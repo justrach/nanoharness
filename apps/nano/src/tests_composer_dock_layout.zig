@@ -110,18 +110,30 @@ test "composer dock keeps priority queue actions visible in narrow panes" {
         try snap(&tester, width, 0, 1);
         const pill = a.view.composer_anchor orelse return error.MissingComposer;
         const tray = try trayRect(&tester, pill);
-        try t.expectApproxEqAbs(pill.w, tray.w, 0.1);
-        try t.expectApproxEqAbs(pill.x, tray.x, 0.1);
+        const icons_only = @import("view_queue.zig").rowLayout(pill.w, 4).stacked;
+        try t.expect(tray.w <= pill.w + 0.1);
+        try t.expectApproxEqAbs(pill.x + pill.w / 2, tray.x + tray.w / 2, 0.1);
         try t.expect(tray.y + tray.h + 7 <= pill.y);
-        if (@import("view_queue.zig").rowLayout(pill.w, 4).stacked)
-            try t.expect(!tester.containsText("Synthetic queued message 0"));
+        if (icons_only)
+            try t.expect(!tester.containsText("Synthetic queued message 0"))
+        else
+            try t.expectApproxEqAbs(pill.w, tray.w, 0.1);
         const actions = [_]ui.Rect{
             try actionRect(&tester, tray, "Edit"),
             try actionRect(&tester, tray, "Steer into active turn"),
             try actionRect(&tester, tray, "Remove"),
             try actionRect(&tester, tray, "Send now (interrupt)"),
         };
-        if (@import("view_queue.zig").rowLayout(pill.w, 4).stacked) {
+        if (icons_only) {
+            var grid_left = actions[0].x;
+            var grid_right = actions[0].x + actions[0].w;
+            for (actions) |action| {
+                grid_left = @min(grid_left, action.x);
+                grid_right = @max(grid_right, action.x + action.w);
+            }
+            // Only the existing border, surface padding and row gutters
+            // should surround the actual buttons, not stretched empty space.
+            try t.expectApproxEqAbs(grid_right - grid_left + 26, tray.w, 0.1);
             for (actions) |action| {
                 var left = action.x;
                 var right = action.x + action.w;

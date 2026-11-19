@@ -22,6 +22,7 @@ pub const RowLayout = struct {
     drag: bool,
     columns: usize,
     button_width: f32,
+    fit_width: f32,
 };
 
 /// Reserve the tray's border/padding and row gutters before allocating
@@ -31,11 +32,14 @@ pub fn rowLayout(width: f32, actions: usize) RowLayout {
     const available = @max(0, width - 26);
     const count = @max(1, actions);
     const action_width = @as(f32, @floatFromInt(count)) * 28 + @as(f32, @floatFromInt(count - 1)) * 4;
+    const columns = @min(count, @max(1, @as(usize, @intFromFloat(@floor((available + 4) / 32)))));
+    const button_width = @min(28, available);
     return .{
         .stacked = available < action_width + 4 + 32,
         .drag = available >= action_width + 4 + 32 + 18,
-        .columns = @min(count, @max(1, @as(usize, @intFromFloat(@floor((available + 4) / 32))))),
-        .button_width = @min(28, available),
+        .columns = columns,
+        .button_width = button_width,
+        .fit_width = @min(@max(0, width), @as(f32, @floatFromInt(columns)) * button_width + @as(f32, @floatFromInt(columns - 1)) * 4 + 26),
     };
 }
 
@@ -43,7 +47,10 @@ test "composer dock queue layout sacrifices drag before wrapping priority action
     const narrow = rowLayout(108, 4);
     try std.testing.expect(narrow.stacked and !narrow.drag);
     try std.testing.expectEqual(@as(usize, 2), narrow.columns);
+    try std.testing.expectEqual(@as(f32, 86), narrow.fit_width);
     try std.testing.expectEqual(@as(usize, 3), rowLayout(148, 4).columns);
+    try std.testing.expectEqual(@as(f32, 118), rowLayout(148, 4).fit_width);
+    try std.testing.expectEqual(@as(f32, 86), rowLayout(488, 2).fit_width);
     const single = rowLayout(188, 4);
     try std.testing.expect(!single.stacked and !single.drag);
     try std.testing.expect(rowLayout(208, 4).drag);
@@ -51,7 +58,16 @@ test "composer dock queue layout sacrifices drag before wrapping priority action
 
 pub fn tray(c: *ui.Context, a: *App, k: theme.Colors, w: f32) bool {
     if (a.queue.items.len == 0) return false;
-    const box = ui.div(c).column().w(@max(0, w)).bg(k.composer).border(k.border).borderW(1).rounded(16).pb(8).pt(4).px(4);
+    const compact = w < 520;
+    var width: f32 = 0;
+    for (a.queue.items) |r| {
+        const editing = if (a.queue_edit) |e| std.mem.eql(u8, e.row, r.id) else false;
+        const can_steer = @import("app_queue.zig").rowCanSteer(a, r);
+        const layout = rowLayout(w, if (editing) 2 else 2 + @as(usize, @intFromBool(!r.agent)) + @as(usize, @intFromBool(can_steer)));
+        // The composer width is a ceiling, not a target for an icon grid.
+        width = @max(width, if (compact and (layout.stacked or editing)) layout.fit_width else @max(0, w));
+    }
+    const box = ui.div(c).column().w(width).bg(k.composer).border(k.border).borderW(1).rounded(16).pb(8).pt(4).px(4);
     defer box.end();
     // Reuse PR #844's row-only scroll-region approach: surface decoration
     // cannot consume scroll range or hide the last row underneath the input.
@@ -59,10 +75,9 @@ pub fn tray(c: *ui.Context, a: *App, k: theme.Colors, w: f32) bool {
     const rows = ui.div(c).column().wFull().maxH(@max(row_height, pane_h * 0.3 - 14))
         .scrollY().scrollbar(.{ .overlay = k.muted.alpha(0.5) });
     defer rows.end();
-    const compact = w < 520;
     for (a.queue.items, 0..) |r, i| {
         ui.key(c, c.print("q-{s}", .{r.id}));
-        row(c, a, k, r, i + 1 == a.queue.items.len, compact, w);
+        row(c, a, k, r, i + 1 == a.queue.items.len, compact, width);
     }
     return true;
 }
