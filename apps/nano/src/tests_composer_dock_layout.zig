@@ -115,10 +115,24 @@ test "composer dock keeps priority queue actions visible in narrow panes" {
         try t.expect(tray.y + tray.h + 7 <= pill.y);
         if (@import("view_queue.zig").rowLayout(pill.w, 4).stacked)
             try t.expect(!tester.containsText("Synthetic queued message 0"));
-        _ = try actionRect(&tester, tray, "Edit");
-        _ = try actionRect(&tester, tray, "Steer into active turn");
-        _ = try actionRect(&tester, tray, "Remove");
-        _ = try actionRect(&tester, tray, "Send now (interrupt)");
+        const actions = [_]ui.Rect{
+            try actionRect(&tester, tray, "Edit"),
+            try actionRect(&tester, tray, "Steer into active turn"),
+            try actionRect(&tester, tray, "Remove"),
+            try actionRect(&tester, tray, "Send now (interrupt)"),
+        };
+        if (@import("view_queue.zig").rowLayout(pill.w, 4).stacked) {
+            for (actions) |action| {
+                var left = action.x;
+                var right = action.x + action.w;
+                for (actions) |other| {
+                    if (@abs(other.y - action.y) > 0.1) continue;
+                    left = @min(left, other.x);
+                    right = @max(right, other.x + other.w);
+                }
+                try t.expectApproxEqAbs(tray.x + tray.w / 2, (left + right) / 2, 0.1);
+            }
+        }
     }
 }
 

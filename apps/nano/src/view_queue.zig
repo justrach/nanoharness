@@ -150,7 +150,7 @@ fn narrowActions(c: *ui.Context, a: *App, k: theme.Colors, r: queue.Row, editing
     }
     var start: usize = 0;
     while (start < actions.items.len) : (start += layout.columns) {
-        const buttons = ui.div(c).row().wFull().h(28).gap(4);
+        const buttons = ui.div(c).row().wFull().h(28).gap(4).justifyCenter();
         defer buttons.end();
         for (actions.items[start..@min(start + layout.columns, actions.items.len)]) |action| {
             ui.key(c, @tagName(action));
