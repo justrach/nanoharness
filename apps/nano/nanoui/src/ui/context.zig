@@ -574,6 +574,39 @@ pub const Context = struct {
         c.input.released = true;
     }
 
+    /// A responder lost the gesture: retire it without synthesizing a click
+    /// or drop. Keep completed text ranges available for Copy.
+    pub fn cancelPointer(c: *Context) void {
+        c.input.down = false;
+        c.input.pressed = false;
+        c.input.released = false;
+        c.input.secondary = false;
+        c.active = 0;
+        c.right_press = false;
+        c.selection.pressed = false;
+        c.selection.dragging = false;
+        c.selection.moved = false;
+        c.scrollbar_drag = null;
+        c.drag_request = null;
+        c.payload_drag = .{};
+        var edits = c.edits.valueIterator();
+        while (edits.next()) |edit| edit.selecting = false;
+        c.retain.scroll_scene_ok = false;
+    }
+
+    /// Reconcile a native button snapshot after a swallowed mouse-up. Never
+    /// invent a press, or let a different held button keep this gesture alive.
+    pub fn reconcilePointer(c: *Context, buttons: u64) bool {
+        const mask: u64 = switch (c.input.button) {
+            .left => 1,
+            .right => 2,
+            .middle => 4,
+        };
+        if (!c.input.down or buttons & mask != 0) return false;
+        c.cancelPointer();
+        return true;
+    }
+
     /// The secondary button went down (`Input.secondary`): no press, and
     /// the focus stays where it was.
     pub fn secondaryDown(c: *Context) void {

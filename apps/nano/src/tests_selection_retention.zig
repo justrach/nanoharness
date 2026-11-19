@@ -315,6 +315,69 @@ test "retention selection window deactivation invalidates stale copy" {
     try testing.expect(h.t.ctx.selection.anchor == null);
 }
 
+test "retention selection window deactivation cancels a held drag" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const r = h.t.findText("First synthetic paragraph.") orelse return error.TextMissing;
+    h.t.down(r.x + 5, r.y + r.h / 2);
+    h.t.moveTo(r.x + 100, r.y + r.h / 2);
+    try testing.expect(h.t.ctx.selection.dragging);
+    // A native responder can lose the release when focus leaves mid-drag.
+    h.t.ctx.window_focused = false;
+    h.t.frame();
+    try testing.expect(h.t.ctx.selection.anchor == null);
+    try testing.expect(!h.t.ctx.selection.dragging);
+    try testing.expect(!h.t.ctx.input.down);
+    try testing.expectEqual(@as(u64, 0), h.t.ctx.active);
+    h.t.ctx.window_focused = true;
+    h.t.moveTo(r.x + r.w, r.y + r.h / 2);
+    try testing.expect(!h.t.ctx.selection.dragging);
+    // The next ordinary selection works without replacing the tab.
+    try h.select("First synthetic paragraph.", 6, 15);
+    copy(&h);
+    try testing.expectEqualStrings("synthetic", h.t.clipboard.items);
+}
+
+test "retention selection swallowed release stops before crossing panes" {
+    for ([_]u64{ 0, 2 }) |buttons| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        try h.split();
+        h.a.select("selection-b", null);
+        try Harness.apply(&h.a.transcript,
+            \\{"reset":[{"id":"b","role":"assistant","parts":[{"id":"p","kind":"text","text":"Foreign pane text must not join the selection."}]}]}
+        );
+        h.t.settle(1);
+        const r = h.t.findText("First synthetic paragraph.") orelse return error.TextMissing;
+        h.t.down(r.x + 5, r.y + r.h / 2);
+        h.t.moveTo(r.x + 100, r.y + r.h / 2);
+        try testing.expect(h.t.ctx.selection.dragging);
+        try testing.expect(!h.t.ctx.reconcilePointer(1));
+        try testing.expect(h.t.ctx.selection.dragging);
+        const anchor = h.t.ctx.selection.anchor;
+        const focus = h.t.ctx.selection.focus;
+        // The host observes the left button up; a held right button is not
+        // evidence that this left-button gesture is still in progress.
+        try testing.expect(h.t.ctx.reconcilePointer(buttons));
+        try testing.expect(!h.t.ctx.input.released);
+        try testing.expect(!h.t.ctx.input.down);
+        try testing.expect(!h.t.ctx.selection.dragging);
+        const foreign = h.t.findText("Foreign pane text must not join the selection.") orelse return error.TextMissing;
+        h.t.moveTo(foreign.x + foreign.w / 2, foreign.y + foreign.h / 2);
+        try testing.expectEqual(anchor, h.t.ctx.selection.anchor);
+        try testing.expectEqual(focus, h.t.ctx.selection.focus);
+        try testing.expectEqualStrings("selection-b", h.a.selected.?);
+        copy(&h);
+        try testing.expect(h.t.clipboard.items.len > 0);
+        try testing.expect(std.mem.indexOf(u8, h.t.clipboard.items, "Foreign pane") == null);
+        try h.select("Foreign pane text must not join the selection.", 0, 7);
+        copy(&h);
+        try testing.expectEqualStrings("Foreign", h.t.clipboard.items);
+    }
+}
+
 test "retention selection chat replacement invalidates stale copy" {
     var h: Harness = undefined;
     try h.init();

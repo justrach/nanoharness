@@ -194,10 +194,13 @@ fn mouseDragged(obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) 
 fn mouseMoved(obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) void {
     const s = surfaceOf(obj) orelse return;
     setMouse(s, event);
-    if (s.transparent and s.ctx.inStageHoleAt(s.ctx.input.mouse) and s.ctx.hot == 0) return;
+    // Native views and tracking loops can consume the release. A real move
+    // supplies an authoritative button snapshot, unlike scripted frames.
+    const cancelled = s.ctx.reconcilePointer(objc.msg(objc.NSUInteger, objc.class("NSEvent"), "pressedMouseButtons", .{}));
+    if (!cancelled and s.transparent and s.ctx.inStageHoleAt(s.ctx.input.mouse) and s.ctx.hot == 0) return;
     const before = s.ctx.hot;
     s.ctx.updateHot();
-    if (s.ctx.hot != before or s.ctx.wants_moves) {
+    if (cancelled or s.ctx.hot != before or s.ctx.wants_moves) {
         if (s.visible()) s.requestFrame() else s.frame();
         return;
     }
