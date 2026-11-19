@@ -67,6 +67,59 @@ fn snap(tester: *ui.Tester, width: usize, draft: usize, count: usize) !void {
     try tester.screenshot(path);
 }
 
+test "composer dock jump label wraps within narrow panes and remains clickable" {
+    theme.registerFonts();
+    var a: App = .init(t.allocator, t.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.dark = false;
+    a.selected = try a.gpa.dupe(u8, "synthetic");
+    a.view.strip.focused = .{ .chat = 0 };
+    a.view.jump_box = 777;
+    try queue(&a, 1);
+    var tester: ui.Tester = undefined;
+    try tester.init(t.allocator, .init(&a, view), .{ .width = 520, .height = 600 });
+    defer tester.deinit();
+    // Resize the same mounted dock down and back up, not just fresh views.
+    for ([_]usize{ 520, 140, 160, 180, 200, 240, 320, 520 }) |width| {
+        tester.size.w = @floatFromInt(width);
+        a.view.jump_distance = 800;
+        tester.ctx.scroll_follow.put(t.allocator, 777, false) catch unreachable;
+        tester.settle(0.5);
+        const label_index = blk: {
+            for (tester.ctx.nodes.items, 0..) |n, i| {
+                if (n.content == .text and std.mem.eql(u8, n.content.text.str, "Scroll to bottom")) break :blk @as(u32, @intCast(i));
+            }
+            return error.MissingJumpLabel;
+        };
+        const label = tester.ctx.node(label_index);
+        var chip_index = label.parent;
+        while (tester.ctx.node(chip_index).style.border == null) chip_index = tester.ctx.node(chip_index).parent;
+        const chip = tester.ctx.node(chip_index).rect;
+        const tray = try trayRect(&tester);
+        const dir = std.c.getenv("NANO_JUMP_SNAP_DIR");
+        if (dir != null and (width == 140 or width == 520)) {
+            var buf: [1024]u8 = undefined;
+            const path = try std.fmt.bufPrint(&buf, "{s}/jump-{d}.png", .{ std.mem.span(dir.?), width });
+            try tester.screenshot(path);
+        }
+        try t.expect(chip.x >= 16 and chip.x + chip.w <= tester.size.w - 16 + 0.5);
+        try t.expect(label.rect.x >= chip.x and label.rect.x + label.rect.w <= chip.x + chip.w);
+        try t.expect(label.rect.y >= chip.y and label.rect.y + label.rect.h <= chip.y + chip.h);
+        try t.expect(chip.y >= 0 and chip.y + chip.h + 5 <= tray.y);
+        if (width == 140) {
+            try t.expect(label.content.text.lines.len > 1);
+            try t.expect(chip.h > 30);
+        } else if (width == 520) {
+            try t.expectEqual(@as(f32, 18), label.rect.h);
+            try t.expectEqual(@as(f32, 30), chip.h);
+        }
+        try tester.clickText("Scroll to bottom");
+        try t.expect(tester.ctx.scroll_follow.get(777) orelse false);
+        try t.expectEqual(@as(f32, 0), a.view.jump_distance);
+    }
+}
+
 test "composer dock separates queue tray jump button and growing input" {
     theme.registerFonts();
     for ([_]usize{ 320, 520, 900 }) |width| for (0..3) |draft| for ([_]usize{ 1, 8 }) |count| {

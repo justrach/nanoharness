@@ -564,22 +564,39 @@ fn send(c: *ui.Context, a: *App, k: theme.Colors) void {
 const jump_show: f32 = 320;
 const jump_hide: f32 = 70;
 
-/// GPUI's labeled pill, six pixels above the entire dock (`render_jump_to_bottom`
-/// uses `top(-36)` on a 30-point chip). Shown once the reader is 320 points
-/// off the end, and kept until they are within 70.
+// Horizontal padding (11 + 13), arrow (13), and its gap (6).
+const jump_chrome: f32 = 43;
+
+fn jumpChipWidth(available: f32, label_width: f32) f32 {
+    return @max(0, @min(available, @ceil(label_width) + jump_chrome));
+}
+
+/// GPUI's labeled pill, six pixels above the entire dock. Narrow panes wrap
+/// the label and grow upward, keeping the same clearance above the queue.
+/// Shown once the reader is 320 points off the end, and kept until within 70.
 fn jumpToBottom(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     const box = a.view.jump_box;
     if (box == 0) return;
     const show = if (a.view.jump_shown) a.view.jump_distance > jump_hide else a.view.jump_distance > jump_show;
     a.view.jump_shown = show;
     if (!show) return;
+    const label = "Scroll to bottom";
+    const st = kit.style(c, 13, 18, .{ .color = k.text, .wrap = true });
+    const chip_w = jumpChipWidth(w, c.text.width(label, st));
+    const label_w = @max(0, chip_w - jump_chrome);
+    const lines = c.text.wrap(label, st, label_w);
+    const chip_h = @max(30, c.text.lineHeight(st) * @as(f32, @floatFromInt(lines.len)) + 12);
     ui.key(c, "jump-to-bottom");
-    const row = ui.div(c).row().absolute().offset(0, -36).w(w).justifyCenter();
+    const row = ui.div(c).row().absolute().offset(0, -chip_h - 6).w(w).justifyCenter();
     defer row.end();
-    const jump_chip = kit.shadowLg(ui.div(c).row().h(30).pl(11).pr(13).gap(6).itemsCenter().rounded(15).circular().bg(k.composer).border(k.border).borderW(1));
+    const jump_chip = kit.shadowLg(ui.div(c).row().size(chip_w, chip_h).pl(11).pr(13).gap(6).itemsCenter().rounded(15).bg(k.composer).border(k.border).borderW(1));
     defer jump_chip.end();
     icons.icon(c, .@"alt-arrow-down", 13, k.muted, 0);
-    ui.text(c, "Scroll to bottom", kit.style(c, 13, 18, .{ .color = k.text }));
+    {
+        const words = ui.div(c).column().w(label_w);
+        defer words.end();
+        ui.text(c, label, st);
+    }
     if (jump_chip.clicked()) {
         c.scroll.put(c.gpa, box, std.math.floatMax(f32)) catch {};
         c.scroll_follow.put(c.gpa, box, true) catch {};
