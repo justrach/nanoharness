@@ -43,14 +43,14 @@ pub fn host(c: *ui.Context, a: *App, k: theme.Colors) void {
 }
 
 fn githubIdentity(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const header = ui.div(c).row().wFull().px(14).py(12).gap(10).itemsCenter().bg(k.accent.alpha(0.06));
+    const header = ui.div(c).row().wFull().px(14).py(10).gap(10).itemsCenter().bg(k.accent.alpha(if (k.dark) 0.055 else 0.045));
     defer header.end();
-    const badge = ui.div(c).size(32, 32).center().rounded(9).bg(k.accent.alpha(0.12));
-    icons.icon(c, .@"pull-request", 18, k.accent, 0);
+    const badge = ui.div(c).size(30, 30).center().rounded(8).bg(k.accent.alpha(0.13)).border(k.accent.alpha(0.24)).borderW(1);
+    icons.icon(c, .@"pull-request", 16, k.accent, 0);
     badge.end();
-    const labels = ui.div(c).column().grow().w(0).gap(3).clip();
+    const labels = ui.div(c).column().grow().w(0).gap(2).clip();
     defer labels.end();
-    ui.text(c, "GitHub", .{ .size = 16, .weight = .semibold, .color = k.text });
+    ui.text(c, "GitHub", .{ .size = 14.5, .weight = .semibold, .color = k.text });
     kit.ellipsisText(c, c.print("Split from {s}", .{@import("app_github_repository.zig").ownerTitle(a)}), .{ .size = 11, .color = k.muted }, @max(40, a.view.chrome.host_width - 80));
 }
 
