@@ -215,7 +215,7 @@ fn activate(a: *App, r: Row) void {
         .space => |id| a.setSpaceFilter(id),
         .add => {
             close(a);
-            @import("app_open_chooser.zig").open(a, .new_project);
+            a.addFolder();
         },
     }
     close(a);

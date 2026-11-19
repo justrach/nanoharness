@@ -85,6 +85,7 @@ test {
     _ = @import("agent_updates.zig");
     _ = @import("view_agent_updates.zig");
     _ = @import("view_settings_agents.zig");
+    _ = @import("native_flint.zig");
     _ = @import("view_setup.zig");
     _ = @import("accounts.zig");
     _ = @import("view_settings_accounts.zig");
@@ -147,6 +148,7 @@ test {
     _ = @import("tests_ui_input.zig");
     _ = @import("tests_attachments.zig");
     _ = @import("tests_reply_images.zig");
+    _ = @import("tests_color_emoji.zig");
     _ = @import("tests_image_orientation.zig");
     _ = @import("tests_ui_feedback.zig");
     _ = @import("tests_ui_glass.zig");

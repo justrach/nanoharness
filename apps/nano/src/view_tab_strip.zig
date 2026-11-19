@@ -41,6 +41,10 @@ pub const State = struct {
     /// wider card and New project → No project action ordering.
     footer_folder: bool = false,
     anchor: ?ui.Rect = null,
+    /// Active pane's top-strip folder control and tab rect from the previous frame,
+    /// so keyboard project-picker invocation stays anchored to the active tab.
+    active_folder_anchor: ?ui.Rect = null,
+    active_tab_anchor: ?ui.Rect = null,
     /// The computer chip's own anchor, so a folder menu or the footer cannot
     /// move the device popover while it is open.
     device_anchor: ?ui.Rect = null,
@@ -230,7 +234,7 @@ pub fn settle(a: *App) void {
         },
         .add_folder => |p| {
             focus(a, p);
-            @import("app_open_chooser.zig").open(a, .new_project);
+            @import("app_project_setup.zig").openOnDevice(a, device(a, p));
         },
     }
     const motion = @import("motion_rules.zig");
@@ -315,8 +319,18 @@ pub fn toggleProjectPicker(a: *App) void {
         a.redraw();
         return;
     }
-    open(a, .folder, active(a), a.view.space_anchor);
-    state.footer_folder = a.view.space_anchor != null;
+    if (state.active_folder_anchor) |anchor| {
+        open(a, .folder, active(a), anchor);
+        state.footer_folder = false;
+        return;
+    }
+    if (a.view.space_anchor) |anchor| {
+        open(a, .folder, active(a), anchor);
+        state.footer_folder = true;
+        return;
+    }
+    open(a, .folder, active(a), state.active_tab_anchor);
+    state.footer_folder = false;
 }
 
 /// Workspace focus shortcuts remain available while a folder search owns
@@ -394,7 +408,7 @@ pub fn keys(c: *ui.Context, a: *App) void {
     } else if (view_mod.boundShortcut(c, a, "newSession") or c.shortcut(.{ .key = 'n', .cmd = true })) {
         state.menu = null;
         state.pending_folder = null;
-        @import("app_open_chooser.zig").open(a, .new_workspace_tab);
+        a.newTab();
     } else if (c.shortcut(.{ .key = 'w', .cmd = true })) {
         state.menu = null;
         state.pending_folder = null;

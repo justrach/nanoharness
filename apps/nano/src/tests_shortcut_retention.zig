@@ -40,10 +40,7 @@ test "deep shortcuts rebound new and split defaults stay replaced inside folder 
         try testing.expectEqualStrings("field", h.a.view.strip.query.text());
         h.press(custom);
         if (std.mem.eql(u8, key, "newSession")) {
-            try testing.expect(h.a.view.open_chooser.open);
-            try testing.expectEqual(before, h.a.tabs.items.items.len);
-            try testing.expectEqual(@import("app_open_chooser.zig").Intent.new_workspace_tab, h.a.view.open_chooser.intent);
-            @import("app_open_chooser.zig").choose(&h.a, "local-project");
+            try testing.expect(!h.a.view.open_chooser.open);
             try testing.expectEqual(before + 1, h.a.tabs.items.items.len);
             try testing.expect(h.a.tabs.find("a") != null);
         } else try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
@@ -113,7 +110,7 @@ test "deep shortcuts folder Shift Down targets the first pinned action and Up re
         h.t.key(.enter);
         h.t.settle(1);
         if (footer) {
-            try testing.expect(h.a.view.open_chooser.open);
+            try testing.expect(h.a.view.project_setup.open);
         } else try testing.expect(h.a.new_no_project);
     }
 }
@@ -657,10 +654,7 @@ test "retention custom new chat and project chords dispatch their saved bindings
         const before = h.a.tabs.items.items.len;
         h.press(custom);
         if (std.mem.eql(u8, key, "newSession")) {
-            try testing.expect(h.a.view.open_chooser.open);
-            try testing.expectEqual(before, h.a.tabs.items.items.len);
-            try testing.expectEqual(@import("app_open_chooser.zig").Intent.new_workspace_tab, h.a.view.open_chooser.intent);
-            @import("app_open_chooser.zig").choose(&h.a, "local-project");
+            try testing.expect(!h.a.view.open_chooser.open);
             try testing.expectEqual(before + 1, h.a.tabs.items.items.len);
             try testing.expect(h.a.tabs.find("a") != null);
         } else if (std.mem.eql(u8, key, "newProject")) {

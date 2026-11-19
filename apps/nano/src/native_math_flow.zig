@@ -56,6 +56,7 @@ fn width(c: *ui.Context, in: md.Inline, st: ui.TextStyle) f32 {
 
 pub fn draw(c: *ui.Context, in: md.Inline, style: ui.TextStyle, color: ui.Color, rich: Rich) void {
     const area = ui.div(c).column().wFull();
+    c.node(area.index).layout_dependent = true;
     defer area.end();
     const old = c.rects.get(c.node(area.index).id);
     if (old == null) c.changed = true;
@@ -80,22 +81,27 @@ pub fn draw(c: *ui.Context, in: md.Inline, style: ui.TextStyle, color: ui.Color,
             };
             const source = if (bold) c.print("\\boldsymbol{{{s}}}", .{m.source}) else m.source;
             var equation = math.layout(c.alloc(), source, m.display, st.size, st.color orelse color);
-            var w: f32 = 0;
-            var a = ascent;
-            var d = depth;
             if (equation) |*eq| {
                 const scale = @min(1, room / eq.width);
                 eq.width *= scale;
                 eq.height *= scale;
                 eq.ascent *= scale;
                 eq.depth *= scale;
-                w = eq.width;
-                a = eq.ascent;
-                d = eq.depth;
+                fs.append(c.alloc(), .{ .start = at, .end = m.end, .width = eq.width, .ascent = eq.ascent, .depth = eq.depth, .equation = eq.*, .group = group, .display = m.display }) catch return;
             } else {
-                w = width(c, slice(c, in, at, m.end), st);
+                const fallback = slice(c, in, at, m.end);
+                const fallback_width = width(c, fallback, st);
+                if (fallback_width > room) {
+                    const wrapped = c.text.wrapAttributed(fallback.text, st, fallback.spans, room);
+                    for (wrapped, 0..) |part, pi| {
+                        const end = if (pi + 1 < wrapped.len) wrapped[pi + 1].start else fallback.text.len;
+                        fs.append(c.alloc(), .{ .start = at + part.start, .end = at + end, .width = width(c, slice(c, in, at + part.start, at + end), st), .ascent = ascent, .depth = depth, .group = group }) catch return;
+                        group += 1;
+                    }
+                } else {
+                    fs.append(c.alloc(), .{ .start = at, .end = m.end, .width = fallback_width, .ascent = ascent, .depth = depth, .group = group, .display = m.display }) catch return;
+                }
             }
-            fs.append(c.alloc(), .{ .start = at, .end = m.end, .width = w, .ascent = a, .depth = d, .equation = equation, .group = group, .display = m.display }) catch return;
             at = m.end;
             mi += 1;
             continue;

@@ -1119,6 +1119,7 @@ pub const App = struct {
         a.view.strip.pending_folder = null;
         a.select(null, null);
         drafts.adopt(a, fresh);
+        a.view.focus_composer = true;
     }
 
     pub fn addChatTab(a: *App, append: bool) void {
@@ -1141,6 +1142,7 @@ pub const App = struct {
         a.view.strip.pending_folder = null;
         a.select(null, null);
         drafts.adopt(a, fresh);
+        a.view.focus_composer = true;
     }
 
     /// Sidebar "+": an independent workspace, not another
@@ -1158,6 +1160,7 @@ pub const App = struct {
         a.view.strip.pending_folder = null;
         a.select(null, null);
         drafts.adopt(a, fresh);
+        a.view.focus_composer = true;
     }
 
     /// Switch tabs inside the focused split panel; its neighbors stay put.
@@ -1264,6 +1267,7 @@ pub const App = struct {
         a.view.split_reveal = reveal;
         a.select(null, null);
         drafts.adopt(a, fresh);
+        a.view.focus_composer = true;
     }
 
     /// A session dropped on a split target: the focused pane split along

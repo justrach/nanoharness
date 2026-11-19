@@ -161,6 +161,10 @@ pub const TextSystem = struct {
         return self.atlas.texture;
     }
 
+    pub fn colorTexture(self: *const TextSystem) ?objc.Object {
+        return self.atlas.colorTexture();
+    }
+
     pub fn setScale(self: *TextSystem, scale: f32) void {
         self.scale = scale;
         self.atlas.setScale(scale);

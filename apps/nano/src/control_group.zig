@@ -14,7 +14,7 @@ const State = struct {
 pub fn choices(c: *ui.Context, k: theme.Colors, key: []const u8, labels: []const []const u8, selected: usize, enabled: bool, role: ui.A11yRole) ?usize {
     std.debug.assert(labels.len > 0 and labels.len <= 3 and selected < labels.len);
     ui.key(c, key);
-    const group = ui.div(c).row().gap(6).itemsCenter();
+    const group = ui.div(c).row().p(2).gap(2).itemsCenter().rounded(8).bg(k.ink(if (k.dark) 0.045 else 0.04)).border(k.border).borderW(1);
     defer group.end();
     c.addA11y(group.index, .group, key, "", false, true);
     const s = c.state(State, "roving-focus");
@@ -44,12 +44,18 @@ pub fn choices(c: *ui.Context, k: theme.Colors, key: []const u8, labels: []const
     var chosen: ?usize = null;
     for (labels, 0..) |label, i| {
         ui.key(c, label);
-        const b = ui.div(c).row().h(27).px(8).itemsCenter().rounded(6).bg(if (i == selected) k.selected else .transparent).control();
+        const is_selected = i == selected;
+        var b = ui.div(c).row().h(24).px(10).itemsCenter().rounded(6).control();
+        if (is_selected) {
+            b = b.bg(if (k.dark) k.wash(0.11) else k.background).border(if (k.dark) k.ink(0.08) else k.border).borderW(1);
+        } else {
+            b = b.bg(.transparent);
+        }
         defer b.end();
         s.ids[i] = b.id();
-        c.addA11y(b.index, role, label, "", i == selected, enabled);
+        c.addA11y(b.index, role, label, "", is_selected, enabled);
         if (enabled) {
-            _ = b.hover(k.hover);
+            if (!is_selected) _ = b.hover(k.ink(if (k.dark) 0.05 else 0.045));
             const interaction = c.interact(b.index, .{ .focusable = i == s.active });
             behavior.indicate(c, b, k, interaction.focused);
             if (interaction.clicked) {
@@ -59,7 +65,11 @@ pub fn choices(c: *ui.Context, k: theme.Colors, key: []const u8, labels: []const
                 c.changed = true;
             }
         }
-        ui.text(c, label, .{ .size = 11.5, .color = if (enabled) k.text else k.faint });
+        ui.text(c, label, .{
+            .size = 11.5,
+            .weight = if (is_selected) .medium else .regular,
+            .color = if (!enabled) k.faint else if (is_selected) k.text else k.muted,
+        });
     }
     return chosen;
 }

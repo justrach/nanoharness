@@ -179,6 +179,24 @@ pub fn screenAccess(c: *ui.Context, a: *App, k: theme.Colors) void {
     set.space(c, 4);
 }
 
+/// Setup guidance, not a claim that the selected device has a runtime.
+/// Opening the public download page is the only action this card performs.
+pub fn nativeFlintCard(c: *ui.Context, k: theme.Colors) void {
+    const flint = @import("native_flint.zig");
+    const cd = card(c, k, 20);
+    defer cd.end();
+    const in = ui.div(c).column().wFull().p(16);
+    defer in.end();
+    const w = cardInner();
+    title(c, k, flint.name, w);
+    subtitleIn(c, k, flint.description, w);
+    set.space(c, 8);
+    subtitleIn(c, k, flint.setup, w);
+    set.space(c, 12);
+    ui.key(c, "native-flint-download");
+    if (shots.action(c, k, flint.download_label)) _ = nanoui.shell.openUrl(flint.download_url);
+}
+
 /// graff's child agents (`render_graff_draft_subagents`).
 pub fn draftCard(c: *ui.Context, a: *App, k: theme.Colors) void {
     const p = &a.view.agents;

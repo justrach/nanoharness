@@ -44,6 +44,7 @@ pub const Renderer = struct {
     images_texture: ?objc.Object = null,
     images_generation: u64 = std.math.maxInt(u64),
     images_side: u32 = 0,
+    color_atlas_texture: ?objc.Object = null,
     layer_textures: std.ArrayList(objc.Object) = .empty,
     layer_w: usize = 0,
     layer_h: usize = 0,
@@ -412,6 +413,7 @@ pub const Renderer = struct {
         // Pictures, when there are any; else the atlas stands in (unread).
         objc.msg(void, enc, "setFragmentTexture:atIndex:", .{ self.images_texture orelse atlas, @as(objc.NSUInteger, 1) });
         if (layer_tex) |lt| objc.msg(void, enc, "setFragmentTexture:atIndex:", .{ lt, @as(objc.NSUInteger, 2) });
+        objc.msg(void, enc, "setFragmentTexture:atIndex:", .{ self.color_atlas_texture orelse self.images_texture orelse atlas, @as(objc.NSUInteger, 4) });
         objc.msg(void, enc, "drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:", .{
             @as(objc.NSUInteger, 4), @as(objc.NSUInteger, 0), @as(objc.NSUInteger, 4), @as(objc.NSUInteger, count), @as(objc.NSUInteger, first), // triangle strip
         });
@@ -536,6 +538,7 @@ pub const Renderer = struct {
             objc.msg(void, cenc, "setFragmentTexture:atIndex:", .{ atlas, @as(objc.NSUInteger, 0) });
             objc.msg(void, cenc, "setFragmentTexture:atIndex:", .{ self.images_texture orelse atlas, @as(objc.NSUInteger, 1) });
             objc.msg(void, cenc, "setFragmentTexture:atIndex:", .{ ltex, @as(objc.NSUInteger, 2) });
+            objc.msg(void, cenc, "setFragmentTexture:atIndex:", .{ self.color_atlas_texture orelse self.images_texture orelse atlas, @as(objc.NSUInteger, 4) });
             objc.msg(void, cenc, "drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:", .{
                 @as(objc.NSUInteger, 4), @as(objc.NSUInteger, 0), @as(objc.NSUInteger, 4), @as(objc.NSUInteger, 1), @as(objc.NSUInteger, 0),
             });

@@ -54,13 +54,7 @@ test "New project opens a focused internal name-first form, without creating any
         try scene(&h.a, replies);
         strip.queue(&h.a, .{ .add_folder = .{ .chat = 0 } });
         h.t.settle(1);
-        // Menu → shared computer/folder sheet → the project form.
-        try testing.expect(h.a.view.open_chooser.open);
-        try testing.expect(h.t.hasText("Open a project"));
-        try testing.expect(h.t.hasText("Computer"));
-        try testing.expect(h.t.hasText("Folder"));
-        try h.t.clickText("Open a folder…");
-        h.t.settle(1);
+        // Menu New project… goes straight to the project form (not the registered-project chooser).
         try testing.expect(!h.a.view.open_chooser.open);
         try testing.expect(h.a.view.project_setup.open);
         try testing.expect(h.a.view.project_setup.step == .details);

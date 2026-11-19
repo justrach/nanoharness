@@ -675,6 +675,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
             rows.list(c, a, k);
         },
     }
+    cards.nativeFlintCard(c, k);
     cards.draftCard(c, a, k);
     cards.botsCard(c, a, k);
     cards.titlesCard(c, a, k);

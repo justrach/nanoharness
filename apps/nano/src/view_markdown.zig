@@ -352,7 +352,7 @@ fn item(c: *ui.Context, it: @FieldType(md.Block, "item")) void {
             ui.text(c, it.marker, st);
         }
     }
-    const box = ui.div(c).column().grow();
+    const box = ui.div(c).column().grow().w(0);
     defer box.end();
     var st = body;
     if (it.task == true) st.color = k.muted;
@@ -551,7 +551,7 @@ fn tableRow(c: *ui.Context, cells: []const md.Inline, widths: []const f32, head:
     defer r.end();
     for (widths, 0..) |width, i| {
         const cell = if (i < cells.len) cells[i] else md.Inline{ .text = "", .spans = &.{}, .links = &.{} };
-        const d = ui.div(c).column().w(width).px(10).py(6);
+        const d = ui.div(c).column().w(width).px(10).py(6).clip();
         defer d.end();
         var st = body;
         st.size = 13;

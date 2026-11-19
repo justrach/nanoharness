@@ -534,9 +534,7 @@ test "a new pane starts with an empty prompt; each pane and tab keeps its own" {
     // A new chat with a prompt typed, split: the new pane's is empty, on
     // the same agent; going back finds the prompt as it was left.
     h.press(.{ .key = 't', .cmd = true });
-    try testing.expect(h.a.view.open_chooser.open);
-    @import("app_open_chooser.zig").chooseProjectless(&h.a);
-    h.t.settle(1);
+    try testing.expect(!h.a.view.open_chooser.open);
     h.a.composer.set("hey there");
     const harness = try testing.allocator.dupe(u8, h.a.new_harness);
     defer testing.allocator.free(harness);
@@ -603,9 +601,7 @@ test "the composer has the keys after ⌘D, ⌘[ and ⌘]: nothing typed is lost
     try h.init();
     defer h.deinit();
     h.press(.{ .key = 't', .cmd = true });
-    try testing.expect(h.a.view.open_chooser.open);
-    @import("app_open_chooser.zig").chooseProjectless(&h.a);
-    h.t.settle(1);
+    try testing.expect(!h.a.view.open_chooser.open);
     typeKeys(&h, "hey there");
     try testing.expectEqualStrings("hey there", h.a.composer.text());
     h.press(.{ .key = 'd', .cmd = true });
@@ -1601,6 +1597,10 @@ test "Settings › Agents: session titles name the agent and model; the agent li
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"harness\":\"claude-code\",\"model\":null}", .{});
     defer parsed.deinit();
     @import("view_settings_agents.zig").setTitles(&h.a, parsed.value);
+    h.t.settle(1);
+    // Setup cards can put title controls below the viewport. Bring them into
+    // view before clicking, as a person would, rather than clicking clipped text.
+    h.t.scroll(800, 700, -1200);
     h.t.settle(1);
     try testing.expect(h.t.hasText("Title harness"));
     try testing.expect(h.t.hasText("Automatic (cheapest model)"));

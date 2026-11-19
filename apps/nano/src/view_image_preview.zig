@@ -16,6 +16,8 @@ pub fn open(a: *App, chat_id: ?[]const u8, image: *images.Image) void {
     cache.zoom = 1;
     cache.center = .{ .x = 0.5, .y = 0.5 };
     cache.inspection = .{};
+    cache.copy_status = .none;
+    cache.copy_until = 0;
     a.redraw();
 }
 
@@ -26,6 +28,8 @@ pub fn close(a: *App) void {
     cache.preview_chat = null;
     cache.drag = null;
     cache.focus_scope = .{};
+    cache.copy_status = .none;
+    cache.copy_until = 0;
     a.redraw();
 }
 
@@ -74,6 +78,26 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, bounds: ?ui.Rect) void {
         if (cache.focus_scope.button(c, k, "Fit")) {
             cache.zoom = 1;
             cache.center = .{ .x = 0.5, .y = 0.5 };
+        }
+        if (cache.focus_scope.button(c, k, "Copy image")) {
+            if (c.clipboard.write_image(c.clipboard.ctx, image.bytes.items)) {
+                cache.copy_status = .copied;
+                cache.copy_until = c.time + 2.0;
+                c.frameIn(2.0);
+            } else {
+                cache.copy_status = .failed;
+                cache.copy_until = c.time + 3.0;
+                c.frameIn(3.0);
+            }
+        }
+        if (cache.copy_status != .none) {
+            if (c.time >= cache.copy_until) {
+                cache.copy_status = .none;
+            } else {
+                const msg = if (cache.copy_status == .copied) "Copied" else "Copy failed";
+                const color = if (cache.copy_status == .copied) k.accent else k.danger;
+                ui.text(c, msg, .{ .size = 10.5, .weight = .medium, .color = color });
+            }
         }
         ui.text(c, c.print("{d:.0}%", .{cache.zoom * 100}), .{ .size = 10.5, .color = k.muted });
     }

@@ -135,7 +135,7 @@ pub fn github(c: *ui.Context, a: *App, k: theme.Colors) void {
     for (items) |item| {
         const pr = item.summary;
         ui.key(c, pr.url);
-        const card = ui.div(c).column().wFull().p(12).gap(9).border(k.border).borderW(1).rounded(10);
+        const card = ui.div(c).column().wFull().p(13).gap(9).bg(k.ink(if (k.dark) 0.025 else 0.015)).border(k.border).borderW(1).rounded(10);
         defer card.end();
         const model = cr.model(c.alloc(), pr);
         const tone = @import("view_change_requests.zig").badgeColor(k, pr, item.provenance);
@@ -146,8 +146,13 @@ pub fn github(c: *ui.Context, a: *App, k: theme.Colors) void {
             ui.text(c, model.number, .{ .size = 12, .mono = true, .color = tone });
             tag(c, k, model.state_label, tone);
         }
-        ui.text(c, model.title, .{ .size = 13, .weight = .medium, .wrap = true, .color = k.text });
-        ui.text(c, c.print("{s} → {s}", .{ pr.head_ref, pr.base_ref }), .{ .size = 11, .mono = true, .wrap = true, .color = k.muted });
+        ui.text(c, model.title, .{ .size = 13.5, .weight = .semibold, .wrap = true, .color = k.text });
+        {
+            const branch = ui.div(c).row().px(8).py(3).gap(5).itemsCenter().rounded(6).bg(k.ink(if (k.dark) 0.04 else 0.035)).border(k.border).borderW(1);
+            defer branch.end();
+            icons.icon(c, .@"git-branch", 11, k.muted, 0);
+            ui.text(c, c.print("{s} → {s}", .{ pr.head_ref, pr.base_ref }), .{ .size = 11, .mono = true, .wrap = true, .color = k.muted });
+        }
         if (item.provenance.note(c.alloc(), pr)) |note| ui.text(c, note, .{ .size = 11, .wrap = true, .color = k.muted });
         {
             const row = ui.div(c).row().wFull().gap(8).itemsCenter();
@@ -162,7 +167,7 @@ pub fn github(c: *ui.Context, a: *App, k: theme.Colors) void {
 }
 
 fn button(c: *ui.Context, k: theme.Colors, label: []const u8, enabled: bool) bool {
-    const b = ui.div(c).row().h(26).px(8).itemsCenter().rounded(6).hover(if (enabled) k.hover else .transparent).control();
+    const b = ui.div(c).row().h(26).px(9).itemsCenter().rounded(7).bg(k.ink(if (k.dark) 0.035 else 0.025)).border(k.border).borderW(1).hover(if (enabled) k.hover else .transparent).control();
     defer b.end();
     ui.text(c, label, .{ .size = 11.5, .color = if (enabled) k.text else k.faint });
     return enabled and b.clicked();

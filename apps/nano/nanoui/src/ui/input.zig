@@ -150,13 +150,18 @@ pub const FocusedText = struct {
     ends: ?[2]types.Rect = null,
 };
 
-/// Where copied text goes: the system's clipboard, or the Tester's own.
+/// Where copied text and images go: the system's clipboard, or the Tester's own.
 pub const Clipboard = struct {
     ctx: ?*anyopaque = null,
     write: *const fn (ctx: ?*anyopaque, text: []const u8) void = systemWrite,
+    write_image: *const fn (ctx: ?*anyopaque, bytes: []const u8) bool = systemWriteImage,
 
     fn systemWrite(_: ?*anyopaque, s: []const u8) void {
         @import("../platform.zig").clipboardWrite(s);
+    }
+
+    fn systemWriteImage(_: ?*anyopaque, bytes: []const u8) bool {
+        return @import("../platform.zig").clipboardWriteImage(bytes);
     }
 };
 

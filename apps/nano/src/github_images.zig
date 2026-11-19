@@ -76,6 +76,8 @@ pub const Cache = struct {
     drag: ?ui.Point = null,
     inspection: @import("image_inspection.zig").State = .{},
     focus_scope: @import("preview_focus.zig").State = .{},
+    copy_status: enum { none, copied, failed } = .none,
+    copy_until: f64 = 0,
 
     pub fn deinit(cache: *Cache) void {
         for (&cache.entries) |*slot| {
@@ -89,6 +91,8 @@ pub const Cache = struct {
         cache.preview_entry = null;
         cache.focus_scope = .{};
         cache.drag = null;
+        cache.copy_status = .none;
+        cache.copy_until = 0;
         for (cache.entries) |slot| if (slot) |e| {
             e.retired = true;
         };
@@ -228,6 +232,26 @@ pub fn preview(c: *ui.Context, a: *@import("app.zig").App, k: theme.Colors, boun
             cache.zoom = 1;
             cache.center = .{ .x = 0.5, .y = 0.5 };
         }
+        if (cache.focus_scope.button(c, k, "Copy image")) {
+            if (c.clipboard.write_image(c.clipboard.ctx, image.bytes)) {
+                cache.copy_status = .copied;
+                cache.copy_until = c.time + 2.0;
+                c.frameIn(2.0);
+            } else {
+                cache.copy_status = .failed;
+                cache.copy_until = c.time + 3.0;
+                c.frameIn(3.0);
+            }
+        }
+        if (cache.copy_status != .none) {
+            if (c.time >= cache.copy_until) {
+                cache.copy_status = .none;
+            } else {
+                const msg = if (cache.copy_status == .copied) "Copied" else "Copy failed";
+                const color = if (cache.copy_status == .copied) k.accent else k.danger;
+                ui.text(c, msg, .{ .size = 10.5, .weight = .medium, .color = color });
+            }
+        }
         ui.text(c, c.print("{d:.0}%", .{cache.zoom * 100}), .{ .size = 10.5, .color = k.muted });
     }
     ui.text(c, "Scroll or pinch to zoom · Drag to inspect · Esc to close", .{ .size = 10.5, .color = k.muted });
@@ -259,6 +283,8 @@ fn dismiss(c: *ui.Context, cache: *Cache) void {
     cache.focus_scope.restore(c);
     cache.preview_entry = null;
     cache.drag = null;
+    cache.copy_status = .none;
+    cache.copy_until = 0;
 }
 
 test "github images cache is bounded and retires late completions without app callbacks" {

@@ -259,8 +259,20 @@ pub fn settleFrame(a: *App) void {
     // through the ordinary path so canvas text/model/device choices park too.
     const selected = if (a.selected) |id| std.mem.eql(u8, id, b.parent) else false;
     if (!selected) {
-        a.focusPane(owner.pane_index orelse return b.destroy());
+        const pane_index = owner.pane_index orelse return b.destroy();
+        a.focusPane(pane_index);
         if (a.selected == null or !std.mem.eql(u8, a.selected.?, b.parent)) return b.destroy();
+        // Consume the matching deferred pane-promotion focus queued by the same
+        // pointer release so strip.settle() does not overwrite .host below.
+        if (a.view.strip.pending) |pending| switch (pending) {
+            .focus => |panel| switch (panel) {
+                .chat => |ix| if (ix == pane_index) {
+                    a.view.strip.pending = null;
+                },
+                else => {},
+            },
+            else => {},
+        };
     }
     b.pending_source = null;
     if (@import("github_link.zig").parse(b.url)) |target| {

@@ -230,7 +230,7 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
     var box = ui.div(c).row().size(width, chrome.tab_height).pl(7).pr(4).gap(6).itemsCenter().rounded(6).clip().control();
     box = if (on) box.bg(k.ink(if (k.dark) 0.16 else 0.10)) else box.bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover);
     if (github_child) {
-        box = box.bg(k.background);
+        if (on) box = box.bg(k.background);
         const measured = c.rects.get(c.node(box.index).id);
         if (!std.meta.eql(measured, a.view.strip.host_tab_rect)) {
             a.view.strip.host_tab_rect = measured;
@@ -240,6 +240,9 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
         }
     }
     defer box.end();
+    if (strip.same(strip.active(a), target)) {
+        if (c.rects.get(c.node(box.index).id)) |r| a.view.strip.active_tab_anchor = r;
+    }
     const hot = box.hovered() or group_hot;
     const show_controls = hot or c.focus == c.node(box.index).id;
     const menu_count = strip.tabCount(a, target);
@@ -294,6 +297,9 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
             if (f.changeable) pick = pick.px(3).hover(k.ink(0.10)).control();
             defer pick.end();
             const pick_rect = c.rects.get(c.node(pick.index).id) orelse c.rects.get(c.node(box.index).id);
+            if (f.changeable and strip.same(strip.active(a), target)) {
+                if (pick_rect) |r| a.view.strip.active_folder_anchor = r;
+            }
             if (f.changeable and a.view.strip.menu == .folder and !a.view.strip.footer_folder and strip.same(a.view.strip.target, target)) {
                 if (pick_rect) |r| a.view.strip.anchor = r;
             }
@@ -403,7 +409,23 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     else
         @max(0, a.view.chrome.width - left - dev_room - caption.trailing - right_extra - 4);
     const width = chrome.tabWidth(available, n);
-    const scroll = @max(0, @as(f32, @floatFromInt(selected + 1)) * (width + 3) - @max(0, available - 32));
+    const show_add = !settings_open and (!zen or n > 1);
+    const add_room: f32 = if (show_add) 27 else 0;
+    const total_tabs_w = @as(f32, @floatFromInt(n)) * width + @as(f32, @floatFromInt(n -| 1)) * 3;
+    const overflowing = n > 0 and total_tabs_w + add_room > available;
+    const overflow_pill_w: f32 = 34;
+    const visible_budget = @max(0, available - add_room - (if (overflowing) overflow_pill_w + 3 else 0));
+    const visible_count: usize = if (!overflowing)
+        n
+    else
+        @max(@as(usize, 1), @min(n, @as(usize, @intFromFloat(@floor((visible_budget + 3) / (width + 3))))));
+    const win_start: usize = if (selected < visible_count) 0 else @min(n - visible_count, selected + 1 - visible_count);
+    const win_end: usize = @min(n, win_start + visible_count);
+    const hidden_count: usize = n -| (win_end - win_start);
+    const slot_w: f32 = if (overflowing and visible_count == 1)
+        @min(width, @max(48, visible_budget))
+    else
+        width;
     if (zen and n == 1) {
         const only_chat = if (group) |g| (if (selected == 0) a.selected else g.items.items[0].chat) else workspaceChatId(a, 0);
         if (only_chat == null) {
@@ -414,17 +436,17 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     ui.key(c, "panel-tabs");
     const lane = ui.div(c).fixed().offset(lane_x, chrome.tab_top).size(available, chrome.tab_height + chrome.tab_top).clip().layer(2);
     defer lane.end();
-    const row = ui.div(c).absolute().offset(-scroll, 0).row().h(chrome.tab_height).gap(3).itemsCenter();
+    const row = ui.div(c).absolute().offset(0, 0).row().h(chrome.tab_height).gap(3).itemsCenter();
     defer row.end();
-    for (0..n) |ix| {
+    for (win_start..win_end) |ix| {
         const chat = if (group) |g| (if (ix == selected) a.selected else g.items.items[ix].chat) else workspaceChatId(a, ix);
         const panes_n = if (group != null) @as(usize, 1) else workspacePaneCount(a, ix);
         const ch = if (chat) |id| a.findChat(id) else null;
         const label = if (ch) |v| @import("view_sidebar.zig").chatLabel(v) else "New tab";
         const pill_w: f32 = if (zen and n == 1)
-            @min(width, @max(140, c.text.width(label, .{ .size = 12.5, .weight = .medium }) + 58))
+            @min(slot_w, @max(140, c.text.width(label, .{ .size = 12.5, .weight = .medium }) + 58))
         else
-            width;
+            slot_w;
         ui.key(c, c.print("panel-tab-{d}", .{ix}));
         var cap = ui.div(c).row().size(pill_w, if (zen) @as(f32, 28) else chrome.tab_height).px(8).gap(6).itemsCenter().rounded(7).clip().control();
         if (zen) {
@@ -436,6 +458,9 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
             cap = cap.bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover);
         }
         defer cap.end();
+        if (ix == selected) {
+            if (c.rects.get(c.node(cap.index).id)) |r| a.view.strip.active_tab_anchor = r;
+        }
         const hot = cap.hovered();
         const pending_question = if (group != null) chatNeedsInput(a, chat) else workspaceNeedsInput(a, ix);
         if (!questionMark(c, k, pending_question)) {
@@ -484,7 +509,16 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
         }
         if (kit.secondaryClicked(cap)) strip.open(a, .panel, .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 }, c.rects.get(c.node(cap.index).id));
     }
-    if (!settings_open and (!zen or n > 1)) {
+    if (hidden_count > 0) {
+        ui.key(c, "panel-tabs-overflow");
+        var more = ui.div(c).row().size(overflow_pill_w, if (zen) @as(f32, 24) else 26).center().rounded(6)
+            .bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover).control();
+        more = @import("view_tooltip.zig").on(more, k, .{ .text = c.print("{d} more open tab{s}", .{ hidden_count, if (hidden_count == 1) "" else "s" }), .look = .tab });
+        defer more.end();
+        ui.text(c, c.print("+{d}", .{hidden_count}), .{ .size = 11, .weight = .medium, .color = k.muted });
+        if (more.clicked()) strip.open(a, .history, .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 }, c.rects.get(c.node(more.index).id));
+    }
+    if (show_add) {
         ui.key(c, "panel-add-tab");
         if (kit.iconButton(c, k, .plus, .{ .icon = 14, .tip = .{ .text = "New tab", .look = .tab } })) a.newTab();
     }
