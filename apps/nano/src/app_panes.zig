@@ -4,8 +4,8 @@ const std = @import("std");
 const App = @import("app.zig").App;
 const Peer = @import("app.zig").Peer;
 
-pub fn select(a: *App, next: ?[]const u8) void {
-    if (same(a.selected, next)) return;
+pub fn select(a: *App, next: ?[]const u8) bool {
+    if (same(a.selected, next)) return false;
     // Take the incoming peer before appending: an append may move the list.
     var incoming: ?Peer = null;
     if (next) |id| for (a.peers.items, 0..) |p, ix| {
@@ -33,7 +33,9 @@ pub fn select(a: *App, next: ?[]const u8) void {
         a.transcript = p.transcript;
         a.w_doc = .{ .id = p.watch, .retry_at = p.retry_at };
         a.retired_ids.append(a.gpa, p.id) catch a.gpa.free(p.id);
+        return true;
     }
+    return false;
 }
 
 fn visiblePeer(a: *const App, id: []const u8) bool {

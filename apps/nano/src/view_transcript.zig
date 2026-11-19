@@ -308,13 +308,32 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     // no assistant part has arrived yet.
     _ = loading;
     const scroll_rect = c.rects.get(drawn.box);
-    const has_selection = c.selection.anchor != null or c.selection.dragging;
+    const sel_owner_mod = @import("selection_owner.zig");
+    const sel_surface = sel_owner_mod.state(c).surface;
+    const saved_pin = sel_owner_mod.pin(c).*;
+    const active_drag = c.selection.dragging or c.selection.pressed;
+    const anchor_id: u64 = if (c.selection.anchor) |p| p.id else 0;
+    const focus_id: u64 = if (c.selection.focus) |p| p.id else anchor_id;
+    const selection_elsewhere = sel_surface != 0 and sel_surface != drawn.box;
+    const pin_matches = !active_drag and anchor_id != 0 and !selection_elsewhere and
+        saved_pin.surface == drawn.box and saved_pin.anchor == anchor_id and saved_pin.focus == focus_id;
+    const need_full_for_selection = !selection_elsewhere and (active_drag or (anchor_id != 0 and !pin_matches));
     // The column's required clip prevents NanoUI's retained-scroll fast
     // path. A settled conversation therefore rebuilds too: keep measured
     // offscreen rows as spacers on ordinary wheel frames, not only while
-    // a reply streams. Selection and prompt-rail navigation still mount
-    // the full content, and a new width must earn its own measurements.
-    const cull_offscreen = !has_selection and (!a.offscreen or tweening or resizing) and a.view.rail.glide == null;
+    // a reply streams. Active drags and prompt-rail navigation mount the
+    // full content; a completed selection pins only its own row span so
+    // scrolling stays proportional to visible content while Copy keeps
+    // exact ownership.
+    const cull_offscreen = !need_full_for_selection and (!a.offscreen or tweening or resizing) and a.view.rail.glide == null;
+    var sel_pin: SelectionPin = .{
+        .active = pin_matches,
+        .lo_row = saved_pin.lo_row,
+        .hi_row = saved_pin.hi_row,
+        .scanning = !cull_offscreen and anchor_id != 0 and !selection_elsewhere,
+        .anchor_id = anchor_id,
+        .focus_id = focus_id,
+    };
     const offset = c.scroll.get(drawn.box) orelse 0;
     const previous_offset = c.scroll_seen.get(drawn.box) orelse offset;
     const cull: Cull = .{ .on = cull_offscreen, .loose = tweening or resizing, .pad = if (tweening or resizing) 220 else 380, .view = scroll_rect, .col = col, .offset_delta = offset - previous_offset };
@@ -347,7 +366,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         }
         const tail = if (steered and e.role == .user) steer_order.tailAfter(steer, steer_chat.?, entries_, i) else null;
         // After its message, whether that was drawn or is off screen.
-        defer if (tail) |x| steerTail(c, a, k, x, entries_, i, chat_id, cull, just_stuck);
+        defer if (tail) |x| steerTail(c, a, k, x, entries_, i, chat_id, cull, just_stuck, &sel_pin);
         const parts_len = e.parts.items.len;
         const head_end = if (steered and e.role == .assistant) steer_order.headEnd(steer, steer_chat.?, entries_, i) else parts_len;
         // Everything it has came after the message: nothing in its place.
@@ -355,12 +374,15 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         // `top_gap_for`: every entry's first row opens a turn (`SPACE_LG`).
         if (i > 0) _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
         ui.key(c, c.print("entry-{s}-{s}", .{ chat_id orelse "", e.id }));
-        if (spacer(c, cull, (!just_stuck or i + 1 < entries_.len) and !(anchor != null and i == turn_start.?) and e.status != .streaming, &e.cached_h, &e.cached_w, &e.measured_w)) |r| {
+        const row_id = c.peekId(null);
+        const row_pinned = sel_pin.isPinned(row_id);
+        if (spacer(c, cull, !row_pinned and (!just_stuck or i + 1 < entries_.len) and !(anchor != null and i == turn_start.?) and e.status != .streaming, &e.cached_h, &e.cached_w, &e.measured_w)) |r| {
             if (e.isHumanPrompt()) {
                 ticks.append(c.alloc(), .{ .entry = i, .top = r.y - (if (i > 0) @as(f32, 16) else 0) }) catch {};
             }
             continue;
         }
+        const row_start = c.nodes.items.len;
         var at: At = .{ .chat_id = chat_id, .entries = entries_, .index = i, .col = col, .scroll = scroll_rect };
         switch (e.role) {
             .user => {
@@ -376,7 +398,9 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
             },
             .system => system(c, a, k, e, at),
         }
+        sel_pin.observe(c, row_id, row_start);
     }
+    const trailer_start = c.nodes.items.len;
     if (subagent == null) {
         var pending_count: usize = 0;
         if (chat_id) |id| for (a.pending_sends.items) |pending| {
@@ -389,9 +413,84 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         };
         @import("view_working.zig").trailer(c, a, k, chat_id, t);
     }
+    if (sel_pin.scanning) {
+        var trailer_hit = false;
+        for (c.nodes.items[trailer_start..]) |n| {
+            if (n.id == anchor_id or n.id == focus_id) {
+                trailer_hit = true;
+                break;
+            }
+        }
+        if (sel_pin.saw_anchor and sel_pin.saw_focus) {
+            sel_owner_mod.pin(c).* = .{
+                .surface = drawn.box,
+                .anchor = anchor_id,
+                .focus = focus_id,
+                .lo_row = sel_pin.first_row,
+                .hi_row = sel_pin.last_row,
+            };
+        } else if ((sel_pin.saw_anchor or sel_pin.saw_focus) and trailer_hit) {
+            sel_owner_mod.pin(c).* = .{
+                .surface = drawn.box,
+                .anchor = anchor_id,
+                .focus = focus_id,
+                .lo_row = sel_pin.first_row,
+                .hi_row = 0,
+            };
+        } else if (!sel_pin.saw_anchor and !sel_pin.saw_focus and trailer_hit) {
+            sel_owner_mod.pin(c).* = .{
+                .surface = drawn.box,
+                .anchor = anchor_id,
+                .focus = focus_id,
+                .lo_row = 0,
+                .hi_row = 0,
+            };
+        }
+    }
     drawn.ticks = ticks.items;
     return drawn;
 }
+
+const SelectionPin = struct {
+    active: bool = false,
+    lo_row: u64 = 0,
+    hi_row: u64 = 0,
+    in_span: bool = false,
+    scanning: bool = false,
+    anchor_id: u64 = 0,
+    focus_id: u64 = 0,
+    first_row: u64 = 0,
+    last_row: u64 = 0,
+    saw_anchor: bool = false,
+    saw_focus: bool = false,
+
+    fn isPinned(self: *SelectionPin, row_id: u64) bool {
+        if (!self.active or self.lo_row == 0) return false;
+        if (row_id == self.lo_row) self.in_span = true;
+        const pinned = self.in_span;
+        if (self.hi_row != 0 and row_id == self.hi_row) self.in_span = false;
+        return pinned;
+    }
+
+    fn observe(self: *SelectionPin, c: *const ui.Context, row_id: u64, start_ix: usize) void {
+        if (!self.scanning) return;
+        var hit = false;
+        for (c.nodes.items[start_ix..]) |n| {
+            if (n.id == self.anchor_id) {
+                self.saw_anchor = true;
+                hit = true;
+            }
+            if (n.id == self.focus_id) {
+                self.saw_focus = true;
+                hit = true;
+            }
+        }
+        if (hit) {
+            if (self.first_row == 0) self.first_row = row_id;
+            self.last_row = row_id;
+        }
+    }
+};
 
 /// What decides whether a row off screen is drawn or stood in for.
 const Cull = struct {
@@ -439,17 +538,21 @@ fn steerPiece(c: *ui.Context, e: *const tr.Entry, id: []const u8, start: usize, 
 
 /// Under a message sent while its turn worked: what the reply gained
 /// after it, a row of its own with the gap of one.
-fn steerTail(c: *ui.Context, a: *App, k: theme.Colors, t: steer_order.Tail, entries_: []tr.Entry, user_ix: usize, chat_id: ?[]const u8, cull: Cull, just_stuck: bool) void {
+fn steerTail(c: *ui.Context, a: *App, k: theme.Colors, t: steer_order.Tail, entries_: []tr.Entry, user_ix: usize, chat_id: ?[]const u8, cull: Cull, just_stuck: bool, sel_pin: *SelectionPin) void {
     if (t.start >= t.end) return;
     const owner = &entries_[t.owner];
     const message = entries_[user_ix].id;
     _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
     ui.key(c, c.print("entry-{s}-{s}-after-{s}", .{ chat_id orelse "", owner.id, message }));
+    const row_id = c.peekId(null);
+    const row_pinned = sel_pin.isPinned(row_id);
     const at_end = user_ix + 1 == entries_.len;
-    if (spacer(c, cull, (!just_stuck or !at_end) and owner.status != .streaming, &t.cut.cached_h, &t.cut.cached_w, &t.cut.measured_w) != null) return;
+    if (spacer(c, cull, !row_pinned and (!just_stuck or !at_end) and owner.status != .streaming, &t.cut.cached_h, &t.cut.cached_w, &t.cut.measured_w) != null) return;
+    const row_start = c.nodes.items.len;
     const piece = steerPiece(c, owner, c.print("{s}~{s}", .{ owner.id, message }), t.start, t.end) orelse return;
     const closes = t.end == owner.parts.items.len;
     assistant(c, a, k, piece, .{ .chat_id = chat_id, .entries = entries_, .index = t.owner, .col = cull.col, .scroll = cull.view, .closes = closes, .last = closes and at_end });
+    sel_pin.observe(c, row_id, row_start);
 }
 
 /// A prompt's bubble; where it was last laid out.

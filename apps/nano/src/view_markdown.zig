@@ -324,7 +324,6 @@ fn block(c: *ui.Context, b: md.Block, first: bool) void {
         },
         .rule => _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null),
         .math => |in| {
-            ui.key(c, "md-math-block");
             const box = ui.div(c).row().wFull().px(14).py(10).rounded(8).bg(k.ink(0.03)).justifyCenter();
             defer box.end();
             rich(c, in, kit.style(c, 16, 24, .{ .wrap = true }));
@@ -352,7 +351,7 @@ fn item(c: *ui.Context, it: @FieldType(md.Block, "item")) void {
             ui.text(c, it.marker, st);
         }
     }
-    const box = ui.div(c).column().grow().w(0);
+    const box = ui.div(c).column().wFull();
     defer box.end();
     var st = body;
     if (it.task == true) st.color = k.muted;

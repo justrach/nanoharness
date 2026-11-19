@@ -1766,15 +1766,16 @@ pub const App = struct {
         a.view.write_open = false;
         // And a Bots page, which sits in the chat's place.
         a.bots.page = .none;
-        @import("app_panes.zig").select(a, chat_id);
+        const promoted_peer = @import("app_panes.zig").select(a, chat_id);
         a.notice_len = 0;
         queue_mod.stop(a);
         const same = if (a.selected) |s| (if (chat_id) |c| std.mem.eql(u8, s, c) else false) else chat_id == null;
         if (!same and !a.nav_restoring) a.recordNav(a.selected, chat_id);
         if (!same) if (a.selected) |s| a.retireSlice(s);
         if (!same) a.selected = if (chat_id) |c| a.gpa.dupe(u8, c) catch null else null;
-        // A leftover offset from the previous chat parks this one in padding.
-        if (!same) a.view.stick_end = true;
+        // Focusing an already-visible peer preserves its scroll offset and
+        // retires any stale bottom-follow request left by an empty pane.
+        if (!same) a.view.stick_end = !promoted_peer;
         if (space_id) |s| {
             if (a.space) |old| a.retireSlice(old);
             a.space = a.gpa.dupe(u8, s) catch null;

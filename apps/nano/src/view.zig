@@ -1122,13 +1122,16 @@ fn settleSelectionPreTree(a: *App, c: *ui.Context) void {
     }
     const scope = selectionScope(a);
     const promotion = owner.promoted_chat != 0 and a.selected != null and owner.promoted_chat == std.hash.Wyhash.hash(0, a.selected.?);
+    var clear_pin = c.selection.anchor == null;
     if (!c.window_focused or (a.view.selection_scope != 0 and a.view.selection_scope != scope and !promotion)) {
         c.selection.clear();
         a.view.selection_had_text = false;
         a.view.whitespace_drag = .{};
         owner.* = .{};
+        clear_pin = true;
     }
     if (a.view.selection_scope != scope and promotion) owner.promoted_chat = 0;
+    if (clear_pin) @import("selection_owner.zig").pin(c).* = .{};
     a.view.selection_scope = scope;
     // An empty paint cache is not an empty selection: both endpoints can
     // be offscreen. Post-tree validation checks the actual source nodes.
@@ -1282,17 +1285,20 @@ fn gatherSelection(c: *ui.Context) void {
 fn validateSelectionSnapshot(c: *ui.Context, owner: *@import("selection_owner.zig").State) void {
     if (c.selection.anchor == null or c.selection.dragging or c.selection.pressed) {
         owner.snapshot = 0;
+        if (c.selection.anchor == null) @import("selection_owner.zig").pin(c).* = .{};
         return;
     }
     const ends = c.selection.ordered() orelse return;
     const lo = c.selection.order.get(ends[0].id) orelse {
         c.selection.clear();
         owner.snapshot = 0;
+        @import("selection_owner.zig").pin(c).* = .{};
         return;
     };
     const hi = c.selection.order.get(ends[1].id) orelse {
         c.selection.clear();
         owner.snapshot = 0;
+        @import("selection_owner.zig").pin(c).* = .{};
         return;
     };
     var found_start = false;
@@ -1314,6 +1320,7 @@ fn validateSelectionSnapshot(c: *ui.Context, owner: *@import("selection_owner.zi
     if (!found_start or !found_end or (owner.snapshot != 0 and owner.snapshot != snapshot)) {
         c.selection.clear();
         owner.snapshot = 0;
+        @import("selection_owner.zig").pin(c).* = .{};
     } else owner.snapshot = snapshot;
 }
 

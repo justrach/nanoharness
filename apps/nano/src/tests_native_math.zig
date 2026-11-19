@@ -278,3 +278,74 @@ test "rejected table math fallback wraps inside its cell without covering neighb
         try testing.expect(saw_fallback);
     }
 }
+
+test "sibling display equations have distinct selection ids and copy independently (#893)" {
+    theme.registerFonts();
+    const src =
+        \\First synthetic equation:
+        \\
+        \\$$\alpha + \beta = \gamma$$
+        \\
+        \\Middle synthetic prose.
+        \\
+        \\$$\sum_{k=1}^{n} k^2 = \frac{n(n+1)(2n+1)}{6}$$
+        \\
+        \\Final synthetic prose.
+        \\
+        \\$$E = m c^2 + p^2 c^2$$
+    ;
+    var f = Fixture{ .source = src };
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 640, .height = 520 });
+    defer t.deinit();
+    var scheduled_frames: usize = 0;
+    while (scheduled_frames < 8 and (t.ctx.animating or t.ctx.frame_in != null)) : (scheduled_frames += 1) t.frame();
+
+    var eq_ids: [3]u64 = .{ 0, 0, 0 };
+    var eq_rects: [3]ui.Rect = undefined;
+    var found: usize = 0;
+    for (t.ctx.nodes.items) |node| {
+        if (node.content != .text) continue;
+        if (node.content.text.color.a != 0) continue;
+        const s = node.content.text.str;
+        if (std.mem.indexOf(u8, s, "\\alpha") != null) {
+            eq_ids[0] = node.id;
+            eq_rects[0] = node.rect;
+            found += 1;
+        } else if (std.mem.indexOf(u8, s, "\\sum") != null) {
+            eq_ids[1] = node.id;
+            eq_rects[1] = node.rect;
+            found += 1;
+        } else if (std.mem.indexOf(u8, s, "m c^2") != null) {
+            eq_ids[2] = node.id;
+            eq_rects[2] = node.rect;
+            found += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 3), found);
+
+    // Select only the first display equation.
+    const r0 = eq_rects[0];
+    t.drag(r0.x + 2, r0.y + r0.h / 2, r0.x + r0.w - 2, r0.y + r0.h / 2);
+    t.frame();
+    if (std.c.getenv("NANO_MATH_SEL_SNAP")) |raw| {
+        try t.screenshot(std.mem.span(raw));
+    }
+
+    try testing.expect(eq_ids[0] != eq_ids[1]);
+    try testing.expect(eq_ids[1] != eq_ids[2]);
+    try testing.expect(eq_ids[0] != eq_ids[2]);
+
+    try testing.expect(std.mem.indexOf(u8, t.ctx.selection.text.items, "\\alpha") != null);
+    try testing.expect(std.mem.indexOf(u8, t.ctx.selection.text.items, "\\sum") == null);
+    try testing.expect(std.mem.indexOf(u8, t.ctx.selection.text.items, "m c^2") == null);
+
+    // Select across all three equations and verify document order and source.
+    const r2 = eq_rects[2];
+    t.drag(r0.x + 2, r0.y + r0.h / 2, r2.x + r2.w - 2, r2.y + r2.h / 2);
+    t.frame();
+    const p0 = std.mem.indexOf(u8, t.ctx.selection.text.items, "\\alpha") orelse return error.MissingFirstEquation;
+    const p1 = std.mem.indexOf(u8, t.ctx.selection.text.items, "\\sum") orelse return error.MissingSecondEquation;
+    const p2 = std.mem.indexOf(u8, t.ctx.selection.text.items, "m c^2") orelse return error.MissingThirdEquation;
+    try testing.expect(p0 < p1 and p1 < p2);
+}
