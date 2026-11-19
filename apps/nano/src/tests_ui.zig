@@ -1602,6 +1602,10 @@ test "Settings › Agents: session titles name the agent and model; the agent li
     defer parsed.deinit();
     @import("view_settings_agents.zig").setTitles(&h.a, parsed.value);
     h.t.settle(1);
+    // Setup cards can put title controls below the viewport. Bring them into
+    // view before clicking, as a person would, rather than clicking clipped text.
+    h.t.scroll(800, 700, -1200);
+    h.t.settle(1);
     try testing.expect(h.t.hasText("Title harness"));
     try testing.expect(h.t.hasText("Automatic (cheapest model)"));
     try testing.expect(!h.t.hasText("Automatic"));
