@@ -1,8 +1,8 @@
 //! The queue tray over the composer (crates/ui/src/queue.rs): a surface
 //! above (never behind) the input. Rows wrap their actions in narrow panes
-//! instead of clipping them: Edit, Steer and Remove precede "Send now"; the row
-//! being edited reads "Editing in composer" with "Save to queue" and
-//! "Cancel".
+//! instead of clipping them: Edit, Steer and Remove precede "Send now". Narrow
+//! rows show only action icons; the row being edited reads "Editing in composer"
+//! with "Save to queue" and "Cancel" when there is room.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -79,9 +79,8 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, r: queue.Row, newest: bool, com
     const gated = r.gate != .none;
     if (!compact or (!stacked and layout.drag))
         icons.icon(c, .@"queue-drag-handle", 13, k.muted.alpha(if (gated) 0.35 * 0.5 else 0.5), 14);
-    {
-        var col = ui.div(c).column().clip();
-        col = if (stacked) col.wFull() else col.grow().w(0);
+    if (!stacked) {
+        var col = ui.div(c).column().clip().grow().w(0);
         defer col.end();
         const title: []const u8 = if (editing)
             (if (a.queue_edit.?.saving) "Saving…" else "Editing in composer")

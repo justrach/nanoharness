@@ -50,14 +50,15 @@ fn parentOfText(tester: *ui.Tester, label: []const u8) !u32 {
     return error.MissingDockText;
 }
 
-fn trayRect(tester: *ui.Tester) !ui.Rect {
-    var at = parentOfText(tester, "Synthetic queued message 0") catch try parentOfText(tester, "Editing in composer");
-    while (at < tester.ctx.nodes.items.len) {
-        const n = tester.ctx.node(at);
-        if (n.style.border != null) return n.rect;
-        at = n.parent;
+fn trayRect(tester: *ui.Tester, pill: ui.Rect) !ui.Rect {
+    var found: ?ui.Rect = null;
+    for (tester.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (node.style.border != null and r.w > 0 and r.h > 0 and r.y + r.h <= pill.y and
+            (found == null or r.y + r.h > found.?.y + found.?.h))
+            found = r;
     }
-    return error.MissingQueueSurface;
+    return found orelse error.MissingQueueSurface;
 }
 
 fn snap(tester: *ui.Tester, width: usize, draft: usize, count: usize) !void {
@@ -107,11 +108,13 @@ test "composer dock keeps priority queue actions visible in narrow panes" {
         defer tester.deinit();
         tester.settle(0.5);
         try snap(&tester, width, 0, 1);
-        const tray = try trayRect(&tester);
         const pill = a.view.composer_anchor orelse return error.MissingComposer;
+        const tray = try trayRect(&tester, pill);
         try t.expectApproxEqAbs(pill.w, tray.w, 0.1);
         try t.expectApproxEqAbs(pill.x, tray.x, 0.1);
         try t.expect(tray.y + tray.h + 7 <= pill.y);
+        if (@import("view_queue.zig").rowLayout(pill.w, 4).stacked)
+            try t.expect(!tester.containsText("Synthetic queued message 0"));
         _ = try actionRect(&tester, tray, "Edit");
         _ = try actionRect(&tester, tray, "Steer into active turn");
         _ = try actionRect(&tester, tray, "Remove");
@@ -146,7 +149,8 @@ test "composer dock wrapped queue controls dispatch their original actions" {
         try tester.init(t.allocator, .init(&a, view), .{ .width = @floatFromInt(width), .height = 480, .theme = theme.ui(false) });
         defer tester.deinit();
         tester.settle(0.5);
-        const r = try actionRect(&tester, try trayRect(&tester), case[0]);
+        const pill = a.view.composer_anchor orelse return error.MissingComposer;
+        const r = try actionRect(&tester, try trayRect(&tester, pill), case[0]);
         tester.click(r.x + r.w / 2, r.y + r.h / 2);
         var sent = false;
         for (a.engine.sent.items) |frame| {
@@ -162,7 +166,7 @@ test "composer dock wrapped queue controls dispatch their original actions" {
         if (std.mem.eql(u8, case[0], "Edit")) {
             _ = a.engine.pump();
             tester.settle(0.5);
-            const tray = try trayRect(&tester);
+            const tray = try trayRect(&tester, pill);
             _ = try actionRect(&tester, tray, "Save to queue");
             const cancel = try actionRect(&tester, tray, "Cancel");
             tester.click(cancel.x + cancel.w / 2, cancel.y + cancel.h / 2);
@@ -191,8 +195,8 @@ test "composer dock separates queue tray jump button and growing input" {
         defer tester.deinit();
         tester.settle(0.5);
         try snap(&tester, width, draft, count);
-        const tray = try trayRect(&tester);
         const pill = a.view.composer_anchor orelse return error.MissingComposer;
+        const tray = try trayRect(&tester, pill);
         const jump = tester.ctx.node(try parentOfText(&tester, "Scroll to bottom")).rect;
         try t.expect(tray.y + tray.h + 7 <= pill.y);
         try t.expect(jump.y + jump.h + 5 <= tray.y);
