@@ -87,6 +87,19 @@ thumb dragging. Null retains the upstream/default and legacy fade behavior.
 Harness's `Cmd+B sidebar scrollbars` test covers both production sidebar lists
 with simulated time, wheel input, hover, dragging and native screenshots.
 
+Harness-local clipboard image support adds `Clipboard.write_image` in
+`src/ui/input.zig`, `platform.clipboardWriteImage` in `src/platform.zig`,
+macOS PNG/TIFF pasteboard writes in `src/desktop.zig`, and `Tester.clipboard_image`
+in `src/ui/tester.zig` so image previews can copy full image content directly
+and tests can verify success and failure paths without touching the host clipboard.
+
+Harness-local macOS/iOS colour glyph rendering preserves colour emoji RGB and
+internal detail end to end in `src/ui/{atlas,atlas_tt,gpu,paint,metal,shader.metal,text_mac,surface,tester}.zig`
+and `src/ios/surface.zig`: fonts carrying `kCTFontTraitColorGlyphs` rasterize into
+a lazy sRGB premultiplied BGRA8 atlas texture and sample via `Kind.color_text`
+with opacity, clipping, motion blur, and horizontal fades while ordinary text
+keeps its R8 mask, smoothing, and dilation path unchanged.
+
 These changes live in this checked-in package, not an ignored download cache.
 
 To update: start with the pinned upstream distribution, retain the notices,

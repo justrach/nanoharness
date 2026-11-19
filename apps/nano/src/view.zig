@@ -154,6 +154,9 @@ pub fn view(a: *App, c: *ui.Context) void {
         if (a.selected) |id| a.markSeen(id);
     }
     a.view.in_pre_tree = false;
+    if (!a.view.space_menu) a.view.space_anchor = null;
+    a.view.strip.active_folder_anchor = null;
+    a.view.strip.active_tab_anchor = null;
     {
         const root = ui.div(c).row().sizeFull().bg(k.shell);
         defer root.end();

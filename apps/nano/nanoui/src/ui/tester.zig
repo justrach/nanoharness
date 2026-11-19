@@ -52,6 +52,10 @@ pub const Tester = struct {
     dt: f32 = 1.0 / 60.0,
     /// What copy and cut wrote: tests never touch the system's clipboard.
     clipboard: std.ArrayList(u8) = .empty,
+    /// Encoded image bytes written via `Clipboard.write_image`.
+    clipboard_image: std.ArrayList(u8) = .empty,
+    /// When true, `Clipboard.write_image` simulates a system clipboard failure.
+    clipboard_image_fail: bool = false,
     /// The simulated clock, advanced by `dt` each frame.
     time: f64 = 0,
     /// The app's own script steps (`cmd:…`), tried after nanoui's.
@@ -92,7 +96,7 @@ pub const Tester = struct {
         };
         t.text.setScale(opts.scale);
         t.ctx = .init(gpa, &t.text);
-        t.ctx.clipboard = .{ .ctx = t, .write = clipWrite };
+        t.ctx.clipboard = .{ .ctx = t, .write = clipWrite, .write_image = clipWriteImage };
         t.ctx.waker = .{ .ctx = t, .wake = wakeFrom };
         t.frame();
     }
@@ -115,6 +119,14 @@ pub const Tester = struct {
         t.clipboard.appendSlice(t.gpa, text_) catch {};
     }
 
+    fn clipWriteImage(ctx: ?*anyopaque, bytes_: []const u8) bool {
+        const t: *Tester = @ptrCast(@alignCast(ctx));
+        if (t.clipboard_image_fail or bytes_.len == 0) return false;
+        t.clipboard_image.clearRetainingCapacity();
+        t.clipboard_image.appendSlice(t.gpa, bytes_) catch return false;
+        return true;
+    }
+
     pub fn deinit(t: *Tester) void {
         if (@import("../rt.zig").enabled) {
             const Ext = struct { extern fn nanoui_rt_tester_deinit(t: *Tester) callconv(.c) void; };
@@ -125,6 +137,7 @@ pub const Tester = struct {
 
     pub fn deinitImpl(t: *Tester) void {
         t.clipboard.deinit(t.gpa);
+        t.clipboard_image.deinit(t.gpa);
         t.instances.deinit(t.gpa);
         t.ctx.deinit();
         t.text.deinit();
@@ -387,6 +400,7 @@ pub const Tester = struct {
     /// The last frame's pixels (BGRA, premultiplied); free with `deinit`.
     pub fn render(t: *Tester, gpa: std.mem.Allocator) !gpu.Pixels {
         if (!portable) t.renderer.syncImages(&t.text.images);
+        if (!portable) t.renderer.color_atlas_texture = t.text.colorTexture();
         if (!portable) t.renderer.textures = t.ctx.textures.items;
         if (!portable) t.renderer.gradients = t.ctx.gradients.items;
         if (!portable) return t.renderer.drawOffscreen(gpa, t.instances.items, t.text.texture(), t.size, t.scale, t.ctx.theme.background);

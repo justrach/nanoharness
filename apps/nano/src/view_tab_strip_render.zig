@@ -240,6 +240,9 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
         }
     }
     defer box.end();
+    if (strip.same(strip.active(a), target)) {
+        if (c.rects.get(c.node(box.index).id)) |r| a.view.strip.active_tab_anchor = r;
+    }
     const hot = box.hovered() or group_hot;
     const show_controls = hot or c.focus == c.node(box.index).id;
     const menu_count = strip.tabCount(a, target);
@@ -294,6 +297,9 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
             if (f.changeable) pick = pick.px(3).hover(k.ink(0.10)).control();
             defer pick.end();
             const pick_rect = c.rects.get(c.node(pick.index).id) orelse c.rects.get(c.node(box.index).id);
+            if (f.changeable and strip.same(strip.active(a), target)) {
+                if (pick_rect) |r| a.view.strip.active_folder_anchor = r;
+            }
             if (f.changeable and a.view.strip.menu == .folder and !a.view.strip.footer_folder and strip.same(a.view.strip.target, target)) {
                 if (pick_rect) |r| a.view.strip.anchor = r;
             }
@@ -452,6 +458,9 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
             cap = cap.bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover);
         }
         defer cap.end();
+        if (ix == selected) {
+            if (c.rects.get(c.node(cap.index).id)) |r| a.view.strip.active_tab_anchor = r;
+        }
         const hot = cap.hovered();
         const pending_question = if (group != null) chatNeedsInput(a, chat) else workspaceNeedsInput(a, ix);
         if (!questionMark(c, k, pending_question)) {

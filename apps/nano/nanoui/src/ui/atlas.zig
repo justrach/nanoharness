@@ -14,6 +14,7 @@ const types = @import("types.zig");
 
 extern "c" fn CTFontGetBoundingRectsForGlyphs(font: cf.CTFontRef, orientation: u32, glyphs: [*]const u16, rects: ?[*]objc.CGRect, count: cf.CFIndex) objc.CGRect;
 extern "c" fn CTFontDrawGlyphs(font: cf.CTFontRef, glyphs: [*]const u16, positions: [*]const objc.CGPoint, count: usize, ctx: cf.CGContextRef) void;
+extern "c" fn CTFontGetSymbolicTraits(font: cf.CTFontRef) u32;
 extern "c" fn CGContextDrawImage(ctx: cf.CGContextRef, rect: objc.CGRect, image: *anyopaque) void;
 extern "c" fn CGContextTranslateCTM(ctx: cf.CGContextRef, tx: f64, ty: f64) void;
 extern "c" fn CGContextSetAllowsFontSmoothing(ctx: cf.CGContextRef, v: bool) void;
@@ -24,6 +25,9 @@ extern "c" fn UIGraphicsPopContext() void;
 /// The atlas starts at 2048 so cold start never grows it, up to `max_size`.
 const initial_size: u32 = 2048;
 const max_size: u32 = 4096;
+const color_initial_size: u32 = 512;
+const color_max_size: u32 = 2048;
+const color_glyphs_trait: u32 = 1 << 13; // kCTFontTraitColorGlyphs
 const pad: u32 = 1;
 /// Horizontal positions are snapped to quarters of a pixel.
 pub const subpixel_bins = 4;
@@ -36,6 +40,7 @@ pub const Sprite = struct {
     y: f32,
     w: f32,
     h: f32,
+    color: bool = false,
 };
 
 const Key = struct { font: u16, glyph: u16, bin: u8, dilation: u8 };
@@ -80,6 +85,11 @@ pub const Atlas = struct {
     shelf_x: u32 = 0,
     shelf_y: u32 = 0,
     shelf_h: u32 = 0,
+    color_texture: ?objc.Object = null,
+    color_size: u32 = 0,
+    color_shelf_x: u32 = 0,
+    color_shelf_y: u32 = 0,
+    color_shelf_h: u32 = 0,
     /// Set when the atlas was reset during a frame, whose earlier glyphs
     /// are then stale: the frame must be painted again.
     reset_during_frame: bool = false,
@@ -90,9 +100,20 @@ pub const Atlas = struct {
         return .{ .gpa = gpa, .device = device, .texture = makeTexture(device, initial_size) };
     }
 
+    pub fn colorTexture(a: *const Atlas) ?objc.Object {
+        return a.color_texture;
+    }
+
     fn makeTexture(device: objc.Object, side: u32) objc.Object {
         const desc = objc.msg(objc.Object, objc.class("MTLTextureDescriptor"), "texture2DDescriptorWithPixelFormat:width:height:mipmapped:", .{
             @as(objc.NSUInteger, 10), @as(objc.NSUInteger, side), @as(objc.NSUInteger, side), objc.NO, // R8Unorm
+        });
+        return objc.msg(objc.Object, device, "newTextureWithDescriptor:", .{desc});
+    }
+
+    fn makeColorTexture(device: objc.Object, side: u32) objc.Object {
+        const desc = objc.msg(objc.Object, objc.class("MTLTextureDescriptor"), "texture2DDescriptorWithPixelFormat:width:height:mipmapped:", .{
+            @as(objc.NSUInteger, 80), @as(objc.NSUInteger, side), @as(objc.NSUInteger, side), objc.NO, // BGRA8Unorm
         });
         return objc.msg(objc.Object, device, "newTextureWithDescriptor:", .{desc});
     }
@@ -110,10 +131,26 @@ pub const Atlas = struct {
         a.reset_during_frame = true;
     }
 
+    fn makeColorRoom(a: *Atlas) void {
+        if (a.color_texture == null) {
+            a.color_size = color_initial_size;
+            a.color_texture = makeColorTexture(a.device, a.color_size);
+            return;
+        }
+        if (a.color_size < color_max_size) {
+            a.color_size *= 2;
+            objc.release(a.color_texture.?);
+            a.color_texture = makeColorTexture(a.device, a.color_size);
+        }
+        a.reset();
+        a.reset_during_frame = true;
+    }
+
     pub fn deinit(a: *Atlas) void {
         a.sprites.deinit(a.gpa);
         a.symbols.deinit(a.gpa);
         a.pixels.deinit(a.gpa);
+        if (a.color_texture) |t| objc.release(t);
         objc.release(a.texture);
     }
 
@@ -129,6 +166,9 @@ pub const Atlas = struct {
         a.shelf_x = 0;
         a.shelf_y = 0;
         a.shelf_h = 0;
+        a.color_shelf_x = 0;
+        a.color_shelf_y = 0;
+        a.color_shelf_h = 0;
     }
 
     /// The sprite of `glyph` of `font` (whose id is `font_id`) drawn at
@@ -137,9 +177,10 @@ pub const Atlas = struct {
     /// `stroke`: points of outline added, for a bold the font lacks (a font id
     /// always has the same one).
     pub fn glyph(a: *Atlas, font_id: u16, font: cf.CTFontRef, g: u16, bin: u8, dilation: u8, stroke: f32) ?Sprite {
-        const key: Key = .{ .font = font_id, .glyph = g, .bin = bin, .dilation = dilation };
+        const is_color = CTFontGetSymbolicTraits(font) & color_glyphs_trait != 0;
+        const key: Key = .{ .font = font_id, .glyph = g, .bin = bin, .dilation = if (is_color) 0 else dilation };
         if (a.sprites.get(key)) |sp| return sp;
-        const sp = a.rasterize(font, g, bin, dilation, stroke);
+        const sp = if (is_color) a.rasterizeColor(font, g, bin) else a.rasterize(font, g, bin, dilation, stroke);
         a.sprites.put(a.gpa, key, sp) catch {};
         return sp;
     }
@@ -333,6 +374,81 @@ pub const Atlas = struct {
             @as(*anyopaque, bytes.ptr), @as(objc.NSUInteger, a.size), Region{ .x = 0, .y = 0, .z = 0, .w = a.size, .h = a.size, .d = 1 }, @as(objc.NSUInteger, 0),
         });
         return bytes;
+    }
+
+    fn rasterizeColor(a: *Atlas, font: cf.CTFontRef, g: u16, bin: u8) ?Sprite {
+        const scale = a.scale;
+        var glyphs = [1]u16{g};
+        const bounds = CTFontGetBoundingRectsForGlyphs(font, 0, &glyphs, null, 1);
+        if (bounds.size.width <= 0 or bounds.size.height <= 0) return null;
+        const sub: f64 = @as(f64, @floatFromInt(bin)) / subpixel_bins;
+        const s: f64 = scale;
+        const x0 = @floor(bounds.origin.x * s + sub);
+        const y0 = @floor(bounds.origin.y * s);
+        const x1 = @ceil((bounds.origin.x + bounds.size.width) * s + sub);
+        const y1 = @ceil((bounds.origin.y + bounds.size.height) * s);
+        const w: u32 = @as(u32, @intFromFloat(x1 - x0)) + 2 * pad;
+        const h: u32 = @as(u32, @intFromFloat(y1 - y0)) + 2 * pad;
+        if (w > color_max_size or h > color_max_size) return null;
+        const origin = a.allocateColor(w, h) orelse blk: {
+            a.makeColorRoom();
+            break :blk a.allocateColor(w, h) orelse return null;
+        };
+        a.pixels.resize(a.gpa, @as(usize, w) * h * 4) catch return null;
+        @memset(a.pixels.items, 0);
+        const space = cf.CGColorSpaceCreateWithName(cf.kCGColorSpaceSRGB) orelse return null;
+        defer cf.CGColorSpaceRelease(space);
+        // Premultiplied BGRA8 (premultipliedFirst | byteOrder32Little) matching MTLPixelFormatBGRA8Unorm.
+        const ctx = cf.CGBitmapContextCreate(a.pixels.items.ptr, w, h, 8, w * 4, space, 2 | (2 << 12)) orelse return null;
+        defer cf.CGContextRelease(ctx);
+        cf.CGContextSetShouldAntialias(ctx, true);
+        cf.CGContextSetAllowsFontSubpixelPositioning(ctx, true);
+        cf.CGContextSetShouldSubpixelPositionFonts(ctx, true);
+        CGContextTranslateCTM(ctx, @as(f64, pad) - x0 + sub, @as(f64, pad) - y0);
+        cf.CGContextScaleCTM(ctx, s, s);
+        const at = [1]objc.CGPoint{.{}};
+        CTFontDrawGlyphs(font, &glyphs, &at, 1, ctx);
+        a.uploadColor(origin, w, h);
+        const as: f32 = @floatFromInt(a.color_size);
+        const fw: f32 = @floatFromInt(w);
+        const fh: f32 = @floatFromInt(h);
+        return .{
+            .uv = .{
+                @as(f32, @floatFromInt(origin[0])) / as,
+                @as(f32, @floatFromInt(origin[1])) / as,
+                @as(f32, @floatFromInt(origin[0] + w)) / as,
+                @as(f32, @floatFromInt(origin[1] + h)) / as,
+            },
+            .x = (@as(f32, @floatCast(x0)) - @as(f32, pad)) / scale,
+            .y = -(@as(f32, @floatCast(y0)) - @as(f32, pad) + fh) / scale,
+            .w = fw / scale,
+            .h = fh / scale,
+            .color = true,
+        };
+    }
+
+    fn uploadColor(a: *Atlas, origin: [2]u32, w: u32, h: u32) void {
+        const Region = extern struct { x: usize, y: usize, z: usize, w: usize, h: usize, d: usize };
+        objc.msg(void, a.color_texture.?, "replaceRegion:mipmapLevel:withBytes:bytesPerRow:", .{
+            Region{ .x = origin[0], .y = origin[1], .z = 0, .w = w, .h = h, .d = 1 }, @as(objc.NSUInteger, 0), @as(*const anyopaque, a.pixels.items.ptr), @as(objc.NSUInteger, w * 4),
+        });
+    }
+
+    fn allocateColor(a: *Atlas, w: u32, h: u32) ?[2]u32 {
+        if (a.color_texture == null) {
+            a.color_size = color_initial_size;
+            a.color_texture = makeColorTexture(a.device, a.color_size);
+        }
+        if (a.color_shelf_x + w > a.color_size) {
+            a.color_shelf_y += a.color_shelf_h;
+            a.color_shelf_x = 0;
+            a.color_shelf_h = 0;
+        }
+        if (a.color_shelf_y + h > a.color_size) return null;
+        const at: [2]u32 = .{ a.color_shelf_x, a.color_shelf_y };
+        a.color_shelf_x += w;
+        a.color_shelf_h = @max(a.color_shelf_h, h);
+        return at;
     }
 
     fn upload(a: *Atlas, origin: [2]u32, w: u32, h: u32) void {

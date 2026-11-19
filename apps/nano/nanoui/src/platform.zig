@@ -65,6 +65,14 @@ pub fn clipboardWrite(text: []const u8) void {
     }
 }
 
+/// Writes encoded image bytes to the system's clipboard. Returns true on success.
+pub fn clipboardWriteImage(bytes: []const u8) bool {
+    return switch (os) {
+        .macos => @import("desktop.zig").clipboard.writeImage(bytes),
+        else => false,
+    };
+}
+
 /// Android: the app's thread's loop for `seconds` (elsewhere, a sleep).
 fn androidRunFor(seconds: f64) void {
     const activity = @import("android/activity.zig");

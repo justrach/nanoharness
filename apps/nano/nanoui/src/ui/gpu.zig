@@ -91,6 +91,9 @@ pub const Kind = struct {
     /// A rounded box cut out of the frame (`ui.hole`), drawn as a quad's
     /// fill: what's under the frame (a map) shows there.
     pub const hole: f32 = 12;
+    /// A colour glyph (e.g. Apple Color Emoji) sampled as premultiplied BGRA
+    /// from the dedicated colour glyph atlas, preserving RGB and internal detail.
+    pub const color_text: f32 = 13;
 };
 
 /// The matching end of a grouped subtree, including nested masks. A

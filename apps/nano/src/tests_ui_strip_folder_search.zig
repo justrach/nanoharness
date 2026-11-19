@@ -85,8 +85,8 @@ test "release folder menu: text-field Enter activates the current row and both a
                 try testing.expect(h.a.newChatSpace() == null);
                 try testing.expectEqual(h.a.view.composer_id, h.t.ctx.focus);
             } else {
-                try testing.expect(h.a.view.open_chooser.open);
-                try testing.expectEqual(@import("app_open_chooser.zig").Intent.new_project, h.a.view.open_chooser.intent);
+                try testing.expect(!h.a.view.open_chooser.open);
+                try testing.expect(h.a.view.project_setup.open);
             }
         }
     }
@@ -264,4 +264,59 @@ test "release folder menu: only seven folders scroll while search and actions st
     try testing.expectEqual(@as(usize, 3), h.a.view.strip.rows);
     h.press(.{ .key = ui.Shortcut.enter });
     try testing.expectEqualStrings("p17", h.a.newChatSpace().?.id);
+}
+
+test "multi-pane project picker anchors to active tab rather than another pane footer" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    // Create 3 panes side by side: pane 0 (left), pane 1 (middle), pane 2 (right draft).
+    h.a.splitPane(.horizontal);
+    h.a.splitPane(.horizontal);
+    h.t.settle(2);
+    // Focus pane 2 (rightmost draft) so its footer sets space_anchor in the lower-right.
+    strip.focus(&h.a, .{ .chat = 2 });
+    h.t.settle(2);
+    const right_footer = h.a.view.space_anchor orelse return error.MissingRightFooter;
+    const mid_x = h.a.view.chrome.x + h.a.view.chrome.chat_width * 0.5;
+    try testing.expect(right_footer.x >= mid_x);
+
+    // Focus pane 0 (leftmost tab, existing chat) and invoke project picker via keyboard.
+    strip.focus(&h.a, .{ .chat = 0 });
+    h.t.settle(2);
+    // Stale footer anchor from pane 2 must not survive switching to pane 0.
+    try testing.expect(h.a.view.space_anchor == null);
+    strip.toggleProjectPicker(&h.a);
+    h.t.settle(2);
+    try testing.expect(h.a.view.strip.menu == .folder);
+    try testing.expect(!h.a.view.strip.footer_folder);
+    const left_anchor = h.a.view.strip.anchor orelse return error.MissingLeftAnchor;
+    try testing.expect(left_anchor.x < mid_x);
+    try testing.expect(left_anchor.y < 60);
+    const left_search = h.t.findText("Search folders…") orelse return error.MissingLeftSearch;
+    try testing.expect(left_search.x < mid_x);
+    try testing.expect(left_search.y < 120);
+    h.press(.{ .key = ui.Shortcut.escape });
+
+    // Even when pane 0 is a draft (which also has a footer chip), keyboard project picker
+    // in a multi-pane layout anchors to pane 0's active tab strip control, not lower-right.
+    h.a.select(null, null);
+    h.t.settle(2);
+    strip.toggleProjectPicker(&h.a);
+    h.t.settle(2);
+    try testing.expect(h.a.view.strip.menu == .folder);
+    try testing.expect(!h.a.view.strip.footer_folder);
+    const draft_left_search = h.t.findText("Search folders…") orelse return error.MissingDraftLeftSearch;
+    try testing.expect(draft_left_search.x < mid_x);
+    try testing.expect(draft_left_search.y < 120);
+    h.press(.{ .key = ui.Shortcut.escape });
+
+    // Switching to pane 2 (rightmost) anchors the keyboard picker near the right tab.
+    strip.focus(&h.a, .{ .chat = 2 });
+    h.t.settle(2);
+    strip.toggleProjectPicker(&h.a);
+    h.t.settle(2);
+    const right_search = h.t.findText("Search folders…") orelse return error.MissingRightSearch;
+    try testing.expect(right_search.x >= mid_x);
+    try testing.expect(right_search.y < 120);
 }

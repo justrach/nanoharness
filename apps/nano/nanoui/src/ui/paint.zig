@@ -298,7 +298,7 @@ fn paintNode(c: *Context, out: *std.ArrayList(metal.Instance), index: u32, clip_
             const vy = r.y - prev.y;
             if (@sqrt(vx * vx + vy * vy) > 2) {
                 for (out.items[start..]) |*inst| {
-                    if (inst.kind == metal.Kind.quad or inst.kind == metal.Kind.text or inst.kind == metal.Kind.image) {
+                    if (inst.kind == metal.Kind.quad or inst.kind == metal.Kind.text or inst.kind == metal.Kind.color_text or inst.kind == metal.Kind.image) {
                         inst.vel = .{ vx * 0.5, vy * 0.5, inst.vel[2], inst.vel[3] };
                     }
                 }
@@ -476,7 +476,7 @@ fn textRunLimit(c: *Context, out: *std.ArrayList(metal.Instance), t: ctx_mod.Con
         // Lighter text is drawn with thicker strokes, as macOS draws it.
         const sp = c.text.glyph(g, bin, @TypeOf(c.text.*).dilationFor(tone.r, tone.g, tone.b)) orelse continue;
         var uv = sp.uv;
-        if (!text_mod.portable and 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2] < 0.5) {
+        if (!sp.color and !text_mod.portable and 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2] < 0.5) {
             const du = uv[2] - uv[0];
             uv[0] += du;
             uv[2] += du;
@@ -485,7 +485,7 @@ fn textRunLimit(c: *Context, out: *std.ArrayList(metal.Instance), t: ctx_mod.Con
             .rect = .{ px / scale + sp.x, baseline - g.y + sp.y, sp.w, sp.h },
             .color = color,
             .uv = uv,
-            .kind = metal.Kind.text,
+            .kind = if (sp.color) metal.Kind.color_text else metal.Kind.text,
             // A fading line: its glyphs fade out toward `end`, and are
             // cut there (the shader reads these for glyphs).
             .radius = if (limit) |l| l.end else 0,

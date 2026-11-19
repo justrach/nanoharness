@@ -21,6 +21,34 @@ pub const clipboard = struct {
         _ = objc.msg(objc.BOOL, pb, "setString:forType:", .{ objc.nsString(text), objc.nsString("public.utf8-plain-text") });
     }
 
+    /// Writes an encoded image to the clipboard as PNG and TIFF so other apps
+    /// can paste the image content directly. Returns false on invalid/empty input.
+    pub fn writeImage(bytes: []const u8) bool {
+        if (bytes.len == 0) return false;
+        const pool = objc.Pool.push();
+        defer pool.pop();
+        const data = objc.msg(?objc.Object, objc.class("NSData"), "dataWithBytes:length:", .{
+            @as(*const anyopaque, bytes.ptr), @as(objc.NSUInteger, bytes.len),
+        }) orelse return false;
+        const rep = objc.msg(?objc.Object, objc.class("NSBitmapImageRep"), "imageRepWithData:", .{data}) orelse return false;
+        const is_png = bytes.len >= 8 and std.mem.eql(u8, bytes[0..8], "\x89PNG\r\n\x1a\n");
+        const props = objc.msg(objc.Object, objc.class("NSDictionary"), "dictionary", .{});
+        // NSBitmapImageFileTypePNG = 4
+        const png = if (is_png) data else objc.msg(?objc.Object, rep, "representationUsingType:properties:", .{ @as(objc.NSUInteger, 4), props });
+        const tiff = objc.msg(?objc.Object, rep, "TIFFRepresentation", .{});
+        if (png == null and tiff == null) return false;
+        const pb = objc.msg(objc.Object, objc.class("NSPasteboard"), "generalPasteboard", .{});
+        _ = objc.msg(objc.NSInteger, pb, "clearContents", .{});
+        var wrote = false;
+        if (png) |p| {
+            if (objc.msg(objc.BOOL, pb, "setData:forType:", .{ p, objc.nsString("public.png") })) wrote = true;
+        }
+        if (tiff) |t| {
+            if (objc.msg(objc.BOOL, pb, "setData:forType:", .{ t, objc.nsString("public.tiff") })) wrote = true;
+        }
+        return wrote;
+    }
+
     /// The image on the clipboard (a screenshot, an image copied from a
     /// page or an app) as PNG, or null when it holds none. Caller frees it.
     pub fn readImage(gpa: std.mem.Allocator) !?[]u8 {

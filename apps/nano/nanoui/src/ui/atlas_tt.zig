@@ -25,6 +25,7 @@ pub const Sprite = struct {
     y: f32,
     w: f32,
     h: f32,
+    color: bool = false,
 };
 
 /// A font at a size, as glyphs are drawn: `skew` slants an upright face

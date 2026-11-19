@@ -267,6 +267,7 @@ pub const Surface = struct {
             return;
         }
         self.renderer.syncImages(&self.text.images);
+        self.renderer.color_atlas_texture = self.text.colorTexture();
         self.renderer.textures = c.textures.items;
         self.renderer.gradients = c.gradients.items;
         // The renderer draws into the drawable it is given (on the Mac, the

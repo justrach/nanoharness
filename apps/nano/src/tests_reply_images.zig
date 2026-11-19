@@ -466,3 +466,44 @@ test "reply images open preview pins cached bytes until explicitly closed" {
     try t.expect(a.attachments.images.items.items[0] != owner);
     try t.expect(a.attachments.images.items.items[a.attachments.images.items.items.len - 1] == extra);
 }
+
+test "image preview Copy image copies original bytes preserves zoom and surfaces failure" {
+    var a: App = undefined;
+    try setup(&a, false);
+    defer a.deinit();
+    try reset(&a, false);
+    var tester: ui.Tester = undefined;
+    try initTester(&a, &tester);
+    defer tester.deinit();
+    _ = a.engine.pump();
+    tester.settle(3);
+    const owner = a.attachments.images.items.items[0];
+    @import("view_image_preview.zig").open(&a, "reply-owner", owner);
+    tester.settle(1);
+    try t.expect(tester.hasText("Copy image"));
+    // Zoom and pan first: Copy image must still copy full original bytes and leave zoom/pan intact.
+    try tester.clickText("Zoom in");
+    a.attachments.images.center = .{ .x = 0.25, .y = 0.75 };
+    tester.settle(0.2);
+    const zoom_before = a.attachments.images.zoom;
+    const center_before = a.attachments.images.center;
+    try t.expect(zoom_before > 1);
+    try t.expect(center_before.x < 0.49);
+    try tester.clickText("Copy image");
+    tester.settle(0.1);
+    try t.expectEqualSlices(u8, bytes, tester.clipboard_image.items);
+    try t.expect(tester.hasText("Copied"));
+    try t.expect(a.attachments.images.preview == owner);
+    try t.expectEqual(zoom_before, a.attachments.images.zoom);
+    try t.expectApproxEqAbs(center_before.x, a.attachments.images.center.x, 0.001);
+    try t.expectApproxEqAbs(center_before.y, a.attachments.images.center.y, 0.001);
+    // Confirmation clears after 2s.
+    tester.advance(2.1);
+    try t.expect(!tester.hasText("Copied"));
+    // Clipboard failure surfaces without closing the preview.
+    tester.clipboard_image_fail = true;
+    try tester.clickText("Copy image");
+    tester.settle(0.1);
+    try t.expect(tester.hasText("Copy failed"));
+    try t.expect(a.attachments.images.preview == owner);
+}

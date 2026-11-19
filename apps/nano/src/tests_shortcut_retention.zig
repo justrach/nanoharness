@@ -110,7 +110,7 @@ test "deep shortcuts folder Shift Down targets the first pinned action and Up re
         h.t.key(.enter);
         h.t.settle(1);
         if (footer) {
-            try testing.expect(h.a.view.open_chooser.open);
+            try testing.expect(h.a.view.project_setup.open);
         } else try testing.expect(h.a.new_no_project);
     }
 }

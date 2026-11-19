@@ -372,3 +372,32 @@ test "github links hidden transcript cannot enqueue navigation and explicit brow
     try testing.expectEqual(@as(usize, 1), Opener.count);
     try testing.expectEqual(@as(usize, 0), try githubCalls(&h));
 }
+
+test "github links click in unfocused split pane keeps native GitHub focused after strip settle" {
+    var h: Harness = undefined;
+    try setup(&h, &.{pull});
+    defer h.deinit();
+    // Split vertically with chat "a" in pane 0 and a draft in pane 1,
+    // matching a narrow compact-outlet layout where host focus selects what shows.
+    h.a.splitPane(.vertical);
+    h.t.resize(750, 850);
+    h.t.settle(0.3);
+    if (h.a.peer("a")) |p| {
+        const transcript = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\{"reset":[{"id":"reply","role":"assistant","status":"complete","parts":[{"id":"text","kind":"text","text":"[Native pull](https://github.com/demo/other/pull/42)"}]}]}
+        , .{});
+        defer transcript.deinit();
+        try p.transcript.apply(transcript.value);
+    }
+    h.t.settle(0.2);
+    try testing.expect(h.a.selected == null);
+    // Click the GitHub link inside the unfocused pane 0 (chat "a"), which queues
+    // both pending_browser navigation and deferred pane-promotion strip focus.
+    try clickPull(&h, false);
+    while (h.a.engine.pump()) {}
+    h.t.settle(0.3);
+    try testing.expectEqualStrings("a", h.a.selected.?);
+    try testing.expect(h.a.panels.host_open);
+    try testing.expect(h.a.view.strip.focused == .host);
+    try testing.expect(h.t.hasText(pull.detail.?.title));
+}
