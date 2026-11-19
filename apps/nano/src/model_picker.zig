@@ -332,6 +332,8 @@ pub fn route(m: workspace.Model) []const u8 {
 /// name and mark. Never used to filter a live catalog.
 pub fn providerInfo(id: []const u8) struct { name: []const u8, icon: icons.Name } {
     const P = struct { []const u8, []const u8, icons.Name };
+    const flint = @import("native_flint.zig");
+    if (std.mem.eql(u8, id, flint.provider)) return .{ .name = flint.name, .icon = .globe };
     const table = [_]P{
         .{ "anthropic", "Anthropic", .@"claude-mark" },   .{ "codegraff", "Codegraff", .@"graff-mark" },
         .{ "deepseek", "DeepSeek", .@"maker-deepseek" },  .{ "openai", "OpenAI", .@"openai-mark" },
@@ -601,6 +603,35 @@ test "subscription models and routes come before non-subscription credits and AP
     try testing.expectEqualStrings("kimi/kimi-for-coding", searched[0].model.id);
     try testing.expectEqualStrings("kimi/k3.1-pro", searched[1].model.id);
     try testing.expectEqualStrings("codegraff/kimi-k3", searched[2].model.id);
+}
+
+test "Native Flint follows the live Graff catalog without invented reasoning" {
+    const flint = @import("native_flint.zig");
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.new_harness = try testing.allocator.dupe(u8, "graff");
+    a.models_for = try testing.allocator.dupe(u8, "graff");
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqual(@as(usize, 0), (try rows(&a, arena.allocator())).len);
+
+    // A synthetic live engine reply, not a built-in fallback model.
+    const reply = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"nanoattention/flint","label":"Flint","billing":"local","reasoningLevels":[]}]
+    , .{});
+    defer reply.deinit();
+    try a.models.replace(reply.value);
+    const grouped = try rows(&a, arena.allocator());
+    try testing.expectEqual(@as(usize, 2), grouped.len);
+    try testing.expectEqualStrings(flint.name, grouped[0].header.?);
+    try testing.expectEqualStrings(flint.model, grouped[1].model.id);
+    try testing.expectEqual(@as(usize, 0), grouped[1].model.levels.len);
+    try testing.expect(grouped[1].model.reasoning_default == null);
+    try testing.expectEqualStrings("Runs locally", billingLabel(grouped[1].model.billing.?));
+    try testing.expectEqual(icons.Name.globe, modelIcon(grouped[1].model));
+
+    try copyModels(&a.models, &.{});
+    try testing.expectEqual(@as(usize, 0), (try rows(&a, arena.allocator())).len);
 }
 
 test "ScalarTransition glides from pointer release position to snapped effort stop" {
