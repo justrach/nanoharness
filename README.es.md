@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/brand/harness-icon.png" width="108" height="108" alt="Icono de la app Harness">
+  <img src="dist/macos/icon-1024.png" width="108" height="108" alt="Icono de la app Harness">
 </p>
 
 <h1 align="center">Harness</h1>
@@ -27,8 +27,8 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/readme/codegraff-chat-dark.png" width="960" alt="Conversación en Harness con el tema Codegraff Dark y el agente graff">
-  <br><sub>Harness con graff seleccionado y el tema integrado Codegraff Dark. Conversación de ejemplo sintética.</sub>
+  <img src="docs/media/readme/nanoharness-workspace-light.png" width="960" alt="Conversación en Harness con el tema Light Mode y el agente graff">
+  <br><sub>Harness con graff seleccionado y el tema integrado Light Mode. Conversación de ejemplo sintética.</sub>
 </p>
 
 ## El espacio de trabajo
@@ -46,7 +46,7 @@ cuanto el socket del adaptador esté activo, activa Exo en
 **Settings → Agents**.
 
 <p align="center">
-  <img src="docs/media/readme/codegraff-agents-dark.png" width="960" alt="Ajustes actuales de agentes de Harness con el tema Codegraff Dark, con graff en primer lugar">
+  <img src="docs/media/readme/nanoharness-agents-light.png" width="960" alt="Ajustes actuales de agentes de Harness con el tema Light Mode, con graff en primer lugar">
   <br><sub>Los agentes instalados aparecen en <strong>Settings → Agents</strong>. Inicia sesión cuando quieras que otro dispositivo de confianza siga o controle una sesión.</sub>
 </p>
 

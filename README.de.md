@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/brand/harness-icon.png" alt="Harness-App-Symbol" width="112"></p>
+<p align="center"><img src="dist/macos/icon-1024.png" alt="Harness-App-Symbol" width="112"></p>
 
 <h1 align="center">Harness</h1>
 
@@ -15,7 +15,7 @@ synchronisieren.
 
 | Agents auswählen | Mit graff arbeiten |
 | :---: | :---: |
-| <img src="docs/media/readme/codegraff-agents-dark.png" alt="Aktuelle Agent-Einstellungen im Codegraff-Dark-Design" width="520"> | <img src="docs/media/readme/codegraff-chat-dark.png" alt="Beispielgespräch mit graff im Codegraff-Dark-Design" width="520"> |
+| <img src="docs/media/readme/nanoharness-agents-light.png" alt="Aktuelle Agent-Einstellungen im Light-Mode-Design" width="520"> | <img src="docs/media/readme/nanoharness-workspace-light.png" alt="Beispielgespräch mit graff im Light-Mode-Design" width="520"> |
 
 Modell und Arbeitsverzeichnis auswählen, Änderungen neben dem Chat prüfen
 und Dateien oder den Browser direkt in Harness öffnen. Die Desktop-App nutzt

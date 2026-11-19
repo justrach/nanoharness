@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/brand/harness-icon.png" alt="Harness ऐप आइकन" width="112"></p>
+<p align="center"><img src="dist/macos/icon-1024.png" alt="Harness ऐप आइकन" width="112"></p>
 
 <h1 align="center">Harness</h1>
 
@@ -15,7 +15,7 @@ Cursor, Devin, Grok, Hermes, Pi, OpenCode और Antigravity को साथ �
 
 | एजेंट चुनें | graff के साथ काम करें |
 | :---: | :---: |
-| <img src="docs/media/readme/codegraff-agents-dark.png" alt="Codegraff Dark थीम में Harness की वर्तमान एजेंट सेटिंग" width="520"> | <img src="docs/media/readme/codegraff-chat-dark.png" alt="Codegraff Dark थीम में graff का नमूना संवाद" width="520"> |
+| <img src="docs/media/readme/nanoharness-agents-light.png" alt="Light Mode थीम में Harness की वर्तमान एजेंट सेटिंग" width="520"> | <img src="docs/media/readme/nanoharness-workspace-light.png" alt="Light Mode थीम में graff का नमूना संवाद" width="520"> |
 
 मॉडल चुनें, बातचीत के साथ बदलाव जाँचें और ऐप में ही फ़ाइलें व ब्राउज़र खोलें।
 डेस्कटॉप ऐप Rust/GPUI पर बना है; iOS साथी ऐप SwiftUI में सिंक हुए सत्र दिखाता है।

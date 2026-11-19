@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/brand/harness-icon.png" alt="Ikon aplikasi Harness" width="112"></p>
+<p align="center"><img src="dist/macos/icon-1024.png" alt="Ikon aplikasi Harness" width="112"></p>
 
 <h1 align="center">Harness</h1>
 
@@ -15,7 +15,7 @@ sesi dari perangkat lain yang tepercaya.
 
 | Pilih agen | Bekerja dengan graff |
 | :---: | :---: |
-| <img src="docs/media/readme/codegraff-agents-dark.png" alt="Pengaturan agen Harness terbaru dalam tema Codegraff Dark" width="520"> | <img src="docs/media/readme/codegraff-chat-dark.png" alt="Contoh percakapan graff dalam tema Codegraff Dark" width="520"> |
+| <img src="docs/media/readme/nanoharness-agents-light.png" alt="Pengaturan agen Harness terbaru dalam tema Light Mode" width="520"> | <img src="docs/media/readme/nanoharness-workspace-light.png" alt="Contoh percakapan graff dalam tema Light Mode" width="520"> |
 
 Pilih model, tinjau perubahan di samping percakapan, serta buka berkas dan
 peramban tanpa meninggalkan aplikasi. Desktop memakai Rust/GPUI; pendamping

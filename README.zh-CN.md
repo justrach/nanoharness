@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/brand/harness-icon.png" alt="Harness 应用图标" width="112"></p>
+<p align="center"><img src="dist/macos/icon-1024.png" alt="Harness 应用图标" width="112"></p>
 
 <h1 align="center">Harness</h1>
 
@@ -12,7 +12,7 @@
 
 | 选择编码 Agent | 使用 graff 工作 |
 | :---: | :---: |
-| <img src="docs/media/readme/codegraff-agents-dark.png" alt="Codegraff Dark 主题下当前的 Harness Agent 设置" width="520"> | <img src="docs/media/readme/codegraff-chat-dark.png" alt="Codegraff Dark 主题下的 graff 示例会话" width="520"> |
+| <img src="docs/media/readme/nanoharness-agents-light.png" alt="Light Mode 主题下当前的 Harness Agent 设置" width="520"> | <img src="docs/media/readme/nanoharness-workspace-light.png" alt="Light Mode 主题下的 graff 示例会话" width="520"> |
 
 Harness 内置 [CodeGraff](https://github.com/justrach/codegraff) 适配器。下方标志和插画来自 CodeGraff 项目；来源和许可见[第三方声明](THIRD_PARTY_NOTICES.md)。
 

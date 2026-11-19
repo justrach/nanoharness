@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/brand/harness-icon.png" alt="ไอคอนแอป Harness" width="112"></p>
+<p align="center"><img src="dist/macos/icon-1024.png" alt="ไอคอนแอป Harness" width="112"></p>
 
 <h1 align="center">Harness</h1>
 
@@ -14,7 +14,7 @@ Hermes, Pi, OpenCode และ Antigravity ไว้ในแอปเดสก�
 
 | เลือกเอเจนต์ | ทำงานกับ graff |
 | :---: | :---: |
-| <img src="docs/media/readme/codegraff-agents-dark.png" alt="การตั้งค่าเอเจนต์ปัจจุบันของ Harness ในธีม Codegraff Dark" width="520"> | <img src="docs/media/readme/codegraff-chat-dark.png" alt="บทสนทนาตัวอย่างกับ graff ในธีม Codegraff Dark" width="520"> |
+| <img src="docs/media/readme/nanoharness-agents-light.png" alt="การตั้งค่าเอเจนต์ปัจจุบันของ Harness ในธีม Light Mode" width="520"> | <img src="docs/media/readme/nanoharness-workspace-light.png" alt="บทสนทนาตัวอย่างกับ graff ในธีม Light Mode" width="520"> |
 
 เลือกโมเดล ตรวจการเปลี่ยนแปลงข้างบทสนทนา และเปิดไฟล์หรือเบราว์เซอร์ในแอปได้เลย
 แอปเดสก์ท็อปใช้ Rust/GPUI ส่วนแอป iOS ใช้ SwiftUI เพื่อดูเซสชันที่ซิงก์

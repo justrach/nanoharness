@@ -1,15 +1,12 @@
 # README screenshots
 
-These are captures of the production Harness desktop shell with the built-in
-Codegraff Dark theme. The conversation and device data are synthetic. The Agents
-page reflects tools installed on the machine that generated the capture.
+These are Retina (`2×`) offscreen captures of the production NanoHarness desktop
+shell (`apps/nano`, Zig + nanoui) in **light mode**, rendered entirely from
+synthetic workspaces, conversations, PRs, and agent catalogs.
 
-Regenerate on macOS with:
-
-```sh
-cargo run --locked -p harness-ui --example readme-fixture \
-  --features appshots-fixture --profile app-dev -- docs/media/readme
-```
-
-The matching landing page image files are copies in
-`apps/landing/public/assets/`.
+- `nanoharness-workspace-light.png` — multi-project sidebar, tool summary,
+  native Markdown & LaTeX equation rendering, color emoji, and code blocks.
+- `nanoharness-github-light.png` — split workspace with chat beside the native
+  GitHub pull request review pane.
+- `nanoharness-agents-light.png` — Settings → Agents with Graff, Claude Code,
+  Codex, OpenCode, and Cursor.
