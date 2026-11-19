@@ -49,6 +49,7 @@ pub const Chat = struct {
     model: ?[]const u8,
     reasoning: ?[]const u8 = null,
     orchestrator: ?[]const u8 = null,
+    service_tier: ?[]const u8 = null,
     /// A plain chat, not a coding session (`ChatConfig::chat_mode`).
     chat_mode: bool = false,
     cwd: ?[]const u8,
@@ -187,6 +188,9 @@ pub const Model = struct {
     levels: []const []const u8 = &.{},
     orchestrator_supported: bool = false,
     orchestrator_default: ?[]const u8 = null,
+    service_tier_supported: bool = false,
+    service_tier_ultrafast: bool = false,
+    service_tier_default: ?[]const u8 = null,
     /// Its context window in tokens, when the catalog says (`Model::context`).
     context: ?u64 = null,
 };
@@ -199,12 +203,13 @@ pub const Sessions = List(Session, parseSession);
 
 /// Reflect a just-queued config edit while the engine's watch catches up.
 /// The strings live in the list's arena until its next whole replacement.
-pub fn setChatConfig(l: *Chats, id: []const u8, model: ?[]const u8, reasoning: ?[]const u8, orchestrator: ?[]const u8) bool {
+pub fn setChatConfig(l: *Chats, id: []const u8, model: ?[]const u8, reasoning: ?[]const u8, orchestrator: ?[]const u8, service_tier: ?[]const u8) bool {
     const alloc = l.arena.allocator();
     for (l.items) |*chat| if (std.mem.eql(u8, chat.id, id)) {
         chat.model = if (model) |v| alloc.dupe(u8, v) catch chat.model else null;
         chat.reasoning = if (reasoning) |v| alloc.dupe(u8, v) catch chat.reasoning else null;
         chat.orchestrator = if (orchestrator) |v| alloc.dupe(u8, v) catch chat.orchestrator else null;
+        chat.service_tier = if (service_tier) |v| alloc.dupe(u8, v) catch chat.service_tier else null;
         return true;
     };
     return false;
@@ -266,6 +271,7 @@ fn parseChat(a: Allocator, o: json.ObjectMap) ?Chat {
         .model = if (config) |c| str(a, c, "model") else null,
         .reasoning = if (config) |c| str(a, c, "reasoning") else null,
         .orchestrator = if (config) |c| (if (c.get("modelOptions")) |mo| (if (mo == .object) str(a, mo.object, "orchestrator") else null) else null) else null,
+        .service_tier = if (config) |c| (if (c.get("modelOptions")) |mo| (if (mo == .object) str(a, mo.object, "serviceTier") else null) else null) else null,
         .chat_mode = if (config) |c| (if (c.get("chatMode")) |v| v == .bool and v.bool else false) else false,
         .cwd = str(a, o, "cwd"),
         .harness_session_id = str(a, o, "harnessSessionId"),
@@ -324,12 +330,21 @@ fn parseModel(a: Allocator, o: json.ObjectMap) ?Model {
     const levels = stringList(a, o, "reasoningLevels");
     var orchestrator_supported = false;
     var orchestrator_default: ?[]const u8 = null;
+    var service_tier_supported = false;
+    var service_tier_ultrafast = false;
+    var service_tier_default: ?[]const u8 = null;
     if (o.get("options")) |opts| if (opts == .array) for (opts.array.items) |opt| if (opt == .object) {
         const opt_id = if (opt.object.get("id")) |v| (if (v == .string) v.string else "") else "";
         if (std.mem.eql(u8, opt_id, "orchestrator")) {
             orchestrator_supported = true;
             orchestrator_default = str(a, opt.object, "defaultChoice") orelse "auto";
-            break;
+        } else if (std.mem.eql(u8, opt_id, "serviceTier")) {
+            service_tier_supported = true;
+            service_tier_default = str(a, opt.object, "defaultChoice") orelse "default";
+            if (opt.object.get("choices")) |choices| if (choices == .array) for (choices.array.items) |ch| if (ch == .object) {
+                const cid = if (ch.object.get("id")) |v| (if (v == .string) v.string else "") else "";
+                if (std.mem.eql(u8, cid, "ultrafast")) service_tier_ultrafast = true;
+            };
         }
     };
     return .{
@@ -342,6 +357,9 @@ fn parseModel(a: Allocator, o: json.ObjectMap) ?Model {
         .levels = levels,
         .orchestrator_supported = orchestrator_supported,
         .orchestrator_default = orchestrator_default,
+        .service_tier_supported = service_tier_supported,
+        .service_tier_ultrafast = service_tier_ultrafast,
+        .service_tier_default = service_tier_default,
         .context = if (o.get("context")) |v| (if (v == .integer and v.integer > 0) @as(u64, @intCast(v.integer)) else null) else null,
     };
 }

@@ -2151,7 +2151,8 @@ impl Harness for AcpHarness {
             // context cannot fingerprint. Never serve another account's rows.
             let (exe, _) = self.resolve_program(false).await?;
             return Ok(crate::ModelCatalog {
-                models: graff_models::discover(self, &exe, self.model_discovery_timeout).await?,
+                models: graff_models::discover(self, &exe, self.model_discovery_timeout, force)
+                    .await?,
                 source: "live",
             });
         }

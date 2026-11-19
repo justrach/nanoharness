@@ -112,6 +112,28 @@ fn service_tier() -> ModelOption {
     }
 }
 
+fn service_tier_ultrafast() -> ModelOption {
+    ModelOption {
+        id: "serviceTier".into(),
+        label: "Service Tier".into(),
+        choices: vec![
+            ModelOptionChoice {
+                id: "default".into(),
+                label: "Standard".into(),
+            },
+            ModelOptionChoice {
+                id: "fast".into(),
+                label: "Fast".into(),
+            },
+            ModelOptionChoice {
+                id: "ultrafast".into(),
+                label: "Ultra Fast".into(),
+            },
+        ],
+        default_choice: "default".into(),
+    }
+}
+
 fn model(
     id: &str,
     label: &str,
@@ -176,6 +198,27 @@ pub(crate) fn promote_default_family(models: &mut Vec<Model>, default_id: Option
 
 pub(crate) fn static_models() -> Vec<Model> {
     vec![
+        model(
+            "gpt-6.2-sol",
+            "GPT-6.2-Sol",
+            "Latest frontier agentic model with 500k context and Ultra Fast speed.",
+            ULTRA_LADDER,
+            vec![service_tier_ultrafast()],
+        ),
+        model(
+            "gpt-6.2-astra",
+            "GPT-6.2-Astra",
+            "Latest frontier reasoning model with Ultra Fast speed.",
+            ULTRA_LADDER,
+            vec![service_tier_ultrafast()],
+        ),
+        model(
+            "gpt-6.1-sol",
+            "GPT-6.1-Sol",
+            "Frontier agentic model with 500k context.",
+            ULTRA_LADDER,
+            vec![service_tier()],
+        ),
         model(
             "gpt-6-astra",
             "GPT-6-Astra",
@@ -259,17 +302,26 @@ mod tests {
     #[test]
     fn catalog_is_newest_first_with_service_tiers() {
         let models = static_models();
-        assert_eq!(models.len(), 9);
-        assert_eq!(models[0].id, "gpt-6-astra");
+        assert_eq!(models.len(), 12);
+        assert_eq!(models[0].id, "gpt-6.2-sol");
+        assert_eq!(models[1].id, "gpt-6.2-astra");
         assert!(models[0].reasoning_levels.contains(&ReasoningLevel::Ultra));
-        assert!(!models[5].reasoning_levels.contains(&ReasoningLevel::Max));
+        let gpt55 = models.iter().find(|m| m.id == "gpt-5.5").unwrap();
+        assert!(!gpt55.reasoning_levels.contains(&ReasoningLevel::Max));
         for m in &models {
             let tier = m.options.iter().find(|o| o.id == "serviceTier");
             // Daybreak Blue reports no service tiers on the wire.
             if m.id == "gpt-daybreak-blue-latest" {
                 assert!(tier.is_none(), "{} must not carry serviceTier", m.id);
             } else {
-                assert!(tier.is_some(), "{} missing serviceTier", m.id);
+                let tier = tier.unwrap_or_else(|| panic!("{} missing serviceTier", m.id));
+                let has_ultra = tier.choices.iter().any(|c| c.id == "ultrafast");
+                assert_eq!(
+                    has_ultra,
+                    matches!(m.id.as_str(), "gpt-6.2-sol" | "gpt-6.2-astra"),
+                    "{} ultrafast mismatch",
+                    m.id
+                );
             }
         }
     }

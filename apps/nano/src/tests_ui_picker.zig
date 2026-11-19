@@ -715,3 +715,118 @@ test "live graff chat renders account usage ring alongside context ring and open
         try testing.expect(h.t.hasText(needle));
     }
 }
+
+test "model picker refresh button sends ListModels with force true without delaying initial open" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"ListModels":[]}
+    , .{});
+    h.a.engine.state = .connected;
+    // Ordinary picker reopen triggers non-forced background refresh (no force:true).
+    h.a.togglePicker();
+    h.t.settle(1);
+    h.a.togglePicker();
+    h.t.settle(1);
+    var saw_non_forced = false;
+    for (h.a.engine.sent.items) |frame| {
+        if (std.mem.indexOf(u8, frame, "\"ListModels\"") != null and
+            std.mem.indexOf(u8, frame, "\"force\":true") == null)
+        {
+            saw_non_forced = true;
+            break;
+        }
+    }
+    try testing.expect(saw_non_forced);
+    if (h.a.view.model_picker.catalogs.get("graff")) |cat| cat.loading = false;
+    h.t.settle(1);
+
+    // Click the refresh icon button on the right of the search bar.
+    var search_row: ?ui.Rect = null;
+    for (h.t.ctx.nodes.items) |n| switch (n.content) {
+        .text => |tx| if (std.mem.startsWith(u8, tx.str, "Search models")) {
+            search_row = n.rect;
+            break;
+        },
+        else => {},
+    };
+    const sr = search_row orelse return error.MissingSearchRow;
+    var refresh_rect: ?ui.Rect = null;
+    for (h.t.ctx.nodes.items) |n| switch (n.content) {
+        .image, .icon => if (n.rect.y < sr.y + sr.h and n.rect.y + n.rect.h > sr.y and (refresh_rect == null or n.rect.x > refresh_rect.?.x)) {
+            refresh_rect = n.rect;
+        },
+        else => {},
+    };
+    const rr = refresh_rect orelse return error.MissingRefreshButton;
+    try testing.expect(rr.x > sr.x + 100);
+    h.t.click(rr.x + rr.w / 2, rr.y + rr.h / 2);
+    h.t.settle(1);
+
+    var saw_forced = false;
+    for (h.a.engine.sent.items) |frame| {
+        if (std.mem.indexOf(u8, frame, "\"ListModels\"") != null and
+            std.mem.indexOf(u8, frame, "\"harness\":\"graff\"") != null and
+            std.mem.indexOf(u8, frame, "\"force\":true") != null)
+        {
+            saw_forced = true;
+            break;
+        }
+    }
+    try testing.expect(saw_forced);
+}
+
+test "compact model picker exposes Speed Ultra Fast and persists serviceTier on open and new chats" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.togglePicker();
+    h.t.settle(1);
+
+    const catalog_62 = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"codex/gpt-6.2-sol","label":"GPT-6.2 Sol","maker":"openai","billing":"plan","context":500000,
+        \\  "reasoningLevels":["low","medium","high","xhigh","ultra"],
+        \\  "options":[
+        \\    {"id":"serviceTier","label":"Service Tier","choices":[{"id":"default","label":"Standard"},{"id":"fast","label":"Fast"},{"id":"ultrafast","label":"Ultra Fast"}],"defaultChoice":"default"},
+        \\    {"id":"orchestrator","label":"Orchestrator","choices":[{"id":"off","label":"Off"},{"id":"auto","label":"Auto"},{"id":"on","label":"On"}],"defaultChoice":"auto"}
+        \\  ]}]
+    , .{});
+    defer catalog_62.deinit();
+    try h.a.models.replace(catalog_62.value);
+
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"c-tier","deviceId":"synthetic-device","title":"Ultrafast chat","spaceId":"synthetic-project","archived":false,
+        \\  "config":{"harness":"graff","model":"codex/gpt-6.2-sol","reasoning":"high","modelOptions":{}}}]
+    , .{});
+    defer chats.deinit();
+    try h.a.chats.replace(chats.value);
+    h.a.openChatInTab("c-tier");
+    h.t.settle(1);
+
+    h.a.togglePickerCompact();
+    h.t.settle(1);
+    for ([_][]const u8{ "Speed", "Standard", "Fast", "Ultra Fast" }) |label| {
+        try testing.expect(h.t.hasText(label));
+    }
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"Mutate":{}}
+    , .{});
+    h.a.engine.state = .connected;
+    try h.t.clickText("Ultra Fast");
+    h.t.settle(1);
+    h.snap("compact-ultrafast-dark");
+
+    var sent_set = false;
+    for (h.a.engine.sent.items) |frame| {
+        if (std.mem.indexOf(u8, frame, "\"Mutate\"") != null and
+            std.mem.indexOf(u8, frame, "\"setChatConfig\"") != null and
+            std.mem.indexOf(u8, frame, "\"serviceTier\":\"ultrafast\"") != null)
+        {
+            sent_set = true;
+            break;
+        }
+    }
+    try testing.expect(sent_set);
+    try testing.expectEqualStrings("ultrafast", h.a.findChat("c-tier").?.service_tier.?);
+}

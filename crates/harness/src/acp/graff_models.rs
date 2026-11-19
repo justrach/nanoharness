@@ -47,6 +47,7 @@ pub(super) fn normalize_legacy_id(id: &str) -> Cow<'_, str> {
                 | "fugu"
                 | "mlx"
                 | "lmstudio"
+                | "nanoattention"
         )
     {
         return Cow::Borrowed(id);
@@ -201,8 +202,9 @@ pub(super) async fn discover(
     harness: &AcpHarness,
     exe: &Path,
     timeout: Duration,
+    force: bool,
 ) -> Result<Vec<Model>, HarnessError> {
-    match discover_acp(harness, timeout).await {
+    match discover_acp(harness, timeout, force).await {
         Ok(catalog) => models_from_acp(&catalog),
         Err(error) if extension_unavailable(&error) => discover_legacy(exe, timeout).await,
         Err(error) => Err(error),
@@ -214,7 +216,11 @@ fn extension_unavailable(error: &HarnessError) -> bool {
         if message.starts_with("graff/models:") && message.ends_with("(code -32601)"))
 }
 
-async fn discover_acp(harness: &AcpHarness, timeout: Duration) -> Result<Value, HarnessError> {
+async fn discover_acp(
+    harness: &AcpHarness,
+    timeout: Duration,
+    force: bool,
+) -> Result<Value, HarnessError> {
     let cwd = crate::scratch::ScratchDir::new("graff-model-discovery")?;
     let (_scratch, mut child, _stderr) = harness
         .spawn_agent(cwd.path().to_str(), false, &[], None)
@@ -250,7 +256,12 @@ async fn discover_acp(harness: &AcpHarness, timeout: Duration) -> Result<Value, 
             }),
         )
         .await?;
-        request_draining(&client, &mut incoming, "graff/models", json!({})).await
+        let params = if force {
+            json!({"force": true})
+        } else {
+            json!({})
+        };
+        request_draining(&client, &mut incoming, "graff/models", params).await
     })
     .await;
     child.shutdown(harness.kill_grace).await;
@@ -268,6 +279,11 @@ fn models_from_acp(catalog: &Value) -> Result<Vec<Model>, HarnessError> {
         .and_then(Value::as_str)
         .filter(|v| matches!(*v, "off" | "auto" | "on"))
         .unwrap_or("auto");
+    let service_tier_default = current
+        .and_then(|c| c.get("serviceTier"))
+        .and_then(Value::as_str)
+        .filter(|v| matches!(*v, "default" | "fast" | "ultrafast"))
+        .unwrap_or("default");
     let mut seen = HashSet::new();
     let mut models = Vec::new();
     for row in rows {
@@ -309,11 +325,13 @@ fn models_from_acp(catalog: &Value) -> Result<Vec<Model>, HarnessError> {
             (Some(cost), _) => Some(cost.to_owned()),
             (None, _) => None,
         };
-        let options = if row.get("orchestratorSupported").and_then(Value::as_bool) == Some(true) {
-            vec![orchestrator_option(orchestrator_default)]
-        } else {
-            Vec::new()
-        };
+        let mut options = Vec::new();
+        if let Some(option) = service_tier_option(row, service_tier_default) {
+            options.push(option);
+        }
+        if row.get("orchestratorSupported").and_then(Value::as_bool) == Some(true) {
+            options.push(orchestrator_option(orchestrator_default));
+        }
         let model = Model {
             id: format!("{provider}/{name}"),
             label: name.to_owned(),
@@ -477,6 +495,58 @@ fn describe_acp(provider: &str, context: Option<u64>, separate_quota: bool) -> S
     } else {
         base
     }
+}
+
+fn service_tier_option(row: &Value, default_tier: &str) -> Option<ModelOption> {
+    let mut has_fast = row.get("fastSupported").and_then(Value::as_bool) == Some(true);
+    let mut has_ultrafast = row.get("ultrafastSupported").and_then(Value::as_bool) == Some(true);
+    for value in row
+        .get("serviceTiers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(tier) = value.as_str() {
+            if tier.eq_ignore_ascii_case("fast") || tier.eq_ignore_ascii_case("priority") {
+                has_fast = true;
+            } else if tier.eq_ignore_ascii_case("ultrafast") {
+                has_fast = true;
+                has_ultrafast = true;
+            }
+        }
+    }
+    if !has_fast && !has_ultrafast {
+        return None;
+    }
+    let mut choices = vec![
+        ModelOptionChoice {
+            id: "default".into(),
+            label: "Standard".into(),
+        },
+        ModelOptionChoice {
+            id: "fast".into(),
+            label: "Fast".into(),
+        },
+    ];
+    if has_ultrafast {
+        choices.push(ModelOptionChoice {
+            id: "ultrafast".into(),
+            label: "Ultra Fast".into(),
+        });
+    }
+    let default_choice = if choices.iter().any(|c| c.id == default_tier) {
+        default_tier
+    } else if default_tier == "ultrafast" {
+        "fast"
+    } else {
+        "default"
+    };
+    Some(ModelOption {
+        id: "serviceTier".into(),
+        label: "Service Tier".into(),
+        choices,
+        default_choice: default_choice.into(),
+    })
 }
 
 fn orchestrator_option(default_choice: &str) -> ModelOption {
@@ -1048,5 +1118,75 @@ openrouter:\n\
         ]});
         let models = models_from_acp(&defaults).unwrap();
         assert_eq!(models[0].options[0].default_choice, "auto");
+    }
+
+    #[test]
+    fn acp_catalog_surfaces_service_tier_including_ultrafast_and_normalizes_nanoattention() {
+        assert_eq!(
+            normalize_legacy_id("nanoattention:flint"),
+            "nanoattention/flint"
+        );
+        let catalog = json!({
+            "models": [
+                {"provider": "codex", "name": "gpt-6.2-sol", "authenticated": true,
+                 "fastSupported": true, "ultrafastSupported": true,
+                 "serviceTiers": ["fast", "ultrafast"]},
+                {"provider": "chatgpt-new", "name": "gpt-6.2-astra", "authenticated": true,
+                 "fastSupported": true, "ultrafastSupported": true,
+                 "serviceTiers": ["fast", "ultrafast"]},
+                {"provider": "codex", "name": "gpt-6.1-sol", "authenticated": true,
+                 "fastSupported": true, "ultrafastSupported": false,
+                 "serviceTiers": ["fast"]},
+                {"provider": "openai", "name": "gpt-6.2-sol", "authenticated": true,
+                 "fastSupported": false, "ultrafastSupported": false, "serviceTiers": []}
+            ],
+            "current": {"provider": "codex", "model": "gpt-6.2-sol", "serviceTier": "ultrafast"}
+        });
+        let models = models_from_acp(&catalog).unwrap();
+        let sol = models[0]
+            .options
+            .iter()
+            .find(|o| o.id == "serviceTier")
+            .expect("gpt-6.2-sol serviceTier");
+        assert_eq!(
+            sol.choices
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["default", "fast", "ultrafast"]
+        );
+        assert_eq!(sol.choices[2].label, "Ultra Fast");
+        assert_eq!(sol.default_choice, "ultrafast");
+
+        let astra = models[1]
+            .options
+            .iter()
+            .find(|o| o.id == "serviceTier")
+            .expect("gpt-6.2-astra serviceTier");
+        assert_eq!(
+            astra
+                .choices
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["default", "fast", "ultrafast"]
+        );
+
+        let older = models[2]
+            .options
+            .iter()
+            .find(|o| o.id == "serviceTier")
+            .expect("gpt-6.1-sol serviceTier");
+        assert_eq!(
+            older
+                .choices
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["default", "fast"]
+        );
+        assert_eq!(older.default_choice, "fast");
+
+        assert!(models[3].options.iter().all(|o| o.id != "serviceTier"));
     }
 }

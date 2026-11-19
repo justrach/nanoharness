@@ -49,6 +49,7 @@ pub fn runBot(bot: []const u8, message: ?[]const u8, routine: ?[]const u8) Reque
 
 pub const ModelOptions = struct {
     orchestrator: ?[]const u8 = null,
+    serviceTier: ?[]const u8 = null,
 };
 
 pub const Config = struct {
@@ -164,6 +165,10 @@ pub fn queueUpdate(target: []const u8) Request(struct { targetDeviceId: []const 
 
 pub fn listModels(harness: []const u8) Request(struct { harness: []const u8 }) {
     return .{ .method = "ListModels", .params = .{ .harness = harness } };
+}
+
+pub fn listModelsForce(harness: []const u8) Request(struct { harness: []const u8, force: bool }) {
+    return .{ .method = "ListModels", .params = .{ .harness = harness, .force = true } };
 }
 
 /// Scope is the engine's existing catalog_root contract, not a local guessed cwd.

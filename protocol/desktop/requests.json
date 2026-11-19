@@ -7,6 +7,7 @@
     {"name": "engine ready", "method": "EngineReady", "stream": false, "params": {}},
     {"name": "list agents", "method": "ListHarnesses", "stream": false, "params": {}},
     {"name": "list models", "method": "ListModels", "stream": false, "params": {"harness":"mock"}},
+    {"name": "force refresh models", "method": "ListModels", "stream": false, "params": {"harness":"mock","force":true}},
     {"name": "discover project composer commands", "method": "ListCommands", "stream": false, "params": {"harness":"mock","spaceId":"space-parity","path":"$DIR"}},
     {"name": "discover project composer skills", "method": "ListSkills", "stream": false, "params": {"harness":"mock","spaceId":"space-parity","path":"$DIR"}},
     {"name": "discover chat composer commands", "method": "ListCommands", "stream": false, "params": {"harness":"mock","chatId":"chat-parity"}},

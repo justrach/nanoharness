@@ -2,16 +2,22 @@ import XCTest
 @testable import Harness
 
 final class HarnessCatalogTests: XCTestCase {
-    func testCodexFallbackStartsWithAstraAndExposesItsTraits() {
+    func testCodexFallbackStartsWithGpt62SolAndExposesUltrafastTraits() {
         let models = HarnessCatalog.models(for: "codex")
-        let astra = models.first
+        let sol = models.first
 
-        XCTAssertEqual(astra?.id, "gpt-6-astra")
-        XCTAssertEqual(astra?.label, "GPT-6-Astra")
-        XCTAssertEqual(astra?.reasoningLevels,
+        XCTAssertEqual(sol?.id, "gpt-6.2-sol")
+        XCTAssertEqual(sol?.label, "GPT-6.2-Sol")
+        XCTAssertEqual(sol?.reasoningLevels,
                        ["low", "medium", "high", "xhigh", "max", "ultra"])
-        XCTAssertEqual(astra?.options.first?.id, "serviceTier")
-        XCTAssertEqual(astra?.options.first?.choices.map(\.id), ["default", "fast"])
+        XCTAssertEqual(sol?.options.first?.id, "serviceTier")
+        XCTAssertEqual(sol?.options.first?.choices.map(\.id), ["default", "fast", "ultrafast"])
+        XCTAssertEqual(sol?.options.first?.choices.last?.label, "Ultra Fast")
+
+        let astra62 = models.first { $0.id == "gpt-6.2-astra" }
+        XCTAssertEqual(astra62?.options.first?.choices.map(\.id), ["default", "fast", "ultrafast"])
+        let astra6 = models.first { $0.id == "gpt-6-astra" }
+        XCTAssertEqual(astra6?.options.first?.choices.map(\.id), ["default", "fast"])
     }
 
     func testDefaultReasoningMatchesDesktopPreference() {

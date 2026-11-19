@@ -101,6 +101,13 @@ enum HarnessCatalog {
             ModelOptionChoiceInfo(id: "fast", label: "Fast"),
         ], defaultChoice: "default"),
     ]
+    private static let codexUltrafastServiceTier = [
+        ModelOptionInfo(id: "serviceTier", label: "Service Tier", choices: [
+            ModelOptionChoiceInfo(id: "default", label: "Standard"),
+            ModelOptionChoiceInfo(id: "fast", label: "Fast"),
+            ModelOptionChoiceInfo(id: "ultrafast", label: "Ultra Fast"),
+        ], defaultChoice: "default"),
+    ]
 
     static func models(for harness: String) -> [ModelInfo] {
         switch harness {
@@ -157,6 +164,15 @@ enum HarnessCatalog {
             ]
         case "codex":
             return [
+                ModelInfo(id: "gpt-6.2-sol", label: "GPT-6.2-Sol",
+                          description: "Latest frontier agentic model with 500k context and Ultra Fast speed.",
+                          reasoningLevels: codexUltraLadder, options: codexUltrafastServiceTier),
+                ModelInfo(id: "gpt-6.2-astra", label: "GPT-6.2-Astra",
+                          description: "Latest frontier reasoning model with Ultra Fast speed.",
+                          reasoningLevels: codexUltraLadder, options: codexUltrafastServiceTier),
+                ModelInfo(id: "gpt-6.1-sol", label: "GPT-6.1-Sol",
+                          description: "Frontier agentic model with 500k context.",
+                          reasoningLevels: codexUltraLadder, options: codexServiceTier),
                 ModelInfo(id: "gpt-6-astra", label: "GPT-6-Astra",
                           description: "Our most capable model for complex, demanding work.",
                           reasoningLevels: codexUltraLadder, options: codexServiceTier),
@@ -407,7 +423,7 @@ enum HarnessCatalog {
         let route = model.id.split(separator: "/", maxSplits: 1).first.map(String.init) ?? ""
         switch route {
         case "claude-agent", "codex", "chatgpt-new", "kimi": return 0
-        case "mlx", "lmstudio", "omlx": return 1
+        case "mlx", "lmstudio", "omlx", "nanoattention": return 1
         case "codegraff": return 2
         default: return 2
         }

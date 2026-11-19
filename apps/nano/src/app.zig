@@ -450,6 +450,7 @@ pub const App = struct {
     new_device: ?[]u8 = null,
     new_reasoning: ?[]u8 = null,
     new_orchestrator: ?[]u8 = null,
+    new_service_tier: ?[]u8 = null,
     /// The agent `models` lists models for (owned).
     models_for: []u8 = &.{},
     /// The model chip's picker is open.
@@ -637,6 +638,7 @@ pub const App = struct {
         if (a.new_model) |m| a.gpa.free(m);
         if (a.new_reasoning) |m| a.gpa.free(m);
         if (a.new_orchestrator) |o| a.gpa.free(o);
+        if (a.new_service_tier) |t| a.gpa.free(t);
         if (a.new_device) |id| a.gpa.free(id);
         if (a.new_ref) |r| a.gpa.free(r);
         a.gpa.free(a.models_for);
@@ -664,6 +666,7 @@ pub const App = struct {
     pub const pickModelAndReasoning = agent.pickModelAndReasoning;
     pub const applyLiveModelAndReasoning = agent.applyLiveModelAndReasoning;
     pub const applyLiveOrchestrator = agent.applyLiveOrchestrator;
+    pub const applyLiveServiceTier = agent.applyLiveServiceTier;
     pub const ensureModels = agent.ensureModels;
     pub const newChatSpace = agent.newChatSpace;
     pub fn setArchived(a: *App, id: []const u8, archived: bool) void {
@@ -2018,6 +2021,7 @@ pub const App = struct {
         var model: ?[]const u8 = null;
         var reasoning: ?[]const u8 = null;
         var orchestrator: ?[]const u8 = null;
+        var service_tier: ?[]const u8 = null;
         var cwd: []const u8 = "~";
         var worktree: ?requests.WorktreeSpec = null;
         const chat_id = if (a.selected) |id| blk: {
@@ -2026,6 +2030,7 @@ pub const App = struct {
                 model = c.model;
                 reasoning = c.reasoning;
                 orchestrator = c.orchestrator;
+                service_tier = c.service_tier;
                 if (c.cwd) |d| cwd = d;
             }
             break :blk id;
@@ -2046,11 +2051,12 @@ pub const App = struct {
             model = if (plain) t.model else a.new_model;
             reasoning = a.new_reasoning;
             orchestrator = if (plain) null else t.orchestrator;
+            service_tier = if (plain) null else t.service_tier;
             const config: requests.Config = .{
                 .harness = harness.?,
                 .model = model,
                 .reasoning = reasoning,
-                .modelOptions = .{ .orchestrator = orchestrator },
+                .modelOptions = .{ .orchestrator = orchestrator, .serviceTier = service_tier },
                 .chatMode = if (plain) true else null,
             };
             // A chat with no project names its device instead.
@@ -2070,7 +2076,7 @@ pub const App = struct {
             .harness = harness,
             .model = model,
             .reasoning = reasoning,
-            .modelOptions = .{ .orchestrator = orchestrator },
+            .modelOptions = .{ .orchestrator = orchestrator, .serviceTier = service_tier },
             .cwd = cwd,
             .worktree = worktree,
         }), .of(feedback.Pending, pending, feedback.Pending.onReply));

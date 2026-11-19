@@ -77,6 +77,7 @@ pub fn canvas(a: *App) !Draft {
     d.model = try dupe(a, a.new_model);
     d.reasoning = try dupe(a, a.new_reasoning);
     d.orchestrator = try dupe(a, a.new_orchestrator);
+    d.service_tier = try dupe(a, a.new_service_tier);
     d.space = try dupe(a, a.space);
     d.device = try dupe(a, a.new_device);
     d.no_project = a.new_no_project;
@@ -93,7 +94,7 @@ pub fn adopt(a: *App, d: Draft) void {
     a.new_harness = d.harness;
     a.new_no_project = d.no_project;
     a.new_checkout_local = d.checkout_local;
-    inline for (.{ .{ "new_model", "model" }, .{ "new_reasoning", "reasoning" }, .{ "new_orchestrator", "orchestrator" }, .{ "space", "space" }, .{ "new_device", "device" }, .{ "new_ref", "ref" } }) |f| {
+    inline for (.{ .{ "new_model", "model" }, .{ "new_reasoning", "reasoning" }, .{ "new_orchestrator", "orchestrator" }, .{ "new_service_tier", "service_tier" }, .{ "space", "space" }, .{ "new_device", "device" }, .{ "new_ref", "ref" } }) |f| {
         if (@field(a, f[0])) |old| a.retireSlice(old);
         @field(a, f[0]) = @field(d, f[1]);
     }

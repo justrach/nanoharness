@@ -135,7 +135,7 @@ pub(crate) async fn list(
             result
         }
     });
-    let result = if disk.is_some() {
+    let result = if !force && disk.is_some() {
         tokio::time::timeout(Duration::from_millis(100), &mut refresh)
             .await
             .ok()
@@ -365,6 +365,23 @@ mod tests {
         probe.delay.store(true, SeqCst);
         assert_eq!(list(dir.path(), probe, false).await.unwrap(), old);
         tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(read(&path, &context), Some(models()));
+    }
+    #[tokio::test]
+    async fn forced_probe_waits_for_live_refresh_instead_of_returning_stale_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = Probe::new();
+        let context = probe.model_context().unwrap().unwrap();
+        let path = location(dir.path(), probe.as_ref(), &context);
+        let mut old = models();
+        old[0].id = "old-live".into();
+        save(&path, &context, &old).unwrap();
+        probe.delay.store(true, SeqCst);
+        assert_eq!(
+            list(dir.path(), probe.clone(), true).await.unwrap(),
+            models()
+        );
+        assert!(probe.forced.load(SeqCst));
         assert_eq!(read(&path, &context), Some(models()));
     }
     #[tokio::test]

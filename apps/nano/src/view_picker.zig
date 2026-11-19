@@ -116,21 +116,26 @@ pub fn stageCurrentCompact(a: *App) void {
         (a.gpa.dupe(u8, t.orchestrator orelse resolved.orchestrator_default orelse "auto") catch null)
     else
         null;
+    const tier: ?[]u8 = if (resolved.service_tier_supported)
+        (a.gpa.dupe(u8, t.service_tier orelse resolved.service_tier_default orelse "default") catch null)
+    else
+        null;
     p.clearStage(a.gpa);
-    p.stage = .{ .harness = harness, .model = id, .level = level, .orchestrator = orch, .compact = true };
+    p.stage = .{ .harness = harness, .model = id, .level = level, .orchestrator = orch, .service_tier = tier, .compact = true };
     p.focus = false;
     p.detail = null;
     p.hover_target = null;
     var tmp_arena: std.heap.ArenaAllocator = .init(a.gpa);
     defer tmp_arena.deinit();
     const acct_count = accounts_view.accountsForHarness(a, t.harness, tmp_arena.allocator()).len;
-    p.height = compactCardHeight(acct_count > 0, resolved.orchestrator_supported, levels.len > 1);
+    p.height = compactCardHeight(acct_count > 0, resolved.orchestrator_supported, resolved.service_tier_supported, levels.len > 1);
 }
 
-fn compactCardHeight(has_accounts: bool, has_orchestrator: bool, has_levels: bool) f32 {
+fn compactCardHeight(has_accounts: bool, has_orchestrator: bool, has_speed: bool, has_levels: bool) f32 {
     var h: f32 = compact_single_height; // border(2) + body_pad(8) + model_row(34) + 2
     if (has_accounts) h += 37; // divider(5) + account_row(32)
     if (has_orchestrator) h += 37; // divider(5) + orchestrator_row(32)
+    if (has_speed) h += 37; // divider(5) + speed_row(32)
     if (has_levels) h += 88; // divider(5) + header(40) + slider_row(42) + 1
     return h;
 }
@@ -233,7 +238,11 @@ fn stage(c: *ui.Context, a: *App, r: models.Row) void {
         (a.gpa.dupe(u8, a.target().orchestrator orelse r.model.orchestrator_default orelse "auto") catch null)
     else
         null;
-    p.stage = .{ .harness = harness, .model = id, .level = level, .orchestrator = orch, .compact = return_compact };
+    const tier: ?[]u8 = if (r.model.service_tier_supported)
+        (a.gpa.dupe(u8, a.target().service_tier orelse r.model.service_tier_default orelse "default") catch null)
+    else
+        null;
+    p.stage = .{ .harness = harness, .model = id, .level = level, .orchestrator = orch, .service_tier = tier, .compact = return_compact };
     p.slider_seeded = false;
     p.drag_fraction = null;
     p.effort_anim = null;
@@ -246,7 +255,7 @@ fn stage(c: *ui.Context, a: *App, r: models.Row) void {
         var tmp_arena: std.heap.ArenaAllocator = .init(a.gpa);
         defer tmp_arena.deinit();
         const acct_count = accounts_view.accountsForHarness(a, harness, tmp_arena.allocator()).len;
-        break :blk compactCardHeight(acct_count > 0, r.model.orchestrator_supported, levels.len > 1);
+        break :blk compactCardHeight(acct_count > 0, r.model.orchestrator_supported, r.model.service_tier_supported, levels.len > 1);
     } else (if (levels.len > 1) stage_height else 245);
     if (return_compact) {
         p.focus = false;
@@ -732,6 +741,7 @@ fn detail(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, row: ui.Rect,
     const levels = levelsOf(a, r.harness, m);
     const facts = [_]struct { []const u8, ?[]const u8 }{
         .{ "Reasoning", models.reasoningRange(range_buf, levels) },
+        .{ "Speed", if (m.service_tier_supported) (if (m.service_tier_ultrafast) "Standard · Fast · Ultra Fast" else "Standard · Fast") else null },
         .{ "Context", if (m.context) |n| models.contextLabel(ctx_buf, n) else null },
         .{ "Billing", if (m.billing) |b| models.billingLabel(b) else null },
     };
@@ -892,7 +902,8 @@ fn compactPage(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) voi
     const is_binary = models.binary(levels);
     const accts = accounts_view.accountsForHarness(a, harness_id, c.alloc());
     const has_orch = m.orchestrator_supported;
-    const wanted_h = compactCardHeight(accts.len > 0, has_orch, levels.len > 1);
+    const has_speed = m.service_tier_supported;
+    const wanted_h = compactCardHeight(accts.len > 0, has_orch, has_speed, levels.len > 1);
     if (@abs(p.height - wanted_h) > 0.5) {
         p.height = wanted_h;
         c.changed = true;
@@ -926,7 +937,7 @@ fn compactPage(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) voi
         }
     }
 
-    if (accts.len > 0 or has_orch or levels.len > 1) {
+    if (accts.len > 0 or has_orch or has_speed or levels.len > 1) {
         const sep = ui.div(c).row().wFull().px(4).py(2);
         defer sep.end();
         _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border.alpha(0.6) }, .none, null);
@@ -955,7 +966,7 @@ fn compactPage(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) voi
             p.account_submenu = !p.account_submenu;
             c.changed = true;
         }
-        if (has_orch or levels.len > 1) {
+        if (has_orch or has_speed or levels.len > 1) {
             const sep2 = ui.div(c).row().wFull().px(4).py(2);
             defer sep2.end();
             _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border.alpha(0.6) }, .none, null);
@@ -1012,14 +1023,72 @@ fn compactPage(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) voi
                 }
             }
         }
-        if (levels.len > 1) {
+        if (has_speed or levels.len > 1) {
             const sep_orch = ui.div(c).row().wFull().px(4).py(2);
             defer sep_orch.end();
             _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border.alpha(0.6) }, .none, null);
         }
     }
 
-    // 3. Reasoning header + Fast-tier toggle + capsule EffortSlider.
+    // 2c. Optional Service Tier / Speed row (`Standard · Fast · Ultra Fast`) when supported.
+    if (has_speed) {
+        const raw_tier = st.service_tier orelse a.target().service_tier orelse m.service_tier_default orelse "default";
+        const cur_tier = if (std.mem.eql(u8, raw_tier, "ultrafast") and !m.service_tier_ultrafast) "fast" else raw_tier;
+        ui.key(c, "compact-service-tier-row");
+        const tier_row = ui.div(c).row().wFull().h(32).px(8).gap(8).itemsCenter();
+        {
+            defer tier_row.end();
+            ui.text(c, "Speed", .{ .size = 13, .line_height = 17, .color = k.text });
+            ui.spacer(c);
+            const seg_group = ui.div(c).row().h(24).p(2).gap(2).itemsCenter().rounded(7).bg(k.ink(0.06));
+            defer seg_group.end();
+            const Choice = struct { id: []const u8, label: []const u8 };
+            const all_choices = [_]Choice{
+                .{ .id = "default", .label = "Standard" },
+                .{ .id = "fast", .label = "Fast" },
+                .{ .id = "ultrafast", .label = "Ultra Fast" },
+            };
+            const choices: []const Choice = if (m.service_tier_ultrafast) &all_choices else all_choices[0..2];
+            for (choices) |choice| {
+                ui.key(c, c.print("compact-service-tier-{s}", .{choice.id}));
+                const active = std.mem.eql(u8, cur_tier, choice.id);
+                var seg = ui.div(c).row().h(20).px(6).center().rounded(5).control();
+                if (active) {
+                    seg = seg.bg(look_color.alpha(if (k.dark) 0.20 else 0.14)).border(look_color.alpha(0.45)).borderW(1);
+                } else {
+                    seg = seg.hover(k.ink(0.05));
+                }
+                const seg_hot = seg.hovered();
+                const seg_clicked = seg.clicked();
+                {
+                    defer seg.end();
+                    ui.text(c, choice.label, .{
+                        .size = 11.5,
+                        .line_height = 15,
+                        .weight = if (active) .semibold else .medium,
+                        .color = if (active or seg_hot) k.text else k.muted,
+                    });
+                }
+                if (seg_clicked and open) {
+                    if (p.stage) |*s| {
+                        if (a.gpa.dupe(u8, choice.id)) |copy| {
+                            if (s.service_tier) |old| p.retired_strings.append(a.gpa, old) catch a.gpa.free(old);
+                            s.service_tier = copy;
+                        } else |_| {}
+                    }
+                    a.applyLiveServiceTier(choice.id);
+                    c.changed = true;
+                }
+            }
+        }
+        if (levels.len > 1) {
+            const sep_tier = ui.div(c).row().wFull().px(4).py(2);
+            defer sep_tier.end();
+            _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border.alpha(0.6) }, .none, null);
+        }
+    }
+
+    // 3. Reasoning header + capsule EffortSlider.
     if (levels.len > 1) {
         {
             const hdr = ui.div(c).row().wFull().px(8).pt(6).pb(2).gap(8).itemsCenter();
@@ -1031,20 +1100,6 @@ fn compactPage(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) voi
                 const cur_level = if (p.stage) |s| s.level else st.level;
                 const label = if (cur_level) |i| (if (i < levels.len) models.levelLabel(levels[i], is_binary) else "Default") else "Default";
                 kit.rollText(c, "model-picker-effort-badge", label, .{ .size = 13, .line_height = 17, .weight = .semibold, .color = k.text });
-            }
-            ui.key(c, "compact-fast");
-            var fast_btn = ui.div(c).row().size(28, 28).center().rounded(7).hover(k.hover);
-            if (st.fast) fast_btn = fast_btn.bg(look_color.alpha(if (k.dark) 0.16 else 0.12));
-            const fast_hot = fast_btn.hovered();
-            const fast_clicked = fast_btn.clicked();
-            {
-                defer fast_btn.end();
-                const bolt_color = if (st.fast) look_color else if (fast_hot) k.text else k.muted;
-                icons.icon(c, .@"fast-tier", 15, bolt_color, 15);
-            }
-            if (fast_clicked and open) {
-                if (p.stage) |*s| s.fast = !s.fast;
-                c.changed = true;
             }
         }
         {
@@ -1338,24 +1393,45 @@ fn search(c: *ui.Context, a: *App, k: theme.Colors) void {
     const row = ui.div(c).row().wFull().h(35).px(12).pt(1).gap(8).itemsCenter();
     defer row.end();
     icons.icon(c, .magnifer, 14, k.muted, 14);
-    const f = ui.div(c).row().grow().w(0).itemsCenter();
-    defer f.end();
-    ui.key(c, "model-picker-search");
-    const placeholder = if (a.selected == null) "Search models… · Ctrl+Tab agents" else "Search models…";
-    if (a.picker == .none) {
-        const query = p.query.text();
-        ui.text(c, if (query.len > 0) query else placeholder, .{ .size = 14, .weight = .medium, .line_height = 22.75, .color = if (query.len > 0) k.text else k.faint });
-        return;
+    {
+        const f = ui.div(c).row().grow().w(0).itemsCenter();
+        defer f.end();
+        ui.key(c, "model-picker-search");
+        const placeholder = if (a.selected == null) "Search models… · Ctrl+Tab agents" else "Search models…";
+        if (a.picker == .none) {
+            const query = p.query.text();
+            ui.text(c, if (query.len > 0) query else placeholder, .{ .size = 14, .weight = .medium, .line_height = 22.75, .color = if (query.len > 0) k.text else k.faint });
+        } else {
+            const at = c.nodes.items.len;
+            const r = ui.textField(c, &p.query, .{ .placeholder = placeholder, .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 14, .weight = .medium, .line_height = 22.75, .caret = @import("view_composer.zig").message_caret, .caret_color = k.accent });
+            const id = c.node(@intCast(at)).id;
+            if (p.focus or c.focus != id) {
+                c.focus = id;
+                c.changed = true;
+                p.focus = false;
+            }
+            if (r.changed) reset(c, a);
+        }
     }
-    const at = c.nodes.items.len;
-    const r = ui.textField(c, &p.query, .{ .placeholder = placeholder, .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 14, .weight = .medium, .line_height = 22.75, .caret = @import("view_composer.zig").message_caret, .caret_color = k.accent });
-    const id = c.node(@intCast(at)).id;
-    if (p.focus or c.focus != id) {
-        c.focus = id;
+    ui.key(c, "model-picker-refresh");
+    const refresh_btn = ui.div(c).row().size(24, 24).center().rounded(6).hover(k.hover).control();
+    const refresh_hot = refresh_btn.hovered();
+    const refresh_hit = refresh_btn.clicked();
+    {
+        defer refresh_btn.end();
+        const loading = if (p.catalogs.get(a.target().harness)) |cat| cat.loading else false;
+        icons.icon(c, .refresh, 13, if (loading) k.accent else if (refresh_hot) k.text else k.muted, 13);
+    }
+    if (refresh_hit and a.picker != .none) {
+        if (p.starred) {
+            for (a.harnesses.items) |h| if (offered(a, h.id, h.offered)) {
+                _ = models.refreshCatalog(a, h.id);
+            };
+        } else {
+            _ = models.refreshCatalog(a, a.target().harness);
+        }
         c.changed = true;
-        p.focus = false;
     }
-    if (r.changed) reset(c, a);
 }
 
 fn space(c: *ui.Context, height: f32) void {

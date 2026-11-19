@@ -15,20 +15,22 @@ pub const Target = struct {
     model: ?[]const u8,
     reasoning: ?[]const u8,
     orchestrator: ?[]const u8 = null,
+    service_tier: ?[]const u8 = null,
 };
 
 /// The open chat's agent, model and level, else the new chat's. A level
 /// not picked reads as the model's default.
 pub fn target(a: *const App) Target {
-    var t: Target = .{ .harness = a.new_harness, .model = a.new_model, .reasoning = a.new_reasoning, .orchestrator = a.new_orchestrator };
+    var t: Target = .{ .harness = a.new_harness, .model = a.new_model, .reasoning = a.new_reasoning, .orchestrator = a.new_orchestrator, .service_tier = a.new_service_tier };
     if (a.selected) |id| if (a.findChat(id)) |ch| {
-        t = .{ .harness = ch.harness orelse "graff", .model = ch.model, .reasoning = ch.reasoning, .orchestrator = ch.orchestrator };
+        t = .{ .harness = ch.harness orelse "graff", .model = ch.model, .reasoning = ch.reasoning, .orchestrator = ch.orchestrator, .service_tier = ch.service_tier };
     };
     // A plain chat runs on graff's tiers, starting on the first on offer;
     // never the catalog's default model (`selected_model`).
     if (chatMode(a)) {
         t.harness = chat_mode.harness;
         t.orchestrator = null;
+        t.service_tier = null;
         if (t.model == null or !chat_mode.offers(t.model.?)) t.model = chat_mode.defaultId(graffCatalog(a));
     }
     // The model's ladder, else its agent's (`trait_ladder`), at its default.
@@ -108,6 +110,7 @@ pub fn setHarness(a: *App, id: []const u8) void {
     setNew(a, &a.new_model, null);
     setNew(a, &a.new_reasoning, null);
     setNew(a, &a.new_orchestrator, null);
+    setNew(a, &a.new_service_tier, null);
     // GPUI's effective picks fall back to the sticky per-agent model and
     // the last reasoning level after an agent switch.
     if (!a.new_chat_mode) composer_defaults.adopt(a, id);
@@ -137,6 +140,16 @@ fn keptOrchestrator(a: *const App, ch: workspace.Chat, next_model: ?[]const u8) 
     const id = next_model orelse return null;
     const m = modelOf(a, id) orelse return null;
     return if (m.orchestrator_supported) ch.orchestrator else null;
+}
+
+fn keptServiceTier(a: *const App, ch: workspace.Chat, next_model: ?[]const u8) ?[]const u8 {
+    if (sameModel(ch.model, next_model)) return ch.service_tier;
+    const id = next_model orelse return null;
+    const m = modelOf(a, id) orelse return null;
+    if (!m.service_tier_supported) return null;
+    const tier = ch.service_tier orelse return null;
+    if (std.mem.eql(u8, tier, "ultrafast") and !m.service_tier_ultrafast) return "fast";
+    return tier;
 }
 
 fn setNew(a: *App, field: *?[]u8, value: ?[]const u8) void {
@@ -179,7 +192,7 @@ pub fn pickModelAndReasoning(a: *App, id: []const u8, level: []const u8) void {
         return a.redraw();
     }
     const ch = a.findChat(a.selected.?);
-    storeChatConfig(a, id, level, if (ch) |c| keptOrchestrator(a, c, id) else null);
+    storeChatConfig(a, id, level, if (ch) |c| keptOrchestrator(a, c, id) else null, if (ch) |c| keptServiceTier(a, c, id) else null);
 }
 
 /// Applies model and reasoning changes live from the compact thinking tier
@@ -196,7 +209,7 @@ pub fn applyLiveModelAndReasoning(a: *App, id: []const u8, level: ?[]const u8) v
         return a.redraw();
     }
     const ch = a.findChat(a.selected.?) orelse return;
-    storeChatConfigLive(a, id, level, keptOrchestrator(a, ch, id), false);
+    storeChatConfigLive(a, id, level, keptOrchestrator(a, ch, id), keptServiceTier(a, ch, id), false);
 }
 
 /// Applies an Orchestrator mode (`off` | `auto` | `on`) choice live without closing
@@ -208,7 +221,19 @@ pub fn applyLiveOrchestrator(a: *App, choice: []const u8) void {
         return a.redraw();
     }
     const ch = a.findChat(a.selected.?) orelse return;
-    storeChatConfigLive(a, ch.model, ch.reasoning, choice, false);
+    storeChatConfigLive(a, ch.model, ch.reasoning, choice, ch.service_tier, false);
+}
+
+/// Applies a Service Tier (`default` | `fast` | `ultrafast`) choice live without
+/// closing the compact popover, persisting new-chat defaults or updating the open chat.
+pub fn applyLiveServiceTier(a: *App, choice: []const u8) void {
+    if (a.selected == null) {
+        setNew(a, &a.new_service_tier, choice);
+        composer_defaults.rememberServiceTier(a);
+        return a.redraw();
+    }
+    const ch = a.findChat(a.selected.?) orelse return;
+    storeChatConfigLive(a, ch.model, ch.reasoning, ch.orchestrator, choice, false);
 }
 
 /// Replaces the open chat's config: its agent stays, the model or the
@@ -218,28 +243,28 @@ fn setChatConfig(a: *App, model: ?[]const u8, reasoning: ?[]const u8, new_model:
     const id = a.selected orelse return;
     const ch = a.findChat(id) orelse return;
     const next_model = if (new_model) model else ch.model;
-    storeChatConfig(a, next_model, if (new_model) null else reasoning orelse ch.reasoning, if (new_model) keptOrchestrator(a, ch, next_model) else ch.orchestrator);
+    storeChatConfig(a, next_model, if (new_model) null else reasoning orelse ch.reasoning, if (new_model) keptOrchestrator(a, ch, next_model) else ch.orchestrator, if (new_model) keptServiceTier(a, ch, next_model) else ch.service_tier);
 }
 
 /// One request carries both values, and the local row changes now instead
 /// of waiting for the next WatchChats item.
-fn storeChatConfig(a: *App, model: ?[]const u8, reasoning: ?[]const u8, orchestrator: ?[]const u8) void {
-    storeChatConfigLive(a, model, reasoning, orchestrator, true);
+fn storeChatConfig(a: *App, model: ?[]const u8, reasoning: ?[]const u8, orchestrator: ?[]const u8, service_tier: ?[]const u8) void {
+    storeChatConfigLive(a, model, reasoning, orchestrator, service_tier, true);
 }
 
-fn storeChatConfigLive(a: *App, model: ?[]const u8, reasoning: ?[]const u8, orchestrator: ?[]const u8, focus_composer: bool) void {
+fn storeChatConfigLive(a: *App, model: ?[]const u8, reasoning: ?[]const u8, orchestrator: ?[]const u8, service_tier: ?[]const u8, focus_composer: bool) void {
     const id = a.selected orelse return;
     const ch = a.findChat(id) orelse return;
     const sent = a.send_(requests.setChatConfig(id, .{
         .harness = ch.harness orelse "graff",
         .model = model,
         .reasoning = reasoning,
-        .modelOptions = .{ .orchestrator = orchestrator },
+        .modelOptions = .{ .orchestrator = orchestrator, .serviceTier = service_tier },
         // The config is replaced whole: a plain chat stays one.
         .chatMode = if (ch.chat_mode) true else null,
     }), .of(App, a, App.onNotice));
     if (sent == null) return a.setNotice("The config change couldn't be sent. Reconnect and try again.");
-    _ = @import("workspace.zig").setChatConfig(&a.chats, id, model, reasoning, orchestrator);
+    _ = @import("workspace.zig").setChatConfig(&a.chats, id, model, reasoning, orchestrator, service_tier);
     if (focus_composer) a.view.focus_composer = true;
     a.redraw();
 }

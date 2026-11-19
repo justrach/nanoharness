@@ -25,9 +25,9 @@ pub const Stage = struct {
     /// Index into the model's levels; null for the model's default.
     level: ?usize = null,
     orchestrator: ?[]u8 = null,
+    service_tier: ?[]u8 = null,
     error_text: ?[]const u8 = null,
     compact: bool = false,
-    fast: bool = false,
 };
 
 pub const Catalog = struct {
@@ -156,6 +156,7 @@ pub const State = struct {
             s.retired_strings.append(gpa, st.harness) catch gpa.free(st.harness);
             s.retired_strings.append(gpa, st.model) catch gpa.free(st.model);
             if (st.orchestrator) |orch| s.retired_strings.append(gpa, orch) catch gpa.free(orch);
+            if (st.service_tier) |tier| s.retired_strings.append(gpa, tier) catch gpa.free(tier);
         }
         s.stage = null;
         s.dragging = false;
@@ -241,6 +242,9 @@ pub fn copyModels(to: *workspace.Models, models: []const workspace.Model) !void 
         n.reasoning_default = if (m.reasoning_default) |v| try gpa.dupe(u8, v) else null;
         n.orchestrator_supported = m.orchestrator_supported;
         n.orchestrator_default = if (m.orchestrator_default) |v| try gpa.dupe(u8, v) else null;
+        n.service_tier_supported = m.service_tier_supported;
+        n.service_tier_ultrafast = m.service_tier_ultrafast;
+        n.service_tier_default = if (m.service_tier_default) |v| try gpa.dupe(u8, v) else null;
         const levels = try gpa.alloc([]const u8, m.levels.len);
         for (m.levels, levels) |v, *l| l.* = try gpa.dupe(u8, v);
         n.levels = levels;
@@ -251,6 +255,15 @@ pub fn copyModels(to: *workspace.Models, models: []const workspace.Model) !void 
 }
 
 pub fn ensureCatalog(a: *App, harness: []const u8, refresh: bool) ?*Catalog {
+    return requestCatalog(a, harness, refresh, false);
+}
+
+/// Explicit user-triggered live catalog refresh (`ListModels {"force": true}`).
+pub fn refreshCatalog(a: *App, harness: []const u8) ?*Catalog {
+    return requestCatalog(a, harness, true, true);
+}
+
+fn requestCatalog(a: *App, harness: []const u8, refresh: bool, force: bool) ?*Catalog {
     const p = &a.view.model_picker;
     const cat = p.catalogs.get(harness) orelse blk: {
         const cat = a.gpa.create(Catalog) catch return null;
@@ -268,7 +281,12 @@ pub fn ensureCatalog(a: *App, harness: []const u8, refresh: bool) ?*Catalog {
     };
     if (!cat.loading and (!cat.loaded or refresh) and a.engine.up()) {
         cat.loading = true;
-        a.request(@import("requests.zig").listModels(harness), .of(Catalog, cat, Catalog.reply));
+        const reqs = @import("requests.zig");
+        if (force) {
+            a.request(reqs.listModelsForce(harness), .of(Catalog, cat, Catalog.reply));
+        } else {
+            a.request(reqs.listModels(harness), .of(Catalog, cat, Catalog.reply));
+        }
     }
     return cat;
 }

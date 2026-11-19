@@ -33,6 +33,7 @@ pub fn cases(gpa: std.mem.Allocator) ![]Case {
         try case(gpa, "engine ready", r.none("EngineReady"), false),
         try case(gpa, "list agents", r.none("ListHarnesses"), false),
         try case(gpa, "list models", r.listModels("mock"), false),
+        try case(gpa, "force refresh models", r.listModelsForce("mock"), false),
         try case(gpa, "discover project composer commands", r.listCommands(.{ .harness = "mock", .spaceId = space, .path = dir }), false),
         try case(gpa, "discover project composer skills", r.listSkills(.{ .harness = "mock", .spaceId = space, .path = dir }), false),
         try case(gpa, "discover chat composer commands", r.listCommands(.{ .harness = "mock", .chatId = chat }), false),

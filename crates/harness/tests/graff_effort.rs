@@ -41,6 +41,10 @@ for line in sys.stdin:
     option = {'id':'effort','name':'Thought level','category':'thought_level','type':'select',
               'currentValue':'low','options':[{'value':'low','name':'Low'},
                                             {'value':'high','name':'High'}]}
+    tier_option = {'id':'serviceTier','name':'Service Tier','category':'speed','type':'select',
+                   'currentValue':'default','options':[{'value':'default','name':'Standard'},
+                                                       {'value':'fast','name':'Fast'},
+                                                       {'value':'ultrafast','name':'Ultra Fast'}]}
     if mode.startswith('mimo'):
         option['currentValue'] = 'high'
         option['options'] = [{'value':'none','name':'Off'}, {'value':'high','name':'On'}]
@@ -49,9 +53,11 @@ for line in sys.stdin:
         result = {'protocolVersion':0 if mode == 'bad-version' else 1,
                   'agentCapabilities':{'loadSession':True}}
     elif method == 'session/new':
-        result = {'sessionId':'fixture','configOptions':[option]}
+        opts = [option, tier_option] if mode == 'ultrafast' else [option]
+        result = {'sessionId':'fixture','configOptions':opts}
     elif method == 'session/load':
-        result = {'sessionId':'fixture','configOptions':[option]}
+        opts = [option, tier_option] if mode == 'ultrafast' else [option]
+        result = {'sessionId':'fixture','configOptions':opts}
     elif method == 'graff/models':
         if mode == 'old-agent':
             print(json.dumps({'jsonrpc':'2.0','id':request['id'],
@@ -62,6 +68,11 @@ for line in sys.stdin:
             {'provider':'p1','name':'shared','authenticated':True,'effortLevels':['low','high']},
             {'provider':'p2','name':'shared','authenticated':True,'effortLevels':['medium']},
             {'provider':'p3','name':'closed','authenticated':False,'effortLevels':['high']}]}
+        if mode == 'ultrafast':
+            result = {'current':{'provider':'codex','model':'gpt-6.2-sol','effort':'low','serviceTier':'default'},
+                      'models':[{'provider':'codex','name':'gpt-6.2-sol','authenticated':True,
+                                 'effortLevels':['low','high'],'fastSupported':True,
+                                 'ultrafastSupported':True,'serviceTiers':['fast','ultrafast']}]}
         if mode.startswith('mimo'):
             result = {'current':{'provider':'xiaomi','model':'mimo-v2.6-flash','effort':'high'},
                       'models':[{'provider':'xiaomi','name':'mimo-v2.6-flash',
@@ -77,8 +88,13 @@ for line in sys.stdin:
             print(json.dumps({'jsonrpc':'2.0','id':request['id'],
                               'error':{'code':-32602,'message':'rejected'}}),flush=True)
             continue
-        option['currentValue'] = request['params']['value'] if mode != 'ignored' else 'low'
-        result = {'configOptions':[option]}
+        cid = request['params'].get('configId')
+        if cid == 'serviceTier':
+            tier_option['currentValue'] = request['params']['value']
+        else:
+            option['currentValue'] = request['params']['value'] if mode != 'ignored' else 'low'
+        opts = [option, tier_option] if mode == 'ultrafast' else [option]
+        result = {'configOptions':opts}
     elif method == 'session/prompt':
         if mode == 'slash-low':
             print(json.dumps({'method':'session/update','params':{'sessionId':'other',
@@ -445,4 +461,56 @@ async fn legacy_provider_qualified_chat_preserves_route_on_resume() {
             expected == DoneStatus::Completed
         );
     }
+}
+
+#[tokio::test]
+async fn graff_model_catalog_forwards_force_flag_and_sets_ultrafast_service_tier() {
+    let root = tempfile::tempdir().unwrap();
+    fake_agent(root.path());
+    std::fs::write(root.path().join("mode"), "ultrafast").unwrap();
+    let harness = AcpHarness::graff().with_executable(root.path().join("graff"));
+
+    let cached_probe = harness.model_catalog(false).await.unwrap();
+    assert_eq!(cached_probe.models[0].id, "codex/gpt-6.2-sol");
+    let tier = cached_probe.models[0]
+        .options
+        .iter()
+        .find(|o| o.id == "serviceTier")
+        .expect("serviceTier option");
+    assert_eq!(
+        tier.choices
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["default", "fast", "ultrafast"]
+    );
+
+    let _forced = harness.model_catalog(true).await.unwrap();
+    let model_calls: Vec<_> = wire(root.path())
+        .into_iter()
+        .filter(|entry| entry["method"] == "graff/models")
+        .collect();
+    assert_eq!(model_calls.len(), 2);
+    assert_eq!(model_calls[0]["params"], serde_json::json!({}));
+    assert_eq!(model_calls[1]["params"], serde_json::json!({"force": true}));
+
+    let mut selected = request(root.path(), ReasoningLevel::High);
+    selected.model = Some("codex/gpt-6.2-sol".into());
+    selected
+        .model_options
+        .insert("serviceTier".into(), serde_json::json!("ultrafast"));
+    let events = run_selected(root.path(), selected).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        }
+    )));
+    let entries = wire(root.path());
+    assert!(entries.iter().any(|entry| {
+        entry["method"] == "session/set_config_option"
+            && entry["params"]["configId"] == "serviceTier"
+            && entry["params"]["value"] == "ultrafast"
+    }));
 }
