@@ -394,7 +394,7 @@ pub fn keys(c: *ui.Context, a: *App) void {
     } else if (view_mod.boundShortcut(c, a, "newSession") or c.shortcut(.{ .key = 'n', .cmd = true })) {
         state.menu = null;
         state.pending_folder = null;
-        @import("app_open_chooser.zig").open(a, .new_workspace_tab);
+        a.newTab();
     } else if (c.shortcut(.{ .key = 'w', .cmd = true })) {
         state.menu = null;
         state.pending_folder = null;

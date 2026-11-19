@@ -758,7 +758,7 @@ fn keys(c: *ui.Context, a: *App) void {
     }
     if (a.selected != null and boundShortcut(c, a, "toggleFiles")) @import("app_files.zig").toggle(a);
     if (a.selected != null and (boundShortcut(c, a, "toggleChanges") or boundShortcut(c, a, "toggleTerminal"))) @import("app_panels.zig").toggleHost(a);
-    if (boundShortcut(c, a, "newSession") or c.shortcut(.{ .key = 'n', .cmd = true })) @import("app_open_chooser.zig").open(a, .new_workspace_tab);
+    if (boundShortcut(c, a, "newSession") or c.shortcut(.{ .key = 'n', .cmd = true })) a.newTab();
     if (boundShortcut(c, a, "archiveSession")) {
         if (a.selected) |sel| a.setArchived(sel, true);
     }

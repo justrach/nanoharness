@@ -105,7 +105,29 @@ test "shortcut edge: refused Cmd D preserves the source prompt destination and f
     }
 }
 
-test "shortcut edge: Cmd T cancellation never changes the source draft or creates a tab" {
+test "shortcut edge: Cmd T opens a new top-level tab directly without opening the folder chooser" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    draft(&h, "local-project");
+    const source = h.a.tabs.active;
+    const count = h.a.tabs.items.items.len;
+    h.press(.{ .key = 't', .cmd = true });
+    try testing.expect(!h.a.view.open_chooser.open);
+    try testing.expectEqual(count + 1, h.a.tabs.items.items.len);
+    try testing.expectEqualStrings("local-project", h.a.newChatSpace().?.id);
+    try testing.expectEqualStrings("local", h.a.draftDevice().?);
+    try testing.expectEqualStrings("", h.a.composer.text());
+    h.t.typeText("Fresh tab prompt");
+    try testing.expectEqualStrings("Fresh tab prompt", h.a.composer.text());
+    h.a.closeTab(h.a.tabs.active);
+    h.t.settle(1);
+    try testing.expectEqual(source, h.a.tabs.active);
+    try testing.expectEqualStrings("local-project", h.a.newChatSpace().?.id);
+    try testing.expectEqualStrings("Original synthetic prompt", h.a.composer.text());
+}
+
+test "shortcut edge: chooser cancellation never changes the source draft or creates a tab" {
     for ([_]bool{ false, true }) |button| {
         var h: Harness = undefined;
         try h.init(true);
@@ -113,7 +135,8 @@ test "shortcut edge: Cmd T cancellation never changes the source draft or create
         draft(&h, "local-project");
         const source = h.a.tabs.active;
         const count = h.a.tabs.items.items.len;
-        h.press(.{ .key = 't', .cmd = true });
+        chooser.open(&h.a, .new_project);
+        h.t.settle(1);
         try h.t.clickText("Build box");
         h.t.settle(1);
         h.t.typeText("no such project");
@@ -133,14 +156,17 @@ test "shortcut edge: Cmd T cancellation never changes the source draft or create
     }
 }
 
-test "shortcut edge: repeated Cmd T creates exactly one tab and supports an explicit projectless remote" {
+test "shortcut edge: repeated Cmd Shift N chooser creates one tab and supports an explicit projectless remote" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
     draft(&h, "local-project");
     const source = h.a.tabs.active;
     const count = h.a.tabs.items.items.len;
-    for (0..3) |_| h.press(.{ .key = 't', .cmd = true });
+    for (0..3) |_| {
+        chooser.open(&h.a, .new_project);
+        h.t.settle(1);
+    }
     try testing.expect(h.a.view.open_chooser.open);
     try testing.expectEqual(count, h.a.tabs.items.items.len);
     try h.t.clickText("Build box");
@@ -159,7 +185,7 @@ test "shortcut edge: repeated Cmd T creates exactly one tab and supports an expl
     try testing.expectEqualStrings("Original synthetic prompt", h.a.composer.text());
 }
 
-test "shortcut edge: Cmd T from folder search dismisses only that menu and cancellation restores typing" {
+test "shortcut edge: Cmd T from folder search dismisses that menu and focuses the new tab composer" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
@@ -169,12 +195,10 @@ test "shortcut edge: Cmd T from folder search dismisses only that menu and cance
     const count = h.a.tabs.items.items.len;
     h.press(.{ .key = 't', .cmd = true });
     try testing.expect(h.a.view.strip.menu == null);
-    try testing.expect(h.a.view.open_chooser.open);
-    h.press(.{ .key = ui.Shortcut.escape });
-    try testing.expectEqual(count, h.a.tabs.items.items.len);
-    try testing.expectEqual(@as(usize, 2), strip.chatCount(&h.a));
-    h.t.typeText("!");
-    try testing.expectEqualStrings("Keep the split prompt!", h.a.composer.text());
+    try testing.expect(!h.a.view.open_chooser.open);
+    try testing.expectEqual(count + 1, h.a.tabs.items.items.len);
+    h.t.typeText("Ready immediately");
+    try testing.expectEqualStrings("Ready immediately", h.a.composer.text());
 }
 
 test "shortcut edge: Cmd Shift D is inert in empty drafts chooser device menus and auxiliary panels" {
@@ -187,7 +211,7 @@ test "shortcut edge: Cmd Shift D is inert in empty drafts chooser device menus a
         switch (surface) {
             .canvas => {},
             .projectless => h.a.pickDraftDevice("remote"),
-            .chooser => h.press(.{ .key = 't', .cmd = true }),
+            .chooser => chooser.open(&h.a, .new_project),
             .device => strip.open(&h.a, .device, .{ .chat = 0 }, .{ .x = 750, .y = 24, .w = 80, .h = 14 }),
             .host => {
                 h.a.panels.host_open = true;
@@ -220,7 +244,8 @@ test "shortcut edge: opening and cancelling folder setup preserves the source dr
     defer h.deinit();
     draft(&h, "local-project");
     const count = h.a.tabs.items.items.len;
-    h.press(.{ .key = 't', .cmd = true });
+    chooser.open(&h.a, .new_project);
+    h.t.settle(1);
     chooser.pickDevice(&h.a, "remote");
     chooser.newProject(&h.a);
     h.t.settle(1);
@@ -237,7 +262,8 @@ test "shortcut edge: folder setup honors a remote choice from an established loc
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
-    h.press(.{ .key = 't', .cmd = true });
+    chooser.open(&h.a, .new_project);
+    h.t.settle(1);
     chooser.pickDevice(&h.a, "remote");
     chooser.newProject(&h.a);
     h.t.settle(1);
@@ -253,7 +279,8 @@ test "shortcut edge: finishing folder setup parks the unchanged source and opens
     draft(&h, "local-project");
     const source = h.a.tabs.active;
     const count = h.a.tabs.items.items.len;
-    h.press(.{ .key = 't', .cmd = true });
+    chooser.open(&h.a, .new_project);
+    h.t.settle(1);
     chooser.pickDevice(&h.a, "remote");
     chooser.newProject(&h.a);
     h.a.view.project_setup.folder = .{ .device = "remote", .device_name = "Build box", .path = "/synthetic/remote-project", .git = false };

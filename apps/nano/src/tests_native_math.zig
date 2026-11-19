@@ -113,8 +113,10 @@ test "native math UI inline baseline and narrow wrapping keep equations inside p
 const Fixture = struct {
     source: []const u8,
     owner: ?*@import("app.zig").App = null,
+    max_width: ?f32 = null,
     fn view(f: *Fixture, c: *ui.Context) void {
         const page = ui.div(c).column().wFull().p(20);
+        if (f.max_width) |w| _ = page.maxW(w).clip();
         defer page.end();
         if (f.owner) |a| @import("view_markdown.zig").withLinks(c, theme.builtin(false), f.source, a, "math") else @import("view_markdown.zig").markdown(c, theme.builtin(false), f.source);
     }
@@ -194,4 +196,85 @@ test "native math UI underbrace annotation and display limits extend both sides"
     const sum = try geometry("$$\\sum$$", null);
     const limits = try geometry("$$\\sum_{i=1}^{n}$$", "math-limits");
     try testing.expect(limits.h > sum.h * 1.3);
+}
+
+test "inline math prose and list boundaries stay within column on demand-driven frames (#2)" {
+    theme.registerFonts();
+    const cases = [_][]const u8{
+        "The demonstration processor applies its transformation to the combined score q = a+b, **not each label independently**.",
+        "The demonstration processor applies its transformation to the combined score \\(q=a+b\\), **not each label independently**.",
+        "- The demonstration processor applies its transformation to the combined score q = a+b, **not each label independently**.",
+        "- The demonstration processor applies its transformation to the combined score \\(q=a+b\\), **not each label independently**.",
+    };
+    for (cases) |source| {
+        var f = Fixture{ .source = source, .max_width = 740 };
+        var t: ui.Tester = undefined;
+        try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 1600, .height = 220 });
+        defer t.deinit();
+        var scheduled_frames: usize = 0;
+        while (scheduled_frames < 8 and (t.ctx.animating or t.ctx.frame_in != null)) : (scheduled_frames += 1) t.frame();
+        for (t.ctx.nodes.items) |node| {
+            if (node.content != .text and node.content != .image) continue;
+            if (node.content == .text and node.content.text.color.a == 0) continue;
+            const r = t.ctx.rects.get(node.id) orelse continue;
+            try testing.expect(r.x >= 19 and r.x + r.w <= 721);
+        }
+    }
+}
+
+test "inline math list prose reflows cleanly after shrinking container width (#2)" {
+    theme.registerFonts();
+    var f = Fixture{ .source = "- The demonstration processor applies its transformation to the combined score \\(q=a+b\\), **not each label independently**.", .max_width = 740 };
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 1600, .height = 260 });
+    defer t.deinit();
+    for (0..6) |_| t.frame();
+    t.resize(420, 260);
+    var scheduled_frames: usize = 0;
+    while (scheduled_frames < 8 and (t.ctx.animating or t.ctx.frame_in != null)) : (scheduled_frames += 1) t.frame();
+    for (t.ctx.nodes.items) |node| {
+        if (node.content != .text and node.content != .image) continue;
+        if (node.content == .text and node.content.text.color.a == 0) continue;
+        const r = t.ctx.rects.get(node.id) orelse continue;
+        try testing.expect(r.x >= 19 and r.x + r.w <= 401);
+    }
+}
+
+test "rejected table math fallback wraps inside its cell without covering neighbor (#11)" {
+    theme.registerFonts();
+    var wide_buf: std.ArrayList(u8) = .empty;
+    defer wide_buf.deinit(testing.allocator);
+    try wide_buf.appendSlice(testing.allocator, "| Formula | Neighbor |\n|---|---|\n| $");
+    try wide_buf.appendNTimes(testing.allocator, 'W', 420);
+    try wide_buf.appendSlice(testing.allocator, "$ | SYNTHETIC_RIGHT |\n");
+
+    var unsup_buf: std.ArrayList(u8) = .empty;
+    defer unsup_buf.deinit(testing.allocator);
+    try unsup_buf.appendSlice(testing.allocator, "| Formula | Neighbor |\n|---|---|\n| $\\unsupported{");
+    for (0..72) |i| {
+        if (i > 0) try unsup_buf.append(testing.allocator, '+');
+        try unsup_buf.appendSlice(testing.allocator, "SYNTHETIC");
+    }
+    try unsup_buf.appendSlice(testing.allocator, "}$ | SYNTHETIC_RIGHT |\n");
+
+    for ([_][]const u8{ wide_buf.items, unsup_buf.items }) |src| {
+        var f = Fixture{ .source = src };
+        var t: ui.Tester = undefined;
+        try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 520, .height = 600 });
+        defer t.deinit();
+        var scheduled_frames: usize = 0;
+        while (scheduled_frames < 8 and (t.ctx.animating or t.ctx.frame_in != null)) : (scheduled_frames += 1) t.frame();
+        const neighbor = t.findText("SYNTHETIC_RIGHT") orelse return error.MissingNeighborCell;
+        var saw_fallback = false;
+        for (t.ctx.nodes.items) |node| {
+            if (node.content != .text) continue;
+            if (node.content.text.color.a == 0) continue;
+            const s = node.content.text.str;
+            if (std.mem.indexOf(u8, s, "WWWW") == null and std.mem.indexOf(u8, s, "unsupported") == null and std.mem.indexOf(u8, s, "SYNTHETIC+") == null) continue;
+            saw_fallback = true;
+            const r = t.ctx.rects.get(node.id) orelse continue;
+            try testing.expect(r.x + r.w <= neighbor.x - 10 + 0.5);
+        }
+        try testing.expect(saw_fallback);
+    }
 }

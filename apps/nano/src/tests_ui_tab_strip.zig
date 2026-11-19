@@ -192,9 +192,7 @@ test "unified strip: Cmd T opens a new top-level tab and restores the split draf
     h.a.splitPane(.horizontal);
     h.a.composer.set("A parked synthetic prompt");
     h.press(.{ .key = 't', .cmd = true });
-    try testing.expect(h.a.view.open_chooser.open);
-    @import("app_open_chooser.zig").choose(&h.a, "local-project");
-    h.t.settle(1);
+    try testing.expect(!h.a.view.open_chooser.open);
     try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
     try testing.expect(h.a.tabs.layout() == null);
     try testing.expectEqualStrings("", h.a.composer.text());
@@ -506,9 +504,7 @@ test "session hierarchy nests all tabs under the session in sidebar and shows si
     h.a.splitPane(.horizontal);
     h.a.openChat("b", null);
     h.press(.{ .key = 't', .cmd = true });
-    try testing.expect(h.a.view.open_chooser.open);
-    @import("app_open_chooser.zig").choose(&h.a, "local-project");
-    h.t.settle(1);
+    try testing.expect(!h.a.view.open_chooser.open);
     try testing.expect(h.a.tabs.layout() == null);
     try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
     // Top strip on the new canvas shows the split session ("Beta", "2 split panes") AND the new tab ("New tab")!
@@ -546,4 +542,99 @@ test "session hierarchy nests all tabs under the session in sidebar and shows si
         else => {},
     };
     try testing.expect(side_gamma_open_ws);
+}
+
+test "overflowing titlebar tabs never slice trailing tab title into fragments (#3)" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try replace(&h.a.chats,
+        \\[{"id":"t0","deviceId":"local","title":"Alpha","spaceId":"local-project","archived":false},
+        \\ {"id":"t1","deviceId":"local","title":"Beta","spaceId":"local-project","archived":false},
+        \\ {"id":"t2","deviceId":"local","title":"Gamma","spaceId":"local-project","archived":false},
+        \\ {"id":"t3","deviceId":"local","title":"Delta","spaceId":"local-project","archived":false},
+        \\ {"id":"t4","deviceId":"local","title":"Echo","spaceId":"local-project","archived":false},
+        \\ {"id":"t5","deviceId":"local","title":"Foxtrot","spaceId":"local-project","archived":false},
+        \\ {"id":"t6","deviceId":"local","title":"Grove","spaceId":"local-project","archived":false},
+        \\ {"id":"t7","deviceId":"local","title":"Harbor","spaceId":"local-project","archived":false,"branch":"validation"}]
+    );
+    const ids = [_][]const u8{ "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7" };
+    h.a.openChat(ids[0], "local-project");
+    for (ids[1..]) |id| {
+        h.a.newTab();
+        h.a.openChat(id, "local-project");
+    }
+    h.a.view.sidebar_open = false;
+    h.a.view.sidebar_width = 0;
+    h.a.dark = false;
+    h.a.updates.graff_kind = .updated;
+    const ver = "0.302.74.74";
+    @memcpy(h.a.updates.graff_to[0..ver.len], ver);
+    h.a.updates.graff_to_len = ver.len;
+    for ([_]usize{ 0, 7 }) |sel| {
+        h.a.showTab(sel);
+        for ([_]f32{ 1200, 1220, 1240 }) |w| {
+            h.t.resize(w, 780);
+            h.t.settle(1);
+            for (h.t.ctx.nodes.items) |node| {
+                if (node.content != .text) continue;
+                if (node.rect.y > 40) continue;
+                const str = node.content.text.str;
+                const is_title = for ([_][]const u8{ "Alpha", "Beta", "Gamma", "Delta", "Echo", "Foxtrot", "Grove", "Harbor" }) |name| {
+                    if (std.mem.eql(u8, str, name)) break true;
+                } else false;
+                if (!is_title) continue;
+                var left = node.rect.x;
+                var right = node.rect.x + node.rect.w;
+                var p = node.parent;
+                while (p < h.t.ctx.nodes.items.len) {
+                    const anc = h.t.ctx.node(p);
+                    if (anc.style.clip) {
+                        left = @max(left, anc.rect.x);
+                        right = @min(right, anc.rect.x + anc.rect.w);
+                    }
+                    if (anc.parent == p) break;
+                    p = anc.parent;
+                }
+                const visible = @max(0, right - left);
+                try testing.expect(visible == 0 or visible + 0.5 >= node.rect.w);
+            }
+            const tab_names = [_][]const u8{ "Alpha", "Beta", "Gamma", "Delta", "Echo", "Foxtrot", "Grove", "Harbor" };
+            const want = tab_names[sel];
+            try testing.expect(h.topText(want) != null);
+        }
+    }
+}
+
+test "github tab identity inactive cap differs from selected cap in compact layout (#4)" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.dark = false;
+    h.t.resize(750, 850);
+    const gh = @import("app_github_repository.zig");
+    @import("app_git.zig").open(&h.a, .github);
+    h.t.settle(1);
+    try testing.expect(gh.surface(&h.a));
+    const slotBg = struct {
+        fn find(ctx: *ui.Context, label: []const u8) ?ui.Color {
+            for (ctx.nodes.items) |node| {
+                if (node.content == .text and std.mem.indexOf(u8, node.content.text.str, label) != null and node.rect.y < 42) {
+                    var p = node.parent;
+                    while (p < ctx.nodes.items.len) {
+                        const anc = ctx.node(p);
+                        if (anc.style.background != null and anc.rect.h >= 24 and anc.rect.y < 42) return anc.style.background;
+                        if (anc.parent == p) break;
+                        p = anc.parent;
+                    }
+                }
+            }
+            return null;
+        }
+    }.find;
+    const active_bg = slotBg(&h.t.ctx, "GitHub") orelse return error.MissingActiveGitHubTab;
+    h.a.view.strip.focused = .{ .chat = 0 };
+    h.t.settle(1);
+    const inactive_bg = slotBg(&h.t.ctx, "GitHub") orelse return error.MissingInactiveGitHubTab;
+    try testing.expect(!std.meta.eql(active_bg, inactive_bg));
 }

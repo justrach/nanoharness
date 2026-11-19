@@ -90,14 +90,14 @@ test "project shortcut: Cmd Shift D does nothing, including with a folder menu o
     }
 }
 
-test "project shortcut: Cmd T asks for a project before creating a top-level tab" {
+test "project shortcut: Cmd Shift N asks for a project before creating a top-level tab while Cmd T opens directly" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
     h.a.splitPane(.horizontal);
     h.a.composer.set("Parked split prompt");
     h.t.settle(1);
-    h.press(.{ .key = 't', .cmd = true });
+    h.press(.{ .key = 'n', .cmd = true, .shift = true });
     try testing.expect(h.a.view.open_chooser.open);
     try testing.expectEqual(@as(usize, 1), h.a.tabs.items.items.len);
     try testing.expectEqual(@as(usize, 2), strip.chatCount(&h.a));
@@ -116,6 +116,10 @@ test "project shortcut: Cmd T asks for a project before creating a top-level tab
     h.t.settle(1);
     try testing.expectEqual(@as(usize, 2), strip.chatCount(&h.a));
     try testing.expectEqualStrings("Parked split prompt", h.a.composer.text());
+    h.press(.{ .key = 't', .cmd = true });
+    try testing.expect(!h.a.view.open_chooser.open);
+    try testing.expectEqual(@as(usize, 3), h.a.tabs.items.items.len);
+    try testing.expect(h.a.tabs.layout() == null);
 }
 
 test "shared sheet fades and lifts into place on open" {
