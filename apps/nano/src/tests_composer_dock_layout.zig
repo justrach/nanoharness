@@ -51,7 +51,7 @@ fn parentOfText(tester: *ui.Tester, label: []const u8) !u32 {
 }
 
 fn trayRect(tester: *ui.Tester) !ui.Rect {
-    var at = try parentOfText(tester, "Synthetic queued message 0");
+    var at = parentOfText(tester, "Synthetic queued message 0") catch try parentOfText(tester, "Editing in composer");
     while (at < tester.ctx.nodes.items.len) {
         const n = tester.ctx.node(at);
         if (n.style.border != null) return n.rect;
@@ -65,6 +65,111 @@ fn snap(tester: *ui.Tester, width: usize, draft: usize, count: usize) !void {
     var buf: [1024]u8 = undefined;
     const path = try std.fmt.bufPrint(&buf, "{s}/dock-{d}-{d}-{d}.png", .{ std.mem.span(dir), width, draft, count });
     try tester.screenshot(path);
+}
+
+fn actionRect(tester: *ui.Tester, tray: ui.Rect, label: []const u8) !ui.Rect {
+    // Find controls through their actual hover labels, not sibling order.
+    var candidates: std.ArrayList(ui.Rect) = .empty;
+    defer candidates.deinit(t.allocator);
+    for (tester.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (node.interactive and r.w == 28 and r.h == 28 and
+            r.x >= tray.x and r.x + r.w <= tray.x + tray.w and
+            r.y >= tray.y and r.y + r.h <= tray.y + tray.h)
+            try candidates.append(t.allocator, r);
+    }
+    for (candidates.items) |r| {
+        tester.moveTo(r.x + r.w / 2, r.y + r.h / 2);
+        tester.advance(0.4);
+        if (tester.ctx.tooltip.shown) |shown| {
+            if (std.mem.eql(u8, shown.text, label)) return r;
+        }
+    }
+    std.debug.print("Queue action is not fully visible: {s}\n", .{label});
+    return error.MissingVisibleQueueAction;
+}
+
+test "composer dock keeps priority queue actions visible in narrow panes" {
+    theme.registerFonts();
+    for ([_]usize{ 140, 160, 180, 200, 220, 240, 320, 520 }) |width| {
+        var a: App = .init(t.allocator, t.io, 1);
+        defer a.deinit();
+        a.offscreen = true;
+        a.dark = false;
+        a.selected = try a.gpa.dupe(u8, "synthetic");
+        a.new_harness = try a.gpa.dupe(u8, "graff");
+        a.view.strip.focused = .{ .chat = 0 };
+        a.caps.actions = true;
+        try queue(&a, 1);
+        try t.expect(@import("app_queue.zig").rowCanSteer(&a, a.queue.items[0]));
+        var tester: ui.Tester = undefined;
+        try tester.init(t.allocator, .init(&a, view), .{ .width = @floatFromInt(width), .height = 480, .theme = theme.ui(false) });
+        defer tester.deinit();
+        tester.settle(0.5);
+        try snap(&tester, width, 0, 1);
+        const tray = try trayRect(&tester);
+        const pill = a.view.composer_anchor orelse return error.MissingComposer;
+        try t.expectApproxEqAbs(pill.w, tray.w, 0.1);
+        try t.expectApproxEqAbs(pill.x, tray.x, 0.1);
+        try t.expect(tray.y + tray.h + 7 <= pill.y);
+        _ = try actionRect(&tester, tray, "Edit");
+        _ = try actionRect(&tester, tray, "Steer into active turn");
+        _ = try actionRect(&tester, tray, "Remove");
+        _ = try actionRect(&tester, tray, "Send now (interrupt)");
+    }
+}
+
+test "composer dock wrapped queue controls dispatch their original actions" {
+    theme.registerFonts();
+    const cases = [_][2][]const u8{
+        .{ "Edit", "BeginQueuedMessageEdit" },
+        .{ "Steer into active turn", "SteerQueuedMessageNow" },
+        .{ "Remove", "RemoveQueuedMessage" },
+        .{ "Send now (interrupt)", "SendQueuedMessageNow" },
+    };
+    for ([_]usize{ 140, 200 }) |width| for (cases) |case| {
+        var a: App = .init(t.allocator, t.io, 1);
+        defer a.deinit();
+        a.offscreen = true;
+        a.dark = false;
+        a.selected = try a.gpa.dupe(u8, "synthetic");
+        a.new_harness = try a.gpa.dupe(u8, "graff");
+        a.view.strip.focused = .{ .chat = 0 };
+        a.caps.actions = true;
+        a.caps.edit_lease = true;
+        a.engine.scene = try std.json.parseFromSlice(std.json.Value, a.gpa,
+            \\{"BeginQueuedMessageEdit":{"outcome":"acquired","leaseId":"synthetic-lease","baseTextHash":"synthetic-hash","text":"Synthetic queued message 0"},"FinishQueuedMessageEdit":{"outcome":"cancelled"}}
+        , .{});
+        a.engine.state = .connected;
+        try queue(&a, 1);
+        var tester: ui.Tester = undefined;
+        try tester.init(t.allocator, .init(&a, view), .{ .width = @floatFromInt(width), .height = 480, .theme = theme.ui(false) });
+        defer tester.deinit();
+        tester.settle(0.5);
+        const r = try actionRect(&tester, try trayRect(&tester), case[0]);
+        tester.click(r.x + r.w / 2, r.y + r.h / 2);
+        var sent = false;
+        for (a.engine.sent.items) |frame| {
+            const parsed = try std.json.parseFromSlice(std.json.Value, a.gpa, frame, .{});
+            defer parsed.deinit();
+            const o = parsed.value.object;
+            if (!std.mem.eql(u8, o.get("method").?.string, case[1])) continue;
+            try t.expectEqualStrings("synthetic", o.get("params").?.object.get("chatId").?.string);
+            try t.expectEqualStrings("q0", o.get("params").?.object.get("id").?.string);
+            sent = true;
+        }
+        try t.expect(sent);
+        if (std.mem.eql(u8, case[0], "Edit")) {
+            _ = a.engine.pump();
+            tester.settle(0.5);
+            const tray = try trayRect(&tester);
+            _ = try actionRect(&tester, tray, "Save to queue");
+            const cancel = try actionRect(&tester, tray, "Cancel");
+            tester.click(cancel.x + cancel.w / 2, cancel.y + cancel.h / 2);
+            _ = a.engine.pump();
+            try t.expect(a.queue_edit == null);
+        }
+    };
 }
 
 test "composer dock separates queue tray jump button and growing input" {

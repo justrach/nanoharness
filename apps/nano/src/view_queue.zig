@@ -1,6 +1,6 @@
 //! The queue tray over the composer (crates/ui/src/queue.rs): a surface
-//! above (never behind) the input, one 36-point row per
-//! message: its text on one line, then Remove, Edit and "Send now"; the row
+//! above (never behind) the input. Rows wrap their actions in narrow panes
+//! instead of clipping them: Edit, Steer and Remove precede "Send now"; the row
 //! being edited reads "Editing in composer" with "Save to queue" and
 //! "Cancel".
 const std = @import("std");
@@ -17,9 +17,41 @@ const App = @import("app.zig").App;
 pub const gap: f32 = 8;
 const row_height: f32 = 36;
 
+pub const RowLayout = struct {
+    stacked: bool,
+    drag: bool,
+    columns: usize,
+    button_width: f32,
+};
+
+/// Reserve the tray's border/padding and row gutters before allocating
+/// actions. Drop the decorative drag handle before taking space from text
+/// or actions; when those no longer fit, put actions on rows of their own.
+pub fn rowLayout(width: f32, actions: usize) RowLayout {
+    const available = @max(0, width - 26);
+    const count = @max(1, actions);
+    const action_width = @as(f32, @floatFromInt(count)) * 28 + @as(f32, @floatFromInt(count - 1)) * 4;
+    return .{
+        .stacked = available < action_width + 4 + 32,
+        .drag = available >= action_width + 4 + 32 + 18,
+        .columns = @min(count, @max(1, @as(usize, @intFromFloat(@floor((available + 4) / 32))))),
+        .button_width = @min(28, available),
+    };
+}
+
+test "composer dock queue layout sacrifices drag before wrapping priority actions" {
+    const narrow = rowLayout(108, 4);
+    try std.testing.expect(narrow.stacked and !narrow.drag);
+    try std.testing.expectEqual(@as(usize, 2), narrow.columns);
+    try std.testing.expectEqual(@as(usize, 3), rowLayout(148, 4).columns);
+    const single = rowLayout(188, 4);
+    try std.testing.expect(!single.stacked and !single.drag);
+    try std.testing.expect(rowLayout(208, 4).drag);
+}
+
 pub fn tray(c: *ui.Context, a: *App, k: theme.Colors, w: f32) bool {
     if (a.queue.items.len == 0) return false;
-    const box = ui.div(c).column().w(@max(0, w - 32)).bg(k.composer).border(k.border).borderW(1).rounded(16).pb(8).pt(4).px(4);
+    const box = ui.div(c).column().w(@max(0, w)).bg(k.composer).border(k.border).borderW(1).rounded(16).pb(8).pt(4).px(4);
     defer box.end();
     // Reuse PR #844's row-only scroll-region approach: surface decoration
     // cannot consume scroll range or hide the last row underneath the input.
@@ -30,20 +62,26 @@ pub fn tray(c: *ui.Context, a: *App, k: theme.Colors, w: f32) bool {
     const compact = w < 520;
     for (a.queue.items, 0..) |r, i| {
         ui.key(c, c.print("q-{s}", .{r.id}));
-        row(c, a, k, r, i + 1 == a.queue.items.len, compact);
+        row(c, a, k, r, i + 1 == a.queue.items.len, compact, w);
     }
     return true;
 }
 
-fn row(c: *ui.Context, a: *App, k: theme.Colors, r: queue.Row, newest: bool, compact: bool) void {
+fn row(c: *ui.Context, a: *App, k: theme.Colors, r: queue.Row, newest: bool, compact: bool, w: f32) void {
     const editing = if (a.queue_edit) |e| std.mem.eql(u8, e.row, r.id) else false;
-    var line = ui.div(c).row().wFull().h(36).px(8).gap(if (compact) 4 else 8).itemsCenter().rounded(8);
+    const can_steer = @import("app_queue.zig").rowCanSteer(a, r);
+    const layout = rowLayout(w, if (editing) 2 else 2 + @as(usize, @intFromBool(!r.agent)) + @as(usize, @intFromBool(can_steer)));
+    const stacked = compact and (layout.stacked or editing);
+    var line = ui.div(c).wFull().px(8).gap(if (compact) 4 else 8).rounded(8);
+    line = if (stacked) line.column().py(4) else line.row().h(row_height).itemsCenter();
     line = if (editing) line.bg(k.ink(0.06)) else line.hover(k.ink(0.04));
     defer line.end();
     const gated = r.gate != .none;
-    icons.icon(c, .@"queue-drag-handle", 13, k.muted.alpha(if (gated) 0.35 * 0.5 else 0.5), 14);
+    if (!compact or (!stacked and layout.drag))
+        icons.icon(c, .@"queue-drag-handle", 13, k.muted.alpha(if (gated) 0.35 * 0.5 else 0.5), 14);
     {
-        const col = ui.div(c).column().grow().w(0).clip();
+        var col = ui.div(c).column().clip();
+        col = if (stacked) col.wFull() else col.grow().w(0);
         defer col.end();
         const title: []const u8 = if (editing)
             (if (a.queue_edit.?.saving) "Saving…" else "Editing in composer")
@@ -59,6 +97,10 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, r: queue.Row, newest: bool, com
         kit.fadeText(c, title, kit.style(c, 12.5, 16, .{ .color = k.text.alpha(0.9) }), 2000);
         if (r.attachments > 0 and !editing)
             ui.text(c, c.print("{d} attachment{s}", .{ r.attachments, if (r.attachments == 1) "" else "s" }), .{ .size = 11, .color = k.muted });
+    }
+    if (stacked) {
+        narrowActions(c, a, k, r, editing, can_steer, layout);
+        return;
     }
     if (editing) {
         if (textButton(c, k, .check, "Save to queue", true)) a.queueFinishEdit(.commit);
@@ -95,9 +137,65 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, r: queue.Row, newest: bool, com
     }
 }
 
+const Action = enum { edit, steer, remove, send, save, cancel };
+
+fn narrowActions(c: *ui.Context, a: *App, k: theme.Colors, r: queue.Row, editing: bool, can_steer: bool, layout: RowLayout) void {
+    var actions: std.ArrayList(Action) = .empty;
+    const alloc = c.alloc();
+    if (editing) {
+        actions.appendSlice(alloc, &.{ .save, .cancel }) catch return;
+    } else {
+        if (!r.agent) actions.append(alloc, .edit) catch return;
+        if (can_steer) actions.append(alloc, .steer) catch return;
+        actions.appendSlice(alloc, &.{ .remove, .send }) catch return;
+    }
+    var start: usize = 0;
+    while (start < actions.items.len) : (start += layout.columns) {
+        const buttons = ui.div(c).row().wFull().h(28).gap(4);
+        defer buttons.end();
+        for (actions.items[start..@min(start + layout.columns, actions.items.len)]) |action| {
+            ui.key(c, @tagName(action));
+            const enabled = switch (action) {
+                .edit => r.gate == .none and a.queue_edit == null,
+                .remove => r.gate == .none,
+                .send => a.caps.actions and r.gate == .none,
+                else => true,
+            };
+            const name: icons.Name = switch (action) {
+                .edit => .pen,
+                .steer => .@"fast-tier",
+                .remove => .@"trash-bin-minimalistic",
+                .send => .@"arrow-up",
+                .save => .check,
+                .cancel => .close,
+            };
+            const label: []const u8 = switch (action) {
+                .edit => "Edit",
+                .steer => "Steer into active turn",
+                .remove => "Remove",
+                .send => if (enabled) "Send now (interrupt)" else "Waiting for provider capabilities",
+                .save => "Save to queue",
+                .cancel => "Cancel",
+            };
+            if (rowButtonWidth(c, k, name, label, enabled, layout.button_width)) switch (action) {
+                .edit => a.queueBeginEdit(r.id),
+                .steer => @import("app_queue.zig").steerRowNow(a, r.id),
+                .remove => a.queueRemove(r.id),
+                .send => a.queueSendNow(r.id),
+                .save => a.queueFinishEdit(.commit),
+                .cancel => a.queueFinishEdit(.cancel),
+            };
+        }
+    }
+}
+
 /// A `queue_action`: its icon, and `label` as its tooltip.
 fn rowButton(c: *ui.Context, k: theme.Colors, name: icons.Name, label: []const u8, enabled: bool) bool {
-    var b = ui.div(c).row().size(28, 28).center().rounded(5).opacity(if (enabled) 0.72 else 0.45);
+    return rowButtonWidth(c, k, name, label, enabled, 28);
+}
+
+fn rowButtonWidth(c: *ui.Context, k: theme.Colors, name: icons.Name, label: []const u8, enabled: bool, width: f32) bool {
+    var b = ui.div(c).row().size(width, 28).center().rounded(5).opacity(if (enabled) 0.72 else 0.45);
     if (enabled) b = b.hover(k.ink(0.07));
     b = tip.on(b, k, .{ .text = label, .delay = tip.quick, .look = .queue });
     defer b.end();
