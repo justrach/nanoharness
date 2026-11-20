@@ -2026,11 +2026,12 @@ pub const App = struct {
         var service_tier: ?[]const u8 = null;
         var cwd: []const u8 = "~";
         var worktree: ?requests.WorktreeSpec = null;
+        const agent_mod = @import("app_agent.zig");
         const chat_id = if (a.selected) |id| blk: {
             if (a.findChat(id)) |c| {
                 harness = c.harness;
                 model = c.model;
-                reasoning = c.reasoning;
+                reasoning = agent_mod.sendReasoning(a, harness orelse "graff", model, c.reasoning);
                 orchestrator = c.orchestrator;
                 service_tier = c.service_tier;
                 if (c.cwd) |d| cwd = d;
@@ -2038,7 +2039,6 @@ pub const App = struct {
             break :blk id;
         } else blk: {
             const id = uuid(a.io, &chat_buf);
-            const agent_mod = @import("app_agent.zig");
             const space = agent_mod.newChatSpace(a);
             if (space) |s| cwd = s.path;
             // A git project's new chat runs in a fresh worktree unless its
@@ -2051,7 +2051,7 @@ pub const App = struct {
             const plain = a.new_chat_mode;
             harness = if (plain) t.harness else a.new_harness;
             model = if (plain) t.model else a.new_model;
-            reasoning = a.new_reasoning;
+            reasoning = agent_mod.sendReasoning(a, harness.?, model, a.new_reasoning);
             orchestrator = if (plain) null else t.orchestrator;
             service_tier = if (plain) null else t.service_tier;
             const config: requests.Config = .{

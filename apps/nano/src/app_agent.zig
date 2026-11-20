@@ -34,10 +34,22 @@ pub fn target(a: *const App) Target {
         if (t.model == null or !chat_mode.offers(t.model.?)) t.model = chat_mode.defaultId(graffCatalog(a));
     }
     // The model's ladder, else its agent's (`trait_ladder`), at its default.
-    if (t.reasoning == null) if (modelOf(a, t.model) != null) {
-        t.reasoning = rules.defaultReasoning(ladder(a, t.harness, t.model));
-    };
+    // Drop any sticky reasoning level the target model does not offer.
+    if (modelOfFor(a, t.harness, t.model) != null) {
+        const levels = ladder(a, t.harness, t.model);
+        t.reasoning = supportedReasoning(levels, t.reasoning) orelse rules.defaultReasoning(levels);
+    }
     return t;
+}
+
+/// The model `id` names in `harness`'s catalog, else (none picked) its first.
+fn modelOfFor(a: *const App, harness: []const u8, id: ?[]const u8) ?workspace.Model {
+    const list = @import("model_picker.zig").modelsFor(a, harness);
+    if (id) |want| {
+        for (list) |m| if (std.mem.eql(u8, m.id, want)) return m;
+        return null;
+    }
+    return if (list.len > 0) list[0] else null;
 }
 
 /// The model `id` names, else (none picked) the catalog's first: the one
@@ -64,13 +76,60 @@ pub fn levelsOf(a: *const App, id: ?[]const u8) []const []const u8 {
     return ladder(a, target(a).harness, id);
 }
 
-/// The model's levels, else (it lists none) its agent's; none before the
-/// model is known (`trait_ladder`).
+/// Effective reasoning ladder for a known model `m` on `harness`.
+pub fn levelsForModel(a: *const App, harness: []const u8, m: workspace.Model) []const []const u8 {
+    const catalog = @import("model_picker.zig").modelsFor(a, harness);
+    var harness_levels: []const []const u8 = &.{};
+    for (a.harnesses.items) |h| if (std.mem.eql(u8, h.id, harness)) {
+        harness_levels = h.levels;
+        break;
+    };
+    return modelLadder(harness, catalog, harness_levels, m);
+}
+
+/// Pure rule for a model's reasoning ladder:
+/// - A model's own non-empty `levels` always wins.
+/// - Graff (`graff/models`) and any catalog that reports per-model ladders
+///   authoritatively mark effort-less models (e.g. `nanoattention/flint`,
+///   Haiku, local GGUF/MLX models) with `reasoningLevels: []`, so an empty
+///   list must never inherit the harness-wide ladder.
+/// - Non-graff agents whose catalog omits per-model ladders fall back to the
+///   agent's ladder (`trait_ladder`).
+pub fn modelLadder(
+    harness: []const u8,
+    catalog: []const workspace.Model,
+    harness_levels: []const []const u8,
+    model: workspace.Model,
+) []const []const u8 {
+    if (model.levels.len > 0) return model.levels;
+    if (std.mem.eql(u8, harness, "graff")) return &.{};
+    for (catalog) |row| if (row.levels.len > 0) return &.{};
+    return harness_levels;
+}
+
+/// Pure rule: keep `reasoning` only if `levels` offers it; otherwise `null`.
+pub fn supportedReasoning(levels: []const []const u8, reasoning: ?[]const u8) ?[]const u8 {
+    const want = reasoning orelse return null;
+    for (levels) |l| if (std.mem.eql(u8, l, want)) return want;
+    return null;
+}
+
+/// Reasoning value safe to send in `CreateChat` / `Run` for `(harness, model)`.
+/// Preserves explicit `null` (model default) and drops any stale sticky level
+/// not offered by the target model once its catalog row is known.
+pub fn sendReasoning(a: *const App, harness: []const u8, model: ?[]const u8, reasoning: ?[]const u8) ?[]const u8 {
+    const want = reasoning orelse return null;
+    if (modelOfFor(a, harness, model) != null) {
+        return supportedReasoning(ladder(a, harness, model), want);
+    }
+    return want;
+}
+
+/// The model's levels, else (when the agent has no per-model ladders) its
+/// agent's; none before the model is known (`trait_ladder`).
 fn ladder(a: *const App, harness: []const u8, model: ?[]const u8) []const []const u8 {
-    const m = modelOf(a, model) orelse return &.{};
-    if (m.levels.len > 0) return m.levels;
-    for (a.harnesses.items) |h| if (std.mem.eql(u8, h.id, harness)) return h.levels;
-    return &.{};
+    const m = modelOfFor(a, harness, model) orelse return &.{};
+    return levelsForModel(a, harness, m);
 }
 
 pub fn harnessName(a: *const App, id: []const u8) []const u8 {
@@ -123,7 +182,12 @@ pub fn setHarness(a: *App, id: []const u8) void {
 pub fn setModel(a: *App, id: ?[]const u8) void {
     const changed = if (id) |want| !sameModel(a.new_model, want) else a.new_model != null;
     setNew(a, &a.new_model, id);
-    if (changed) composer_defaults.adoptModelOptions(a, a.new_harness, id);
+    if (changed) {
+        if (modelOfFor(a, a.new_harness, id) != null and supportedReasoning(ladder(a, a.new_harness, id), a.new_reasoning) == null) {
+            setNew(a, &a.new_reasoning, null);
+        }
+        composer_defaults.adoptModelOptions(a, a.new_harness, id);
+    }
     a.picker = .none;
     if (a.selected == null) composer_defaults.rememberModel(a);
     a.redraw();

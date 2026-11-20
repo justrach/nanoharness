@@ -830,3 +830,125 @@ test "compact model picker exposes Speed Ultra Fast and persists serviceTier on 
     try testing.expect(sent_set);
     try testing.expectEqualStrings("ultrafast", h.a.findChat("c-tier").?.service_tier.?);
 }
+
+test "graff model with empty reasoningLevels never inherits harness ladder or sends stale xhigh" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.picker = .none;
+
+    const graff_harnesses = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"graff","name":"graff","installed":true,"enabled":true,
+        \\  "reasoningLevels":["low","medium","high","xhigh","max","ultra"]},
+        \\ {"id":"claude-code","name":"Claude Code","installed":true,"enabled":true,
+        \\  "reasoningLevels":["low","high"]}]
+    , .{});
+    defer graff_harnesses.deinit();
+    try h.a.harnesses.replace(graff_harnesses.value);
+
+    const graff_models = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"codex/gpt-6.2-sol","label":"GPT-6.2 Sol","maker":"openai","billing":"plan","context":500000,
+        \\  "reasoningLevels":["low","medium","high","xhigh","ultra"]},
+        \\ {"id":"nanoattention/flint","label":"Flint","maker":"nanoattention","billing":"local","context":65536,
+        \\  "reasoningLevels":[]},
+        \\ {"id":"xiaomi/mimo-v2.6-pro","label":"MiMo-V2.6-Pro","maker":"xiaomi","billing":"credits","context":262144,
+        \\  "reasoningLevels":["none","high"]}]
+    , .{});
+    defer graff_models.deinit();
+    try h.a.models.replace(graff_models.value);
+    if (h.a.view.model_picker.catalogs.get("graff")) |cat| {
+        try cat.models.replace(graff_models.value);
+        cat.loaded = true;
+    }
+
+    // Start on GPT-6.2 Sol with sticky xhigh reasoning, then switch to Flint (which has no effort levels).
+    h.a.pickModelAndReasoning("codex/gpt-6.2-sol", "xhigh");
+    h.a.setModel("nanoattention/flint");
+    // Simulate a cold-start sticky composer-defaults.json that left xhigh on Flint.
+    if (h.a.new_reasoning) |old| h.a.gpa.free(old);
+    h.a.new_reasoning = try h.a.gpa.dupe(u8, "xhigh");
+    h.t.settle(1);
+
+    // Open the compact picker on Flint and capture visual state.
+    h.a.togglePickerCompact();
+    h.t.settle(1);
+    h.snap("flint-compact-picker-light");
+
+    // Flint advertises reasoningLevels: [] on Graff — never inherit Graff's harness ladder.
+    try testing.expectEqual(@as(usize, 0), h.a.levelsOf("nanoattention/flint").len);
+    try testing.expect(h.a.target().reasoning == null);
+    try testing.expect(!h.t.hasText("X-High"));
+    try testing.expect(!h.t.hasText("REASONING"));
+    try testing.expect(h.a.view.model_picker.stage != null);
+    try testing.expect(h.a.view.model_picker.stage.?.level == null);
+
+    // Sending a new chat on Flint must never forward stale "xhigh".
+    h.a.picker = .none;
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"Mutate":{},"QueueCommand":{}}
+    , .{});
+    h.a.engine.state = .connected;
+    h.a.composer.set("hey there");
+    h.a.send();
+    h.t.settle(1);
+
+    var saw_run = false;
+    for (h.a.engine.sent.items) |frame| {
+        if (std.mem.indexOf(u8, frame, "\"QueueCommand\"") != null or std.mem.indexOf(u8, frame, "\"createChat\"") != null) {
+            if (std.mem.indexOf(u8, frame, "\"QueueCommand\"") != null) saw_run = true;
+            try testing.expect(std.mem.indexOf(u8, frame, "\"reasoning\":\"xhigh\"") == null);
+        }
+    }
+    try testing.expect(saw_run);
+
+    // Stale xhigh on a narrower Graff model (MiMo: ["none","high"]) must never send "xhigh".
+    h.a.select(null, null);
+    h.a.setModel("xiaomi/mimo-v2.6-pro");
+    if (h.a.new_reasoning) |old| h.a.gpa.free(old);
+    h.a.new_reasoning = try h.a.gpa.dupe(u8, "xhigh");
+    try testing.expectEqualStrings("high", h.a.target().reasoning.?);
+    const before_mimo = h.a.engine.sent.items.len;
+    h.a.composer.set("hello mimo");
+    h.a.send();
+    h.t.settle(1);
+    var saw_mimo_run = false;
+    for (h.a.engine.sent.items[before_mimo..]) |frame| {
+        if (std.mem.indexOf(u8, frame, "\"QueueCommand\"") != null) saw_mimo_run = true;
+        try testing.expect(std.mem.indexOf(u8, frame, "\"reasoning\":\"xhigh\"") == null);
+    }
+    try testing.expect(saw_mimo_run);
+
+    // Existing chat saved with stale xhigh on Flint must also drop unsupported reasoning on send.
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"stale-flint","deviceId":"synthetic-device","title":"Flint chat","spaceId":"synthetic-project","archived":false,
+        \\  "config":{"harness":"graff","model":"nanoattention/flint","reasoning":"xhigh","modelOptions":{}}}]
+    , .{});
+    defer chats.deinit();
+    try h.a.chats.replace(chats.value);
+    h.a.openChatInTab("stale-flint");
+    try testing.expect(h.a.target().reasoning == null);
+    const before_existing = h.a.engine.sent.items.len;
+    h.a.composer.set("retry flint");
+    h.a.send();
+    h.t.settle(1);
+    var saw_existing_run = false;
+    for (h.a.engine.sent.items[before_existing..]) |frame| {
+        if (std.mem.indexOf(u8, frame, "\"QueueCommand\"") != null) saw_existing_run = true;
+        try testing.expect(std.mem.indexOf(u8, frame, "\"reasoning\":\"xhigh\"") == null);
+    }
+    try testing.expect(saw_existing_run);
+
+    // Non-graff agent whose catalog omits per-model levels still falls back to its agent ladder.
+    h.a.select(null, null);
+    h.a.setHarness("claude-code");
+    h.a.gpa.free(h.a.models_for);
+    h.a.models_for = try h.a.gpa.dupe(u8, "claude-code");
+    const agent_only_models = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"claude-synthetic","label":"Claude Synthetic","maker":"anthropic","billing":"plan","reasoningLevels":[]}]
+    , .{});
+    defer agent_only_models.deinit();
+    try h.a.models.replace(agent_only_models.value);
+    h.a.setModel("claude-synthetic");
+    try testing.expectEqual(@as(usize, 2), h.a.levelsOf("claude-synthetic").len);
+    try testing.expectEqualStrings("high", h.a.target().reasoning.?);
+}

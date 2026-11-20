@@ -250,9 +250,7 @@ fn models(a: *const App) []const workspace.Model {
 }
 
 fn ladder(a: *const App, m: workspace.Model) []const []const u8 {
-    if (m.levels.len > 0) return m.levels;
-    if (harness(a, "graff")) |h| return h.levels;
-    return &.{};
+    return @import("app_agent.zig").levelsForModel(a, "graff", m);
 }
 
 /// The model and rung picked, if Graff's models are listed.

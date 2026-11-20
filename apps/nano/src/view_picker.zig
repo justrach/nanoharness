@@ -205,10 +205,10 @@ fn reset(c: *ui.Context, a: *App) void {
 }
 
 /// The model `r` as the page shows it: its levels, else its agent's
-/// ladder (`with_agent_ladder`).
+/// ladder (`with_agent_ladder`) only when the agent does not advertise
+/// per-model ladders.
 fn levelsOf(a: *App, harness: []const u8, m: workspace.Model) []const []const u8 {
-    if (m.levels.len > 0) return m.levels;
-    return if (std.mem.eql(u8, harness, a.target().harness)) a.levelsOf(m.id) else &.{};
+    return @import("app_agent.zig").levelsForModel(a, harness, m);
 }
 
 /// A click on a model: its page, the slider where its reasoning is now
