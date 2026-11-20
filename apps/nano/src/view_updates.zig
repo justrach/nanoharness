@@ -49,6 +49,7 @@ pub const State = struct {
     graff_highlights_total: usize = 0,
     graff_card_open: bool = true,
     graff_updating_manual: bool = false,
+    graff_schedule: graff_update.Schedule = .{},
 
     restart_dismissed: [32]u8 = undefined,
     restart_dismissed_len: usize = 0,
@@ -133,7 +134,7 @@ pub const State = struct {
             whatsNew(&s.graff_highlights, &s.graff_highlight_lens, out, from, to)
         else
             0;
-        s.graff_card_open = true;
+        s.graff_card_open = kind != .updating;
         s.graff_updating_manual = false;
         s.dirty = true;
     }
@@ -412,7 +413,11 @@ pub fn tick(a: *App) ?f32 {
         a.updates.app_checking = a.release.schedule.in_flight;
         a.redraw();
     }
-    return a.release.schedule.delaySeconds(a.nowMs());
+    if (graff_update.startIfDue(a)) a.redraw();
+    const now = a.nowMs();
+    const app_delay = a.release.schedule.delaySeconds(now);
+    const graff_delay = a.updates.graff_schedule.delaySeconds(now);
+    return @min(app_delay, graff_delay);
 }
 
 pub fn checkForUpdates(a: *App) void {
@@ -421,6 +426,7 @@ pub fn checkForUpdates(a: *App) void {
         initialize(a);
         a.release.start();
         a.updates.app_checking = a.release.schedule.in_flight;
+        graff_update.checkNow(a);
     }
     a.redraw();
 }
