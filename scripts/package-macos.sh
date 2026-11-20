@@ -110,6 +110,29 @@ else
   rm -rf "$CODEDB_TMP"
 fi
 echo "bundled $("$APP/Contents/Resources/bin/codedb" --version | head -1)"
+# flint (justrach/nanoattention) ships inside Apple Silicon macOS bundles only
+# (Contents/Resources/bin/flint) for managed Native Flint local inference.
+# FLINT_BINARY overrides; otherwise the latest nanoattention release, checked
+# against its checksums.sha256.
+if [[ "$ARCH" == "arm64" ]]; then
+  if [[ -n "${FLINT_BINARY:-}" ]]; then
+    [[ -x "$FLINT_BINARY" ]] || { echo "FLINT_BINARY is not executable" >&2; exit 1; }
+    install -m 755 "$FLINT_BINARY" "$APP/Contents/Resources/bin/flint"
+  else
+    FLINT_ASSET="flint-aarch64-macos.tar.gz"
+    FLINT_URL="${FLINT_RELEASES_URL:-https://github.com/justrach/nanoattention/releases/latest/download}"
+    FLINT_TMP="$(mktemp -d)"
+    curl -fsSL "$FLINT_URL/$FLINT_ASSET" -o "$FLINT_TMP/$FLINT_ASSET"
+    curl -fsSL "$FLINT_URL/checksums.sha256" -o "$FLINT_TMP/checksums.sha256"
+    (cd "$FLINT_TMP" && grep " $FLINT_ASSET\$" checksums.sha256 | shasum -a 256 -c -)
+    tar -xzf "$FLINT_TMP/$FLINT_ASSET" -C "$FLINT_TMP"
+    FLINT_SRC="$FLINT_TMP/flint-aarch64-macos/flint"
+    [[ -f "$FLINT_SRC" ]] || FLINT_SRC="$FLINT_TMP/flint"
+    install -m 755 "$FLINT_SRC" "$APP/Contents/Resources/bin/flint"
+    rm -rf "$FLINT_TMP"
+  fi
+  echo "bundled flint ($APP/Contents/Resources/bin/flint)"
+fi
 
 # Guard against host-stamped macOS deployment targets (e.g. building on a
 # newer macOS host without pinning minos, which breaks launch on older macOS).
@@ -141,6 +164,9 @@ check_macho_minos "$APP/Contents/MacOS/harness-engine" "$MIN_MACOS"
 check_macho_minos "$APP/Contents/Resources/bin/harness-github-runners" "$MIN_MACOS"
 check_macho_minos "$APP/Contents/Resources/bin/graff" "15.0"
 check_macho_minos "$APP/Contents/Resources/bin/codedb" "15.0"
+if [[ -f "$APP/Contents/Resources/bin/flint" ]]; then
+  check_macho_minos "$APP/Contents/Resources/bin/flint" "15.0"
+fi
 
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/apps/nano/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
@@ -184,6 +210,11 @@ if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   codesign --verify --strict "$APP/Contents/Resources/bin/codedb" 2>/dev/null &&
     codesign -dv "$APP/Contents/Resources/bin/codedb" 2>&1 | grep -q "Authority=Developer ID Application" ||
     codesign --force --options runtime --timestamp ${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"} --sign "$CODESIGN_IDENTITY" "$APP/Contents/Resources/bin/codedb"
+  if [[ -f "$APP/Contents/Resources/bin/flint" ]]; then
+    codesign --verify --strict "$APP/Contents/Resources/bin/flint" 2>/dev/null &&
+      codesign -dv "$APP/Contents/Resources/bin/flint" 2>&1 | grep -q "Authority=Developer ID Application" ||
+      codesign --force --options runtime --timestamp ${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"} --sign "$CODESIGN_IDENTITY" "$APP/Contents/Resources/bin/flint"
+  fi
   # The entitlements let dictation reach the microphone, and dropped or
   # picked files from any folder stay readable, under the hardened runtime
   # (dist/macos/Harness.entitlements).

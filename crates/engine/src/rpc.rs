@@ -801,6 +801,7 @@ pub struct EngineRpc {
     harness_updates: Option<crate::harness_updates::HarnessUpdateCoordinator>,
     local_import: Option<crate::local_import::LocalImporter>,
     external_history: Option<crate::external_history::ExternalHistory>,
+    flint: Option<std::sync::Arc<crate::flint::FlintManager>>,
     engine_info: EngineInfo,
 }
 
@@ -850,6 +851,7 @@ impl EngineRpc {
             harness_updates: None,
             local_import: None,
             external_history: None,
+            flint: None,
             engine_info,
         }
     }
@@ -866,6 +868,11 @@ impl EngineRpc {
 
     pub fn with_localhost_view(mut self, view: crate::localhost_view::LocalhostView) -> Self {
         self.localhost_view = Some(view);
+        self
+    }
+
+    pub fn with_flint(mut self, flint: std::sync::Arc<crate::flint::FlintManager>) -> Self {
+        self.flint = Some(flint);
         self
     }
 
@@ -1626,6 +1633,9 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_GRAFF_DRAFT_SUBAGENTS
             | methods::GET_GRAFF_COMPACT_AT
             | methods::SET_GRAFF_COMPACT_AT
+            | methods::GET_NATIVE_FLINT_STATUS
+            | methods::START_NATIVE_FLINT
+            | methods::STOP_NATIVE_FLINT
             | methods::GET_KEEP_AWAKE
             | methods::SET_KEEP_AWAKE
             | methods::SET_HARNESS_ENABLED
@@ -2218,6 +2228,33 @@ impl RpcService for EngineRpc {
                     .set_graff_compact_at(p.pct)
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.graff_compact_at())
+            }
+            methods::GET_NATIVE_FLINT_STATUS => {
+                let flint = self
+                    .flint
+                    .as_ref()
+                    .ok_or_else(|| RpcError::Failed("Native Flint is unavailable on this engine".into()))?;
+                RpcReply::value(&flint.status())
+            }
+            methods::START_NATIVE_FLINT => {
+                let flint = self
+                    .flint
+                    .as_ref()
+                    .ok_or_else(|| RpcError::Failed("Native Flint is unavailable on this engine".into()))?;
+                let p: crate::flint::StartNativeFlintParams = if params.is_null() {
+                    Default::default()
+                } else {
+                    parse_params(params)?
+                };
+                let status = flint.start(p).await.map_err(RpcError::Failed)?;
+                RpcReply::value(&status)
+            }
+            methods::STOP_NATIVE_FLINT => {
+                let flint = self
+                    .flint
+                    .as_ref()
+                    .ok_or_else(|| RpcError::Failed("Native Flint is unavailable on this engine".into()))?;
+                RpcReply::value(&flint.stop())
             }
             methods::SET_TITLE_SETTINGS => {
                 let p: crate::registry::TitleSettings = parse_params(params)?;

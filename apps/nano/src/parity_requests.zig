@@ -122,6 +122,10 @@ pub fn cases(gpa: std.mem.Allocator) ![]Case {
         try case(gpa, "dismiss an agent CLI update", r.dismissHarnessUpdate("claude-code", "2.1.322", "host-parity"), false),
         try case(gpa, "set agent CLI auto-update policy", r.setHarnessUpdatePolicy("claude-code", true, "host-parity"), false),
         try case(gpa, "generate custom theme and animated backdrop", r.generateCustomTheme("kyoto rain at midnight", true, null), false),
+        // Native Flint managed local server (macOS Apple Silicon).
+        try case(gpa, "inspect Native Flint status and RAM tier", r.nativeFlintStatus(null), false),
+        try case(gpa, "start Native Flint with nonexistent synthetic checkpoint", r.startNativeFlint("$DIR/no-flint-weights", 8192, null), false),
+        try case(gpa, "stop Native Flint server", r.stopNativeFlint(null), false),
     };
     return gpa.dupe(Case, &list);
 }

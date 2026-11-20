@@ -50,6 +50,30 @@ pub fn isView(p: *const tr.Part) bool {
     return p.kind == .tool and p.saved_view != null;
 }
 
+/// Whether a turn's compact work group defaults to open.
+/// Streaming turns stay open. Completed turns with a reply, saved view,
+/// error, question, or media fold closed; a completed turn with only folded
+/// work (tools/reasoning and no visible reply) stays open so it never
+/// collapses to an empty `> Worked for …` line.
+pub fn defaultWorkOpen(parts: []const tr.Part, streaming: bool) bool {
+    if (streaming) return true;
+    const reply = replyStart(parts, false);
+    if (reply != null) return false;
+    var has_work = false;
+    for (parts, 0..) |*p, i| {
+        if (isWork(i, p, reply)) {
+            if (isView(p)) return false;
+            has_work = true;
+            continue;
+        }
+        switch (p.kind) {
+            .text, .reasoning => if (!blank(p)) return false,
+            else => return false,
+        }
+    }
+    return has_work;
+}
+
 /// The index of the part the answer starts at: the first text of a
 /// complete reply's trailing text, with nothing left unresolved. Narration
 /// before more work, an error, or a turn still running has none.
@@ -170,4 +194,22 @@ test "worked for: at most two units, at least a second" {
     try testing.expectEqual(@as(?i64, 1), workedSecs(&e));
     e.duration_ms = 0;
     try testing.expectEqual(@as(?i64, null), workedSecs(&e));
+}
+
+test "completed work-only turn defaults open so it never collapses to an empty row" {
+    var work_only = try entry(.complete, &.{ .{ .reasoning, "Planning" }, .{ .tool, "" }, .{ .text, "   \n" } });
+    defer work_only.deinit(testing.allocator);
+    try testing.expect(defaultWorkOpen(work_only.parts.items, false));
+
+    var with_reply = try entry(.complete, &.{ .{ .tool, "" }, .{ .text, "Done." } });
+    defer with_reply.deinit(testing.allocator);
+    try testing.expect(!defaultWorkOpen(with_reply.parts.items, false));
+
+    var with_error = try entry(.complete, &.{ .{ .tool, "" }, .{ .@"error", "failed" } });
+    defer with_error.deinit(testing.allocator);
+    try testing.expect(!defaultWorkOpen(with_error.parts.items, false));
+
+    var live_turn = try entry(.streaming, &.{ .{ .tool, "" }, .{ .text, "Streaming" } });
+    defer live_turn.deinit(testing.allocator);
+    try testing.expect(defaultWorkOpen(live_turn.parts.items, true));
 }

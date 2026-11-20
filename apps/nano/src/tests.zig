@@ -86,6 +86,7 @@ test {
     _ = @import("view_agent_updates.zig");
     _ = @import("view_settings_agents.zig");
     _ = @import("native_flint.zig");
+    _ = @import("tests_ui_native_flint.zig");
     _ = @import("view_setup.zig");
     _ = @import("accounts.zig");
     _ = @import("view_settings_accounts.zig");

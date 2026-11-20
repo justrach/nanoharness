@@ -131,6 +131,12 @@ struct HarnessPrefsFile {
     /// graff's automatic compaction point, percent of the context window.
     #[serde(skip_serializing_if = "Option::is_none")]
     graff_compact_at: Option<u8>,
+    /// Native Flint checkpoint directory preference (macOS Apple Silicon).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_flint_checkpoint_dir: Option<String>,
+    /// Native Flint context window preference (macOS Apple Silicon).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_flint_context: Option<u32>,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing, deserialize_with = "known_harnesses_opt")]
@@ -201,6 +207,8 @@ pub struct HarnessRegistry {
     graff_draft_subagents: Arc<AtomicBool>,
     /// The spawn-time view of `graff_compact_at`; 0 = graff's default.
     graff_compact_at: Arc<AtomicU8>,
+    /// Live managed Native Flint loopback endpoint for graff ACP spawns.
+    graff_native_flint: Arc<std::sync::RwLock<Option<harness_adapters::NativeFlintEnv>>>,
     /// Live view of `keep_awake` for the engine's power-assertion task.
     keep_awake: tokio::sync::watch::Sender<bool>,
     /// Where the prefs persist; `None` (tests, bare registries) skips writes.
@@ -222,6 +230,7 @@ impl HarnessRegistry {
             prefs: Mutex::new(HarnessPrefsFile::default()),
             graff_draft_subagents: Arc::new(AtomicBool::new(false)),
             graff_compact_at: Arc::new(AtomicU8::new(0)),
+            graff_native_flint: Arc::new(std::sync::RwLock::new(None)),
             keep_awake: tokio::sync::watch::Sender::new(false),
             prefs_path: Mutex::new(None),
         }
@@ -442,6 +451,34 @@ impl HarnessRegistry {
         self.prefs().graff_compact_at
     }
 
+    pub fn native_flint_checkpoint_dir(&self) -> Option<String> {
+        self.prefs().native_flint_checkpoint_dir.clone()
+    }
+
+    pub fn native_flint_context(&self) -> Option<u32> {
+        self.prefs().native_flint_context
+    }
+
+    pub fn set_native_flint_prefs(&self, checkpoint_dir: Option<String>, context: Option<u32>) {
+        {
+            let mut prefs = self.prefs();
+            if let Some(dir) = checkpoint_dir {
+                prefs.native_flint_checkpoint_dir = Some(dir);
+            }
+            if let Some(ctx) = context {
+                prefs.native_flint_context = Some(ctx);
+            }
+        }
+        self.persist_prefs();
+    }
+
+    pub fn set_graff_native_flint(&self, env: Option<harness_adapters::NativeFlintEnv>) {
+        *self
+            .graff_native_flint
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = env;
+    }
+
     /// `None` returns graff to its own default. Applies to graff processes
     /// started after the change; a running session keeps its point until it
     /// restarts (or the user runs `/compact-at` in it).
@@ -604,6 +641,7 @@ pub fn default_registry() -> HarnessRegistry {
     // from the live catalog; session/new does not yet advertise thought_level.
     let graff_draft_subagents = registry.graff_draft_subagents.clone();
     let graff_compact_at = registry.graff_compact_at.clone();
+    let graff_native_flint = registry.graff_native_flint.clone();
     registry.register_lazy(
         HarnessDescriptor {
             id: HarnessId::Graff,
@@ -627,7 +665,8 @@ pub fn default_registry() -> HarnessRegistry {
             Ok(Arc::new(
                 harness_adapters::AcpHarness::graff()
                     .with_graff_draft_subagents(graff_draft_subagents.clone())
-                    .with_graff_compact_at(graff_compact_at.clone()),
+                    .with_graff_compact_at(graff_compact_at.clone())
+                    .with_graff_native_flint(graff_native_flint.clone()),
             ) as Arc<dyn Harness>)
         }),
     );

@@ -901,7 +901,8 @@ fn workLine(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: 
         if (a.view.groups.fetchRemove(live_key)) |kv| a.gpa.free(kv.key);
     }
     const override = if (live) live_key else settled_key;
-    const open = a.view.groups.get(override) orelse if (live) true else (a.view.groups.get(key) orelse a.view.groups.get(legacy) orelse false);
+    const default_open = compact.defaultWorkOpen(e.parts.items, live);
+    const open = a.view.groups.get(override) orelse if (live) true else (a.view.groups.get(key) orelse a.view.groups.get(legacy) orelse default_open);
     const box = ui.div(c).column().wFull();
     defer box.end();
     {

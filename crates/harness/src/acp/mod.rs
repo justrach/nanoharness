@@ -1078,6 +1078,15 @@ enum Launch {
     },
 }
 
+/// Live managed Native Flint loopback endpoint injected into Graff ACP spawns
+/// when the engine's local Flint server is running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeFlintEnv {
+    pub url: String,
+    pub api_key: String,
+    pub context: u32,
+}
+
 /// The ACP harness. Construct with [`AcpHarness::grok`]; tests point it at a
 /// fake agent with [`AcpHarness::with_executable`].
 pub struct AcpHarness {
@@ -1085,6 +1094,8 @@ pub struct AcpHarness {
     graff_draft_subagents: Option<Arc<AtomicBool>>,
     /// Settings → graff's compaction point (percent; 0 = graff's default).
     graff_compact_at: Option<Arc<AtomicU8>>,
+    /// Managed local Native Flint loopback server env for graff spawns.
+    graff_native_flint: Option<Arc<std::sync::RwLock<Option<NativeFlintEnv>>>>,
     executable: Option<PathBuf>,
     /// Override of the agent's on-disk sessions root (grok's
     /// `~/.grok/sessions`), where subagent transcripts are tailed from.
@@ -1114,6 +1125,7 @@ impl AcpHarness {
             spec,
             graff_draft_subagents: None,
             graff_compact_at: None,
+            graff_native_flint: None,
             executable: None,
             sessions_root: None,
             interrupt_grace: Duration::from_secs(2),
@@ -1158,6 +1170,25 @@ impl AcpHarness {
     pub fn with_graff_compact_at(mut self, pct: Arc<AtomicU8>) -> Self {
         self.graff_compact_at = Some(pct);
         self
+    }
+
+    pub fn with_graff_native_flint(
+        mut self,
+        flint: Arc<std::sync::RwLock<Option<NativeFlintEnv>>>,
+    ) -> Self {
+        self.graff_native_flint = Some(flint);
+        self
+    }
+
+    fn graff_native_flint_env(&self) -> Option<NativeFlintEnv> {
+        if self.spec.id != HarnessId::Graff {
+            return None;
+        }
+        self.graff_native_flint
+            .as_ref()?
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
     }
 
     /// The compaction point to pass graff, unless the user's own
@@ -1555,6 +1586,17 @@ impl AcpHarness {
             }
             if let Some(pct) = self.graff_compact_at_env() {
                 cmd.env("GRAFF_COMPACT_PCT", pct.to_string());
+            }
+            if let Some(flint) = self.graff_native_flint_env() {
+                if std::env::var_os("GRAFF_NANOATTENTION_URL").is_none() {
+                    cmd.env("GRAFF_NANOATTENTION_URL", &flint.url);
+                }
+                if std::env::var_os("NANOATTENTION_API_KEY").is_none() {
+                    cmd.env("NANOATTENTION_API_KEY", &flint.api_key);
+                }
+                if std::env::var_os("GRAFF_CONTEXT").is_none() {
+                    cmd.env("GRAFF_CONTEXT", flint.context.to_string());
+                }
             }
             // Which Harness and which computer sent each gateway request.
             for (key, value) in graff_client::env() {
@@ -5421,6 +5463,56 @@ mod tests {
             .with_graff_compact_at(pct.clone())
             .configure_adapter_environment(&mut grok, Path::new("grok"));
         assert_eq!(env_of(&mut grok), None);
+    }
+
+    #[test]
+    fn graff_native_flint_env_reaches_only_the_graff_child() {
+        let env_of = |cmd: &mut Command, name: &str| {
+            cmd.as_std_mut()
+                .get_envs()
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+        };
+        let slot = Arc::new(std::sync::RwLock::new(None));
+        let harness = AcpHarness::graff().with_graff_native_flint(slot.clone());
+
+        let mut stopped = Command::new("graff");
+        harness.configure_adapter_environment(&mut stopped, Path::new("graff"));
+        assert_eq!(env_of(&mut stopped, "GRAFF_NANOATTENTION_URL"), None);
+        assert_eq!(env_of(&mut stopped, "NANOATTENTION_API_KEY"), None);
+        assert_eq!(env_of(&mut stopped, "GRAFF_CONTEXT"), None);
+
+        *slot.write().unwrap() = Some(NativeFlintEnv {
+            url: "http://127.0.0.1:41234/v1/chat/completions".into(),
+            api_key: "ephemeral-test-token".into(),
+            context: 32_768,
+        });
+
+        let mut running = Command::new("graff");
+        harness.configure_adapter_environment(&mut running, Path::new("graff"));
+        if std::env::var_os("GRAFF_NANOATTENTION_URL").is_none() {
+            assert_eq!(
+                env_of(&mut running, "GRAFF_NANOATTENTION_URL").as_deref(),
+                Some("http://127.0.0.1:41234/v1/chat/completions")
+            );
+        }
+        if std::env::var_os("NANOATTENTION_API_KEY").is_none() {
+            assert_eq!(
+                env_of(&mut running, "NANOATTENTION_API_KEY").as_deref(),
+                Some("ephemeral-test-token")
+            );
+        }
+        if std::env::var_os("GRAFF_CONTEXT").is_none() {
+            assert_eq!(env_of(&mut running, "GRAFF_CONTEXT").as_deref(), Some("32768"));
+        }
+
+        let mut grok = Command::new("grok");
+        AcpHarness::grok()
+            .with_graff_native_flint(slot)
+            .configure_adapter_environment(&mut grok, Path::new("grok"));
+        assert_eq!(env_of(&mut grok, "GRAFF_NANOATTENTION_URL"), None);
+        assert_eq!(env_of(&mut grok, "NANOATTENTION_API_KEY"), None);
+        assert_eq!(env_of(&mut grok, "GRAFF_CONTEXT"), None);
     }
 
     #[test]

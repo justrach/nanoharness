@@ -53,6 +53,11 @@ pub mod methods {
     /// window; `null` is graff's own default (80%).
     pub const GET_GRAFF_COMPACT_AT: &str = "GetGraffCompactAt";
     pub const SET_GRAFF_COMPACT_AT: &str = "SetGraffCompactAt";
+    /// Managed local Native Flint (nanoattention) loopback server on Apple
+    /// Silicon macOS: status + RAM assessment, explicit start, explicit stop.
+    pub const GET_NATIVE_FLINT_STATUS: &str = "GetNativeFlintStatus";
+    pub const START_NATIVE_FLINT: &str = "StartNativeFlint";
+    pub const STOP_NATIVE_FLINT: &str = "StopNativeFlint";
     /// Keep the device awake while its agents work. Replies
     /// `{ enabled, supported }`; `supported: false` where the engine cannot
     /// hold a sleep assertion (clients hide the setting there).

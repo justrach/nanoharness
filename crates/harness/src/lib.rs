@@ -533,7 +533,7 @@ pub(crate) fn crash_message(
     }
 }
 
-pub use acp::AcpHarness;
+pub use acp::{AcpHarness, NativeFlintEnv};
 pub use acp::exo_bridge::serve as serve_exo_acp;
 pub use acp::graff_bot::bot_command as graff_bot_command;
 pub use acp::graff_client::set_device_name as set_graff_device_name;

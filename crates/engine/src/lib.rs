@@ -30,6 +30,9 @@ mod device_login;
 pub mod diff_sync;
 pub mod doc_host;
 pub mod external_history;
+pub mod flint;
+pub mod flint_policy;
+pub mod flint_protocol;
 pub mod git_actions;
 pub mod github_repository;
 mod graff_logins;
@@ -177,6 +180,7 @@ pub struct EngineCore {
     /// Conversations from other tools on this device, importable as chats.
     pub external_history: external_history::ExternalHistory,
     pub harness_updates: harness_updates::HarnessUpdateCoordinator,
+    pub flint: Arc<flint::FlintManager>,
     workspace_scope: WorkspaceScope,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
@@ -357,6 +361,10 @@ impl EngineCore {
         let agent_accounts = AgentAccounts::new(agent_accounts_config);
         let harness_updates =
             harness_updates::HarnessUpdateCoordinator::new(data_dir, registry.clone());
+        let flint = Arc::new(flint::FlintManager::new(
+            data_dir.to_path_buf(),
+            registry.clone(),
+        ));
         sessions.set_titles(TitleGenerator::new(
             workspace.clone(),
             registry.clone(),
@@ -391,6 +399,7 @@ impl EngineCore {
             local_import,
             external_history,
             harness_updates,
+            flint,
             workspace_scope: profile.scope(),
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
@@ -553,7 +562,8 @@ impl EngineCore {
         .with_auth(self.auth())
         .with_simulators(self.simulators.clone())
         .with_localhost_view(self.localhost_view.clone())
-        .with_previews(self.previews.clone());
+        .with_previews(self.previews.clone())
+        .with_flint(self.flint.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }
@@ -593,6 +603,7 @@ impl EngineCore {
         // boot resumes it) must not wait behind anything else. A caller with
         // a deadline (the app quitting, a service stop) can be cut off later.
         self.sessions.shutdown().await;
+        self.flint.stop();
         self.previews.shutdown().await;
         self.terminals.shutdown();
         self.simulators.shutdown().await;

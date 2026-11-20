@@ -149,3 +149,24 @@ test "Nanoui request: resumed work folds on completion even after a manual reope
     try testing.expect(!h.t.containsText("Looking at the synthetic fixtures first."));
     try testing.expect(h.t.containsText("The synthetic fixtures are tidy now."));
 }
+
+const work_only_turn =
+    \\{"reset":[
+    \\ {"id":"u","role":"user","parts":[{"id":"p","kind":"text","text":"Audit the synthetic module"}]},
+    \\ {"id":"a","role":"assistant","status":"complete","durationMs":238000,"parts":[
+    \\  {"id":"r","kind":"reasoning","text":"Checking synthetic module outputs"},
+    \\  {"id":"x","kind":"tool","resolved":true,"call":{"kind":"exec","command":"zig build test"}}]}]}
+;
+
+test "compact mode keeps a completed work-only turn open instead of hiding it behind Worked for" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try h.apply(work_only_turn);
+    try testing.expect(h.t.hasText("Worked for 3m 58s"));
+    try testing.expect(h.t.containsText("Ran 1 command"));
+    // Clicking the header still lets the user collapse it manually.
+    try h.t.clickText("Worked for 3m 58s");
+    h.t.advance(0.5);
+    try testing.expect(!h.t.containsText("Ran 1 command"));
+}

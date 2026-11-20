@@ -179,22 +179,182 @@ pub fn screenAccess(c: *ui.Context, a: *App, k: theme.Colors) void {
     set.space(c, 4);
 }
 
-/// Setup guidance, not a claim that the selected device has a runtime.
-/// Opening the public download page is the only action this card performs.
-pub fn nativeFlintCard(c: *ui.Context, k: theme.Colors) void {
+/// Managed local Native Flint server with unified-memory guard (macOS only).
+pub fn nativeFlintCard(c: *ui.Context, a: *App, k: theme.Colors) void {
+    if (comptime @import("builtin").os.tag != .macos) return;
     const flint = @import("native_flint.zig");
+    const p = &a.view.agents;
+    const st = &p.flint_status;
+    const w = cardInner();
     const cd = card(c, k, 20);
     defer cd.end();
     const in = ui.div(c).column().wFull().p(16);
     defer in.end();
-    const w = cardInner();
-    title(c, k, flint.name, w);
+
+    const ready = p.flint == .ready;
+    const running = ready and st.state == .running;
+    const ctx = flint.effectiveContext(st, p.flint_context);
+    const has_custom = p.flint_custom_dir.items.len > 0;
+    const can_start = ready and flint.canStart(st, ctx, has_custom);
+    const can_toggle = ready and !p.flint_busy and (running or can_start);
+    const pill_label = if (ready) flint.statusBadge(st, p.flint_busy) else if (p.flint == .failed) "Unavailable" else "Checking…";
+
+    // Header row: title + live status pill + explicit On/Off server switch.
+    {
+        const hdr = ui.div(c).row().wFull().gap(12).itemsCenter();
+        defer hdr.end();
+        const badge_w = badgeW(c, pill_label);
+        const tw = @max(w - 12 - 32 - 8 - badge_w, 120);
+        {
+            const col = ui.div(c).column().w(tw);
+            defer col.end();
+            const top = ui.div(c).row().gap(8).itemsCenter();
+            defer top.end();
+            title(c, k, flint.name, @max(tw - 10, 80));
+            ui.key(c, "native-flint-status-badge");
+            var sb = ui.div(c).row().px(8).py(2).roundedFull().itemsCenter().gap(5);
+            if (running) {
+                sb = sb.bg(k.success.alpha(0.12));
+            } else if (ready and (!st.ram_supported or !st.platform_supported)) {
+                sb = sb.bg(k.warning.alpha(0.12));
+            } else {
+                sb = sb.border(k.border).borderW(1);
+            }
+            defer sb.end();
+            if (running) kit.dot(c, 5, k.success);
+            ui.text(c, pill_label, set.st(c, 10.5, .{ .color = if (running)
+                k.success_muted.alpha(0.95)
+            else if (ready and (!st.ram_supported or !st.platform_supported))
+                k.warning.alpha(0.95)
+            else
+                k.muted }));
+        }
+        ui.spacer(c);
+        ui.key(c, "native-flint-toggle");
+        if (toggle(c, k, running, can_toggle)) {
+            if (running) page.stopFlint(a) else page.startFlint(a);
+        }
+    }
     subtitleIn(c, k, flint.description, w);
-    set.space(c, 8);
-    subtitleIn(c, k, flint.setup, w);
+
+    // Unified-memory headroom panel.
+    if (ready) {
+        set.space(c, 12);
+        const mem_box = ui.div(c).column().wFull().p(12).gap(6).rounded(10).bg(k.ink(0.03)).border(k.border).borderW(1);
+        defer mem_box.end();
+        const inner_w = @max(w - 26, 120);
+        const summary_buf = c.alloc().alloc(u8, 128) catch return;
+        const summary = flint.ramSummary(summary_buf, st, ctx);
+        ui.text(c, summary, set.st(c, 12, .{ .weight = .medium, .wrap = true, .color = k.text }));
+        if (st.platform_supported and st.total_ram_gb > 0) {
+            const frac = flint.ramFraction(st, ctx);
+            const bar_color = if (!st.ram_supported or frac >= 0.88)
+                k.danger
+            else if (st.ram_tier == .tight or frac >= 0.68)
+                k.warning
+            else
+                k.success;
+            const meter = ui.div(c).row().w(inner_w).h(5).roundedFull().bg(k.ink(0.08)).clip();
+            defer meter.end();
+            if (frac > 0) _ = c.leaf(.{
+                .width = .{ .px = inner_w * @max(frac, 0.02) },
+                .height = .{ .px = 5 },
+                .radius = 2.5,
+                .background = bar_color.alpha(0.85),
+            }, .none, null);
+        }
+        const adv = ui.div(c).column().w(inner_w);
+        defer adv.end();
+        ui.text(c, flint.ramAdvice(st), set.st(c, 11.5, .{ .wrap = true, .color = k.muted }));
+    }
+
+    // RAM-gated context window selector.
+    if (ready and st.platform_supported and st.ram_supported) {
+        set.space(c, 12);
+        const ctx_row = ui.div(c).row().wFull().gap(6).itemsCenter();
+        defer ctx_row.end();
+        ui.text(c, "Context", set.st(c, 12, .{ .weight = .medium, .color = k.text }));
+        set.space(c, 2);
+        for (flint.context_presets) |preset| {
+            const allowed = preset <= st.max_context;
+            const selected = ctx == preset;
+            const interactive = allowed and !running and !p.flint_busy;
+            ui.key(c, c.print("native-flint-ctx-{d}", .{preset}));
+            var pill = ui.div(c).row().roundedFull();
+            pill = if (selected)
+                pill.px(9).py(3).bg(k.success.alpha(0.14))
+            else
+                pill.px(9).py(3).border(k.border).borderW(1);
+            if (!allowed or (running and !selected)) pill = pill.opacity(0.32);
+            defer pill.end();
+            const hot = interactive and !selected and pill.hovered();
+            ui.text(c, flint.contextLabel(preset), set.st(c, 11, .{ .color = if (selected)
+                k.success_muted.alpha(0.95)
+            else if (hot)
+                k.text
+            else
+                k.muted }));
+            if (interactive and !selected and pill.clicked()) {
+                p.flint_context = preset;
+                a.redraw();
+            }
+        }
+        if (running) {
+            ui.spacer(c);
+            ui.text(c, "Stop to change", set.st(c, 11, .{ .color = k.muted }));
+        }
+    }
+
+    // Checkpoint folder status & actions.
     set.space(c, 12);
-    ui.key(c, "native-flint-download");
-    if (shots.action(c, k, flint.download_label)) _ = nanoui.shell.openUrl(flint.download_url);
+    if (ready and st.platform_supported) {
+        const shown_dir = if (has_custom) p.flint_custom_dir.items else st.checkpoint_dir.items;
+        const dir_row = ui.div(c).row().wFull().gap(8).itemsCenter();
+        defer dir_row.end();
+        kit.dot(c, 6, if (st.checkpoint_valid or has_custom) k.success else k.ink(0.22));
+        const label_w = @max(w - 14, 120);
+        const dir_text = if (shown_dir.len > 0)
+            c.print("Weights: {s}", .{shown_dir})
+        else
+            "Weights folder not configured";
+        kit.ellipsisText(c, dir_text, set.st(c, 12, .{ .color = if (st.checkpoint_valid or has_custom) k.text else k.muted }), label_w);
+    }
+
+    if (ready and !st.binary_available and st.platform_supported) {
+        set.space(c, 6);
+        const warn = ui.div(c).column().w(w);
+        defer warn.end();
+        ui.text(c, "Bundled `flint` runtime was not found. Use a release build or set FLINT_BINARY.", set.st(c, 11.5, .{ .wrap = true, .color = k.warning.alpha(0.95) }));
+    } else if (running) {
+        set.space(c, 6);
+        const live_note = ui.div(c).column().w(w);
+        defer live_note.end();
+        ui.text(c, "Active in Graff as " ++ flint.model ++ " · single request at a time.", set.st(c, 11.5, .{ .wrap = true, .color = k.success_muted.alpha(0.9) }));
+    } else if (ready and st.platform_supported and st.ram_supported and !st.checkpoint_valid and !has_custom) {
+        set.space(c, 6);
+        const hint_box = ui.div(c).column().w(w);
+        defer hint_box.end();
+        ui.text(c, if (st.checkpoint_hint.items.len > 0) st.checkpoint_hint.items else flint.setup, set.st(c, 11.5, .{ .wrap = true, .color = k.muted }));
+    }
+
+    if (p.flint_err.items.len > 0) {
+        set.space(c, 8);
+        const eb = ui.div(c).column().w(w);
+        defer eb.end();
+        ui.text(c, p.flint_err.items, set.st(c, 12, .{ .wrap = true, .color = k.danger_muted.alpha(0.9) }));
+    }
+
+    set.space(c, 12);
+    {
+        const actions = ui.div(c).row().wFull().gap(8).itemsCenter();
+        defer actions.end();
+        if (ready and st.platform_supported and st.ram_supported and p.target == null and !running) {
+            ui.key(c, "native-flint-choose-folder");
+            if (shots.action(c, k, "Choose weights folder…")) page.pickFlintFolder(a);
+        }
+        ui.key(c, "native-flint-download");
+        if (shots.action(c, k, flint.download_label)) _ = nanoui.shell.openUrl(flint.download_url);
+    }
 }
 
 /// graff's child agents (`render_graff_draft_subagents`).

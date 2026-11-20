@@ -55,6 +55,10 @@ security-framework = "3"
 # Keep-awake holds an IOKit power assertion named by CFStrings.
 core-foundation = "0.10"
 
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+# Native Flint (justrach/nanoattention) tokenizer for Apple Silicon macOS.
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Threading"] }
 

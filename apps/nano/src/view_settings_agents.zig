@@ -106,11 +106,20 @@ pub const Page = struct {
     /// Screen Recording's Allow was used: System Settings and the restart
     /// instead (macOS asks once).
     screen_requested: bool = false,
+    /// Native Flint managed local server (macOS Apple Silicon only).
+    flint: Phase = .idle,
+    flint_status: @import("native_flint.zig").Status = .{},
+    flint_context: ?u32 = null,
+    flint_custom_dir: std.ArrayList(u8) = .empty,
+    flint_busy: bool = false,
+    flint_call: ?u64 = null,
+    flint_err: std.ArrayList(u8) = .empty,
 
     pub fn deinit(p: *Page, gpa: Allocator) void {
         if (p.list) |*l| l.deinit();
         if (p.title_models) |*m| m.deinit();
-        for ([_]*std.ArrayList(u8){ &p.failure, &p.err, &p.install_notice, &p.titles_failure, &p.models_failure }) |l| l.deinit(gpa);
+        for ([_]*std.ArrayList(u8){ &p.failure, &p.err, &p.install_notice, &p.titles_failure, &p.models_failure, &p.flint_custom_dir, &p.flint_err }) |l| l.deinit(gpa);
+        p.flint_status.deinit(gpa);
         if (p.target) |t| gpa.free(t);
         if (p.title_model) |m| gpa.free(m);
         if (p.sign_in) |*s| s.deinit(gpa);
@@ -162,6 +171,7 @@ pub fn load(a: *App) void {
     loadDraft(a, null);
     loadCompact(a, .read);
     loadAutonomy(a, null);
+    if (comptime @import("builtin").os.tag == .macos) loadFlint(a);
     p.phase = .loading;
     send(a, &p.list_call, "ListHarnesses", .{ .targetDeviceId = p.target }, .of(App, a, onList));
 }
@@ -501,6 +511,104 @@ pub fn setCompact(a: *App, pct: ?u8) void {
     p.err.clearRetainingCapacity();
 }
 
+/// Inspect Native Flint status & host unified memory on the target device.
+pub fn loadFlint(a: *App) void {
+    const p = &a.view.agents;
+    if (!live(a)) return;
+    p.flint = .loading;
+    send(a, &p.flint_call, "GetNativeFlintStatus", .{ .targetDeviceId = p.target }, .of(App, a, onFlint));
+}
+
+pub fn startFlint(a: *App) void {
+    const flint = @import("native_flint.zig");
+    const p = &a.view.agents;
+    if (!live(a) or p.flint_busy) return;
+    p.flint_busy = true;
+    p.flint_err.clearRetainingCapacity();
+    const ctx = flint.effectiveContext(&p.flint_status, p.flint_context);
+    const dir: ?[]const u8 = if (p.flint_custom_dir.items.len > 0)
+        p.flint_custom_dir.items
+    else if (p.flint_status.checkpoint_dir.items.len > 0)
+        p.flint_status.checkpoint_dir.items
+    else
+        null;
+    send(a, &p.flint_call, "StartNativeFlint", .{
+        .checkpointDir = dir,
+        .context = ctx,
+        .targetDeviceId = p.target,
+    }, .of(App, a, onFlintToggle));
+    a.redraw();
+}
+
+pub fn stopFlint(a: *App) void {
+    const p = &a.view.agents;
+    if (!live(a) or p.flint_busy) return;
+    p.flint_busy = true;
+    p.flint_err.clearRetainingCapacity();
+    send(a, &p.flint_call, "StopNativeFlint", .{ .targetDeviceId = p.target }, .of(App, a, onFlintToggle));
+    a.redraw();
+}
+
+pub fn pickFlintFolder(a: *App) void {
+    const p = &a.view.agents;
+    if (p.flint_busy or p.flint_status.state == .running) return;
+    const paths = (nanoui.dialog.open(a.gpa, .{
+        .title = "Choose Flint INT4 weights folder",
+        .button = "Choose",
+        .files = false,
+        .directories = true,
+    }) catch return) orelse return;
+    defer nanoui.dialog.freePaths(a.gpa, paths);
+    if (paths.len == 0) return;
+    setText(a.gpa, &p.flint_custom_dir, paths[0]);
+    p.flint_err.clearRetainingCapacity();
+    a.redraw();
+}
+
+/// Inject a Native Flint status snapshot (tests and visual fixtures).
+pub fn setFlintStatus(a: *App, v: json.Value) void {
+    const p = &a.view.agents;
+    p.flint_status.replaceFromJson(a.gpa, v) catch {
+        p.flint = .failed;
+        setText(a.gpa, &p.flint_err, "Unexpected Native Flint status reply");
+        return;
+    };
+    p.flint = .ready;
+    if (p.flint_context == null and p.flint_status.context > 0) p.flint_context = p.flint_status.context;
+    p.flint_err.clearRetainingCapacity();
+}
+
+fn onFlint(a: *App, id: u64, r: rpc.Reply) void {
+    const p = &a.view.agents;
+    if (!current(&p.flint_call, id)) return;
+    p.flint_busy = false;
+    switch (r) {
+        .ok => |v| setFlintStatus(a, v),
+        .err => |e| {
+            p.flint = .failed;
+            setText(a.gpa, &p.flint_err, friendly(e));
+        },
+        else => {},
+    }
+    a.redraw();
+}
+
+fn onFlintToggle(a: *App, id: u64, r: rpc.Reply) void {
+    const p = &a.view.agents;
+    if (!current(&p.flint_call, id)) return;
+    p.flint_busy = false;
+    switch (r) {
+        .ok => |v| {
+            setFlintStatus(a, v);
+            p.flint_custom_dir.clearRetainingCapacity();
+            if (p.target == null) _ = @import("model_picker.zig").refreshCatalog(a, "graff");
+        },
+        .err => |e| setText(a.gpa, &p.flint_err, friendly(e)),
+        else => {},
+    }
+    a.redraw();
+}
+
 /// `save` writes a level; null reads the device's.
 pub fn loadAutonomy(a: *App, save: ?setup.Autonomy) void {
     const p = &a.view.agents;
@@ -619,6 +727,12 @@ pub fn setTarget(a: *App, target: ?[]const u8) void {
     p.draft_saving = false;
     p.compact = .idle;
     p.compact_saving = false;
+    p.flint = .idle;
+    p.flint_busy = false;
+    p.flint_call = null;
+    p.flint_context = null;
+    p.flint_custom_dir.clearRetainingCapacity();
+    p.flint_err.clearRetainingCapacity();
     p.titles = .idle;
     p.models = .idle;
     p.title_menu = null;
@@ -675,7 +789,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
             rows.list(c, a, k);
         },
     }
-    cards.nativeFlintCard(c, k);
+    cards.nativeFlintCard(c, a, k);
     cards.draftCard(c, a, k);
     cards.botsCard(c, a, k);
     cards.titlesCard(c, a, k);
