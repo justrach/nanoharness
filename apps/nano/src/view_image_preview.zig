@@ -101,20 +101,6 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, bounds: ?ui.Rect) void {
             cache.drag = null;
             a.redraw();
         }
-        if (cache.annotate.active and cache.annotate.count > 0) {
-            if (annotateButton(c, k, "Undo", false)) {
-                cache.annotate.undo();
-                a.redraw();
-            }
-            if (annotateButton(c, k, "Clear", false)) {
-                cache.annotate.clearPins();
-                a.redraw();
-            }
-            if (annotateButton(c, k, c.print("Send feedback ({d})", .{cache.annotate.count}), true)) {
-                sendFeedback(c, a, image);
-                return;
-            }
-        }
         if (cache.copy_status != .none) {
             if (c.time >= cache.copy_until) {
                 cache.copy_status = .none;
@@ -127,20 +113,21 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, bounds: ?ui.Rect) void {
         ui.text(c, c.print("{d:.0}%", .{cache.zoom * 100}), .{ .size = 10.5, .color = k.muted });
     }
     const hint = if (cache.annotate.active)
-        "Click image to drop callout pins · Type notes below · Esc to close"
+        "Click image to drop callout pins · Click a pin to edit its note · Esc to close"
     else
         "Scroll or pinch to zoom · Drag to inspect · Esc to close";
     ui.text(c, hint, .{ .size = 10.5, .color = k.muted });
 
-    const pin_panel_h: f32 = if (cache.annotate.active and cache.annotate.count > 0)
-        @min(124, @as(f32, @floatFromInt(cache.annotate.count)) * 34 + 12)
-    else
-        0;
+    const annotating = cache.annotate.active;
+    // Keep the annotation stage height steady from 0 pins through 8 pins so
+    // dropping pin #1 never shifts or shrinks the image under the user's cursor.
+    const pin_list_h: f32 = if (annotating) 92 else 0;
+    const pin_footer_h: f32 = if (annotating) 36 else 0;
     const area = ui.div(c).column().wFull().grow().h(0).center().clip().control().wheel();
     defer area.end();
     const key = c.print("inspect:{s}:{s}:{x}", .{ image.device, image.path, image.content_hash });
     const natural = ui.imageSize(c, key, image.bytes.items) orelse return;
-    const fit = @min(@max(1, r.w - 42) / natural.w, @max(1, r.h - 148 - pin_panel_h) / natural.h);
+    const fit = @min(@max(1, r.w - 42) / natural.w, @max(1, r.h - 148 - pin_list_h - pin_footer_h) / natural.h);
     const w = @max(1, natural.w * fit);
     const h = @max(1, natural.h * fit);
     const viewport = c.rects.get(c.node(area.index).id) orelse r;
@@ -171,31 +158,75 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, bounds: ?ui.Rect) void {
         if (cache.annotate.active) {
             const stage_rect = c.rects.get(c.node(stage.index).id) orelse pic_rect;
             if (stage.clicked()) {
-                if (annotate.screenToImage(c.input.mouse, stage_rect, part)) |pt| {
+                // Clicking an existing pin focuses its note instead of stacking a duplicate pin.
+                const hit_pin: ?usize = blk_hit: {
+                    for (cache.annotate.pins[0..cache.annotate.count], 0..) |pin, idx| {
+                        const pos = annotate.imageToScreen(.{ .x = pin.x, .y = pin.y }, stage_rect, part) orelse continue;
+                        const dx = (c.input.mouse.x - stage_rect.x) - pos.x;
+                        const dy = (c.input.mouse.y - stage_rect.y) - pos.y;
+                        if (dx * dx + dy * dy <= 14 * 14) break :blk_hit idx;
+                    }
+                    break :blk_hit null;
+                };
+                if (hit_pin) |idx| {
+                    cache.annotate.focus_pin = idx;
+                    a.redraw();
+                } else if (annotate.screenToImage(c.input.mouse, stage_rect, part)) |pt| {
                     _ = cache.annotate.addPin(pt.x, pt.y);
                     a.redraw();
                 }
             }
+            const on_accent = k.onAccent();
             for (cache.annotate.pins[0..cache.annotate.count], 0..) |pin, idx| {
                 const pos = annotate.imageToScreen(.{ .x = pin.x, .y = pin.y }, stage_rect, part) orelse continue;
                 ui.key(c, c.print("pin-marker-{d}", .{idx}));
                 const badge = ui.div(c).absolute()
                     .offset(std.math.clamp(pos.x - 11, 0, @max(0, w - 22)), std.math.clamp(pos.y - 11, 0, @max(0, h - 22)))
-                    .size(22, 22).center().roundedFull().bg(k.accent).border(ui.Color.white).borderW(1.5);
-                ui.text(c, c.print("{d}", .{idx + 1}), .{ .size = 10.5, .weight = .semibold, .color = ui.Color.white });
+                    .size(22, 22).center().roundedFull().bg(k.accent).border(k.background).borderW(1.5);
+                ui.text(c, c.print("{d}", .{idx + 1}), .{ .size = 10.5, .weight = .semibold, .color = on_accent });
                 badge.end();
             }
         }
     }
 
-    if (cache.annotate.active and cache.annotate.count > 0) {
-        drawPinNotes(c, a, k, &cache.annotate, pin_panel_h);
+    if (annotating) {
+        if (cache.annotate.count > 0) {
+            drawPinNotes(c, a, k, &cache.annotate, pin_list_h);
+        } else {
+            const empty = ui.div(c).row().wFull().h(pin_list_h).center().rounded(6)
+                .bg(k.ink(if (k.dark) 0.04 else 0.03)).border(k.border).borderW(1);
+            ui.text(c, "Click anywhere on the image to place a numbered callout pin.", .{ .size = 11, .color = k.muted });
+            empty.end();
+        }
+        const footer = ui.div(c).row().wFull().h(28).gap(6).itemsCenter();
+        defer footer.end();
+        const count_label = if (cache.annotate.count == 0)
+            "No pins yet"
+        else
+            c.print("{d} {s}", .{ cache.annotate.count, if (cache.annotate.count == 1) "pin" else "pins" });
+        ui.text(c, count_label, .{ .size = 10.5, .color = k.muted });
+        ui.spacer(c);
+        if (cache.annotate.count > 0) {
+            if (annotateButton(c, k, "Undo", false)) {
+                cache.annotate.undo();
+                a.redraw();
+            }
+            if (annotateButton(c, k, "Clear", false)) {
+                cache.annotate.clearPins();
+                a.redraw();
+            }
+            if (annotateButton(c, k, c.print("Send feedback ({d})", .{cache.annotate.count}), true)) {
+                sendFeedback(c, a, image);
+                return;
+            }
+        }
     }
 }
 
 fn drawPinNotes(c: *ui.Context, a: *App, k: theme.Colors, state: *annotate.State, panel_h: f32) void {
     const list = ui.div(c).column().wFull().h(panel_h).gap(6).scrollY();
     defer list.end();
+    const on_accent = k.onAccent();
     var remove_idx: ?usize = null;
     for (state.pins[0..state.count], 0..) |*pin, idx| {
         ui.key(c, c.print("pin-row-{d}", .{idx}));
@@ -203,7 +234,7 @@ fn drawPinNotes(c: *ui.Context, a: *App, k: theme.Colors, state: *annotate.State
         defer row.end();
 
         const num = ui.div(c).row().size(20, 20).center().roundedFull().bg(k.accent);
-        ui.text(c, c.print("{d}", .{idx + 1}), .{ .size = 10, .weight = .semibold, .color = ui.Color.white });
+        ui.text(c, c.print("{d}", .{idx + 1}), .{ .size = 10, .weight = .semibold, .color = on_accent });
         num.end();
 
         const px: u32 = @intFromFloat(@round(pin.x * 100));
@@ -248,7 +279,7 @@ fn annotateButton(c: *ui.Context, k: theme.Colors, label: []const u8, accent: bo
     b = if (accent) b.bg(k.accent) else b.bg(k.hover);
     defer b.end();
     const clicked = @import("control_behavior.zig").activateIndex(c, b.index, k, label, true, false);
-    ui.text(c, label, .{ .size = 10.5, .weight = if (accent) .medium else .regular, .color = if (accent) ui.Color.white else k.text });
+    ui.text(c, label, .{ .size = 10.5, .weight = if (accent) .medium else .regular, .color = if (accent) k.onAccent() else k.text });
     return clicked or b.clicked();
 }
 

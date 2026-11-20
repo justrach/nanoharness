@@ -582,6 +582,10 @@ test "image preview Annotate mode drops numbered pins and attaches feedback to c
     tester.click(picture.x + picture.w * 0.72, picture.y + picture.h * 0.65);
     tester.settle(2);
     try t.expectEqual(@as(usize, 2), cache.annotate.count);
+    // Re-clicking an existing pin focuses its note instead of adding a duplicate pin.
+    tester.click(picture.x + picture.w * 0.35, picture.y + picture.h * 0.40);
+    tester.settle(2);
+    try t.expectEqual(@as(usize, 2), cache.annotate.count);
     cache.annotate.pins[0].note.set("Tighten spacing");
     tester.settle(2);
     try t.expect(tester.hasText("Send feedback (2)"));
@@ -596,4 +600,45 @@ test "image preview Annotate mode drops numbered pins and attaches feedback to c
     try t.expect(std.mem.indexOf(u8, a.composer.text(), "Image feedback on picture.png:") != null);
     try t.expect(std.mem.indexOf(u8, a.composer.text(), "Tighten spacing") != null);
     try t.expect(std.mem.indexOf(u8, a.composer.text(), "2. (") != null);
+}
+
+test "image preview Annotate full production desktop handoff works at narrow width" {
+    var a: App = undefined;
+    try setup(&a, false);
+    defer a.deinit();
+    a.openChat("reply-owner", null);
+    a.view.sidebar_open = false;
+    try reset(&a, false);
+    @import("theme.zig").registerFonts();
+    var tester: ui.Tester = undefined;
+    try tester.init(a.gpa, .init(&a, @import("view.zig").view), .{ .width = 520, .height = 680, .dark = true });
+    defer tester.deinit();
+    tester.ctx.reduced_motion = true;
+    tester.settle(3);
+    _ = a.engine.pump();
+    tester.settle(3);
+    try clickPicture(&tester);
+    try tester.clickText("Annotate");
+    tester.settle(2);
+    var picture: ui.Rect = undefined;
+    for (tester.ctx.nodes.items) |n| {
+        if (n.content == .image and n.rect.w > 100 and n.rect.h > 100) picture = n.rect;
+    }
+    tester.click(picture.x + picture.w * 0.40, picture.y + picture.h * 0.45);
+    tester.settle(2);
+    a.attachments.images.annotate.pins[0].note.set("Align header baseline");
+    tester.settle(2);
+    if (std.c.getenv("NANO_SNAP_DIR")) |dir| {
+        var buffer: [1024]u8 = undefined;
+        try tester.screenshot(try std.fmt.bufPrint(&buffer, "{s}/image-preview-annotate-narrow.png", .{std.mem.span(dir)}));
+    }
+    try tester.clickText("Send feedback (1)");
+    tester.settle(3);
+    try t.expect(a.attachments.images.preview == null);
+    try t.expectEqual(@as(usize, 1), @import("app_attachments.zig").count(&a));
+    try t.expect(tester.hasText("picture.png"));
+    if (std.c.getenv("NANO_SNAP_DIR")) |dir| {
+        var buffer: [1024]u8 = undefined;
+        try tester.screenshot(try std.fmt.bufPrint(&buffer, "{s}/composer-after-annotate.png", .{std.mem.span(dir)}));
+    }
 }
