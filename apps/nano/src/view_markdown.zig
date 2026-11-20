@@ -179,23 +179,52 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
         prose.images = &.{};
         rich(c, prose, style);
         const before_after = @import("view_before_after.zig");
-        var skip_next = false;
+        const image_gallery = @import("view_image_gallery.zig");
+        const reply_images = @import("view_reply_images.zig");
+        var skip: usize = 0;
         for (in.images, 0..) |image, i| {
-            if (skip_next) {
-                skip_next = false;
+            if (skip > 0) {
+                skip -= 1;
                 continue;
             }
             const alt = in.text[image.start..image.end];
             if (github_images_app == null) {
                 if (link_owner) |owner| {
-                    if (owner.app.settings.get(.design_before_after_enabled) and i + 1 < in.images.len) {
+                    const ba_on = owner.app.settings.get(.design_before_after_enabled);
+                    if (ba_on and i + 1 < in.images.len) {
                         const next = in.images[i + 1];
                         const next_alt = in.text[next.start..next.end];
                         if (before_after.matchPair(alt, next_alt)) |caption| {
                             ui.key(c, c.print("md-before-after-{d}", .{i}));
                             const id = before_after.cardId(owner.parent, image.src, next.src, caption);
                             before_after.drawPair(c, owner.app, k, owner.parent, id, image.src, alt, next.src, next_alt, caption, 580);
-                            skip_next = true;
+                            skip = 1;
+                            continue;
+                        }
+                    }
+                    const chat = owner.app.findChat(owner.parent);
+                    const cwd = if (chat) |ch| ch.cwd else null;
+                    if (reply_images.resolve(c.alloc(), cwd, image.src) != null) {
+                        var items_buf: [image_gallery.max_items]image_gallery.Item = undefined;
+                        var n: usize = 0;
+                        var j = i;
+                        while (j < in.images.len and n < image_gallery.max_items) : (j += 1) {
+                            const cand = in.images[j];
+                            if (reply_images.resolve(c.alloc(), cwd, cand.src) == null) break;
+                            const cand_alt = in.text[cand.start..cand.end];
+                            if (j > i and ba_on and j + 1 < in.images.len) {
+                                const next_img = in.images[j + 1];
+                                const next_alt = in.text[next_img.start..next_img.end];
+                                if (before_after.matchPair(cand_alt, next_alt) != null) break;
+                            }
+                            items_buf[n] = .{ .path = cand.src, .caption = cand_alt };
+                            n += 1;
+                        }
+                        if (n >= 2) {
+                            ui.key(c, c.print("md-gallery-{d}", .{i}));
+                            const id = image_gallery.cardId(owner.parent, image.src, alt, n);
+                            image_gallery.draw(c, owner.app, k, owner.parent, id, items_buf[0..n], 580);
+                            skip = n - 1;
                             continue;
                         }
                     }
@@ -205,7 +234,7 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
             if (github_images_app) |app| {
                 @import("github_images.zig").draw(c, app, k, image.src, alt, image.width);
             } else if (link_owner) |owner| {
-                @import("view_reply_images.zig").draw(c, owner.app, k, owner.parent, image.src, alt, image.width);
+                reply_images.draw(c, owner.app, k, owner.parent, image.src, alt, image.width);
             } else {
                 ui.text(c, c.print("Image unavailable{s}{s}", .{ if (alt.len > 0) ": " else "", alt }), .{ .size = 12, .color = k.muted, .wrap = true });
             }

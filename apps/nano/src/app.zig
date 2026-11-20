@@ -193,6 +193,7 @@ pub const View = struct {
     profile_card: @import("member_card.zig").State = .{},
     /// Top-right unified updates popover state & anchor (`view_updates.zig`).
     before_after: @import("view_before_after.zig").State = .{},
+    gallery: @import("view_image_gallery.zig").State = .{},
     updates_popover: bool = false,
     updates_anchor: ?nanoui.ui.Rect = null,
     /// Sidebar `#star-banner` context menu state & last opened external URL.

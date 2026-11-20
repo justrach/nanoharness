@@ -507,3 +507,93 @@ test "image preview Copy image copies original bytes preserves zoom and surfaces
     try t.expect(tester.hasText("Copy failed"));
     try t.expect(a.attachments.images.preview == owner);
 }
+
+test "reply images multi-image runs group into a gallery card with switching and preview" {
+    var a: App = undefined;
+    try setup(&a, false);
+    defer a.deinit();
+    // Same encoded fixture serves all three distinct synthetic paths.
+    const encoded = try a.gpa.alloc(u8, std.base64.standard.Encoder.calcSize(bytes.len));
+    defer a.gpa.free(encoded);
+    _ = std.base64.standard.Encoder.encode(encoded, bytes);
+    const Chunk = struct { mimeType: []const u8 = "image/png", data: []const u8, done: bool, nextOffset: usize };
+    const replies = try std.json.Stringify.valueAlloc(a.gpa, .{ .ReadAttachmentChunk = .{ .@"$seq" = [_]Chunk{
+        .{ .data = encoded, .done = true, .nextOffset = encoded.len },
+        .{ .data = encoded, .done = true, .nextOffset = encoded.len },
+        .{ .data = encoded, .done = true, .nextOffset = encoded.len },
+    } } }, .{});
+    defer a.gpa.free(replies);
+    a.engine.scene.?.deinit();
+    a.engine.scene = try std.json.parseFromSlice(std.json.Value, a.gpa, replies, .{});
+    const frame =
+        \\{"reset":[{"id":"reply","role":"assistant","status":"complete","parts":[
+        \\  {"id":"p0","kind":"image","name":"Direction A — compact card","path":"/synthetic/workspace/dir-a.png","mimeType":"image/png"},
+        \\  {"id":"p1","kind":"image","name":"Direction B — rail layout","path":"/synthetic/workspace/dir-b.png","mimeType":"image/png"},
+        \\  {"id":"p2","kind":"image","name":"Direction C — minimal","path":"/synthetic/workspace/dir-c.png","mimeType":"image/png"}
+        \\]}]}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, a.gpa, frame, .{});
+    defer parsed.deinit();
+    try a.transcript.apply(parsed.value);
+    var tester: ui.Tester = undefined;
+    try initTester(&a, &tester);
+    defer tester.deinit();
+    _ = a.engine.pump();
+    tester.settle(3);
+    try t.expect(tester.hasText("1 of 3"));
+    try t.expect(tester.hasText("Direction A — compact card"));
+    if (std.c.getenv("NANO_SNAP_DIR")) |dir| {
+        var buffer: [1024]u8 = undefined;
+        try tester.screenshot(try std.fmt.bufPrint(&buffer, "{s}/reply-image-gallery.png", .{std.mem.span(dir)}));
+    }
+    try tester.clickText("›");
+    tester.settle(2);
+    try t.expect(tester.hasText("2 of 3"));
+    try t.expect(tester.hasText("Direction B — rail layout"));
+    try tester.clickText("‹");
+    tester.settle(2);
+    try t.expect(tester.hasText("1 of 3"));
+    try clickPicture(&tester);
+    try t.expect(tester.hasText("Image preview"));
+}
+
+test "image preview Annotate mode drops numbered pins and attaches feedback to composer" {
+    var a: App = undefined;
+    try setup(&a, false);
+    defer a.deinit();
+    try reset(&a, false);
+    var tester: ui.Tester = undefined;
+    try initTester(&a, &tester);
+    defer tester.deinit();
+    _ = a.engine.pump();
+    tester.settle(3);
+    try clickPicture(&tester);
+    try t.expect(tester.hasText("Annotate"));
+    try tester.clickText("Annotate");
+    tester.settle(2);
+    const cache = &a.attachments.images;
+    try t.expect(cache.annotate.active);
+    var picture: ui.Rect = undefined;
+    for (tester.ctx.nodes.items) |n| {
+        if (n.content == .image and n.rect.w > 100 and n.rect.h > 100) picture = n.rect;
+    }
+    tester.click(picture.x + picture.w * 0.35, picture.y + picture.h * 0.40);
+    tester.settle(2);
+    tester.click(picture.x + picture.w * 0.72, picture.y + picture.h * 0.65);
+    tester.settle(2);
+    try t.expectEqual(@as(usize, 2), cache.annotate.count);
+    cache.annotate.pins[0].note.set("Tighten spacing");
+    tester.settle(2);
+    try t.expect(tester.hasText("Send feedback (2)"));
+    if (std.c.getenv("NANO_SNAP_DIR")) |dir| {
+        var buffer: [1024]u8 = undefined;
+        try tester.screenshot(try std.fmt.bufPrint(&buffer, "{s}/image-preview-annotate.png", .{std.mem.span(dir)}));
+    }
+    try tester.clickText("Send feedback (2)");
+    tester.settle(2);
+    try t.expect(cache.preview == null);
+    try t.expectEqual(@as(usize, 1), @import("app_attachments.zig").count(&a));
+    try t.expect(std.mem.indexOf(u8, a.composer.text(), "Image feedback on picture.png:") != null);
+    try t.expect(std.mem.indexOf(u8, a.composer.text(), "Tighten spacing") != null);
+    try t.expect(std.mem.indexOf(u8, a.composer.text(), "2. (") != null);
+}

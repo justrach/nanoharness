@@ -40,6 +40,8 @@ test {
     _ = @import("tests_artifact_links.zig");
     _ = @import("tests_titlebar_clearance.zig");
     _ = @import("view_before_after.zig");
+    _ = @import("view_image_gallery.zig");
+    _ = @import("image_annotate.zig");
     _ = @import("wizard.zig");
     _ = @import("termlog.zig");
     _ = @import("parity.zig");

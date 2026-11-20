@@ -20,6 +20,8 @@ const steer_order = @import("steer_order.zig");
 const attachment_refs = @import("attachment_refs.zig");
 const attachment_images = @import("app_attachment_images.zig");
 const before_after = @import("view_before_after.zig");
+const image_gallery = @import("view_image_gallery.zig");
+const reply_images = @import("view_reply_images.zig");
 const sidebar = @import("view_sidebar.zig");
 const App = @import("app.zig").App;
 const rows_st = @import("view_settings_accounts_rows.zig").st;
@@ -745,10 +747,13 @@ fn partRows(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts:
         return;
     };
     const runs = tools.runs(buf, parts);
-    var skip_next = false;
+    const chat = if (at.chat_id) |cid| a.findChat(cid) else null;
+    const cwd = if (chat) |ch| ch.cwd else null;
+    const ba_on = a.settings.get(.design_before_after_enabled);
+    var skip: usize = 0;
     for (runs, 0..) |r, ri| {
-        if (skip_next) {
-            skip_next = false;
+        if (skip > 0) {
+            skip -= 1;
             continue;
         }
         const p = &parts[r.start];
@@ -762,17 +767,39 @@ fn partRows(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts:
             group(c, a, k, e, parts[r.start..r.end], tail, at.chat_id);
             continue;
         }
-        if (p.kind == .image and a.settings.get(.design_before_after_enabled) and ri + 1 < runs.len) {
+        if (p.kind == .image and ba_on and ri + 1 < runs.len) {
             const nr = runs[ri + 1];
             if (!nr.group) {
                 const np = &parts[nr.start];
                 if (np.kind == .image) {
                     if (before_after.matchPair(p.text.items, np.text.items)) |caption| {
                         before_after.drawPair(c, a, k, at.chat_id, before_after.cardId(at.chat_id, e.id, p.id, np.id), p.path, p.text.items, np.path, np.text.items, caption, at.col);
-                        skip_next = true;
+                        skip = 1;
                         continue;
                     }
                 }
+            }
+        }
+        if (p.kind == .image and reply_images.resolve(c.alloc(), cwd, p.path) != null) {
+            var items_buf: [image_gallery.max_items]image_gallery.Item = undefined;
+            var n: usize = 0;
+            var j = ri;
+            while (j < runs.len and n < image_gallery.max_items) : (j += 1) {
+                if (runs[j].group) break;
+                const cand = &parts[runs[j].start];
+                if (cand.kind != .image) break;
+                if (reply_images.resolve(c.alloc(), cwd, cand.path) == null) break;
+                if (j > ri and ba_on and j + 1 < runs.len and !runs[j + 1].group) {
+                    const next_cand = &parts[runs[j + 1].start];
+                    if (next_cand.kind == .image and before_after.matchPair(cand.text.items, next_cand.text.items) != null) break;
+                }
+                items_buf[n] = .{ .path = cand.path, .caption = cand.text.items };
+                n += 1;
+            }
+            if (n >= 2) {
+                image_gallery.draw(c, a, k, at.chat_id, image_gallery.cardId(at.chat_id, e.id, p.id, n), items_buf[0..n], at.col);
+                skip = n - 1;
+                continue;
             }
         }
         part(c, a, k, e, p, at, answer);
@@ -852,10 +879,13 @@ fn compactParts(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at
     };
     var answer = answer_in;
     answer.label = work.items.len == 0;
-    var skip_next = false;
+    const chat = if (at.chat_id) |cid| a.findChat(cid) else null;
+    const cwd = if (chat) |ch| ch.cwd else null;
+    const ba_on = a.settings.get(.design_before_after_enabled);
+    var skip: usize = 0;
     for (items, 0..) |*p, i| {
-        if (skip_next) {
-            skip_next = false;
+        if (skip > 0) {
+            skip -= 1;
             continue;
         }
         if (compact.isWork(i, p, reply)) {
@@ -868,14 +898,35 @@ fn compactParts(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at
             continue;
         }
         ui.key(c, c.print("part-{s}-{s}", .{ e.id, p.id }));
-        if (p.kind == .image and a.settings.get(.design_before_after_enabled) and i + 1 < items.len) {
+        if (p.kind == .image and ba_on and i + 1 < items.len) {
             const np = &items[i + 1];
             if (!compact.isWork(i + 1, np, reply) and np.kind == .image) {
                 if (before_after.matchPair(p.text.items, np.text.items)) |caption| {
                     before_after.drawPair(c, a, k, at.chat_id, before_after.cardId(at.chat_id, e.id, p.id, np.id), p.path, p.text.items, np.path, np.text.items, caption, at.col);
-                    skip_next = true;
+                    skip = 1;
                     continue;
                 }
+            }
+        }
+        if (p.kind == .image and reply_images.resolve(c.alloc(), cwd, p.path) != null) {
+            var items_buf: [image_gallery.max_items]image_gallery.Item = undefined;
+            var n: usize = 0;
+            var j = i;
+            while (j < items.len and n < image_gallery.max_items) : (j += 1) {
+                const cand = &items[j];
+                if (compact.isWork(j, cand, reply) or cand.kind != .image) break;
+                if (reply_images.resolve(c.alloc(), cwd, cand.path) == null) break;
+                if (j > i and ba_on and j + 1 < items.len and !compact.isWork(j + 1, &items[j + 1], reply)) {
+                    const next_cand = &items[j + 1];
+                    if (next_cand.kind == .image and before_after.matchPair(cand.text.items, next_cand.text.items) != null) break;
+                }
+                items_buf[n] = .{ .path = cand.path, .caption = cand.text.items };
+                n += 1;
+            }
+            if (n >= 2) {
+                image_gallery.draw(c, a, k, at.chat_id, image_gallery.cardId(at.chat_id, e.id, p.id, n), items_buf[0..n], at.col);
+                skip = n - 1;
+                continue;
             }
         }
         part(c, a, k, e, p, at, answer);

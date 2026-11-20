@@ -188,7 +188,7 @@ fn createRoom(c: *Ctx, args: Value) !Value {
     }, false);
     const a = c.a;
     const m = try me(c);
-    const kind = argStr(args, "kind") orelse "ephemeral";
+    const kind = tools.given(args, "kind") orelse "ephemeral";
     const ttl: Value = if (std.mem.eql(u8, kind, "ephemeral")) u.i(@intCast(tools.argUint(args, "idle_ttl_secs") orelse 3600)) else .null;
     const project: ?[]const u8 = if (tools.argBool(args, "project") orelse false)
         (m.project orelse return c.failMsg("this chat's checkout has no origin remote to bind the room to"))
@@ -235,7 +235,7 @@ fn joinRoom(c: *Ctx, args: Value) !Value {
         .{ .name = "chat", .kind = .opt_string },
     }, false);
     const room = try resolveRoom(c, argStr(args, "room").?);
-    if (argStr(args, "chat")) |chat| {
+    if (tools.given(args, "chat")) |chat| {
         var r = u.obj(c.a);
         try r.put("joined", try addChat(c, room.id, chat));
         return r.value();
@@ -344,7 +344,7 @@ fn postRoom(c: *Ctx, args: Value) !Value {
     try post.put("to", u.field(args, "to"));
     try post.put("mentions", u.get(args, "mentions") orelse .{ .array = u.arr(a) });
     try post.put("replyTo", u.field(args, "reply_to"));
-    try post.put("kind", u.s(argStr(args, "kind") orelse "message"));
+    try post.put("kind", u.s(tools.given(args, "kind") orelse "message"));
     try post.put("claimKey", u.field(args, "claim_key"));
     try post.put("clientId", u.s(try a.dupe(u8, client_id_buf[0..n])));
     try post.put("fromUser", u.b(false));

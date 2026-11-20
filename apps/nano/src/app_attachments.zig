@@ -342,6 +342,20 @@ pub fn restore(a: *App, text: []const u8, extra_paths: []const []const u8) !void
     a.composer.set(parsed.text);
 }
 
+/// Attach an existing host-jailed path directly to the active composer without
+/// re-uploading bytes; deduplicates against already-attached items for this chat.
+pub fn attachExisting(a: *App, path: []const u8) !void {
+    const refs = @import("attachment_refs.zig");
+    if (!refs.validPath(path)) return error.InvalidAttachmentRef;
+    for (a.attachments.items.items) |item| {
+        if (!item.active(a)) continue;
+        if (item.path) |existing| if (std.mem.eql(u8, existing, path)) return;
+    }
+    const item = try restoredItem(a, path);
+    errdefer item.destroy();
+    try a.attachments.items.append(a.gpa, item);
+}
+
 fn restoredItem(a: *App, path: []const u8) !*Item {
     const item = try a.gpa.create(Item);
     errdefer a.gpa.destroy(item);

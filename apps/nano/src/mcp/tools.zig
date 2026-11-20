@@ -809,7 +809,7 @@ fn listChats(c: *Ctx, args: Value) !Value {
     try all.appendSlice(c.a, try c.chats());
     const sps = try c.spaces();
     const sss = try c.sessions();
-    if (argStr(args, "project")) |project| {
+    if (given(args, "project")) |project| {
         const space = try c.resolveSpace(project);
         const sid = u.str(space, "id") orelse "";
         try retain(c.a, &all, struct {
@@ -818,7 +818,7 @@ fn listChats(c: *Ctx, args: Value) !Value {
             }
         }.keep, sid);
     }
-    if (argStr(args, "device")) |device| {
+    if (given(args, "device")) |device| {
         const dev = try c.resolveDeviceId(device);
         try retain(c.a, &all, struct {
             fn keep(ctx: []const u8, ch: Value) bool {
@@ -833,7 +833,7 @@ fn listChats(c: *Ctx, args: Value) !Value {
             }
         }.keep, "");
     }
-    if (argStr(args, "parent")) |parent_key| {
+    if (given(args, "parent")) |parent_key| {
         const parent = try c.resolveChat(parent_key);
         try retain(c.a, &all, struct {
             fn keep(ctx: []const u8, ch: Value) bool {
@@ -916,17 +916,17 @@ fn createChatTool(c: *Ctx, args: Value) !Value {
         .{ .name = "timeout_secs", .kind = .opt_u64 },
     }, false);
     return createChat(c, .{
-        .project = argStr(args, "project"),
-        .device = argStr(args, "device"),
-        .parent = argStr(args, "parent"),
-        .harness = argStr(args, "harness"),
-        .model = argStr(args, "model"),
-        .reasoning = argStr(args, "reasoning"),
-        .sandbox = argStr(args, "sandbox"),
-        .title = argStr(args, "title"),
-        .branch = argStr(args, "branch"),
-        .cwd = argStr(args, "cwd"),
-        .prompt = argStr(args, "prompt"),
+        .project = given(args, "project"),
+        .device = given(args, "device"),
+        .parent = given(args, "parent"),
+        .harness = given(args, "harness"),
+        .model = given(args, "model"),
+        .reasoning = given(args, "reasoning"),
+        .sandbox = given(args, "sandbox"),
+        .title = given(args, "title"),
+        .branch = given(args, "branch"),
+        .cwd = given(args, "cwd"),
+        .prompt = given(args, "prompt"),
         .wait = argBool(args, "wait") orelse false,
         .timeout_secs = argUint(args, "timeout_secs"),
     });
@@ -1097,7 +1097,7 @@ fn sendMessage(c: *Ctx, args: Value) !Value {
     const hs = try c.harnesses();
     const space = findSpace(sps, u.str(chat, "spaceId"));
     const baseline = sessionFor(sss, chat);
-    const mode = argStr(args, "mode") orelse "auto";
+    const mode = given(args, "mode") orelse "auto";
     const sent_at = c.t.nowMs();
     const body = try attribute(c, chat, text);
     if (c.t.origin.chat_id) |origin| {
@@ -1195,7 +1195,7 @@ const respond_fields = [_]Field{
 
 /// The given request id, else the chat's current pending question.
 fn pendingRequestId(c: *Ctx, chat: Value, args: Value) ![]const u8 {
-    if (argStr(args, "request_id")) |id| return id;
+    if (given(args, "request_id")) |id| return id;
     const chat_id = u.str(chat, "id") orelse "";
     const rendered = try transcript.render(c.a, try c.transcriptOf(chat_id), .{});
     if (transcript.lastPendingInput(rendered)) |p| if (u.str(p, "requestId")) |id| return id;

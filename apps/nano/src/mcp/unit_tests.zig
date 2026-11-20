@@ -743,6 +743,17 @@ test "mcp respond_to_input: the current pending question is found in the transcr
     try expectErr(try w.call("respond_to_input", "{\"chat\":\"Alpha\",\"answers\":[{\"question_id\":\"q1\",\"labels\":[\"Yes\"]}]}"), "chat chat-alp has no pending question");
 }
 
+test "mcp list_chats and create_chat ignore blank optional string filters" {
+    const w = try WorldFixture.create(.{});
+    defer w.destroy();
+    const listed = try ok(try w.call("list_chats", "{\"project\":\"\",\"device\":\"  \",\"parent\":\"\",\"include_archived\":true,\"limit\":50}"));
+    try testing.expect(u.int(listed, "total").? >= 1);
+    const chats = u.array(listed, "chats").?;
+    try testing.expect(chats.len >= 1);
+    const created = try ok(try w.call("create_chat", "{\"harness\":\"\",\"model\":\"\",\"reasoning\":\"\",\"sandbox\":\"\",\"parent\":\"\",\"device\":\"\",\"title\":\"Blank opts\"}"));
+    try testing.expectEqualStrings("Blank opts", u.str(created, "title").?);
+}
+
 // ---- publishing -------------------------------------------------------------------------
 
 test "mcp show_image and show_visual: scripted engine surfaces errors and validates bounds" {

@@ -16,10 +16,12 @@ pub const Cache = struct {
     drag: ?@import("nanoui").ui.Point = null,
     inspection: @import("image_inspection.zig").State = .{},
     focus_scope: @import("preview_focus.zig").State = .{},
+    annotate: @import("image_annotate.zig").State = .{},
     copy_status: enum { none, copied, failed } = .none,
     copy_until: f64 = 0,
 
     pub fn deinit(cache: *Cache, gpa: std.mem.Allocator) void {
+        cache.annotate.deinit();
         if (cache.preview_chat) |chat| gpa.free(chat);
         for (cache.items.items) |image| image.destroy();
         cache.items.deinit(gpa);
