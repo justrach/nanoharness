@@ -16,6 +16,13 @@ const std = @import("std");
 pub const icon_and_gap: f32 = 13;
 pub const editable_extra: f32 = 18;
 pub const chip_gap: f32 = 6;
+/// Bare glyph chip width when a top-strip slot is too narrow for readable text
+/// (`px(3) * 2 + 10px` icon when editable, `10px` icon when static).
+pub const compact_editable_w: f32 = 16;
+pub const compact_static_w: f32 = 10;
+/// Minimum readable 10pt label width before a chip collapses to its bare glyph
+/// (`Nano.StripMenu.minChipLabel`), preventing bare `"…"` stubs and clipped chevrons.
+pub const slot_min_label: f32 = 20;
 
 pub const ChipLayout = struct {
     dev_w: f32,
@@ -30,7 +37,9 @@ pub const ChipLayout = struct {
 /// Guarantees (`chip_conservation_holds` in `Nano/StripMenu.lean`):
 /// 1. When `dev_natural + 6 + pick_natural <= room`, neither chip's label or
 ///    `9px` `.@"alt-arrow-down"` chevron is ever clipped.
-/// 2. Neither chip overflows `room`.
+/// 2. Drawn chips plus their gap never exceed `room`.
+/// 3. Each drawn chip is either a bare glyph (`text_max == 0`, `w == icon_w`)
+///    or carries full chrome + a readable label (`text_max >= min(text_w, 20)`).
 pub fn slotChipWidths(
     room_in: f32,
     dev_text_w_in: f32,
@@ -38,32 +47,80 @@ pub fn slotChipWidths(
     pick_text_w_in: ?f32,
     pick_changeable: bool,
 ) ChipLayout {
-    const room = @max(0, room_in);
+    const room = @max(0, @floor(room_in));
     const dev_text_w = @max(0, @ceil(dev_text_w_in));
-    const dev_extra: f32 = if (dev_editable) editable_extra else 0;
-    const dev_natural = dev_text_w + icon_and_gap + dev_extra;
+    const dev_chrome: f32 = icon_and_gap + (if (dev_editable) editable_extra else 0);
+    const dev_icon: f32 = if (dev_editable) compact_editable_w else compact_static_w;
+    const dev_has_text = dev_text_w > 0;
+    const dev_natural = if (dev_has_text) dev_text_w + dev_chrome else dev_icon;
+    const dev_min_lab = if (dev_has_text) dev_chrome + @min(dev_text_w, slot_min_label) else dev_icon;
     if (pick_text_w_in) |p_raw| {
         const p_text = @max(0, @ceil(p_raw));
-        const pick_extra: f32 = if (pick_changeable) editable_extra else 0;
-        const pick_natural = p_text + icon_and_gap + pick_extra;
-        const dev_floor = @max(room * 0.5, room - (chip_gap + pick_natural));
-        const dev_w = @max(0, @min(dev_natural, @min(room, dev_floor)));
-        const pick_max = @max(0, room - @min(room, dev_w + chip_gap));
-        const pick_w = if (pick_changeable) @min(pick_max, pick_natural) else pick_max;
-        return .{
-            .dev_w = dev_w,
-            .dev_text_max = @max(0, dev_w - (icon_and_gap + dev_extra)),
-            .pick_w = pick_w,
-            .pick_text_max = @max(0, pick_w - (icon_and_gap + pick_extra)),
-        };
+        const pick_chrome: f32 = icon_and_gap + (if (pick_changeable) editable_extra else 0);
+        const pick_icon: f32 = if (pick_changeable) compact_editable_w else compact_static_w;
+        const pick_has_text = p_text > 0;
+        const pick_natural = if (pick_has_text) p_text + pick_chrome else pick_icon;
+        const pick_min_lab = if (pick_has_text) pick_chrome + @min(p_text, slot_min_label) else pick_icon;
+
+        // Stage 1: Both full labels fit.
+        if (dev_has_text and pick_has_text and dev_natural + chip_gap + pick_natural <= room) {
+            const pick_max = room - (dev_natural + chip_gap);
+            const pick_w = if (pick_changeable) pick_natural else pick_max;
+            return .{
+                .dev_w = dev_natural,
+                .dev_text_max = dev_text_w,
+                .pick_w = pick_w,
+                .pick_text_max = pick_w - pick_chrome,
+            };
+        }
+        // Stage 2: Both labels fit at or above `slot_min_label`.
+        if (dev_has_text and pick_has_text and dev_min_lab + chip_gap + pick_min_lab <= room) {
+            const dev_floor = @max(@floor(room / 2), @max(0, room - (chip_gap + pick_natural)));
+            const dev_cap = room - (chip_gap + pick_min_lab);
+            const dev_w = @max(dev_min_lab, @min(dev_natural, @min(dev_floor, dev_cap)));
+            const pick_max = room - (dev_w + chip_gap);
+            const pick_w = if (pick_changeable) @min(pick_max, pick_natural) else pick_max;
+            return .{
+                .dev_w = dev_w,
+                .dev_text_max = dev_w - dev_chrome,
+                .pick_w = pick_w,
+                .pick_text_max = pick_w - pick_chrome,
+            };
+        }
+        // Stage 3: Computer collapses to bare glyph so folder keeps a readable label + chevron.
+        if (pick_has_text and dev_icon + chip_gap + pick_min_lab <= room) {
+            const pick_max = room - (dev_icon + chip_gap);
+            const pick_w = if (pick_changeable) @min(pick_max, pick_natural) else pick_max;
+            return .{
+                .dev_w = dev_icon,
+                .dev_text_max = 0,
+                .pick_w = pick_w,
+                .pick_text_max = pick_w - pick_chrome,
+            };
+        }
+        // Stage 4: Both collapse cleanly to bare glyphs.
+        if (dev_icon + chip_gap + pick_icon <= room) {
+            return .{ .dev_w = dev_icon, .dev_text_max = 0, .pick_w = pick_icon, .pick_text_max = 0 };
+        }
+        // Stage 5: Only one icon fits (prefer folder, then computer).
+        if (pick_icon <= room) {
+            return .{ .dev_w = 0, .dev_text_max = 0, .pick_w = pick_icon, .pick_text_max = 0 };
+        }
+        if (dev_icon <= room) {
+            return .{ .dev_w = dev_icon, .dev_text_max = 0, .pick_w = 0, .pick_text_max = 0 };
+        }
+        return .{ .dev_w = 0, .dev_text_max = 0, .pick_w = 0, .pick_text_max = 0 };
     }
-    const dev_w = @max(0, @min(dev_natural, room));
-    return .{
-        .dev_w = dev_w,
-        .dev_text_max = @max(0, dev_w - (icon_and_gap + dev_extra)),
-        .pick_w = 0,
-        .pick_text_max = 0,
-    };
+    if (dev_has_text and dev_natural <= room) {
+        return .{ .dev_w = dev_natural, .dev_text_max = dev_text_w, .pick_w = 0, .pick_text_max = 0 };
+    }
+    if (dev_has_text and dev_min_lab <= room) {
+        return .{ .dev_w = room, .dev_text_max = room - dev_chrome, .pick_w = 0, .pick_text_max = 0 };
+    }
+    if (dev_icon <= room) {
+        return .{ .dev_w = dev_icon, .dev_text_max = 0, .pick_w = 0, .pick_text_max = 0 };
+    }
+    return .{ .dev_w = 0, .dev_text_max = 0, .pick_w = 0, .pick_text_max = 0 };
 }
 
 /// Top Y coordinate of a strip menu's dismissal scrim (`Nano.StripMenu.scrimTop`).
@@ -573,21 +630,50 @@ test "lean StripMenu kernel: screenshot slot chevron unclipped and conservation 
     try std.testing.expectEqual(@as(f32, 71), shot.pick_w);
     try std.testing.expectEqual(@as(f32, 40), shot.pick_text_max);
 
-    const rooms = [_]f32{ 60, 100, 140, 151, 180, 240 };
+    // Narrow 105px split slot (`room = 74` unhovered, `room = 50` hovered):
+    // drops computer to its 16px glyph so folder stays readable + unclipped,
+    // then drops both to 16px glyphs on hover without clipping or bare "…".
+    const narrow = slotChipWidths(74, 43, true, 60, true);
+    try std.testing.expectEqual(@as(f32, 16), narrow.dev_w);
+    try std.testing.expectEqual(@as(f32, 0), narrow.dev_text_max);
+    try std.testing.expectEqual(@as(f32, 52), narrow.pick_w);
+    try std.testing.expectEqual(@as(f32, 21), narrow.pick_text_max);
+
+    const narrow_hov = slotChipWidths(50, 43, true, 60, true);
+    try std.testing.expectEqual(@as(f32, 16), narrow_hov.dev_w);
+    try std.testing.expectEqual(@as(f32, 0), narrow_hov.dev_text_max);
+    try std.testing.expectEqual(@as(f32, 16), narrow_hov.pick_w);
+    try std.testing.expectEqual(@as(f32, 0), narrow_hov.pick_text_max);
+
+    const rooms = [_]f32{ 0, 10, 16, 38, 50, 60, 74, 89, 100, 105, 119, 140, 151, 180, 240 };
     const dev_widths = [_]f32{ 20, 43, 80 };
-    const pick_widths = [_]?f32{ null, 20, 40, 90 };
+    const pick_widths = [_]?f32{ null, 20, 40, 60, 90 };
     for (rooms) |room| {
         for (dev_widths) |dw| {
             for ([_]bool{ false, true }) |de| {
                 for (pick_widths) |pw| {
                     for ([_]bool{ false, true }) |pc| {
                         const out = slotChipWidths(room, dw, de, pw, pc);
-                        const dev_extra: f32 = if (de) editable_extra else 0;
-                        const dev_nat = dw + icon_and_gap + dev_extra;
-                        try std.testing.expect(out.dev_w <= room);
+                        const dev_chrome: f32 = icon_and_gap + (if (de) editable_extra else 0);
+                        const dev_icon: f32 = if (de) compact_editable_w else compact_static_w;
+                        const dev_nat = dw + dev_chrome;
+                        const dev_valid = out.dev_w == 0 or
+                            (out.dev_text_max == 0 and out.dev_w == dev_icon) or
+                            (out.dev_text_max >= @min(dw, slot_min_label) and out.dev_w == dev_chrome + out.dev_text_max);
+                        try std.testing.expect(dev_valid);
                         if (pw) |p| {
-                            const pick_extra: f32 = if (pc) editable_extra else 0;
-                            const pick_nat = p + icon_and_gap + pick_extra;
+                            const pick_chrome: f32 = icon_and_gap + (if (pc) editable_extra else 0);
+                            const pick_icon: f32 = if (pc) compact_editable_w else compact_static_w;
+                            const pick_nat = p + pick_chrome;
+                            const total_w = if (out.dev_w > 0 and out.pick_w > 0)
+                                out.dev_w + chip_gap + out.pick_w
+                            else
+                                out.dev_w + out.pick_w;
+                            const pick_valid = out.pick_w == 0 or
+                                (out.pick_text_max == 0 and out.pick_w == pick_icon) or
+                                (out.pick_text_max >= @min(p, slot_min_label) and out.pick_w == pick_chrome + out.pick_text_max);
+                            try std.testing.expect(total_w <= room);
+                            try std.testing.expect(pick_valid);
                             if (dev_nat + chip_gap + pick_nat <= room) {
                                 try std.testing.expectEqual(dev_nat, out.dev_w);
                                 try std.testing.expectEqual(dw, out.dev_text_max);
@@ -596,8 +682,13 @@ test "lean StripMenu kernel: screenshot slot chevron unclipped and conservation 
                                     try std.testing.expectEqual(p, out.pick_text_max);
                                 }
                             }
-                        } else if (dev_nat <= room) {
-                            try std.testing.expectEqual(dw, out.dev_text_max);
+                        } else {
+                            try std.testing.expect(out.dev_w <= room);
+                            try std.testing.expectEqual(@as(f32, 0), out.pick_w);
+                            if (dev_nat <= room) {
+                                try std.testing.expectEqual(dev_nat, out.dev_w);
+                                try std.testing.expectEqual(dw, out.dev_text_max);
+                            }
                         }
                     }
                 }

@@ -62,7 +62,7 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     const other_shown: usize = if (other_tabs > 0 and max_other_budget >= 76) @min(other_tabs, @as(usize, @intFromFloat(@max(1, @floor(max_other_budget / 76))))) else 0;
     const other_pill_w: f32 = if (other_shown > 0) @min(128, @max(72, max_other_budget / @as(f32, @floatFromInt(other_shown)) - 4)) else 0;
     const other_reserve: f32 = if (other_shown > 0) @as(f32, @floatFromInt(other_shown)) * (other_pill_w + 4) else 0;
-    const shared = @min(chrome.slot_max, chrome.sharedSlotRoom(@max(240, c.size.w - a.view.sidebar_width - other_reserve - caption.trailing - right_extra), left, 8, n));
+    const shared = @min(chrome.slot_max, chrome.sharedSlotRoom(@max(0, c.size.w - a.view.sidebar_width - other_reserve - caption.trailing - right_extra), left, 8, n));
     ui.key(c, "instrument-strip");
     const row = ui.div(c).fixed().offset(a.view.sidebar_width, 0).w(c.size.w - a.view.sidebar_width - caption.trailing - right_extra).h(chrome.titlebar_height).pt(chrome.top_pad).pl(left).pr(8).row().gap(if (columns) ws_gutter else 4).itemsCenter().layer(2);
     defer row.end();
@@ -262,23 +262,28 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
         const meta = ui.div(c).row().h(14).wFull().gap(6).itemsCenter().clip();
         defer meta.end();
         const device_editable = target == .chat;
-        const dev_text_w = c.text.width(computer, .{ .size = 10 });
-        const pick_text_w: ?f32 = if (project) |f| c.text.width(f.name, .{ .size = 10 }) else null;
+        const chip_st: ui.TextStyle = .{ .size = 10, .line_height = 12, .color = k.muted };
+        const dev_text_w = c.text.width(computer, chip_st);
+        const pick_text_w: ?f32 = if (project) |f| c.text.width(f.name, chip_st) else null;
         const pick_changeable = if (project) |f| f.changeable else false;
         const chips = @import("motion_rules.zig").slotChipWidths(room, dev_text_w, device_editable, pick_text_w, pick_changeable);
-        {
+        if (chips.dev_w > 0) {
+            const dev_glyph_only = chips.dev_text_max <= 0;
             ui.key(c, "slot-device");
             var dev = ui.div(c).row().w(chips.dev_w).h(14).gap(3).itemsCenter().rounded(3).clip();
             if (device_editable) dev = dev.px(3).hover(k.ink(0.10)).control();
+            if (dev_glyph_only or dev_text_w > chips.dev_text_max) dev = tip.on(dev, k, .{ .text = computer, .look = .tab });
             defer dev.end();
             const dev_rect = c.rects.get(c.node(dev.index).id) orelse c.rects.get(c.node(box.index).id);
             if (device_editable and a.view.strip.menu == .device and strip.same(a.view.strip.target, target)) {
                 if (dev_rect) |r| a.view.strip.device_anchor = r;
             }
             icons.icon(c, if (github_child) .@"split-columns" else .monitor, 10, k.muted, 0);
-            kit.ellipsisText(c, computer, .{ .size = 10, .line_height = 12, .color = k.muted }, chips.dev_text_max);
+            if (!dev_glyph_only) {
+                kit.ellipsisText(c, computer, chip_st, chips.dev_text_max);
+            }
             if (device_editable) {
-                icons.icon(c, .@"alt-arrow-down", 9, k.muted, 0);
+                if (!dev_glyph_only) icons.icon(c, .@"alt-arrow-down", 9, k.muted, 0);
                 if (dev.clicked()) {
                     handled = true;
                     const state = &a.view.strip;
@@ -291,10 +296,12 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
                 }
             }
         }
-        if (project) |f| {
+        if (project) |f| if (chips.pick_w > 0) {
+            const pick_glyph_only = chips.pick_text_max <= 0;
             ui.key(c, "slot-folder");
             var pick = ui.div(c).row().w(chips.pick_w).h(14).gap(3).itemsCenter().rounded(3).clip();
             if (f.changeable) pick = pick.px(3).hover(k.ink(0.10)).control();
+            if (pick_glyph_only or (pick_text_w orelse 0) > chips.pick_text_max) pick = tip.on(pick, k, .{ .text = f.name, .look = .tab });
             defer pick.end();
             const pick_rect = c.rects.get(c.node(pick.index).id) orelse c.rects.get(c.node(box.index).id);
             if (f.changeable and strip.same(strip.active(a), target)) {
@@ -304,9 +311,11 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
                 if (pick_rect) |r| a.view.strip.anchor = r;
             }
             icons.icon(c, .folder, 10, k.muted, 0);
-            kit.ellipsisText(c, f.name, .{ .size = 10, .line_height = 12, .color = k.muted }, chips.pick_text_max);
+            if (!pick_glyph_only) {
+                kit.ellipsisText(c, f.name, chip_st, chips.pick_text_max);
+            }
             if (f.changeable) {
-                icons.icon(c, .@"alt-arrow-down", 9, k.muted, 0);
+                if (!pick_glyph_only) icons.icon(c, .@"alt-arrow-down", 9, k.muted, 0);
                 strip.offerSplitFolder(c, a, target, c.rects.get(c.node(pick.index).id));
                 if (pick.clicked()) {
                     handled = true;
@@ -320,7 +329,7 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
                     }
                 }
             }
-        }
+        };
     }
     if (show_controls and width >= 220) {
         ui.key(c, "slot-add");
@@ -388,24 +397,31 @@ pub fn singleWindow(available: f32, n: usize, selected: usize, add_room: f32) Ta
         .selected_left = 0,
         .selected_right = 0,
     };
-    const width = chrome.tabWidth(available, n);
-    const total_tabs_w = @as(f32, @floatFromInt(n)) * width + @as(f32, @floatFromInt(n -| 1)) * 3;
-    const overflowing = total_tabs_w + add_room > available;
-    const visible_budget = @max(0, available - add_room - (if (overflowing) overflow_pill_w + 3 else 0));
+    const gap: f32 = 3;
+    const min_w: f32 = 112;
+    const max_w: f32 = 240;
+    const fit_budget = @max(0, available - add_room);
+    const min_needed = @as(f32, @floatFromInt(n)) * min_w + @as(f32, @floatFromInt(n -| 1)) * gap;
+    const overflowing = n > 1 and min_needed > fit_budget;
+    const visible_budget = @max(0, fit_budget - (if (overflowing) overflow_pill_w + gap else 0));
     const visible_count: usize = if (!overflowing)
         n
     else
-        @max(@as(usize, 1), @min(n, @as(usize, @intFromFloat(@floor((visible_budget + 3) / (width + 3))))));
+        @max(@as(usize, 1), @min(n, @as(usize, @intFromFloat(@floor((visible_budget + gap) / (min_w + gap))))));
     const clamped_sel = @min(selected, n - 1);
     const win_start: usize = if (clamped_sel < visible_count) 0 else @min(n - visible_count, clamped_sel + 1 - visible_count);
     const win_end: usize = @min(n, win_start + visible_count);
     const hidden_count: usize = n -| (win_end - win_start);
-    const slot_w: f32 = if (overflowing and visible_count == 1)
-        @min(width, @max(48, visible_budget))
+    const slot_w: f32 = if (visible_count == 1)
+        @min(max_w, @max(48, @floor(visible_budget)))
     else
-        width;
+        std.math.clamp(
+            @floor((visible_budget - @as(f32, @floatFromInt(visible_count - 1)) * gap) / @as(f32, @floatFromInt(visible_count))),
+            min_w,
+            max_w,
+        );
     const rel_ix = clamped_sel -| win_start;
-    const sel_left = @as(f32, @floatFromInt(rel_ix)) * (slot_w + 3);
+    const sel_left = @as(f32, @floatFromInt(rel_ix)) * (slot_w + gap);
     return .{
         .slot_w = slot_w,
         .win_start = win_start,
@@ -572,8 +588,17 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
             .global => |ws| workspaceNeedsInput(a, ws),
             .panel => chatNeedsInput(a, chat),
         };
+        const show_close = !settings_open and (hot or (n > 1 and ix == selected));
+        const show_spacer = !show_close and !zen;
+        const has_trailing = show_close or show_spacer;
+        const show_monogram = !pending_question and zen and panes_n == 1 and ch != null;
+        const lead_w: f32 = if (show_monogram) 16 else 14;
+        const split_badge_text: ?[]const u8 = if (zen and panes_n > 1) c.print("{d}", .{panes_n}) else null;
+        const split_badge_w: f32 = if (split_badge_text) |txt| @max(16, @ceil(c.text.width(txt, .{ .size = 10, .weight = .medium })) + 8) else 0;
+        const trail_w: f32 = (if (split_badge_w > 0) 6 + split_badge_w else 0) + (if (has_trailing) @as(f32, 22) else 0);
+        const label_w: f32 = @max(0, pill_w - (16 + lead_w + 6 + trail_w));
         if (!questionMark(c, k, pending_question)) {
-            if (zen and panes_n == 1 and ch != null) {
+            if (show_monogram) {
                 @import("view_sidebar.zig").zenMonogram(c, a, k, ch.?, 16);
             } else {
                 icons.icon(c, if (panes_n > 1) .widget else .@"chat-round-line", 14, if (ix == selected) k.text else k.muted, 0);
@@ -582,26 +607,32 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
         {
             const labels = ui.div(c).column().grow().w(0).clip();
             defer labels.end();
-            if (zen and panes_n == 1) {
-                kit.ellipsisText(c, label, .{ .size = 12.5, .line_height = 16, .weight = .medium, .color = if (ix == selected) k.text else k.muted }, @max(0, pill_w - 50));
+            if (zen) {
+                kit.ellipsisText(c, label, .{ .size = 12.5, .line_height = 16, .weight = .medium, .color = if (ix == selected) k.text else k.muted }, label_w);
             } else {
-                kit.ellipsisText(c, label, .{ .size = 12, .line_height = 14, .color = if (ix == selected) k.text else k.muted }, @max(0, pill_w - 58));
+                kit.ellipsisText(c, label, .{ .size = 12, .line_height = 14, .color = if (ix == selected) k.text else k.muted }, label_w);
                 if (panes_n > 1) {
                     const meta = ui.div(c).row().gap(6).h(12).itemsCenter();
                     defer meta.end();
-                    kit.ellipsisText(c, c.print("{d} split panes", .{panes_n}), .{ .size = 10, .line_height = 12, .color = k.muted }, @max(0, pill_w - 58));
+                    kit.ellipsisText(c, c.print("{d} split panes", .{panes_n}), .{ .size = 10, .line_height = 12, .color = k.muted }, label_w);
                 } else if (ch) |chat_row| {
                     const meta = ui.div(c).row().gap(6).h(12).itemsCenter();
                     defer meta.end();
-                    if (chat_row.branch) |branch| kit.ellipsisText(c, branch, .{ .size = 10, .line_height = 12, .color = k.muted }, @max(0, (pill_w - 58) * 0.45));
+                    if (chat_row.branch) |branch| kit.ellipsisText(c, branch, .{ .size = 10, .line_height = 12, .color = k.muted }, @max(0, label_w * 0.45));
                     const mark = icons.harnessMark(chat_row.harness orelse "graff");
                     icons.icon(c, mark.name, 12, mark.brand orelse k.muted, 0);
-                    kit.ellipsisText(c, chat_row.model orelse chat_row.harness orelse "Graff", .{ .size = 10, .line_height = 12, .color = k.muted }, @max(0, (pill_w - 58) * 0.5 - 15));
+                    kit.ellipsisText(c, chat_row.model orelse chat_row.harness orelse "Graff", .{ .size = 10, .line_height = 12, .color = k.muted }, @max(0, label_w * 0.5 - 15));
                 }
             }
         }
+        if (split_badge_text) |txt| {
+            var badge = ui.div(c).row().size(split_badge_w, 16).center().rounded(4).bg(k.ink(if (k.dark) 0.10 else 0.07));
+            badge = tip.on(badge, k, .{ .text = c.print("{d} split panes", .{panes_n}), .look = .tab });
+            defer badge.end();
+            ui.text(c, txt, .{ .size = 10, .line_height = 12, .weight = .medium, .color = k.muted });
+        }
         var handled = false;
-        if (!settings_open and (hot or (n > 1 and ix == selected))) {
+        if (show_close) {
             if (kit.iconButton(c, k, .close, .{ .size = 16, .radius = 4, .icon = 11, .tip = .{ .text = "Close tab" } })) {
                 handled = true;
                 switch (item) {
@@ -609,7 +640,7 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
                     .global => |ws| strip.queue(a, .{ .close_global_tab = ws }),
                 }
             }
-        } else if (!zen or (!settings_open and n > 1)) ui.div(c).size(16, 16).end();
+        } else if (show_spacer) ui.div(c).size(16, 16).end();
         if (!handled and cap.clicked() and (settings_open or ix != selected)) {
             if (settings_open) @import("view_settings.zig").close(a);
             if (ix != selected) switch (item) {
@@ -621,7 +652,7 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     }
     if (hidden_count > 0) {
         ui.key(c, "panel-tabs-overflow");
-        var more = ui.div(c).row().size(overflow_pill_w, if (zen) @as(f32, 24) else 26).center().rounded(6)
+        var more = ui.div(c).row().size(overflow_pill_w, if (zen) @as(f32, 28) else 26).center().rounded(if (zen) @as(f32, 7) else 6)
             .bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover).control();
         more = @import("view_tooltip.zig").on(more, k, .{ .text = c.print("{d} more open tab{s}", .{ hidden_count, if (hidden_count == 1) "" else "s" }), .look = .tab });
         defer more.end();

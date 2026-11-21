@@ -1041,6 +1041,14 @@ pub const App = struct {
         }
         const chat = a.findChat(chat_id).?;
         const project = chat.space_id;
+        // A blank "New tab" (single tab or split pane with no unsent draft)
+        // opens the chosen conversation in place instead of abandoning the
+        // empty tab and opening a new tab/workspace elsewhere.
+        if (a.isBlankNewTab()) {
+            a.tabs.setCurrent(chat_id);
+            a.select(chat_id, project);
+            return;
+        }
         // Reading history is not a project-pane replacement. Keep the live
         // workspace (including its split and drafts) visible in its own tab.
         if (chat.archived) {
@@ -1069,6 +1077,16 @@ pub const App = struct {
         }
         a.tabs.setCurrent(chat_id);
         a.select(chat_id, project);
+    }
+
+    fn isBlankNewTab(a: *const App) bool {
+        if (a.selected != null) return false;
+        if (std.mem.trim(u8, a.composer.text(), " \t\r\n").len > 0) return false;
+        if (a.attachments.items.items.len > 0) return false;
+        for (a.panels.tabs.items) |tab| {
+            if (tab.editor) |e| if (e.target.chatId == null and e.dirty()) return false;
+        }
+        return true;
     }
 
     /// The workspace's selected conversation or parked draft owns its project.
@@ -1797,6 +1815,7 @@ pub const App = struct {
         if (!same) {
             a.view.agent_work = .{};
             a.view.subagent_steer.clear();
+            a.view.model_picker.chip_width = null;
         }
         if (!same and !a.nav_restoring) a.recordNav(a.selected, chat_id);
         if (!same) if (a.selected) |s| a.retireSlice(s);

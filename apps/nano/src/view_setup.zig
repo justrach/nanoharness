@@ -522,19 +522,23 @@ const left_w: f32 = 420;
 const text_w: f32 = left_w - 2 * 40;
 const right_w: f32 = 500;
 
-pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
+pub fn ensureChecked(a: *App) void {
     if (!a.view.setup_checked) {
         a.view.setup_checked = true;
         check(a);
     }
+}
+
+pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
+    ensureChecked(a);
     const s = if (a.view.setup) |*x| x else return;
     seed(a, s);
     ui.key(c, "setup-overlay");
-    const root = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(9).row().bg(k.shell);
+    const root = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(9).row().bg(k.shell.alpha(1)).clip();
     defer root.end();
     questionPane(c, a, k, s);
     _ = c.leaf(.{ .width = .{ .px = 1 }, .height = .fill, .background = k.border }, .none, null);
-    const right = ui.div(c).column().grow().w(0).hFull().center().bg(k.composer);
+    const right = ui.div(c).column().grow().w(0).hFull().center().bg(k.composer.alpha(1)).clip();
     defer right.end();
     switch (s.step) {
         0 => agentsPane(c, a, k, s),

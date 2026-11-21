@@ -231,13 +231,15 @@ fn band(c: *ui.Context, a: *App, k: theme.Colors) void {
 fn picker(c: *ui.Context, a: *App, k: theme.Colors) void {
     const area = ui.div(c).column().wFull().grow().center().gap(8);
     defer area.end();
+    const row_w = @min(@as(f32, 280), @max(0, a.view.chrome.host_width - 24));
+    const label_w = @max(0, row_w - 28 - 15 - 10);
     for ([_]struct { title: []const u8, glyph: icons.Name, kind: panels.TabKind }{
         .{ .title = "Browser", .glyph = .globe, .kind = .browser },
         .{ .title = "Diffs", .glyph = .list, .kind = .diffs },
         .{ .title = "Git history", .glyph = .@"git-branch", .kind = .git },
         .{ .title = "GitHub", .glyph = .@"pull-request", .kind = .github },
     }) |item| {
-        const row = ui.div(c).row().w(280).h(44).px(14).gap(10).itemsCenter().rounded(10).border(k.border).borderW(1).bg(k.ink(0.02)).hover(k.ink(0.05));
+        const row = ui.div(c).row().w(row_w).h(44).px(14).gap(10).itemsCenter().rounded(10).border(k.border).borderW(1).bg(k.ink(0.02)).hover(k.ink(0.05)).clip();
         defer row.end();
         if (row.clicked()) {
             switch (item.kind) {
@@ -248,7 +250,7 @@ fn picker(c: *ui.Context, a: *App, k: theme.Colors) void {
             }
         }
         icons.icon(c, item.glyph, 15, k.muted, 0);
-        ui.text(c, item.title, .{ .size = 13, .weight = .medium, .color = k.text });
+        kit.ellipsisText(c, item.title, .{ .size = 13, .weight = .medium, .color = k.text }, label_w);
     }
 }
 

@@ -1149,7 +1149,7 @@ pub fn topbarTrailingReserve(a: *const App) f32 {
     const zen = a.settings.uiMode() == .zen;
     if (uw == 0 and !zen) return 0;
     const total = uw + (if (uw > 0 and zen) @as(f32, 6) else 0) + (if (zen) @as(f32, 28) else 0);
-    return total + 4;
+    return total + 10;
 }
 
 pub fn topbarUpdatesButton(c: *ui.Context, a: *App, k: theme.Colors) void {

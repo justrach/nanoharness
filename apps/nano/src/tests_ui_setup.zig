@@ -180,3 +180,55 @@ test "Skip setup leaves the defaults alone" {
     try testing.expectEqualStrings("codex", h.a.new_harness);
     try testing.expect(h.a.settings.get(.notifications_enabled));
 }
+
+test "onboarding renders as a dedicated opaque screen that hides and blocks the workspace below" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.a.dark = false;
+    h.a.settings.setText("surface", "frosted");
+    var chats_json = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"c1","deviceId":"local","title":"Cedar Notes","archived":false}]
+    , .{});
+    defer chats_json.deinit();
+    try h.a.chats.replace(chats_json.value);
+    h.a.openChat("c1", null);
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("Cedar Notes"));
+
+    setup.open(&h.a, 0);
+    h.t.settle(1);
+    if (std.c.getenv("NANO_SNAP_DIR")) |dir| {
+        var buf: [1024]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, "{s}/setup-screen.png", .{std.mem.span(dir)})) |path| {
+            h.t.screenshot(path) catch {};
+        } else |_| {}
+    }
+
+    // Setup content is visible, while nothing from the workspace/sidebar/tab strip is mounted underneath.
+    try testing.expect(h.t.hasText("Start with Graff"));
+    try testing.expect(!h.t.hasText("Cedar Notes"));
+    try testing.expect(!h.t.hasText("New session"));
+
+    // Setup panes are fully opaque even when frosted glass is enabled.
+    var saw_full_root = false;
+    for (h.t.ctx.nodes.items) |node| {
+        if (@abs(node.rect.w - 1200) < 0.5 and @abs(node.rect.h - 780) < 0.5 and node.style.background != null) {
+            try testing.expectApproxEqAbs(@as(f32, 1.0), node.style.background.?.a, 0.001);
+            saw_full_root = true;
+        }
+    }
+    try testing.expect(saw_full_root);
+
+    // Workspace shortcuts (e.g. Cmd+T) are blocked while onboarding is active.
+    const tabs_before = h.a.tabs.items.items.len;
+    h.press(.{ .key = 't', .cmd = true });
+    try testing.expectEqual(tabs_before, h.a.tabs.items.items.len);
+    try testing.expect(h.a.view.setup != null);
+
+    // Skipping onboarding restores the workspace cleanly.
+    try h.t.clickText("Skip setup");
+    h.t.settle(1);
+    try testing.expect(h.a.view.setup == null);
+    try testing.expect(h.t.hasText("Cedar Notes"));
+}

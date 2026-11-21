@@ -130,6 +130,22 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("app_browser.zig").settleFrame(a);
     @import("view_settings_theme_import.zig").settleFrame(a);
     @import("view_settings_devices_updates.zig").settleFrame(a);
+    @import("view_setup.zig").ensureChecked(a);
+    if (a.view.setup != null and shown == null) {
+        // Dedicated full-window onboarding screen: nothing from the workspace,
+        // sidebar, tab strip, or popovers mounts or receives input underneath.
+        a.view.in_pre_tree = false;
+        c.focus = 0;
+        _ = @import("view_setup.zig").keys(c, a);
+        if (a.view.setup != null) {
+            c.node(0).style.background = base.shell.alpha(1);
+            @import("view_setup.zig").overlay(c, a, base);
+            @import("window_chrome.zig").draw(c, a, base);
+            @import("app_browser.zig").syncNative(a, c);
+            @import("frame_profile.zig").frame(a, c);
+            return;
+        }
+    }
     @import("pane_gesture.zig").observe(a, c);
     settleSelectionPreTree(a, c);
     // Capture once, before drawing the search can blur it on a pointer
@@ -308,8 +324,6 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("view_custom_theme_studio.zig").overlay(c, a, popup);
     @import("view_project_setup.zig").overlay(c, a, popup);
     @import("view_open_chooser.zig").overlay(c, a, popup);
-    // First-run setup, over the whole window.
-    @import("view_setup.zig").overlay(c, a, k);
     @import("app_browser.zig").syncNative(a, c);
     settleSelectionPostTree(a, c);
     // After the overlays: a click that opens a menu has opened it.
@@ -332,7 +346,7 @@ pub fn view(a: *App, c: *ui.Context) void {
 /// no focus of its own, so it isn't one.
 pub fn menuKeepsKeys(a: *const App) bool {
     const v = &a.view;
-    return v.project_setup.open or v.open_chooser.open or v.strip.menu != null or v.more_menu or v.filter_menu or v.space_menu or v.checkout_menu or v.ref_menu or v.chat_menu.open or v.link_menu.open or
+    return v.setup != null or v.project_setup.open or v.open_chooser.open or v.strip.menu != null or v.more_menu or v.filter_menu or v.space_menu or v.checkout_menu or v.ref_menu or v.chat_menu.open or v.link_menu.open or
         v.updates_popover or v.star_menu or v.account_usage.open or v.agent_work.pinned or v.context.pinned or v.menus.ctx_at != null or v.palette.open or v.custom_theme_open or v.search.focus or a.picker != .none;
 }
 

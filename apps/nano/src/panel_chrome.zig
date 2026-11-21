@@ -139,26 +139,62 @@ pub fn tabWidth(width: f32, count: usize) f32 {
 
 pub fn sharedSlotRoom(width: f32, left: f32, right: f32, count: usize) f32 {
     const n: f32 = @floatFromInt(@max(count, 1));
-    return (width - left - right - 24 - n * 2) / n;
+    return @max(0, (width - left - right - 24 - n * 4) / n);
 }
 
-/// Slot widths align to columns only if every slot fits. Expanded or stacked
-/// panels use shared slots instead, never positions from their hidden bodies.
+/// Slot widths align to columns whenever every slot can keep at least
+/// `slot_min`. When the leading titlebar controls (collapsed sidebar) or
+/// trailing toolbar squeeze an edge pane below `slot_min`, only that edge
+/// group shares its combined header span so interior and opposite-edge slots
+/// remain aligned over their panes.
 pub fn columns(widths: []const f32, leading: f32, left: f32, right: f32, out: []f32) bool {
     if (widths.len == 0 or out.len < widths.len) return false;
-    @memcpy(out[0..widths.len], widths);
+    const n = widths.len;
+    @memcpy(out[0..n], widths);
     out[0] -= left - leading;
-    out[widths.len - 1] -= new_tab_room + @max(0, right - gutter);
-    for (out[0..widths.len]) |w| if (w < slot_min) return false;
+    out[n - 1] -= new_tab_room + @max(0, right - gutter);
+
+    if (out[0] < slot_min) {
+        var sum: f32 = out[0];
+        var end: usize = 0;
+        while (end + 1 < n and sum / @as(f32, @floatFromInt(end + 1)) < slot_min) {
+            end += 1;
+            sum += out[end];
+        }
+        const each = sum / @as(f32, @floatFromInt(end + 1));
+        if (each < slot_min) return false;
+        for (0..end + 1) |i| out[i] = each;
+    }
+
+    if (out[n - 1] < slot_min) {
+        var sum: f32 = out[n - 1];
+        var start: usize = n - 1;
+        while (start > 0 and sum / @as(f32, @floatFromInt(n - start)) < slot_min) {
+            start -= 1;
+            sum += out[start];
+        }
+        const each = sum / @as(f32, @floatFromInt(n - start));
+        if (each < slot_min) return false;
+        for (start..n) |i| out[i] = each;
+    }
+
+    for (out[0..n]) |w| if (w < slot_min) return false;
     return true;
 }
 
 test "desktop strip columns keep their panels' widths and reserve the trailing plus" {
-    var out: [3]f32 = undefined;
+    var out: [4]f32 = undefined;
     try std.testing.expect(columns(&.{ 468, 468 }, 0, 0, 8, &out));
     try std.testing.expectEqual(@as(f32, 468), out[0]);
     try std.testing.expectEqual(@as(f32, 436), out[1]);
     try std.testing.expect(!columns(&.{ 95, 95 }, 8, 44, 8, &out));
+    // Collapsed sidebar squeezes pane 0 below slot_min: panes 0..1 share their
+    // combined span while panes 2 and 3 stay pixel-aligned over their columns.
+    try std.testing.expect(columns(&.{ 187, 187, 187, 189 }, 6, 182, 46, &out));
+    try std.testing.expectEqual(@as(f32, 99), out[0]);
+    try std.testing.expectEqual(@as(f32, 99), out[1]);
+    try std.testing.expectEqual(@as(f32, 187), out[2]);
+    try std.testing.expectEqual(@as(f32, 119), out[3]);
     try std.testing.expectEqual(@as(f32, 240), tabWidth(1000, 2));
     try std.testing.expectEqual(@as(f32, 112), tabWidth(200, 4));
 }
