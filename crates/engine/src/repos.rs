@@ -53,6 +53,25 @@ const FILE_SEARCH_TIMEOUT: Duration = Duration::from_secs(6);
 const GITHUB_AVATAR_TIMEOUT: Duration = Duration::from_secs(6);
 const FILE_INDEX_TTL: Duration = Duration::from_secs(10);
 const FILE_INDEX_MAX_ENTRIES: usize = 250_000;
+/// When `@` file indexing runs directly against the user's home directory,
+/// bound recursion depth and skip OS-managed / cache trees so indexing stays
+/// responsive and never triggers macOS TCC folder prompts.
+const HOME_WALK_MAX_DEPTH: usize = 4;
+const HOME_SKIP_TOP_DIRS: &[&str] = &[
+    "Library",
+    "Applications",
+    "Pictures",
+    "Music",
+    "Movies",
+    "Public",
+    "Downloads",
+    ".Trash",
+    ".cache",
+    ".npm",
+    ".cargo",
+    ".rustup",
+    ".local",
+];
 const RANK_BUFFER: usize = 1_024;
 pub const GIT_HISTORY_DEFAULT_LIMIT: usize = 100;
 pub const GIT_HISTORY_MAX_LIMIT: usize = 200;
@@ -2382,8 +2401,42 @@ fn canonical_search_root(root: &Path) -> Result<PathBuf, EngineError> {
         .map_err(|e| EngineError::Other(format!("could not search workspace: {e}")))
 }
 
+fn is_home_root(root: &Path) -> bool {
+    let home = home_dir();
+    if root == home {
+        return true;
+    }
+    match (std::fs::canonicalize(root), std::fs::canonicalize(&home)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn should_skip_index_entry(depth: usize, name: &std::ffi::OsStr, is_home: bool) -> bool {
+    if depth == 0 {
+        return false;
+    }
+    if name == ".git" {
+        return true;
+    }
+    if is_home && depth == 1 {
+        return name
+            .to_str()
+            .is_some_and(|s| HOME_SKIP_TOP_DIRS.contains(&s));
+    }
+    false
+}
+
 fn walk_file_index<F: Fn() -> bool + Sync>(
     root: &Path,
+    cancelled: &F,
+) -> Result<Vec<IndexedPath>, EngineError> {
+    walk_file_index_in(root, is_home_root(root), cancelled)
+}
+
+fn walk_file_index_in<F: Fn() -> bool + Sync>(
+    root: &Path,
+    is_home: bool,
     cancelled: &F,
 ) -> Result<Vec<IndexedPath>, EngineError> {
     if cancelled() {
@@ -2394,77 +2447,82 @@ fn walk_file_index<F: Fn() -> bool + Sync>(
         .unwrap_or(4);
     let collected: std::sync::Mutex<Vec<IndexedPath>> = std::sync::Mutex::new(Vec::new());
     let was_cancelled = AtomicBool::new(false);
-    ignore::WalkBuilder::new(root)
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder
         .hidden(false)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
         .threads(threads)
-        .filter_entry(|entry| entry.depth() == 0 || entry.file_name() != ".git")
-        .build_parallel()
-        .run(|| {
-            const BATCH: usize = 512;
-            struct Batch<'a> {
-                items: Vec<IndexedPath>,
-                sink: &'a std::sync::Mutex<Vec<IndexedPath>>,
-            }
-            impl Drop for Batch<'_> {
-                fn drop(&mut self) {
-                    if self.items.is_empty() {
-                        return;
-                    }
-                    if let Ok(mut all) = self.sink.lock() {
-                        all.append(&mut self.items);
-                    }
-                }
-            }
-            let mut batch = Batch {
-                items: Vec::with_capacity(BATCH),
-                sink: &collected,
-            };
-            let was_cancelled = &was_cancelled;
-            Box::new(move |entry| {
-                if was_cancelled.load(Ordering::Relaxed) {
-                    return ignore::WalkState::Quit;
-                }
-                if cancelled() {
-                    was_cancelled.store(true, Ordering::Relaxed);
-                    return ignore::WalkState::Quit;
-                }
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(err) => {
-                        tracing::debug!(%err, "file mention index skipped entry");
-                        return ignore::WalkState::Continue;
-                    }
-                };
-                let path = entry.path();
-                if path == root {
-                    return ignore::WalkState::Continue;
-                }
-                let Ok(relative) = path.strip_prefix(root) else {
-                    return ignore::WalkState::Continue;
-                };
-                let relative = relative.to_string_lossy().replace('\\', "/");
-                if relative == ".git" || relative.starts_with(".git/") {
-                    return ignore::WalkState::Continue;
-                }
-                batch.items.push(IndexedPath {
-                    haystack: nucleo_matcher::Utf32String::from(relative.as_str()),
-                    path: relative,
-                    is_dir: entry.file_type().is_some_and(|kind| kind.is_dir()),
-                });
-                if batch.items.len() >= BATCH
-                    && let Ok(mut all) = batch.sink.lock()
-                {
-                    all.append(&mut batch.items);
-                    if all.len() >= FILE_INDEX_MAX_ENTRIES {
-                        return ignore::WalkState::Quit;
-                    }
-                }
-                ignore::WalkState::Continue
-            })
+        .filter_entry(move |entry| {
+            !should_skip_index_entry(entry.depth(), entry.file_name(), is_home)
         });
+    if is_home {
+        builder.max_depth(Some(HOME_WALK_MAX_DEPTH));
+    }
+    builder.build_parallel().run(|| {
+        const BATCH: usize = 512;
+        struct Batch<'a> {
+            items: Vec<IndexedPath>,
+            sink: &'a std::sync::Mutex<Vec<IndexedPath>>,
+        }
+        impl Drop for Batch<'_> {
+            fn drop(&mut self) {
+                if self.items.is_empty() {
+                    return;
+                }
+                if let Ok(mut all) = self.sink.lock() {
+                    all.append(&mut self.items);
+                }
+            }
+        }
+        let mut batch = Batch {
+            items: Vec::with_capacity(BATCH),
+            sink: &collected,
+        };
+        let was_cancelled = &was_cancelled;
+        Box::new(move |entry| {
+            if was_cancelled.load(Ordering::Relaxed) {
+                return ignore::WalkState::Quit;
+            }
+            if cancelled() {
+                was_cancelled.store(true, Ordering::Relaxed);
+                return ignore::WalkState::Quit;
+            }
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    tracing::debug!(%err, "file mention index skipped entry");
+                    return ignore::WalkState::Continue;
+                }
+            };
+            let path = entry.path();
+            if path == root {
+                return ignore::WalkState::Continue;
+            }
+            let Ok(relative) = path.strip_prefix(root) else {
+                return ignore::WalkState::Continue;
+            };
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            if relative == ".git" || relative.starts_with(".git/") {
+                return ignore::WalkState::Continue;
+            }
+            batch.items.push(IndexedPath {
+                haystack: nucleo_matcher::Utf32String::from(relative.as_str()),
+                path: relative,
+                is_dir: entry.file_type().is_some_and(|kind| kind.is_dir()),
+            });
+            if batch.items.len() >= BATCH
+                && let Ok(mut all) = batch.sink.lock()
+            {
+                all.append(&mut batch.items);
+                if all.len() >= FILE_INDEX_MAX_ENTRIES {
+                    return ignore::WalkState::Quit;
+                }
+            }
+            ignore::WalkState::Continue
+        })
+    });
     if was_cancelled.load(Ordering::Relaxed) || cancelled() {
         return Err(EngineError::Other("file search cancelled".into()));
     }
@@ -3534,5 +3592,27 @@ tmpfs /run tmpfs rw 0 0
         let expected: Vec<FolderEntry> = all.entries.into_iter().filter(|e| e.is_dir).collect();
         assert_eq!(dirs.entries, expected);
         assert!(dirs.entries.iter().any(|e| e.name == "beta" && e.is_repo));
+    }
+
+    #[test]
+    fn home_walk_skips_os_managed_dirs_and_caps_depth() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("Library/Caches/big")).unwrap();
+        std::fs::write(home.path().join("Library/Caches/big/skip.txt"), "x").unwrap();
+        std::fs::create_dir_all(home.path().join("Projects/a/b/c/d/e")).unwrap();
+        std::fs::write(home.path().join("Projects/a/shallow.txt"), "ok").unwrap();
+        std::fs::write(home.path().join("Projects/a/b/c/d/e/too-deep.txt"), "deep").unwrap();
+
+        let home_entries = walk_file_index_in(home.path(), true, &|| false).unwrap();
+        let home_paths: Vec<&str> = home_entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(home_paths.contains(&"Projects/a/shallow.txt"));
+        assert!(!home_paths.iter().any(|p| p.starts_with("Library")));
+        assert!(!home_paths.iter().any(|p| p.ends_with("too-deep.txt")));
+
+        // Regular project roots are not depth-capped or Library-filtered.
+        let project_entries = walk_file_index_in(home.path(), false, &|| false).unwrap();
+        let project_paths: Vec<&str> = project_entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(project_paths.contains(&"Library/Caches/big/skip.txt"));
+        assert!(project_paths.contains(&"Projects/a/b/c/d/e/too-deep.txt"));
     }
 }

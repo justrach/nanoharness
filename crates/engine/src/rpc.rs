@@ -1803,15 +1803,25 @@ fn doc_messages_stream(
     rx: watch::Receiver<crate::doc_host::TranscriptSnapshot>,
     doc: std::sync::Arc<harness_doc::SessionDoc>,
 ) -> BoxStream<'static, Box<serde_json::value::RawValue>> {
+    doc_messages_stream_from(rx, doc, None)
+}
+
+fn doc_messages_stream_from(
+    rx: watch::Receiver<crate::doc_host::TranscriptSnapshot>,
+    doc: std::sync::Arc<harness_doc::SessionDoc>,
+    start: Option<(
+        crate::doc_host::TranscriptSnapshot,
+        harness_doc::TranscriptBaseline,
+    )>,
+) -> BoxStream<'static, Box<serde_json::value::RawValue>> {
     use harness_doc::transcript_delta::{TranscriptFrame, diff_transcript_shared};
+    let (initial_prev, initial_baseline) = match start {
+        Some((snap, baseline)) => (Some(snap), baseline),
+        None => (None, harness_doc::TranscriptBaseline::default()),
+    };
+    let initial_usage = initial_prev.as_ref().and_then(|_| doc.context_usage());
     futures::stream::unfold(
-        (
-            rx,
-            None::<crate::doc_host::TranscriptSnapshot>,
-            doc,
-            None,
-            harness_doc::TranscriptBaseline::default(),
-        ),
+        (rx, initial_prev, doc, initial_usage, initial_baseline),
         |(mut rx, mut prev, doc, mut previous_usage, mut opening_baseline)| async move {
             loop {
                 if prev.is_some() {
@@ -1913,6 +1923,111 @@ async fn opening_doc_messages_stream(
     .flatten();
     Ok(futures::stream::once(async move { preview })
         .chain(full)
+        .boxed())
+}
+
+/// Bounds on the newest-entries read emitted before a full `since` diff on a
+/// long cold chat (`since_doc_messages_stream`).
+const SINCE_TAIL_ENTRIES: usize = 48;
+const SINCE_TAIL_PARTS: usize = 2_048;
+
+/// Fast cold-chat watch for a viewer that already holds `known` `(id, sum)`
+/// rows: for long transcripts, diffs and sends any changed/new newest entries
+/// immediately (`historyPending: true`), then computes the full `since: true`
+/// delta (plus `orderSum`) from the updated baseline before continuing with
+/// live delta streaming.
+async fn since_doc_messages_stream(
+    host: crate::doc_host::DocHost,
+    chat_id: String,
+    known: Vec<(String, u64)>,
+) -> Result<BoxStream<'static, Box<serde_json::value::RawValue>>, RpcError> {
+    let first = tokio::task::spawn_blocking(move || {
+        let handle = host.open(&chat_id)?;
+        if !handle.transcript_is_long() {
+            return Ok::<_, crate::EngineError>(Err(since_stream(&handle, &known)?));
+        }
+        let tail = handle
+            .doc()
+            .read_newest_entries(SINCE_TAIL_ENTRIES, SINCE_TAIL_PARTS)?;
+        let (changed, holds) = harness_doc::tail_since_known(&known, &tail);
+        if changed.is_empty() {
+            return Ok(Err(since_stream(&handle, &known)?));
+        }
+        let mut preview = serde_json::to_value(harness_doc::TranscriptUpdate {
+            frame: harness_doc::TranscriptFrame::reset(&changed),
+            context_usage: handle.doc().context_usage(),
+            replay_baseline: Some(harness_doc::TranscriptBaseline::capture(&changed)),
+        })
+        .map_err(|e| crate::EngineError::Other(e.to_string()))?;
+        preview["historyPending"] = serde_json::Value::Bool(true);
+        let raw = serde_json::value::to_raw_value(&preview)
+            .map_err(|e| crate::EngineError::Other(e.to_string()))?;
+        Ok(Ok((raw, handle, holds)))
+    })
+    .await
+    .map_err(|e| RpcError::Failed(e.to_string()))?
+    .map_err(|e| RpcError::Failed(e.to_string()))?;
+
+    let (preview, handle, holds) = match first {
+        Ok(pair) => pair,
+        Err(stream) => return Ok(stream),
+    };
+    let rest = futures::stream::once(async move {
+        match tokio::task::spawn_blocking(move || since_stream(&handle, &holds)).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "transcript since failed");
+                futures::stream::empty().boxed()
+            }
+            Err(error) => {
+                tracing::warn!(%error, "transcript since failed");
+                futures::stream::empty().boxed()
+            }
+        }
+    })
+    .flatten();
+    Ok(futures::stream::once(async move { preview })
+        .chain(rest)
+        .boxed())
+}
+
+fn since_stream(
+    handle: &crate::doc_host::ChatDocHandle,
+    known: &[(String, u64)],
+) -> Result<BoxStream<'static, Box<serde_json::value::RawValue>>, crate::EngineError> {
+    let rx = handle.watch_messages();
+    handle.publish_messages();
+    let current = rx.borrow().clone();
+    let baseline = harness_doc::TranscriptBaseline::capture_shared(&current.entries);
+    let frame = harness_doc::delta_from_known(known, &current.entries);
+    let sent_baseline = match &frame {
+        harness_doc::TranscriptFrame::Reset { reset } => {
+            Some(harness_doc::TranscriptBaseline::capture(reset))
+        }
+        harness_doc::TranscriptFrame::Delta { upsert, .. } if !upsert.is_empty() => {
+            let entries: Vec<_> = upsert.iter().map(|u| u.entry.clone()).collect();
+            Some(harness_doc::TranscriptBaseline::capture(&entries))
+        }
+        _ => None,
+    };
+    let mut first = serde_json::to_value(harness_doc::TranscriptUpdate {
+        frame,
+        context_usage: handle.doc().context_usage(),
+        replay_baseline: sent_baseline,
+    })
+    .map_err(|e| crate::EngineError::Other(e.to_string()))?;
+    first["since"] = serde_json::Value::Bool(true);
+    first["orderSum"] = serde_json::json!(harness_doc::order_sum(
+        current.entries.iter().map(|e| e.id.as_str())
+    ));
+    let raw = serde_json::value::to_raw_value(&first)
+        .map_err(|e| crate::EngineError::Other(e.to_string()))?;
+    Ok(futures::stream::once(async move { raw })
+        .chain(doc_messages_stream_from(
+            rx,
+            handle.doc_arc(),
+            Some((current, baseline)),
+        ))
         .boxed())
 }
 
@@ -2462,7 +2577,18 @@ impl RpcService for EngineRpc {
                     .get("openingTail")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                let known: Option<Vec<(String, u64)>> = params
+                    .get("known")
+                    .filter(|v| !v.is_null())
+                    .map(|v| serde_json::from_value(v.clone()))
+                    .transpose()
+                    .map_err(|e| RpcError::BadParams(e.to_string()))?;
                 let p: ChatParams = parse_params(params)?;
+                if let Some(known) = known {
+                    return Ok(RpcReply::StreamRaw(
+                        since_doc_messages_stream(self.doc_host.clone(), p.chat_id, known).await?,
+                    ));
+                }
                 if opening_tail {
                     return Ok(RpcReply::StreamRaw(
                         opening_doc_messages_stream(self.doc_host.clone(), p.chat_id).await?,
@@ -5324,5 +5450,100 @@ mod context_usage_tests {
         remote.clear_context_usage().unwrap();
         tx.send_replace(crate::doc_host::TranscriptSnapshot::default());
         assert!(stream.next().await.unwrap()["contextUsage"].is_null());
+    }
+
+    #[tokio::test]
+    async fn cold_open_with_known_rows_sends_newest_changes_before_full_since_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(harness_sync::DocsStore::open(dir.path()).unwrap());
+        let doc = harness_doc::SessionDoc::init("long-cold").unwrap();
+        // Build an incompressible > 1 MiB snapshot so `transcript_is_long()` triggers.
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut word = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            format!("{seed:016x}")
+        };
+        let mut held = Vec::new();
+        for i in 0..80 {
+            let mut body = String::with_capacity(20_000);
+            while body.len() < 18_000 {
+                body.push_str(&word());
+                body.push(' ');
+            }
+            let entry = harness_doc::SessionMessageEntry {
+                id: format!("e{i}"),
+                role: harness_doc::MessageRole::Assistant,
+                parts: vec![harness_doc::MessagePart::Text {
+                    id: format!("p{i}"),
+                    text: body,
+                }],
+                created_at: i as i64,
+                device_id: "dev".into(),
+                status: Some(harness_doc::MessageStatus::Complete),
+                continuation_of: None,
+                duration_ms: None,
+            };
+            doc.push_message(&entry).unwrap();
+            held.push(entry);
+        }
+        let known: Vec<(String, u64)> = held
+            .iter()
+            .map(|e| (e.id.clone(), harness_doc::entry_sum_of(e)))
+            .collect();
+        // Append one new entry after the reader captured `known`, persist, and open cold.
+        let newest = harness_doc::SessionMessageEntry {
+            id: "e80".into(),
+            role: harness_doc::MessageRole::Assistant,
+            parts: vec![harness_doc::MessagePart::Text {
+                id: "p80".into(),
+                text: "freshly arrived reply".into(),
+            }],
+            created_at: 80,
+            device_id: "dev".into(),
+            status: Some(harness_doc::MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        };
+        doc.push_message(&newest).unwrap();
+        let snapshot = doc.export_snapshot().unwrap();
+        assert!(snapshot.len() >= 1 << 20);
+        store.save_snapshot("long-cold", &snapshot).unwrap();
+
+        let host = crate::doc_host::DocHost::new(
+            store,
+            crate::doc_host::DocHostConfig {
+                device_id: "dev".into(),
+                default_harness: harness_proto::HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let mut stream = since_doc_messages_stream(host.clone(), "long-cold".into(), known)
+            .await
+            .unwrap();
+
+        // Frame 1: immediate opening tail with only the changed/new newest entry.
+        let first: serde_json::Value =
+            serde_json::from_str(stream.next().await.unwrap().get()).unwrap();
+        assert_eq!(first["historyPending"], true);
+        let reset = first["reset"].as_array().unwrap();
+        assert_eq!(reset.len(), 1);
+        assert_eq!(reset[0]["id"], "e80");
+
+        // Frame 2: authoritative `since` delta measured after applying Frame 1.
+        let second: serde_json::Value =
+            serde_json::from_str(stream.next().await.unwrap().get()).unwrap();
+        assert_eq!(second["since"], true);
+        assert_eq!(second["count"], 81);
+        assert!(second["upsert"].as_array().unwrap().is_empty());
+        assert!(second["remove"].as_array().unwrap().is_empty());
+        let expected_ids: Vec<String> = (0..=80).map(|i| format!("e{i}")).collect();
+        assert_eq!(
+            second["orderSum"].as_u64().unwrap(),
+            harness_doc::order_sum(expected_ids.iter().map(String::as_str))
+        );
+
+        host.shutdown_workers().await;
     }
 }

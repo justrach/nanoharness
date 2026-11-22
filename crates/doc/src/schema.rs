@@ -650,6 +650,73 @@ impl SessionDoc {
         Ok(join_continuation_entries(entries))
     }
 
+    /// Read the transcript's newest entries — each WHOLE and joined exactly as
+    /// [`Self::read_entries`] + [`join_continuation_entries`] produce it — from
+    /// their Loro containers without expanding older history.
+    ///
+    /// Stops once `max_entries` have been read (and all included continuations
+    /// have found their root) or adding the next entry's parts would exceed
+    /// `max_parts` (no entry is ever read in part). Any continuation whose root
+    /// lies beyond the scan reach is dropped so it never appears as an orphan;
+    /// the full read that follows supplies the complete transcript.
+    pub fn read_newest_entries(
+        &self,
+        max_entries: usize,
+        max_parts: usize,
+    ) -> Result<Vec<SessionMessageEntry>, DocError> {
+        use loro::{Container, ValueOrContainer};
+        if max_entries == 0 || max_parts == 0 {
+            return Ok(Vec::new());
+        }
+        let messages = self.doc.get_list("messages");
+        let reach = max_entries.saturating_mul(4).max(max_entries + 16);
+        let mut parts_read = 0usize;
+        let mut entries = Vec::new();
+        let mut roots = std::collections::HashSet::new();
+        let mut missing = std::collections::HashSet::new();
+        for (scanned, index) in (0..messages.len()).rev().enumerate() {
+            if scanned >= reach || (entries.len() >= max_entries && missing.is_empty()) {
+                break;
+            }
+            let value = match messages.get(index) {
+                Some(ValueOrContainer::Container(Container::Map(map))) => {
+                    let parts = match map.get("parts") {
+                        Some(ValueOrContainer::Container(Container::List(parts))) => parts.len(),
+                        _ => 0,
+                    };
+                    if parts_read + parts > max_parts {
+                        break;
+                    }
+                    parts_read += parts;
+                    map.get_deep_value().to_json_value()
+                }
+                Some(ValueOrContainer::Value(value)) => value.to_json_value(),
+                _ => continue,
+            };
+            let Ok(entry) = entry_from_json(value) else {
+                continue;
+            };
+            match &entry.continuation_of {
+                Some(root) if !roots.contains(root) => {
+                    missing.insert(root.clone());
+                }
+                Some(_) => {}
+                None => {
+                    missing.remove(&entry.id);
+                    roots.insert(entry.id.clone());
+                }
+            }
+            entries.push(entry);
+        }
+        entries.reverse();
+        entries.retain(|e| {
+            e.continuation_of
+                .as_ref()
+                .is_none_or(|root| roots.contains(root))
+        });
+        Ok(join_continuation_entries(entries))
+    }
+
     /// Read the commands ledger.
     ///
     /// Same skip-not-fail policy as `read_entries`: any device can append
@@ -2697,5 +2764,48 @@ mod context_usage_tests {
         assert_eq!(rebuilt.context_usage(), host.context_usage());
         rebuilt.clear_context_usage().unwrap();
         assert_eq!(rebuilt.context_usage(), None);
+    }
+
+    #[test]
+    fn read_newest_entries_reads_whole_entries_and_joins_continuations() {
+        let doc = SessionDoc::init("newest-tail").unwrap();
+        for i in 0..8 {
+            doc.push_message(&SessionMessageEntry {
+                id: format!("m{i}"),
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Text {
+                    id: format!("p{i}"),
+                    text: format!("body {i}"),
+                }],
+                created_at: i as i64,
+                device_id: "dev".into(),
+                status: Some(MessageStatus::Complete),
+                continuation_of: None,
+                duration_ms: None,
+            })
+            .unwrap();
+        }
+        // Continuation of m5 placed at the tail: reading 2 entries must pull m5's root too.
+        doc.push_message(&SessionMessageEntry {
+            id: "m5-cont".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Text {
+                id: "p5c".into(),
+                text: "continued".into(),
+            }],
+            created_at: 9,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: Some("m5".into()),
+            duration_ms: None,
+        })
+        .unwrap();
+
+        let newest = doc.read_newest_entries(2, 64).unwrap();
+        let ids: Vec<&str> = newest.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["m5", "m6", "m7"]);
+        assert_eq!(newest[0].parts.len(), 2);
+        // Zero part budget reads no partial entries.
+        assert!(doc.read_newest_entries(4, 0).unwrap().is_empty());
     }
 }

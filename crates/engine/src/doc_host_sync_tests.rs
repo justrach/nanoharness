@@ -1499,3 +1499,56 @@ async fn a_chat_born_on_the_host_starts_with_a_verified_cursor() {
     assert!(born.persistence.as_ref().unwrap().initial_cursor_verified);
     host.shutdown_workers().await;
 }
+
+/// Reopening a connected remote-hosted chat asks the room for any missed
+/// updates (throttled by `REOPEN_REFRESH_SPACING_MS`), while locally hosted
+/// chats never issue redundant reopen catch-up requests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reopening_a_connected_remote_chat_asks_the_room_for_missed_updates() {
+    let _budget_guard = SYNC_TEST_LOCK.lock().await;
+    let room = room().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+    let ws = workspace(store.clone());
+    legacy_chat(&ws, "remote-chat", "remote-host", Some(2));
+    legacy_chat(&ws, "local-chat", "host", Some(2));
+    let host = DocHost::new(
+        store.clone(),
+        DocHostConfig {
+            device_id: "host".into(),
+            default_harness: HarnessId::Mock,
+            edge: Some(EdgeConfig::with_static_token(&room.url, "test")),
+        },
+    );
+    host.set_workspace(ws);
+
+    let remote = host.open("remote-chat").unwrap();
+    let _watch_remote = remote.watch_messages();
+    until(|| lock(&remote.chat2).as_ref().is_some_and(|c| c.caught_up())).await;
+
+    // Simulate the spacing window having elapsed since initial join, then reopen.
+    lock(&remote.reopen).asked_at = now_ms() - REOPEN_REFRESH_SPACING_MS - 1_000;
+    let _reopened = host.open("remote-chat").unwrap();
+    until(|| {
+        let r = lock(&remote.reopen);
+        r.opened == 0 && r.pending.is_none() && now_ms() - r.asked_at < 5_000
+    })
+    .await;
+
+    // A second immediate reopen within the spacing window must not re-ask.
+    let asked_before = lock(&remote.reopen).asked_at;
+    host.focus_chat("remote-chat").unwrap();
+    until(|| lock(&remote.reopen).opened == 0).await;
+    assert_eq!(lock(&remote.reopen).asked_at, asked_before);
+
+    // A locally hosted chat must not issue reopen catch-up asks at all.
+    let local = host.open("local-chat").unwrap();
+    let _watch_local = local.watch_messages();
+    until(|| lock(&local.chat2).as_ref().is_some_and(|c| c.caught_up())).await;
+    lock(&local.reopen).asked_at = 0;
+    let _ = host.open("local-chat").unwrap();
+    until(|| lock(&local.reopen).opened == 0).await;
+    assert_eq!(lock(&local.reopen).asked_at, 0);
+
+    host.shutdown_workers().await;
+}
