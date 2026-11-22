@@ -522,6 +522,23 @@ case "$promptline" in
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
   ;;
 
+*scenario:background-tool*)
+  # Mirrors agy acp 1.5+: a run_command call stays in_progress across end_turn,
+  # then completes later via a post-turn tool_call_update followed by a reactive
+  # wakeup reply.
+  update '{"sessionUpdate":"tool_call","toolCallId":"bg-1","title":"gh pr checks --watch","kind":"execute","status":"in_progress","rawInput":{"command":"gh pr checks --watch"}}'
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"WAITING"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  sleep 0.2
+  update '{"sessionUpdate":"tool_call_update","toolCallId":"bg-1","title":"gh pr checks --watch","kind":"execute","status":"completed","rawInput":{"command":"gh pr checks --watch"},"content":[{"type":"content","content":{"type":"text","text":"all green"}}]}'
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"FINISHED"}}'
+  # Also ensure a user prompt arriving right after bg-1 settles goes through cleanly.
+  read -r followline || exit 0
+  fid=$(rid "$followline")
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"FOLLOWUP_OK"}}'
+  emit "{\"id\":$fid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
+
 *)
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"refusal\"}}"
   ;;

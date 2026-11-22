@@ -3146,3 +3146,71 @@ async fn clarification_recovery_does_not_replay_reported_post_answer_work() {
         )
     );
 }
+
+#[tokio::test]
+async fn open_tool_across_turn_end_emits_background_task_lifecycle() {
+    let (controls, steer, _token) = controls();
+    let harness = harness();
+    let stream = harness
+        .run(request("scenario:background-tool"), controls)
+        .await
+        .expect("run starts");
+    let events = tokio::time::timeout(Duration::from_secs(15), async move {
+        let mut events = Vec::new();
+        let mut stream = stream;
+        let mut steer = Some(steer);
+        while let Some(ev) = stream.next().await {
+            let ev = ev.expect("stream event");
+            if matches!(ev, AgentEvent::TextDelta { ref text } if text == "FINISHED")
+                && let Some(tx) = &steer
+            {
+                tx.send(SteerMessage {
+                    prompt: "merge now".into(),
+                    message_id: None,
+                    attachments: Vec::new(),
+                })
+                .await
+                .expect("steer sent");
+            }
+            if matches!(ev, AgentEvent::TextDelta { ref text } if text == "FOLLOWUP_OK") {
+                steer = None;
+            }
+            events.push(ev);
+        }
+        events
+    })
+    .await
+    .expect("run finished in time");
+
+    let started = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::BackgroundTask { id, running: true } if id == "bg-1"))
+        .expect("open tool at end_turn must emit BackgroundTask { running: true }");
+    let first_done = events
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    ..
+                }
+            )
+        })
+        .expect("initial Done");
+    let settled = events
+        .iter()
+        .position(
+            |e| matches!(e, AgentEvent::BackgroundTask { id, running: false } if id == "bg-1"),
+        )
+        .expect("post-turn ToolResult must emit BackgroundTask { running: false }");
+    let wakeup = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TextDelta { text } if text == "FINISHED"))
+        .expect("reactive wakeup text");
+
+    assert!(
+        started < first_done && first_done < settled && settled < wakeup,
+        "expected BackgroundTask start < Done < settle < wakeup, got: {events:?}"
+    );
+}

@@ -3762,16 +3762,78 @@ fn prompt_like_request(
     Box::pin(async move { client.request(method, params).await })
 }
 
-/// Track tools to avoid prompting into an unowned self-continued turn.
-fn track_open_tools(ev: &AgentEvent, open_tools: &mut std::collections::HashSet<String>) {
-    match ev {
-        AgentEvent::ToolCall { id, .. } => {
-            open_tools.insert(id.clone());
+/// Track open tools and background tools that outlive a turn (for example
+/// Antigravity's `run_command` background tasks, which stay `in_progress`
+/// across `end_turn` and settle later via `tool_call_update`).
+#[derive(Default)]
+struct ToolLifecycleTracker {
+    open: std::collections::HashSet<String>,
+    background: std::collections::HashSet<String>,
+}
+
+impl ToolLifecycleTracker {
+    /// Update open/background tool sets for one `session/update` batch and
+    /// return any `BackgroundTask` lifecycle transitions to forward.
+    fn observe_batch(&mut self, events: &[AgentEvent], turn_active: bool) -> Vec<AgentEvent> {
+        let resolved_in_batch: std::collections::HashSet<&str> = events
+            .iter()
+            .filter_map(|ev| match ev {
+                AgentEvent::ToolResult { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let mut bg_events = Vec::new();
+        for ev in events {
+            match ev {
+                AgentEvent::ToolCall { id, .. } if id != harness_proto::LIVE_PLAN_TOOL_ID => {
+                    self.open.insert(id.clone());
+                    if !turn_active
+                        && !resolved_in_batch.contains(id.as_str())
+                        && self.background.insert(id.clone())
+                    {
+                        bg_events.push(AgentEvent::BackgroundTask {
+                            id: id.clone(),
+                            running: true,
+                        });
+                    }
+                }
+                AgentEvent::ToolResult { id, .. } => {
+                    self.open.remove(id);
+                    if self.background.remove(id) {
+                        bg_events.push(AgentEvent::BackgroundTask {
+                            id: id.clone(),
+                            running: false,
+                        });
+                    }
+                }
+                _ => {}
+            }
         }
-        AgentEvent::ToolResult { id, .. } => {
-            open_tools.remove(id);
+        bg_events
+    }
+
+    /// Any tool still open when a turn completes cleanly outlived the turn as
+    /// background work: promote it out of `open` (so follow-up steers are not
+    /// deferred forever) and announce it to the engine's idle reaper / wake
+    /// tracker.
+    fn promote_open_on_turn_end(&mut self) -> Vec<AgentEvent> {
+        let mut ids: Vec<String> = self.open.drain().collect();
+        ids.sort();
+        let mut bg_events = Vec::new();
+        for id in ids {
+            if id != harness_proto::LIVE_PLAN_TOOL_ID && self.background.insert(id.clone()) {
+                bg_events.push(AgentEvent::BackgroundTask { id, running: true });
+            }
         }
-        _ => {}
+        bg_events
+    }
+
+    fn clear_open(&mut self) {
+        self.open.clear();
+    }
+
+    fn has_open(&self) -> bool {
+        !self.open.is_empty()
     }
 }
 
@@ -4341,7 +4403,7 @@ async fn run_session(session: Session) {
     // its response (or an authoritative completion extension) arrives.
     // HARNESS_ACP_QUIET_SETTLE_MS is intentionally no longer honored (#296).
     let mut last_update_at = tokio::time::Instant::now();
-    let mut open_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut open_tools = ToolLifecycleTracker::default();
     // PREVENTION, ahead of all the recovery above: never send a
     // `session/prompt` into a session that is visibly mid SELF-CONTINUED
     // turn — that prompt's reply is what the adapter drops (the verified
@@ -4457,7 +4519,8 @@ async fn run_session(session: Session) {
                         Incoming::Notification { method, params } => {
                             let events =
                                 session_update_events(&method, &params, &session_id, &mut subagents, &mut trackers);
-                            for ev in events {
+                            let bg_events = open_tools.observe_batch(&events, true);
+                            for ev in events.into_iter().chain(bg_events) {
                                 clarification.observe(&ev);
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -4503,7 +4566,7 @@ async fn run_session(session: Session) {
                     }).await {
                         break 'main;
                     }
-                    open_tools.clear();
+                    open_tools.clear_open();
                     last_update_at = tokio::time::Instant::now();
                     prompt_seq += 1;
                     current_prompt_id = prompt_complete_extension.then(|| format!("harness-p{prompt_seq}"));
@@ -4546,6 +4609,15 @@ async fn run_session(session: Session) {
                 autonomous_turn = false;
                 if interrupted {
                     done_after_interrupt = true;
+                    open_tools.clear_open();
+                } else if res.is_ok() {
+                    for bg in open_tools.promote_open_on_turn_end() {
+                        if !send(&event_tx, bg).await {
+                            break 'main;
+                        }
+                    }
+                } else {
+                    open_tools.clear_open();
                 }
                 if !send(
                     &event_tx,
@@ -4580,7 +4652,7 @@ async fn run_session(session: Session) {
                         break 'main;
                     }
                     done_current = false;
-                    open_tools.clear();
+                    open_tools.clear_open();
                     last_update_at = tokio::time::Instant::now();
                     prompt_seq += 1;
                     current_prompt_id =
@@ -4705,7 +4777,7 @@ async fn run_session(session: Session) {
                                 break 'main;
                             }
                             trackers.effort.finish_turn();
-                            open_tools.clear();
+                            open_tools.clear_open();
                             done_current = true;
                             autonomous_turn = false;
                             if !send(
@@ -4738,9 +4810,9 @@ async fn run_session(session: Session) {
                     // tolerated by design.
                     let events =
                         session_update_events(&method, &params, &session_id, &mut subagents, &mut trackers);
-                    for ev in events {
+                    let bg_events = open_tools.observe_batch(&events, turn.is_some());
+                    for ev in events.into_iter().chain(bg_events) {
                         clarification.observe(&ev);
-                        track_open_tools(&ev, &mut open_tools);
                         if !send(&event_tx, ev).await {
                             break 'main;
                         }
@@ -4858,7 +4930,8 @@ async fn run_session(session: Session) {
                                 Incoming::Notification { method, params } => {
                                     let events =
                                         session_update_events(&method, &params, &session_id, &mut subagents, &mut trackers);
-                                    for ev in events {
+                                    let bg_events = open_tools.observe_batch(&events, true);
+                                    for ev in events.into_iter().chain(bg_events) {
                                         clarification.observe(&ev);
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
@@ -4946,7 +5019,7 @@ async fn run_session(session: Session) {
                         break 'main;
                     }
                     done_current = false;
-                    open_tools.clear();
+                    open_tools.clear_open();
                     last_update_at = tokio::time::Instant::now();
                     prompt_seq += 1;
                     current_prompt_id =
@@ -4985,7 +5058,8 @@ async fn run_session(session: Session) {
                 busy_defer_deadline = None;
                 if turn.is_none()
                     && !queued_steers.is_empty()
-                    && (!open_tools.is_empty() || last_update_at.elapsed() < BUSY_RECENT)
+                    && ((harness != HarnessId::Antigravity && open_tools.has_open())
+                        || last_update_at.elapsed() < BUSY_RECENT)
                 {
                     busy_defer_deadline = Some(tokio::time::Instant::now() + BUSY_RECHECK);
                 } else if turn.is_none()
@@ -5004,7 +5078,7 @@ async fn run_session(session: Session) {
                         break 'main;
                     }
                     done_current = false;
-                    open_tools.clear();
+                    open_tools.clear_open();
                     last_update_at = tokio::time::Instant::now();
                     prompt_seq += 1;
                     current_prompt_id =
@@ -5082,7 +5156,7 @@ async fn run_session(session: Session) {
                         break 'main;
                     }
                     done_current = false;
-                    open_tools.clear();
+                    open_tools.clear_open();
                     last_update_at = tokio::time::Instant::now();
                     prompt_seq += 1;
                     current_prompt_id =
@@ -5119,7 +5193,7 @@ async fn run_session(session: Session) {
                         queued_steers.push_back(text);
                     } else if turn.is_none()
                         && defer_into_busy
-                        && (!open_tools.is_empty()
+                        && ((harness != HarnessId::Antigravity && open_tools.has_open())
                             || last_update_at.elapsed() < BUSY_RECENT)
                     {
                         // Mid self-continued turn (see BUSY_RECENT above):
@@ -5148,7 +5222,7 @@ async fn run_session(session: Session) {
                             break 'main;
                         }
                         done_current = false;
-                        open_tools.clear();
+                        open_tools.clear_open();
                         last_update_at = tokio::time::Instant::now();
                         prompt_seq += 1;
                     current_prompt_id =
@@ -6911,6 +6985,67 @@ fn explicit_program_launches_do_not_get_archive_scratch_roots() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-antigravity-acp.sh"),
     );
     assert!(harness.adapter_scratch().unwrap().is_none());
+}
+
+#[cfg(test)]
+#[test]
+fn tool_lifecycle_tracker_promotes_open_tools_at_turn_end_and_settles_later() {
+    let mut tracker = ToolLifecycleTracker::default();
+    let call = |id: &str| AgentEvent::ToolCall {
+        id: id.into(),
+        call: harness_proto::ToolCall::Exec {
+            command: "gh pr checks --watch".into(),
+        },
+    };
+    let result = |id: &str| AgentEvent::ToolResult {
+        id: id.into(),
+        is_error: false,
+        output: None,
+        diff: None,
+    };
+
+    // Synchronous tool during an active turn produces no BackgroundTask events.
+    assert!(tracker.observe_batch(&[call("sync-1")], true).is_empty());
+    assert!(tracker.observe_batch(&[result("sync-1")], true).is_empty());
+
+    // Tool still open when the turn completes is promoted and cleared from open.
+    assert!(tracker.observe_batch(&[call("bg-1")], true).is_empty());
+    assert!(tracker.has_open());
+    assert_eq!(
+        tracker.promote_open_on_turn_end(),
+        vec![AgentEvent::BackgroundTask {
+            id: "bg-1".into(),
+            running: true,
+        }]
+    );
+    assert!(!tracker.has_open());
+
+    // Post-turn tool_call_update carrying both ToolCall refresh and ToolResult
+    // settles bg-1 without re-emitting running: true.
+    assert_eq!(
+        tracker.observe_batch(&[call("bg-1"), result("bg-1")], false),
+        vec![AgentEvent::BackgroundTask {
+            id: "bg-1".into(),
+            running: false,
+        }]
+    );
+
+    // An async tool opened during an unowned (self-continued) turn announces
+    // running: true immediately and settles when its ToolResult arrives.
+    assert_eq!(
+        tracker.observe_batch(&[call("bg-2")], false),
+        vec![AgentEvent::BackgroundTask {
+            id: "bg-2".into(),
+            running: true,
+        }]
+    );
+    assert_eq!(
+        tracker.observe_batch(&[result("bg-2")], false),
+        vec![AgentEvent::BackgroundTask {
+            id: "bg-2".into(),
+            running: false,
+        }]
+    );
 }
 
 #[cfg(test)]

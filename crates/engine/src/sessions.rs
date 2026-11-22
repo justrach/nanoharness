@@ -2739,6 +2739,68 @@ fn stopped_after_answer(reason: Option<&str>) -> Option<String> {
     ))
 }
 
+/// Tracks a chain of self-continued turns since the last Done, steer, or
+/// settled background task (#341, #517). Counts only ACTIVE working time while
+/// a self-continued turn is running — sitting parked idle between wakes (e.g.
+/// waiting on a long CI job) pauses the clock so it never trips the cap.
+#[derive(Default)]
+struct SelfContinueChain {
+    resumes: u32,
+    active: std::time::Duration,
+    turn_started: Option<tokio::time::Instant>,
+}
+
+impl SelfContinueChain {
+    fn reset(&mut self) {
+        self.resumes = 0;
+        self.active = std::time::Duration::ZERO;
+        self.turn_started = None;
+    }
+
+    fn pause(&mut self, now: tokio::time::Instant) {
+        if let Some(started) = self.turn_started.take() {
+            self.active += now.saturating_duration_since(started);
+        }
+    }
+
+    fn elapsed(&self, now: tokio::time::Instant) -> std::time::Duration {
+        self.active
+            + self
+                .turn_started
+                .map_or(std::time::Duration::ZERO, |started| {
+                    now.saturating_duration_since(started)
+                })
+    }
+
+    fn resumes(&self) -> u32 {
+        self.resumes
+    }
+
+    fn try_resume(
+        &mut self,
+        now: tokio::time::Instant,
+        resume_cap: Option<u32>,
+        active_cap: Option<std::time::Duration>,
+    ) -> bool {
+        if resume_cap.is_some_and(|cap| self.resumes >= cap)
+            || active_cap.is_some_and(|cap| self.elapsed(now) >= cap)
+        {
+            return false;
+        }
+        self.resumes += 1;
+        self.turn_started = Some(now);
+        true
+    }
+
+    fn exceeded_active_cap(
+        &self,
+        now: tokio::time::Instant,
+        active_cap: Option<std::time::Duration>,
+    ) -> bool {
+        self.turn_started.is_some() && active_cap.is_some_and(|cap| self.elapsed(now) >= cap)
+    }
+}
+
 /// The terminal Done that ends a self-continued chain past its cap (#341).
 fn runaway_chain_done(resumes: u32, elapsed: std::time::Duration) -> AgentEvent {
     let minutes = elapsed.as_secs().div_ceil(60).max(1);
@@ -3039,8 +3101,7 @@ async fn drive_run(
             Some(ms) => Some(std::time::Duration::from_millis(ms)),
             None => Some(std::time::Duration::from_secs(30 * 60)),
         };
-    let mut self_resumes: u32 = 0;
-    let mut self_chain_started: Option<tokio::time::Instant> = None;
+    let mut self_chain = SelfContinueChain::default();
     // Journal-side delta coalescing (see `DeltaCoalescer`).
     let mut deltas = DeltaCoalescer::default();
     // Spawn chips that have SETTLED (tagged Done seen). Content events for a
@@ -3430,7 +3491,9 @@ async fn drive_run(
                     dirty = false;
                     entry_id = new_id();
                     segment_started = now_ms();
-                    idle_since = Some(tokio::time::Instant::now());
+                    let parked_at = tokio::time::Instant::now();
+                    idle_since = Some(parked_at);
+                    self_chain.pause(parked_at);
                     self_continued_turn = false;
                     inner.set_status_with_completion(
                         &chat_id, SessionStatus::Idle, false, completed_turn,
@@ -3865,17 +3928,15 @@ async fn drive_run(
                 // with nothing settling is runaway (#517, #341).
                 task_woken_turn = std::mem::take(&mut task_wake);
                 if task_woken_turn {
-                    self_resumes = 0;
-                    self_chain_started = None;
+                    self_chain.reset();
                 }
-                let chain_started =
-                    *self_chain_started.get_or_insert_with(tokio::time::Instant::now);
-                if self_resume_cap.is_some_and(|cap| self_resumes >= cap)
-                    || self_chain_cap.is_some_and(|cap| chain_started.elapsed() >= cap)
-                {
+                if !self_chain.try_resume(
+                    tokio::time::Instant::now(),
+                    self_resume_cap,
+                    self_chain_cap,
+                ) {
                     chain_capped = true;
                 } else {
-                    self_resumes += 1;
                     tracing::info!(
                         chat = %chat_id,
                         "parked session resumed by self-continued agent output"
@@ -3949,14 +4010,12 @@ async fn drive_run(
             }
         }
         // A resumed turn that keeps streaming never parks, so it never meets
-        // the resume check above: its chain's wall-clock cap holds here too.
+        // the resume check above: its chain's active-time cap holds here too.
         if self_continued_turn
             && !task_woken_turn
             && idle_since.is_none()
             && !matches!(&event, AgentEvent::Done { .. })
-            && self_chain_cap
-                .zip(self_chain_started)
-                .is_some_and(|(cap, started)| started.elapsed() >= cap)
+            && self_chain.exceeded_active_cap(tokio::time::Instant::now(), self_chain_cap)
         {
             chain_capped = true;
         }
@@ -3964,10 +4023,11 @@ async fn drive_run(
         // run ends with an errored Done that says why, so the transcript and
         // the session status show it instead of output silently vanishing.
         if chain_capped {
-            let elapsed = self_chain_started.map(|s| s.elapsed()).unwrap_or_default();
+            let elapsed = self_chain.elapsed(tokio::time::Instant::now());
+            let resumes = self_chain.resumes();
             tracing::warn!(
                 chat = %chat_id,
-                resumes = self_resumes,
+                resumes,
                 chain_secs = elapsed.as_secs(),
                 "self-continued turn chain capped; stopping the agent"
             );
@@ -3989,7 +4049,7 @@ async fn drive_run(
             self_continued_turn = false;
             // Not a startup crash: never retried.
             retry_request = None;
-            event = runaway_chain_done(self_resumes, elapsed);
+            event = runaway_chain_done(resumes, elapsed);
         }
         // A queued background command must not mask real concurrent model
         // work. Positive model output owns the status until a request/tool
@@ -4143,8 +4203,7 @@ async fn drive_run(
             // A steer boundary means a real prompt owns the turn again — its
             // Done will come; the short self-continued window stands down.
             self_continued_turn = false;
-            self_resumes = 0;
-            self_chain_started = None;
+            self_chain.reset();
             if let Err(err) = finish_segment(
                 doc_ref,
                 writer.take(),
@@ -4427,8 +4486,7 @@ async fn drive_run(
                 saw_session_started = true;
                 idle_since = Some(tokio::time::Instant::now());
                 self_continued_turn = false;
-                self_resumes = 0;
-                self_chain_started = None;
+                self_chain.reset();
                 inner.set_status_with_completion(
                     &chat_id,
                     SessionStatus::Idle,
@@ -5186,5 +5244,31 @@ mod tests {
         );
 
         core.shutdown().await;
+    }
+
+    #[test]
+    fn self_continue_chain_pauses_clock_while_parked_idle() {
+        let mut chain = super::SelfContinueChain::default();
+        let t0 = tokio::time::Instant::now();
+        let cap = Some(std::time::Duration::from_secs(30));
+        let max = Some(5);
+
+        assert!(chain.try_resume(t0, max, cap));
+        // Worked 10s, then parked idle.
+        chain.pause(t0 + std::time::Duration::from_secs(10));
+        // Sat parked idle for 2 hours — elapsed active time is still 10s.
+        let t_after_idle = t0 + std::time::Duration::from_secs(2 * 3600);
+        assert_eq!(
+            chain.elapsed(t_after_idle),
+            std::time::Duration::from_secs(10)
+        );
+        assert!(chain.try_resume(t_after_idle, max, cap));
+        assert!(!chain.exceeded_active_cap(t_after_idle + std::time::Duration::from_secs(19), cap));
+        assert!(chain.exceeded_active_cap(t_after_idle + std::time::Duration::from_secs(20), cap));
+
+        // Reset clears both resumes and active time.
+        chain.reset();
+        assert_eq!(chain.resumes(), 0);
+        assert_eq!(chain.elapsed(t_after_idle), std::time::Duration::ZERO);
     }
 }
