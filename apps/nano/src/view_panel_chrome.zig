@@ -43,12 +43,24 @@ pub fn zenEdge(k: theme.Colors) ui.Color {
     return k.ink(if (k.dark) 0.085 else 0.095);
 }
 
+pub fn zenEdgeOn(k: theme.Colors, black_canvas: bool) ui.Color {
+    return if (black_canvas) ui.Color.white.alpha(0.095) else zenEdge(k);
+}
+
 pub fn zenSidebar(c: *ui.Context, k: theme.Colors) ui.Div {
-    return ui.div(c).column().bg(zenSidebarBg(k)).border(zenEdge(k)).borderW(1).rounded(chrome.zen_radius);
+    return zenSidebarOn(c, k, false);
+}
+
+pub fn zenSidebarOn(c: *ui.Context, k: theme.Colors, black_canvas: bool) ui.Div {
+    return ui.div(c).column().bg(zenSidebarBg(k)).border(zenEdgeOn(k, black_canvas)).borderW(1).rounded(chrome.zen_radius);
 }
 
 pub fn zenBody(c: *ui.Context, k: theme.Colors) ui.Div {
-    return ui.div(c).column().bg(zenPageBg(k)).border(zenEdge(k)).borderW(1).p(1).rounded(chrome.zen_radius);
+    return zenBodyOn(c, k, false);
+}
+
+pub fn zenBodyOn(c: *ui.Context, k: theme.Colors, black_canvas: bool) ui.Div {
+    return ui.div(c).column().bg(zenPageBg(k)).border(zenEdgeOn(k, black_canvas)).borderW(1).p(1).rounded(chrome.zen_radius);
 }
 
 pub fn body(c: *ui.Context, k: theme.Colors) ui.Div {
@@ -57,8 +69,12 @@ pub fn body(c: *ui.Context, k: theme.Colors) ui.Div {
 }
 
 pub fn bodyFor(c: *ui.Context, k: theme.Colors, zen: bool) ui.Div {
+    return bodyForOn(c, k, zen, false);
+}
+
+pub fn bodyForOn(c: *ui.Context, k: theme.Colors, zen: bool, black_canvas: bool) ui.Div {
     _ = zen;
-    return zenBody(c, k);
+    return zenBodyOn(c, k, black_canvas);
 }
 
 /// Join before panel content, outside its rounded clip: the selected cap and

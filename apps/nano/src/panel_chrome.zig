@@ -95,6 +95,10 @@ pub fn frameWithSide(width: f32, height: f32, sidebar: f32, expanded_sidebar: f3
 /// Zen inset-card workspace geometry: keeps a symmetric `6pt` outer margin and
 /// `6pt` inter-card gap (`3pt` on the sidebar card + `3pt` leading here when open).
 pub fn zenFrameWithSide(width: f32, height: f32, sidebar: f32, expanded_sidebar: f32, chat_panels: usize, horizontal: bool, host: bool, files: bool, preferred: f32) Frame {
+    return zenFrameWithTop(width, height, sidebar, expanded_sidebar, header_height, chat_panels, horizontal, host, files, preferred);
+}
+
+pub fn zenFrameWithTop(width: f32, height: f32, sidebar: f32, expanded_sidebar: f32, top_inset: f32, chat_panels: usize, horizontal: bool, host: bool, files: bool, preferred: f32) Frame {
     const t = std.math.clamp(sidebar / @max(1, expanded_sidebar), 0, 1);
     const leading: f32 = zen_gutter - (zen_gutter / 2.0) * t;
     const chats = if (horizontal) @max(chat_panels, 1) else 1;
@@ -115,9 +119,9 @@ pub fn zenFrameWithSide(width: f32, height: f32, sidebar: f32, expanded_sidebar:
     const chat_width = each * @as(f32, @floatFromInt(chats)) + zen_gutter * @as(f32, @floatFromInt(chats - 1));
     return .{
         .x = sidebar + leading,
-        .y = header_height,
+        .y = top_inset,
         .width = @min(room, each * @as(f32, @floatFromInt(chats + @intFromBool(files))) + host_width + gaps),
-        .height = @max(0, height - header_height - zen_gutter),
+        .height = @max(0, height - top_inset - zen_gutter),
         .chat_width = chat_width,
         .host_width = host_width,
         .files_width = files_width,
@@ -205,6 +209,7 @@ test "a side panel gets the old width when the others can spare it" {
 test "zen frame geometry aligns cards below 42pt header with symmetric 6pt gutters" {
     const open = zenFrameWithSide(1200, 780, 256, 256, 1, true, false, false, right_pane_default);
     const closed = zenFrameWithSide(1200, 780, 0, 256, 1, true, false, false, right_pane_default);
+    const fullscreen = zenFrameWithTop(1200, 780, 0, 256, zen_gutter, 1, true, false, false, right_pane_default);
     try std.testing.expectEqual(@as(f32, 42), open.y);
     try std.testing.expectEqual(@as(f32, 780 - 42 - 6), open.height);
     try std.testing.expectEqual(@as(f32, 3), open.leading);
@@ -213,4 +218,6 @@ test "zen frame geometry aligns cards below 42pt header with symmetric 6pt gutte
     try std.testing.expectEqual(@as(f32, 6), closed.leading);
     try std.testing.expectEqual(@as(f32, 6), closed.x);
     try std.testing.expectEqual(@as(f32, 1200 - 12), closed.width);
+    try std.testing.expectEqual(@as(f32, 6), fullscreen.y);
+    try std.testing.expectEqual(@as(f32, 780 - 12), fullscreen.height);
 }

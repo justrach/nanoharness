@@ -35,12 +35,15 @@ pub fn sidebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     const panel_chrome = @import("view_panel_chrome.zig");
     const side = ui.div(c).column().w(widthOf(a)).hFull();
     defer side.end();
-    sidebarTitlebar(c, a, k);
-    ui.div(c).h(chrome.top_pad).end();
-    const wrap = ui.div(c).column().wFull().grow().h(0).pl(chrome.zen_gutter).pr(chrome.zen_gutter / 2.0).pb(chrome.zen_gutter);
+    if (!a.view.full_screen) {
+        sidebarTitlebar(c, a, k);
+        ui.div(c).h(chrome.top_pad).end();
+    }
+    var wrap = ui.div(c).column().wFull().grow().h(0).pl(chrome.zen_gutter).pr(chrome.zen_gutter / 2.0).pb(chrome.zen_gutter);
+    if (a.view.full_screen) wrap = wrap.pt(chrome.zen_gutter);
     defer wrap.end();
     ui.key(c, "zen-sidebar-card");
-    const card = panel_chrome.zenSidebar(c, k).wFull().grow().h(0).pt(6).clip();
+    const card = panel_chrome.zenSidebarOn(c, k, a.view.full_screen).wFull().grow().h(0).pt(6).clip();
     defer card.end();
     if (zen) {
         zenNavRows(c, a, k);

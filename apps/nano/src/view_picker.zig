@@ -32,7 +32,10 @@ pub const compact_single_height: f32 = 46;
 /// Clamps the top edge below the 38pt window titlebar (`header_height + 6`)
 /// so agent tabs are never clipped against the top bar.
 pub fn placement(anchor: ui.Rect, size: ui.Size, new_chat: bool, wanted: f32) struct { x: f32, y: f32, h: f32 } {
-    const top_margin: f32 = @import("panel_chrome.zig").header_height + 6;
+    return placementTop(anchor, size, new_chat, wanted, @import("panel_chrome.zig").header_height + 6);
+}
+
+pub fn placementTop(anchor: ui.Rect, size: ui.Size, new_chat: bool, wanted: f32, top_margin: f32) struct { x: f32, y: f32, h: f32 } {
     const above = @max(0, anchor.y - top_margin - 6);
     const below = @max(0, size.h - anchor.y - anchor.h - 14);
     const down = (new_chat and below >= 180) or (above < 180 and below > above);
@@ -466,7 +469,9 @@ pub fn popover(c: *ui.Context, a: *App, k: theme.Colors) void {
         p.card_height = null;
         break :blk p.height;
     };
-    const geometry = placement(anchor, c.size, a.selected == null, wanted_h);
+    const chrome = @import("panel_chrome.zig");
+    const top_margin: f32 = (if (a.view.full_screen) chrome.zen_gutter else chrome.header_height) + 6;
+    const geometry = placementTop(anchor, c.size, a.selected == null, wanted_h, top_margin);
     const h = geometry.h;
     const x = std.math.clamp(anchor.x, 8, @max(8, c.size.w - w - 8));
     const y = geometry.y;
@@ -724,7 +729,8 @@ fn detail(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, row: ui.Rect,
     const left = c.size.w - right < detail_width + 8 and row.x - 10 >= detail_width + 8;
     const x = if (left) row.x - 10 - detail_width else @min(right, @max(8, c.size.w - detail_width - 8));
     const est: f32 = if (p.detail_rect) |d| d.h else 172;
-    const top_margin: f32 = @import("panel_chrome.zig").header_height + 6;
+    const chrome = @import("panel_chrome.zig");
+    const top_margin: f32 = (if (a.view.full_screen) chrome.zen_gutter else chrome.header_height) + 6;
     const y = std.math.clamp(row.y, top_margin, @max(top_margin, c.size.h - est - 8));
     ui.key(c, "model-detail-card");
     const card = kit.shadowLg(ui.div(c).fixed().offset(x, y).motion(exit).w(detail_width).layer(7).column().p(16 + 1).gap(11)

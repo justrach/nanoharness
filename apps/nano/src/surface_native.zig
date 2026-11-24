@@ -27,6 +27,7 @@ pub const Native = struct {
     events: Events,
     reduced: bool,
     enabled: bool = false,
+    full_screen: bool = false,
     dark: ?bool = null,
 
     pub fn create(gpa: std.mem.Allocator, window: objc.Object, layer: objc.Object, events: Events, options: Options) !*Native {
@@ -69,9 +70,13 @@ pub const Native = struct {
     /// Changes native properties only on a material/appearance transition.
     /// An unavailable backing view fails closed to the opaque palette.
     pub fn sync(self: *Native, requested: bool, dark: bool) bool {
+        return self.syncSurface(requested, dark, false);
+    }
+
+    pub fn syncSurface(self: *Native, requested: bool, dark: bool, full_screen: bool) bool {
         const pool = objc.Pool.push();
         defer pool.pop();
-        var enabled = requested and !self.reduced;
+        var enabled = requested and !self.reduced and !full_screen;
         if (enabled and self.effect == null) {
             const content = objc.msg(objc.Object, self.window, "contentView", .{});
             if (objc.msg(?objc.Object, content, "superview", .{})) |parent| {
@@ -94,12 +99,13 @@ pub const Native = struct {
             if (enabled != self.enabled) objc.msg(void, effect, "setHidden:", .{!enabled});
         }
         self.dark = dark;
-        if (enabled != self.enabled) {
+        if (enabled != self.enabled or full_screen != self.full_screen) {
             objc.msg(void, self.window, "setOpaque:", .{!enabled});
-            const color = objc.msg(objc.Object, objc.class("NSColor"), if (enabled) "clearColor" else "windowBackgroundColor", .{});
+            const color = objc.msg(objc.Object, objc.class("NSColor"), if (full_screen) "blackColor" else if (enabled) "clearColor" else "windowBackgroundColor", .{});
             objc.msg(void, self.window, "setBackgroundColor:", .{color});
             objc.msg(void, self.layer, "setOpaque:", .{!enabled});
             self.enabled = enabled;
+            self.full_screen = full_screen;
         }
         return enabled;
     }

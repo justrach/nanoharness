@@ -44,6 +44,9 @@ pub const SplitReveal = struct {
 /// The window's own state, apart from the engine's.
 pub const View = struct {
     sidebar_open: bool = true,
+    full_screen: bool = false,
+    full_screen_native: bool = false,
+    full_screen_restore_sidebar: bool = true,
     /// A prompt was just sent: position the new turn near the top, even
     /// when the reader was browsing older work.
     stick_end: bool = false,
@@ -2179,5 +2182,35 @@ pub const App = struct {
     pub fn interrupt(a: *App) void {
         const chat = a.selected orelse return;
         a.request(requests.interrupt(chat), .of(App, a, onNotice));
+    }
+
+    /// Updates UI layout state for macOS/desktop minimal fullscreen mode.
+    pub fn applyFullScreenState(a: *App, on: bool) void {
+        if (a.view.full_screen == on) return;
+        a.view.full_screen = on;
+        if (on) {
+            a.view.full_screen_restore_sidebar = a.view.sidebar_open;
+            a.view.sidebar_open = false;
+            @import("view_sidebar_search.zig").close(a);
+            a.view.updates_popover = false;
+            a.view.strip.menu = null;
+            a.view.more_menu = false;
+            a.view.filter_menu = false;
+        } else {
+            a.view.sidebar_open = a.view.full_screen_restore_sidebar;
+        }
+        a.redraw();
+    }
+
+    pub fn setFullScreen(a: *App, on: bool) void {
+        a.applyFullScreenState(on);
+        if (a.window) |w| {
+            w.setFullScreen(on);
+            a.view.full_screen_native = w.isFullScreen();
+        }
+    }
+
+    pub fn toggleFullScreen(a: *App) void {
+        a.setFullScreen(!a.view.full_screen);
     }
 };

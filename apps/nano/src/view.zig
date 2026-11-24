@@ -64,6 +64,14 @@ pub fn view(a: *App, c: *ui.Context) void {
     // The themes Settings › Appearance picked, for every palette drawn now.
     theme.light_id = a.settings.themeId(false);
     theme.dark_id = a.settings.themeId(true);
+    if (!a.offscreen) if (a.window) |w| {
+        const native_fs = w.isFullScreen();
+        if (native_fs != a.view.full_screen_native) {
+            a.view.full_screen_native = native_fs;
+            a.applyFullScreenState(native_fs);
+        }
+    };
+    const fs = a.view.full_screen;
     const dark = a.dark orelse nanoui.isDark();
     c.theme = theme.ui(dark);
     // The accent Settings › Appearance chose, in place of the theme's.
@@ -71,11 +79,13 @@ pub fn view(a: *App, c: *ui.Context) void {
     const surfaces = @import("surface_palette.zig");
     const requested = surfaces.requested(a.settings.text("surface"), base.recommended_frosted);
     const k = surfaces.apply(base, @import("app_surface.zig").sync(a, requested, dark));
-    c.theme.background = if (k.frosted) .transparent else k.shell;
+    const canvas_bg: ui.Color = if (fs) ui.Color.black else if (k.frosted) .transparent else k.shell;
+    c.theme.background = canvas_bg;
     c.theme.surface = k.composer;
     // Context.begin seeded an implicit root before the view resolved its
-    // live theme. It must not leave an opaque sheet under a glass window.
-    c.node(0).style.background = c.theme.background;
+    // live theme. It must not leave an opaque sheet under a glass window,
+    // and in minimal fullscreen the outer bezel is always pure #000000 black.
+    c.node(0).style.background = canvas_bg;
     c.setZoom(a.settings.uiFontSize() / 16.0);
     @import("view_transcript.zig").column_w = @import("view_settings_appearance.zig").transcriptWidth(a);
     a.ansi = k.ansi;
@@ -89,7 +99,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     a.view.last_win_w = c.size.w;
     a.view.last_win_h = c.size.h;
     if (!a.offscreen and c.time < a.view.resize_until) c.frameIn(1.0 / 120.0);
-    c.title_bar_height = sidebar.titlebar_h;
+    c.title_bar_height = if (fs) 0 else sidebar.titlebar_h;
     @import("view_kit.zig").beginFrame(c, k);
     // Box edges on the device's pixels, a half toward zero, as GPUI's
     // taffy.rs puts them; text keeps the line heights nano gives it.
@@ -176,7 +186,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     var strip_layout: strip.rendering.Layout = undefined;
     var pane_widths: [tabs.max_panes]?f32 = @splat(null);
     {
-        const root = ui.div(c).row().sizeFull().bg(k.shell);
+        const root = ui.div(c).row().sizeFull().bg(if (fs) ui.Color.black else k.shell);
         defer root.end();
         // One retained seam tween, independent of the sidebar's mount state.
         // CSS ease-out (cubic-bezier(0, 0, 0.58, 1)) over 200ms, as GPUI's
@@ -238,13 +248,14 @@ pub fn view(a: *App, c: *ui.Context) void {
         a.view.seam_inset = 2;
         const zen = a.settings.uiMode() == .zen;
         const ws_gutter = chrome.zen_gutter;
+        const top_inset: f32 = if (fs) chrome.zen_gutter else chrome.header_height;
         const layout = a.tabs.layout();
         const github_host = strip.hasHost(a) and @import("app_github_repository.zig").surface(a);
         const preferred_host = if (github_host) @max(chrome.right_pane_default, a.settings.rightPaneWidth()) else a.settings.rightPaneWidth();
-        a.view.chrome = chrome.zenFrameWithSide(c.size.w, c.size.h, a.view.sidebar_width, side_width, strip.chatCount(a), if (layout) |s| s.axis == .horizontal and !s.zoomed else true, strip.hasHost(a), strip.hasFiles(a), preferred_host);
+        a.view.chrome = chrome.zenFrameWithTop(c.size.w, c.size.h, a.view.sidebar_width, side_width, top_inset, strip.chatCount(a), if (layout) |s| s.axis == .horizontal and !s.zoomed else true, strip.hasHost(a), strip.hasFiles(a), preferred_host);
         a.view.chrome.compact_host = github_host and a.view.chrome.host_width < chrome.github_min_width;
         strip_layout = strip.rendering.layout(c, a);
-        if (strip_layout.pane_row) {
+        if (!fs and strip_layout.pane_row) {
             const extra = chrome.tab_height + ws_gutter;
             a.view.chrome.y += extra;
             a.view.chrome.height = @max(0, a.view.chrome.height - extra);
@@ -253,10 +264,10 @@ pub fn view(a: *App, c: *ui.Context) void {
         const main = ui.div(c).column().grow().w(0).hFull();
         defer main.end();
         if (a.view.settings_open) {
-            const wrap = ui.div(c).row().pt(chrome.header_height).pl(a.view.chrome.leading).pr(chrome.zen_gutter).pb(chrome.zen_gutter).hFull().wFull();
+            const wrap = ui.div(c).row().pt(top_inset).pl(a.view.chrome.leading).pr(chrome.zen_gutter).pb(chrome.zen_gutter).hFull().wFull();
             defer wrap.end();
             ui.key(c, "zen-settings-page-card");
-            const card = panel_chrome.zenBody(c, k).grow().w(0).hFull().clip();
+            const card = panel_chrome.zenBodyOn(c, k, fs).grow().w(0).hFull().clip();
             defer card.end();
             settings_view.page(c, a, k);
         } else {
@@ -281,19 +292,21 @@ pub fn view(a: *App, c: *ui.Context) void {
             if (strip.hasFiles(a) and (expanded == null or expanded.? == .files)) {
                 if (expanded == null) ui.div(c).w(ws_gutter).hFull().end();
                 if (expanded != null) a.view.chrome.files_width = a.view.chrome.width;
-                const files = panel_chrome.bodyFor(c, k, zen).w(a.view.chrome.files_width).hFull().clip();
+                const files = panel_chrome.bodyForOn(c, k, zen, fs).w(a.view.chrome.files_width).hFull().clip();
                 defer files.end();
                 if (c.input.pressed and files.interaction().hovered) a.view.strip.focused = .files;
                 @import("view_files.zig").explorer(c, a, k);
             }
         }
     }
-    strip.draw(c, a, k, strip_layout, &pane_widths);
-    titlebar(c, a, k);
-    @import("window_chrome.zig").draw(c, a, k);
+    if (!fs) {
+        strip.draw(c, a, k, strip_layout, &pane_widths);
+        titlebar(c, a, k);
+        @import("window_chrome.zig").draw(c, a, k);
+    }
     if (c.input.released) a.view.sidebar_press_focus = false;
     const popup = surfaces.popup(k);
-    trailing(c, a, popup);
+    if (!fs) trailing(c, a, popup);
     @import("view_question.zig").overlay(c, a, k);
     @import("view_diffs.zig").overlays(c, a, popup);
     @import("view_actions.zig").overlays(c, a, popup);
@@ -406,7 +419,7 @@ fn seam(c: *ui.Context, a: *App, k: theme.Colors) void {
 /// chat's page.
 fn chatPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     const zen = a.settings.uiMode() == .zen;
-    const panel = panel_chrome.bodyFor(c, k, zen).grow().wFull().h(0);
+    const panel = panel_chrome.bodyForOn(c, k, zen, a.view.full_screen).grow().wFull().h(0);
     defer panel.end();
     @import("view_attachment_drop.zig").target(c, a, panel.index, if (a.tabs.layout()) |s| s.focus else null);
     @import("view_attachment_drop.zig").shade(c, a, k, panel.index);
@@ -450,10 +463,10 @@ fn githubChildInSplit(a: *const App) bool {
 fn hostPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     const zen = a.settings.uiMode() == .zen;
     ui.key(c, "workspace-host-body");
-    const host = panel_chrome.bodyFor(c, k, zen).w(a.view.chrome.host_width).hFull();
+    const host = panel_chrome.bodyForOn(c, k, zen, a.view.full_screen).w(a.view.chrome.host_width).hFull();
     defer host.end();
     if (c.input.pressed and host.interaction().hovered) a.view.strip.focused = .host;
-    if (!zen and @import("app_github_repository.zig").surface(a)) {
+    if (!a.view.full_screen and !zen and @import("app_github_repository.zig").surface(a)) {
         if (a.view.strip.host_tab_rect) |tab| if (c.rects.get(c.node(host.index).id)) |body| {
             panel_chrome.join(c, k, a.view.chrome.host_width, @max(0, tab.x - body.x), @min(a.view.chrome.host_width, tab.x + tab.w - body.x));
         };
@@ -525,11 +538,11 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split, widths: *[tab
             if (!across and child_parent != null and !owns_child) a.view.chrome.chat_width += a.view.chrome.host_width + ws_gutter;
             defer a.view.chrome.chat_width = saved_width;
             const bpct = @import("ux_rules.zig").FocusAndClose.splitPaneBorderPct(@intCast(s.panes.items.len), ix == s.focus);
-            var pane = panel_chrome.bodyFor(c, k, zen).clip().w(if (across) size else a.view.chrome.chat_width).hFull();
+            var pane = panel_chrome.bodyForOn(c, k, zen, a.view.full_screen).clip().w(if (across) size else a.view.chrome.chat_width).hFull();
             if (bpct == 100) {
                 pane = pane.border(k.accent.alpha(0.45));
             } else if (bpct > 0) {
-                pane = pane.border(k.border.alpha(0.55));
+                pane = pane.border(if (a.view.full_screen) ui.Color.white.alpha(0.12) else k.border.alpha(0.55));
             }
             defer pane.end();
             @import("view_attachment_drop.zig").target(c, a, pane.index, ix);
@@ -766,6 +779,13 @@ fn keys(c: *ui.Context, a: *App) void {
         @import("frame_profile.zig").note(a, "cmd-b");
         c.changed = false;
         toggleSidebar(c, a, false);
+    }
+    const is_macos_native = @import("builtin").os.tag == .macos and a.window != null and !a.offscreen;
+    if ((!is_macos_native and c.shortcut(.{ .key = 'f', .cmd = true, .ctrl = true })) or
+        (@import("builtin").os.tag != .macos and c.shortcut(.{ .key = S.f(11) })))
+    {
+        a.toggleFullScreen();
+        return;
     }
     if (c.shortcut(.{ .key = '=', .cmd = true }) or
         c.shortcut(.{ .key = '=', .cmd = true, .shift = true }) or

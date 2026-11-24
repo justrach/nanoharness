@@ -128,8 +128,39 @@ pub fn entries(a: *const App, gpa: std.mem.Allocator, query: []const u8) ![]Entr
         const text = std.fmt.bufPrint(&buf, "{s} {s}", .{ l.title, l.project }) catch l.title;
         if (pal.matchesQuery(query, text)) try out.append(gpa, .{ .pane = ix });
     };
+    if (a.view.palette.navigation == .preserve_tabs and !a.view.settings_open) {
+        if (a.tabs.layout()) |s| {
+            const group = &s.groups[s.focus];
+            if (group.items.items.len > 1) {
+                for (group.items.items, 0..) |pt, pt_ix| {
+                    if (pt_ix == group.active) continue;
+                    const ch = if (pt.chat) |id| a.findChat(id) else null;
+                    const title = if (ch) |chat| firstLine(chat.title orelse "Untitled session") else "New tab";
+                    const proj: []const u8 = if (ch) |chat| (if (a.findSpace(chat.space_id)) |sp| sp.name else "") else "";
+                    var buf: [1024]u8 = undefined;
+                    const text = std.fmt.bufPrint(&buf, "{s} {s} tab", .{ title, proj }) catch title;
+                    if (pal.matchesQuery(query, text)) try out.append(gpa, .{ .open_tab = .{ .ws = a.tabs.active, .pane_tab = pt_ix } });
+                    if (pt.chat) |id| try appendUniqueId(gpa, &in_panes, id);
+                }
+            }
+        }
+        const render = @import("view_tab_strip_render.zig");
+        for (0..a.tabs.items.items.len) |ws| {
+            if (ws == a.tabs.active) continue;
+            const cid = render.workspaceChatId(a, ws);
+            const ch = if (cid) |id| a.findChat(id) else null;
+            const title = if (ch) |chat| firstLine(chat.title orelse "Untitled session") else "New tab";
+            const proj_id: ?[]const u8 = if (ch) |chat| chat.space_id else a.workspaceProject(ws);
+            const proj: []const u8 = if (a.findSpace(proj_id)) |sp| sp.name else "";
+            const panes_n: usize = if (ws < a.tabs.splits.items.len) (if (a.tabs.splits.items[ws]) |s| s.panes.items.len else 1) else 1;
+            var buf: [1024]u8 = undefined;
+            const text = std.fmt.bufPrint(&buf, "{s} {s} {s}", .{ title, proj, if (panes_n > 1) "split tab" else "open tab" }) catch title;
+            if (pal.matchesQuery(query, text)) try out.append(gpa, .{ .open_tab = .{ .ws = ws } });
+            if (cid) |id| try appendUniqueId(gpa, &in_panes, id);
+        }
+    }
     if (!history) {
-        const actions = pal.actionsFor(query, isDark(a));
+        const actions = pal.actionsForContext(query, isDark(a), a.view.full_screen);
         try out.appendSlice(gpa, actions.slice());
     }
     const p = &a.view.palette;
@@ -168,6 +199,11 @@ pub fn entries(a: *const App, gpa: std.mem.Allocator, query: []const u8) ![]Entr
     return out.toOwnedSlice(gpa);
 }
 
+fn appendUniqueId(gpa: std.mem.Allocator, list: *std.ArrayList([]const u8), id: []const u8) !void {
+    for (list.items) |have| if (std.mem.eql(u8, have, id)) return;
+    try list.append(gpa, id);
+}
+
 fn deviceOrEmpty(a: *const App, id: ?[]const u8) []const u8 {
     const want = id orelse return "";
     for (a.devices.items) |d| if (std.mem.eql(u8, d.id, want)) return d.name;
@@ -195,6 +231,22 @@ pub fn activate(a: *App, e: Entry) void {
         .new_project => @import("app_open_chooser.zig").open(a, .new_project),
         .settings => @import("view_settings.zig").open(a),
         .theme => unreachable,
+        .full_screen => |is_fs| a.setFullScreen(!is_fs),
+        .toggle_sidebar => {
+            a.view.sidebar_open = !a.view.sidebar_open;
+            if (!a.view.sidebar_open) @import("view_sidebar_search.zig").close(a);
+            a.redraw();
+        },
+        .split_right => @import("view_tab_strip.zig").splitChoosingFolder(a, .horizontal),
+        .split_down => @import("view_tab_strip.zig").splitChoosingFolder(a, .vertical),
+        .close_tab => a.closeByShortcut(),
+        .toggle_side_panel => @import("app_panels.zig").toggleHost(a),
+        .toggle_files => @import("app_files.zig").toggle(a),
+        .toggle_terminal => {
+            a.actions.dock_open = !a.actions.dock_open;
+            a.redraw();
+        },
+        .chat_history => toggle(a, .chat_history),
         .custom_theme_studio => @import("view_custom_theme_studio.zig").open(a),
         .open_design_canvas => {
             a.settings.applyUiMode(.design);
@@ -223,6 +275,10 @@ pub fn activate(a: *App, e: Entry) void {
         },
         .import_all => importExternal(a, null),
         .pane => |ix| a.focusPane(ix),
+        .open_tab => |t| {
+            a.view.settings_open = false;
+            if (t.pane_tab) |pt| a.showPaneTab(pt) else a.showTab(t.ws);
+        },
         .chat => |id| {
             // The id outlives the chat list's next update.
             var buf: [256]u8 = undefined;
@@ -258,7 +314,8 @@ pub fn keys(c: *ui.Context, a: *App) void {
     if (list.len > 0) activate(a, list[@min(p.active, list.len - 1)]);
 }
 
-fn scrimColor(k: theme.Colors) ui.Color {
+fn scrimColor(a: *const App, k: theme.Colors) ui.Color {
+    if (a.view.full_screen) return .{ .a = 0.50 };
     return .{ .a = if (k.dark) 0.35 else 0.32 * (0.35 / 0.6) };
 }
 
@@ -283,12 +340,13 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
         const left = std.math.clamp(if (footer) a.settings.sidebarWidth() - 44 else 16, 16, @max(16, c.size.w - w - 16));
         scrim = scrim.column().itemsStart().pl(left);
         scrim = if (footer) scrim.justifyEnd().pb(52) else scrim.pt(50);
-    } else scrim = scrim.bg(scrimColor(k)).center();
+    } else scrim = scrim.bg(scrimColor(a, k)).center();
     defer scrim.end();
     if (scrim.clicked()) return close(a);
     // Its children inside its 1-point border, as GPUI lays them out.
+    const card_border = if (a.view.full_screen and k.dark) ui.Color.white.alpha(0.14) else k.border;
     var card = @import("view_sidebar_menus.zig").held(ui.div(c).w(w).column().p(1).rounded(16)
-        .bg(if (k.frosted) .transparent else k.composer).border(k.border).borderW(1).clip());
+        .bg(if (k.frosted) .transparent else k.composer).border(card_border).borderW(1).clip());
     if (!k.frosted) card = kit.shadowLg(card);
     defer card.end();
     if (k.frosted) frostedBackdrop(c, k);
@@ -460,7 +518,14 @@ fn header(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         const f = ui.div(c).row().grow().w(0).itemsCenter();
         defer f.end();
         const splits = if (a.tabs.layout()) |s| s.panes.items.len > 1 else false;
-        const placeholder = if (p.navigation == .chat_history) "Search chats across projects…" else if (splits) "Search open panes, commands and chats…" else "Search commands and chats…";
+        const placeholder = if (p.navigation == .chat_history)
+            "Search chats across projects…"
+        else if (splits)
+            "Search open panes, commands and chats…"
+        else if (a.view.full_screen)
+            "Search open tabs, commands and chats…"
+        else
+            "Search commands and chats…";
         ui.key(c, "command-palette-search");
         const at = c.nodes.items.len;
         const res = ui.textField(c, &p.query, .{ .placeholder = placeholder, .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 14, .line_height = 22.75 });
@@ -540,6 +605,32 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, e: Entry, lit: bool, query: []c
             if (l.project.len > 0) kit.ellipsisText(c, l.project, .{ .size = 12, .line_height = 12 * phi, .color = k.muted }, 160);
             ui.text(c, "Go to pane", .{ .size = 11, .line_height = 11 * phi, .color = k.muted.alpha(0.7) });
         },
+        .open_tab => |ot| {
+            const render = @import("view_tab_strip_render.zig");
+            const chat_id: ?[]const u8 = if (ot.pane_tab) |pt|
+                (if (a.tabs.layout()) |s| (if (pt < s.groups[s.focus].items.items.len) s.groups[s.focus].items.items[pt].chat else null) else null)
+            else
+                render.workspaceChatId(a, ot.ws);
+            const ch = if (chat_id) |cid| a.findChat(cid) else null;
+            const title = if (ch) |chat| firstLine(chat.title orelse "Untitled session") else "New tab";
+            const panes_n: usize = if (ot.pane_tab == null and ot.ws < a.tabs.splits.items.len)
+                (if (a.tabs.splits.items[ot.ws]) |s| s.panes.items.len else 1)
+            else
+                1;
+            const proj_id: ?[]const u8 = if (ch) |chat| chat.space_id else if (ot.pane_tab == null) a.workspaceProject(ot.ws) else null;
+            const proj: []const u8 = if (a.findSpace(proj_id)) |sp| sp.name else "";
+            icons.icon(c, if (panes_n > 1) .widget else .@"chat-round-line", 16, k.muted, 0);
+            const badge = if (panes_n > 1) c.print("Split · {d} panes", .{panes_n}) else "Open tab";
+            const tail = c.text.width(badge, .{ .size = 11 }) + 10;
+            const proj_w = if (proj.len > 0) @min(160, c.text.width(proj, .{ .size = 12 })) + 10 else 0;
+            {
+                const t = ui.div(c).row().grow().w(0).clip();
+                defer t.end();
+                kit.highlightText(c, k, title, st, room - tail - proj_w, query);
+            }
+            if (proj.len > 0) kit.ellipsisText(c, proj, .{ .size = 12, .line_height = 12 * phi, .color = k.muted }, 160);
+            ui.text(c, badge, .{ .size = 11, .line_height = 11 * phi, .color = k.muted.alpha(0.75) });
+        },
         .import_all => {
             slot(c, k, "↓");
             const t = ui.div(c).row().grow().w(0).clip();
@@ -572,6 +663,15 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, e: Entry, lit: bool, query: []c
                     .light => .sun,
                     .dark => .moon,
                 },
+                .full_screen => .@"expand-arrows",
+                .toggle_sidebar => .@"sidebar-minimalistic-left",
+                .split_right => .@"split-columns",
+                .split_down => .@"fold-vertical",
+                .close_tab => .close,
+                .toggle_side_panel => .@"sidebar-minimalistic",
+                .toggle_files => .folder,
+                .toggle_terminal => .terminal,
+                .chat_history => .@"clock-circle",
                 .custom_theme_studio, .custom_theme => .@"magic-stick-3",
                 .open_design_canvas => .@"palette-search",
                 .ui_mode => |m| switch (m) {
@@ -588,6 +688,17 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, e: Entry, lit: bool, query: []c
                 .new_chat => shortcuts.badge(&buf, comboFor(a, "newSession")),
                 .new_project => shortcuts.badge(&buf, comboFor(a, "newProject")),
                 .settings => shortcuts.badge(&buf, "mod-,"),
+                .full_screen => if (comptime @import("builtin").os.tag == .macos) "⌃⌘F" else "F11",
+                .toggle_sidebar => shortcuts.badge(&buf, comboFor(a, "toggleSidebar")),
+                .split_right => shortcuts.badge(&buf, comboFor(a, "splitTerminal")),
+                .split_down => blk: {
+                    const c_down = comboFor(a, "splitTerminalDown");
+                    break :blk if (c_down.len > 0) shortcuts.badge(&buf, c_down) else null;
+                },
+                .close_tab => shortcuts.badge(&buf, "mod-w"),
+                .toggle_side_panel => shortcuts.badge(&buf, comboFor(a, "toggleChanges")),
+                .toggle_files => shortcuts.badge(&buf, comboFor(a, "toggleFiles")),
+                .toggle_terminal => shortcuts.badge(&buf, comboFor(a, "toggleTerminal")),
                 .open_design_canvas => shortcuts.badge(&buf, "mod-alt-d"),
                 .ui_mode => |m| shortcuts.badge(&buf, if (m == .design) "mod-alt-d" else "mod-shift-m"),
                 else => null,
