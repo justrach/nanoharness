@@ -87,6 +87,81 @@ test "completion slash menu inactive rows retain the theme surface in both schem
     try testing.expect(valid);
 }
 
+test "completion paints only explicitly accepted command chips across undo and redo" {
+    const completion = @import("composer_completion.zig");
+    for ([_]bool{ false, true }) |dark| {
+        var h: Harness = undefined;
+        try h.initTheme(dark);
+        defer h.deinit();
+        h.t.resize(490, 540);
+        h.draft("Synthetic prompt\n/goal", "Synthetic prompt\n/goal".len);
+        const plain = try completion.prompt(&h.a);
+        if (plain) |value| testing.allocator.free(value);
+        try testing.expect(plain == null);
+        try expectCommandChip(&h, dark, null);
+        try testing.expect(h.t.hasText("Synthetic goal command"));
+        _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
+        h.draw();
+        try testing.expect(std.mem.startsWith(u8, h.a.composer.text(), "Synthetic prompt\n/goal"));
+        const invocation = (try completion.prompt(&h.a)) orelse return error.MissingSelectedCommand;
+        defer testing.allocator.free(invocation);
+        try testing.expect(std.mem.indexOf(u8, invocation, "harness-invoke:") != null);
+        if (std.c.getenv("NANO_COMPLETION_CHIP_SNAP_DIR")) |path| {
+            var buf: [1024]u8 = undefined;
+            try h.t.screenshot(try std.fmt.bufPrint(&buf, "{s}/accepted-{s}.png", .{ std.mem.span(path), if (dark) "dark" else "light" }));
+        }
+        try expectCommandChip(&h, dark, "/goal");
+
+        _ = h.t.shortcut(.{ .key = 'z', .cmd = true });
+        h.draw();
+        try expectCommandChip(&h, dark, null);
+        _ = h.t.shortcut(.{ .key = 'z', .cmd = true, .shift = true });
+        h.draw();
+        try expectCommandChip(&h, dark, "/goal");
+
+        const command_start = "Synthetic prompt\n".len;
+        const command_end = h.a.composer.text().len;
+        h.t.textOps(&.{
+            .{ .select = .{ .anchor = command_start, .caret = command_end } },
+            .{ .insert = "/goal " },
+        });
+        h.draw();
+        const pasted = try completion.prompt(&h.a);
+        if (pasted) |value| testing.allocator.free(value);
+        try testing.expect(pasted == null);
+        try expectCommandChip(&h, dark, null);
+    }
+}
+
+fn expectCommandChip(h: *Harness, dark: bool, label: ?[]const u8) !void {
+    const field = h.t.ctx.rects.get(h.a.view.composer_id) orelse return error.MissingComposerField;
+    const accent_wash = @import("theme.zig").colors(dark).accent_wash;
+    var chips: usize = 0;
+    var chip: ?ui.Rect = null;
+    for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (node.style.radius != 6 or !std.meta.eql(node.style.background, accent_wash)) continue;
+        if (r.x < field.x or r.x + r.w > field.x + field.w or r.y < field.y or r.y + r.h > field.y + field.h) continue;
+        chips += 1;
+        chip = r;
+    }
+    try testing.expectEqual(@as(usize, @intFromBool(label != null)), chips);
+    if (chip) |r| {
+        try testing.expect(r.y >= field.y + 20);
+        for (h.t.ctx.nodes.items) |node| {
+            if (node.content != .text or !std.mem.eql(u8, node.content.text.str, label.?)) continue;
+            if (node.rect.y < field.y or node.rect.y >= field.y + field.h) continue;
+            const width = h.t.ctx.text.width(label.?, node.content.text.style);
+            // The wash must surround the label, especially at a line start.
+            try testing.expect(node.rect.x - r.x >= 5.5);
+            try testing.expect(r.x + r.w - (node.rect.x + width) >= 5.5);
+            try testing.expect(r.h >= 21 and r.h <= 22.75);
+            return;
+        }
+        return error.MissingCommandLabel;
+    }
+}
+
 test "completion restores original issue575 Tab path without deleting adjacent prompt" {
     var h: Harness = undefined;
     try h.init();
@@ -122,6 +197,62 @@ fn lastPrompt(h: *Harness) !?[]u8 {
         result = try testing.allocator.dupe(u8, prompt.string);
     }
     return result;
+}
+
+test "completion other slash commands paint only after Tab or clicking a suggestion" {
+    const cases = [_]struct { command: []const u8, description: []const u8, click: bool }{
+        .{ .command = "/goals", .description = "Synthetic goals command", .click = true },
+        .{ .command = "/compact-at", .description = "Compact at a synthetic turn", .click = false },
+    };
+    for (cases) |case| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        try replies(&h,
+            \\{"ListCommands":[{"name":"goals","description":"Synthetic goals command"},{"name":"compact-at","description":"Compact at a synthetic turn"}],"ListSkills":[]}
+        );
+        const draft = try std.fmt.allocPrint(testing.allocator, "Synthetic prompt\n{s}", .{case.command});
+        defer testing.allocator.free(draft);
+        h.draft(draft, draft.len);
+        try testing.expect(h.t.hasText(case.description));
+        try expectCommandChip(&h, true, null);
+        if (case.click) try h.t.clickText(case.description) else h.t.textOps(&.{.{ .command = .insert_tab }});
+        h.draw();
+        try expectCommandChip(&h, true, case.command);
+        h.a.send();
+        const wire = (try lastPrompt(&h)) orelse return error.NoQueueCommand;
+        defer testing.allocator.free(wire);
+        const canonical = try @import("composer_completion.zig").canonical(testing.allocator, .{ .name = case.command[1..], .description = "" });
+        defer testing.allocator.free(canonical);
+        try testing.expect(std.mem.endsWith(u8, wire, canonical));
+    }
+}
+
+test "completion Return sends a visible slash match as literal text" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.draft("/compact", 8);
+    try testing.expect(h.t.hasText("Compact the synthetic context"));
+    h.t.textOps(&.{.{ .command = .insert_newline }});
+    h.draw();
+    try expectCommandChip(&h, true, null);
+    const wire = (try lastPrompt(&h)) orelse return error.NoQueueCommand;
+    defer testing.allocator.free(wire);
+    try testing.expectEqualStrings("/compact", wire);
+}
+
+test "completion unaccepted local slash words send as literal text" {
+    for ([_][]const u8{ "/resume", "/zen", "/custom-theme Synthetic theme" }) |draft| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        h.draft(draft, draft.len);
+        h.a.send();
+        const wire = (try lastPrompt(&h)) orelse return error.NoQueueCommand;
+        defer testing.allocator.free(wire);
+        try testing.expectEqualStrings(draft, wire);
+    }
 }
 
 test "completion acceptance remains one lossless undo for drafts beyond toolkit snapshot capacity" {

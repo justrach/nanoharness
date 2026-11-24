@@ -357,6 +357,43 @@ test "composer native Return keyDown preserves Shift through AppKit interpretati
     try testing.expect(!objc.msg(objc.BOOL, native.window.nswindow, "isVisible", .{}));
 }
 
+test "composer native Tab accepts a slash completion without moving focus" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const objc = @import("nanoui").objc;
+    const pool = objc.Pool.push();
+    defer pool.pop();
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.a.device_id = try testing.allocator.dupe(u8, "synthetic");
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"ListCommands":[{"name":"goal","description":"Synthetic goal command"}],"ListSkills":[]}
+    , .{});
+    h.a.engine.state = .connected;
+    var native: NativeInput = undefined;
+    try native.init(&h.a);
+    defer native.deinit();
+    native.key("/goal", 0, 0);
+    _ = h.a.engine.pump();
+    const surface = native.window.surface.?;
+    surface.frame();
+    try testing.expectEqualStrings("/goal", h.a.composer.text());
+    const choice = h.a.completion.menu_choice orelse return error.NoSlashSuggestion;
+    try testing.expect(surface.ctx.rects.contains(choice.id));
+    try testing.expectEqual(h.a.view.composer_id, surface.ctx.focus);
+
+    // The real key goes through both the shortcut offer and AppKit's fallback
+    // unless the popup acknowledges that it consumed the shortcut.
+    native.routedKey(.window, "\t", 48, 0);
+    try testing.expectEqualStrings("/goal ", h.a.composer.text());
+    try testing.expectEqual(h.a.view.composer_id, surface.ctx.focus);
+    try testing.expect(surface.ctx.shortcut_taken);
+    native.key("synthetic follow-up", 0, 0);
+    try testing.expectEqualStrings("/goal synthetic follow-up", h.a.composer.text());
+    try testing.expectEqual(h.a.view.composer_id, surface.ctx.focus);
+    try testing.expect(!objc.msg(objc.BOOL, native.window.nswindow, "isVisible", .{}));
+}
+
 fn expectNativeRouting(route: NativeInput.Route) !void {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const objc = @import("nanoui").objc;

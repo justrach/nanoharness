@@ -2058,28 +2058,6 @@ pub const App = struct {
         };
         defer if (attached) |p| a.gpa.free(p);
         const prompt = attached orelse text;
-        // `/resume` is the workspace's, not the agent's: the palette that
-        // puts a chat in this tab (`WorkspaceCommand::Resume`).
-        if (std.mem.eql(u8, prompt, "/resume")) {
-            a.composer.clear();
-            return @import("view_palette.zig").toggle(a, .replace_current);
-        }
-        if (std.mem.eql(u8, prompt, "/zen")) {
-            a.composer.clear();
-            const was_design = a.settings.uiMode() == .design;
-            a.settings.toggleUiMode();
-            if (was_design and a.settings.uiMode() != .design) @import("app_panels.zig").closeDesignCanvas(a);
-            return a.redraw();
-        }
-        if (std.mem.eql(u8, prompt, "/custom-theme") or std.mem.startsWith(u8, prompt, "/custom-theme ")) {
-            const raw_arg = if (prompt.len > "/custom-theme".len) std.mem.trim(u8, prompt["/custom-theme".len..], " \t\r\n") else "";
-            var arg_buf: [512]u8 = undefined;
-            const n = @min(raw_arg.len, arg_buf.len);
-            if (n > 0) @memcpy(arg_buf[0..n], raw_arg[0..n]);
-            a.composer.clear();
-            const studio = @import("view_custom_theme_studio.zig");
-            if (n > 0) return studio.openWithPrompt(a, arg_buf[0..n]) else return studio.open(a);
-        }
         if (prompt.len == 0 or a.engine.state != .connected) return;
         if (a.selected == null and !a.new_chat_mode and !a.new_no_project and
             a.space != null and a.newChatSpace() == null)
