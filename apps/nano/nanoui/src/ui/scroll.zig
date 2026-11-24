@@ -20,6 +20,8 @@ pub const ScrollbarGeom = struct {
     thumb_y: f32,
     thumb_h: f32,
     max_scroll: f32,
+    // Overlay bars paint only a thumb; the empty track isn't a control.
+    thumb_hit: ?types.Rect = null,
 };
 
 pub const ScrollbarDrag = struct {
@@ -208,18 +210,16 @@ pub fn tryPressScrollbar(c: *Context) bool {
     // the pointer being on the track decides, not `hot`. Of the tracks under it
     // the innermost wins, so a list inside a page scrolls itself, not the page.
     //
-    // The exception is a control that reaches the edge: a button flush against
-    // the scroll box's right side is under the track, and the press is the
-    // button's. Without this the 10 points of track swallow it and the button
-    // never fires.
-    if (c.hot_index != none and c.hot_index < c.nodes.items.len and c.node(c.hot_index).interactive) return false;
+    // A control flush against the right edge beats an ordinary track, but
+    // a visible overlay thumb is painted on top of the content beneath it.
+    const over_control = c.hot_index != none and c.hot_index < c.nodes.items.len and c.node(c.hot_index).interactive;
     var found: ?struct { id: u64, g: ScrollbarGeom } = null;
     var it = c.scrollbars.iterator();
     while (it.next()) |e| {
         const g = e.value_ptr.*;
-        if (m.x >= g.track_x and m.x <= g.track_x + 10 and m.y >= g.track_y and m.y <= g.track_y + g.track_h) {
-            if (found == null or g.track_h < found.?.g.track_h) found = .{ .id = e.key_ptr.*, .g = g };
-        }
+        const hit = if (g.thumb_hit) |thumb| thumb.contains(m) else !over_control and
+            m.x >= g.track_x and m.x <= g.track_x + 10 and m.y >= g.track_y and m.y <= g.track_y + g.track_h;
+        if (hit and (found == null or g.track_h < found.?.g.track_h)) found = .{ .id = e.key_ptr.*, .g = g };
     }
     const f = found orelse return false;
     if (m.y >= f.g.thumb_y and m.y <= f.g.thumb_y + f.g.thumb_h) {
@@ -232,15 +232,20 @@ pub fn tryPressScrollbar(c: *Context) bool {
     }
     c.hot = 0;
     c.active = 0;
+    c.input.pressed = false;
     return true;
 }
 
 pub fn updateScrollbarDrag(c: *Context) void {
+    const d = c.scrollbar_drag orelse return;
     if (!c.input.down) {
+        if (c.input.released) {
+            c.input.released = false;
+            if (c.overlay_bars.getPtr(d.id)) |bar| bar.moved_at = c.time;
+        }
         c.scrollbar_drag = null;
         return;
     }
-    const d = c.scrollbar_drag orelse return;
     const g = c.scrollbars.get(d.id) orelse return;
     scrubTo(c, d.id, g, c.input.mouse.y - d.grab_dy);
 }

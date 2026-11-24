@@ -216,6 +216,45 @@ test "a short chat has no rail dash, and scrolling away offers jump to bottom" {
     try testing.expect(t.ctx.scroll_follow.get(box) orelse false);
 }
 
+test "transcript scrollbar thumb drags to either end without selecting chat text" {
+    @import("theme.zig").registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.view.sidebar_open = false;
+    a.openChat("synthetic", null);
+    var history: std.ArrayList(u8) = .empty;
+    defer history.deinit(testing.allocator);
+    try history.appendSlice(testing.allocator, "{\"reset\":[");
+    for (0..40) |i| {
+        if (i > 0) try history.appendSlice(testing.allocator, ",");
+        try history.print(testing.allocator, "{{\"id\":\"a{d}\",\"role\":\"assistant\",\"parts\":[{{\"id\":\"p\",\"kind\":\"text\",\"text\":\"Synthetic reply {d}\"}}]}}", .{ i, i });
+    }
+    try history.appendSlice(testing.allocator, "]}");
+    try apply(&a, history.items);
+
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 900, .height = 500 });
+    defer t.deinit();
+    t.settle(0.5);
+    const box = a.view.jump_box;
+    const view = t.ctx.rects.get(box) orelse return error.NoTranscriptScroll;
+    const end = t.ctx.scroll_max.get(box) orelse return error.NoTranscriptScroll;
+    try testing.expect(end > 300);
+    const center_x = view.x + view.w / 2;
+    t.scroll(center_x, view.y + view.h / 2, 150);
+    const thumb = (t.ctx.scrollbars.get(box) orelse return error.NoTranscriptThumb).thumb_hit orelse return error.NoTranscriptThumb;
+    t.down(thumb.x + thumb.w / 2, thumb.y + thumb.h / 2);
+    t.move(center_x, view.y + 1);
+    try testing.expectApproxEqAbs(@as(f32, 0), t.ctx.scroll.get(box).?, 0.01);
+    try testing.expect(!(t.ctx.scroll_follow.get(box) orelse true));
+    t.move(center_x, view.y + view.h - 1);
+    t.up();
+    try testing.expectApproxEqAbs(t.ctx.scroll_max.get(box).?, t.ctx.scroll.get(box).?, 0.01);
+    try testing.expect(t.ctx.scroll_follow.get(box) orelse false);
+    try testing.expect(!t.ctx.selection.dragging and t.ctx.selection.text.items.len == 0);
+}
+
 test "live streaming reply dissolves incoming words with a 120Hz veil and balances unclosed markdown" {
     @import("theme.zig").registerFonts();
     var a: App = .init(testing.allocator, testing.io, 1);

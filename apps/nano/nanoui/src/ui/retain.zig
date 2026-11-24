@@ -82,6 +82,11 @@ pub fn shift(c: *Context, instances: *std.ArrayList(gpu.Instance), size: types.S
     const dy = moved.next - moved.prev;
     if (dy == 0) return false;
     const index = scrollIndex(c, moved.id) orelse return false;
+    // Overlay thumbs can appear on the first wheel tick and use different
+    // geometry from placeThumb's persistent bar. Repaint to update the
+    // visible thumb and its hit target together.
+    const scrollbar = c.node(index).style.scrollbar;
+    if (scrollbar == .overlay and scrollbar.overlay.a > 0) return false;
     instances.clearRetainingCapacity();
     instances.appendSlice(c.gpa, rs.scroll_scene.items) catch return false;
     const view = moved.view;
