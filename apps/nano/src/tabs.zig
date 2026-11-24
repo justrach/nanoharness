@@ -387,19 +387,27 @@ pub const Tabs = struct {
         return if (ix < s.drafts.items.len) &s.drafts.items[ix] else null;
     }
 
-    /// Where `id` is open: its tab, and its pane there when it isn't the
-    /// tab's focused one.
+    /// Where `id` is open. Prefer the current workspace, including its
+    /// inactive local panel tabs, before a duplicate parked elsewhere.
     pub fn find(t: *const Tabs, id: []const u8) ?struct { tab: usize, pane: ?usize, panel_tab: ?usize = null } {
         if (t.paneOf(t.active, id)) |ix| return .{ .tab = t.active, .pane = ix };
-        for (t.items.items, 0..) |c, i| if (c) |have| if (std.mem.eql(u8, have, id)) return .{ .tab = i, .pane = null };
-        for (0..t.splits.items.len) |i| if (t.paneOf(i, id)) |ix| return .{ .tab = i, .pane = ix };
-        for (t.splits.items, 0..) |layout_state, i| if (layout_state) |s| {
-            for (s.groups[0..s.panes.items.len], 0..) |group, pane| {
-                for (group.items.items, 0..) |tab, ix| if (tab.chat) |chat| {
-                    if (std.mem.eql(u8, chat, id)) return .{ .tab = i, .pane = pane, .panel_tab = ix };
-                };
-            }
+        if (t.current()) |have| if (std.mem.eql(u8, have, id)) return .{ .tab = t.active, .pane = null };
+        if (t.localTabOf(t.active, id)) |at| return .{ .tab = t.active, .pane = at.pane, .panel_tab = at.panel_tab };
+        for (t.items.items, 0..) |c, i| if (i != t.active) if (c) |have| if (std.mem.eql(u8, have, id)) return .{ .tab = i, .pane = null };
+        for (0..t.splits.items.len) |i| if (i != t.active) if (t.paneOf(i, id)) |ix| return .{ .tab = i, .pane = ix };
+        for (0..t.splits.items.len) |i| if (i != t.active) if (t.localTabOf(i, id)) |at| {
+            return .{ .tab = i, .pane = at.pane, .panel_tab = at.panel_tab };
         };
+        return null;
+    }
+
+    fn localTabOf(t: *const Tabs, workspace: usize, id: []const u8) ?struct { pane: usize, panel_tab: usize } {
+        const s = t.splits.items[workspace] orelse return null;
+        for (s.groups[0..s.panes.items.len], 0..) |group, pane| {
+            for (group.items.items, 0..) |tab, ix| if (tab.chat) |chat| {
+                if (std.mem.eql(u8, chat, id)) return .{ .pane = pane, .panel_tab = ix };
+            };
+        }
         return null;
     }
 
@@ -1043,4 +1051,32 @@ test "split divider snapFraction and snapDivider snap near 1/3, 1/2, and 2/3 sto
     t.snapDivider(1);
     try testing.expectApproxEqAbs(@as(f32, 1.0 / 3.0), t.layout().?.shares.items[0], 1e-5);
     try testing.expectApproxEqAbs(@as(f32, 2.0 / 3.0), t.layout().?.shares.items[1], 1e-5);
+}
+
+test "session navigation parity prefers active panel tabs before parked workspace duplicates" {
+    var t: Tabs = .init(testing.allocator);
+    defer t.deinit();
+    t.show("a");
+    try testing.expect(try t.split(.horizontal));
+    t.setCurrent("c");
+    try t.newPaneTab(.{
+        .text = try testing.allocator.dupe(u8, ""),
+        .harness = try testing.allocator.dupe(u8, ""),
+    });
+    const active_split = t.layout().?;
+    testing.allocator.free(active_split.groups[1].items.items[0].chat.?);
+    active_split.groups[1].items.items[0].chat = try testing.allocator.dupe(u8, "b");
+    t.setCurrent("d");
+
+    // Another parked workspace intentionally also contains b.
+    t.newTab();
+    t.setCurrent("x");
+    try testing.expect(try t.split(.horizontal));
+    t.setCurrent("b");
+    t.show("a");
+
+    const found = t.find("b").?;
+    try testing.expectEqual(@as(usize, 0), found.tab);
+    try testing.expectEqual(@as(?usize, 1), found.pane);
+    try testing.expectEqual(@as(?usize, 0), found.panel_tab);
 }

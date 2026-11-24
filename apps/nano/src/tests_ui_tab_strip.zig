@@ -60,6 +60,40 @@ fn replace(list: anytype, text: []const u8) !void {
     try list.replace(parsed.value);
 }
 
+test "session navigation parity opens archived history outside a blank split pane" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try replace(&h.a.chats,
+        \\[ {"id":"a","deviceId":"local","title":"Live session","spaceId":"local-project","archived":false},
+        \\  {"id":"history","deviceId":"local","title":"Archived session","spaceId":"local-project","archived":true} ]
+    );
+    h.a.settings.applyUiMode(.developer);
+    h.a.splitPane(.horizontal);
+    const live = h.a.tabs.active;
+    try testing.expect(h.a.selected == null);
+    h.a.openChatInTab("history");
+    h.t.settle(2);
+    h.snap("archive-split");
+
+    try testing.expectEqualStrings("history", h.a.selected.?);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expect(h.a.tabs.active != live);
+    try testing.expect(h.a.tabs.layout() == null);
+    const history = h.a.tabs.active;
+    h.a.showTab(live);
+    h.a.openChatInTab("history");
+    try testing.expectEqual(history, h.a.tabs.active);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    h.a.closeTab(history);
+    try testing.expectEqual(live, h.a.tabs.active);
+    const split = h.a.tabs.layout() orelse return error.MissingSplit;
+    try testing.expectEqual(@as(usize, 2), split.panes.items.len);
+    try testing.expectEqualStrings("a", split.panes.items[0].?);
+    try testing.expectEqual(@as(usize, 1), split.focus);
+    try testing.expect(split.panes.items[1] == null and h.a.selected == null);
+}
+
 test "question tab attention remains visible with hidden sidebar without selecting the question chat" {
     for (0..3) |mode| {
         var h: Harness = undefined;
