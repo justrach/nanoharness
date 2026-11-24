@@ -1323,3 +1323,202 @@ test "developer mode uses the same inset rounded-12 card chrome as zen while kee
     try testing.expect(h.t.hasText("Local checkout"));
     try testing.expect(h.t.hasText("Dev"));
 }
+
+test "tabStyle gives only active tabs an elevated surface and keeps inactive tabs transparent" {
+    const theme = @import("theme.zig");
+    const surfaces = @import("surface_palette.zig");
+    const render = @import("view_tab_strip_render.zig");
+    for ([_]bool{ false, true }) |dark| {
+        for ([_]bool{ false, true }) |frosted| {
+            const k = surfaces.apply(theme.colors(dark), frosted);
+            const inactive = render.tabStyle(k, false, false);
+            try testing.expectEqual(@as(f32, 0), inactive.bg.a);
+            try testing.expect(inactive.border == null);
+            try testing.expectEqual(@as(usize, 0), inactive.shadows.len);
+            try testing.expectEqual(ui.Weight.regular, inactive.weight);
+            try testing.expectEqualDeep(k.muted, inactive.fg);
+
+            const hovered = render.tabStyle(k, false, true);
+            try testing.expectEqual(@as(f32, 0), hovered.bg.a);
+            try testing.expectEqualDeep(k.text, hovered.fg);
+
+            const active = render.tabStyle(k, true, false);
+            try testing.expect(active.bg.a > 0);
+            try testing.expect(!std.meta.eql(active.bg, k.shell));
+            try testing.expect(active.border != null);
+            try testing.expect(active.shadows.len > 0);
+            try testing.expectEqual(ui.Weight.medium, active.weight);
+            try testing.expectEqualDeep(k.text, active.fg);
+            if (!frosted) {
+                try testing.expect(theme.contrast(active.fg, active.bg) >= 4.5);
+            }
+        }
+    }
+}
+
+test "browse-style top tab bar highlights only the active tab in stable index order across split and single workspaces" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    const topPrefix = struct {
+        fn find(ctx: *ui.Context, side_w: f32, prefix: []const u8) ?ui.Rect {
+            for (ctx.nodes.items) |node| switch (node.content) {
+                .text => |tx| if (std.mem.startsWith(u8, tx.str, prefix) and node.rect.y < chrome.header_height and node.rect.x >= side_w) return node.rect,
+                else => {},
+            };
+            return null;
+        }
+    }.find;
+
+    try replace(&h.a.spaces,
+        \\[{"id":"p1","deviceId":"local","path":"/synthetic/fieldnotes"},
+        \\ {"id":"p2","deviceId":"local","path":"/synthetic/harbor"}]
+    );
+    try replace(&h.a.chats,
+        \\[{"id":"c0","deviceId":"local","title":"Cedar Layout Notes","spaceId":"p1","archived":false},
+        \\ {"id":"c1","deviceId":"local","title":"Maple Cache Plan","spaceId":"p1","archived":false},
+        \\ {"id":"c2","deviceId":"local","title":"Birch Query Pass","spaceId":"p1","archived":false},
+        \\ {"id":"c3","deviceId":"local","title":"Alder Stream Spec","spaceId":"p1","archived":false},
+        \\ {"id":"c4","deviceId":"local","title":"Willow Table Review","spaceId":"p1","archived":false},
+        \\ {"id":"c5","deviceId":"local","title":"Spruce Build Guide","spaceId":"p2","archived":false},
+        \\ {"id":"c6","deviceId":"local","title":"Juniper Design Notes","spaceId":"p2","archived":false},
+        \\ {"id":"c7","deviceId":"local","title":"Linden Sync Audit","spaceId":"p2","archived":false}]
+    );
+
+    // 6 workspaces in order: [0: split, 1: split, 2: split (c4 | New tab), 3: single, 4: single, 5: single]
+    h.a.openChat("c0", "p1");
+    h.a.splitPane(.horizontal);
+    h.a.openChat("c1", "p1");
+
+    h.a.newWorkspaceSession();
+    h.a.openChat("c2", "p1");
+    h.a.splitPane(.horizontal);
+    h.a.openChat("c3", "p1");
+
+    h.a.newWorkspaceSession();
+    h.a.openChat("c4", "p1");
+    h.a.splitPane(.horizontal); // Pane 0: Willow Table Review, Pane 1 (focused): New tab
+
+    for ([_][]const u8{ "c5", "c6", "c7" }) |cid| {
+        h.a.newWorkspaceSession();
+        h.a.openChat(cid, "p2");
+    }
+
+    h.a.showTab(2);
+    h.a.focusPane(1);
+    h.a.view.sidebar_open = false;
+    h.a.view.sidebar_width = 0;
+    h.t.resize(1280, 680);
+    h.t.settle(2);
+    if (std.c.getenv("NANO_TAB_POLISH_SNAP_DIR")) |dir| {
+        var buf: [1024]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, "{s}/after-tab-bar-split.png", .{std.mem.span(dir)})) |path| {
+            h.t.screenshot(path) catch {};
+        } else |_| {}
+    }
+
+    // 1. Active split workspace stays in its true slot (index 2) rather than jumping to slot 0.
+    const t0 = topPrefix(&h.t.ctx, h.a.view.sidebar_width, "Maple Cache") orelse return error.MissingWorkspace0;
+    const t1 = topPrefix(&h.t.ctx, h.a.view.sidebar_width, "Alder Stream") orelse return error.MissingWorkspace1;
+    const t2 = h.topText("Split · 2 panes") orelse return error.MissingActiveSplitTab;
+    const t3 = topPrefix(&h.t.ctx, h.a.view.sidebar_width, "Spruce Build") orelse return error.MissingWorkspace3;
+    const t4 = topPrefix(&h.t.ctx, h.a.view.sidebar_width, "Juniper Design") orelse return error.MissingWorkspace4;
+    const t5 = topPrefix(&h.t.ctx, h.a.view.sidebar_width, "Linden Sync") orelse return error.MissingWorkspace5;
+    try testing.expect(t0.x < t1.x and t1.x < t2.x and t2.x < t3.x and t3.x < t4.x and t4.x < t5.x);
+
+    // 2. Only the active top workspace tab has a filled surface + border + shadow; the other 5 stay transparent.
+    var top_active: usize = 0;
+    var top_inactive: usize = 0;
+    var active_x: f32 = 0;
+    var rightmost_tab_right: f32 = 0;
+    var pane_active: usize = 0;
+    var pane_inactive: usize = 0;
+    var pane_active_x: f32 = 0;
+    var pane_inactive_x: f32 = 0;
+    for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (!node.style.control) continue;
+        if (r.y < chrome.header_height and @abs(r.h - 28) < 0.5 and r.w >= 72) {
+            rightmost_tab_right = @max(rightmost_tab_right, r.x + r.w);
+            const bg = node.style.background orelse return error.MissingTabBackground;
+            if (bg.a > 0.5) {
+                try testing.expect(node.style.border != null);
+                try testing.expect(node.style.shadows.len > 0);
+                top_active += 1;
+                active_x = r.x;
+            } else {
+                try testing.expectEqual(@as(f32, 0), bg.a);
+                try testing.expect(node.style.border == null);
+                try testing.expectEqual(@as(usize, 0), node.style.shadows.len);
+                top_inactive += 1;
+            }
+        } else if (r.y >= chrome.header_height - 0.5 and r.y < h.a.view.chrome.y and @abs(r.h - chrome.tab_height) < 0.5 and @abs(node.style.radius - 6) < 0.5) {
+            const bg = node.style.background orelse return error.MissingPaneHeaderBackground;
+            if (bg.a > 0.5) {
+                try testing.expect(node.style.border != null);
+                pane_active += 1;
+                pane_active_x = r.x;
+            } else {
+                try testing.expectEqual(@as(f32, 0), bg.a);
+                try testing.expect(node.style.border == null);
+                pane_inactive += 1;
+                pane_inactive_x = r.x;
+            }
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), top_active);
+    try testing.expectEqual(@as(usize, 5), top_inactive);
+    try testing.expect(active_x > t1.x and active_x < t3.x);
+    try testing.expectEqual(@as(usize, 1), pane_active);
+    try testing.expectEqual(@as(usize, 1), pane_inactive);
+    try testing.expect(pane_active_x > pane_inactive_x);
+
+    // 3. New-tab (+) button sits immediately after the tab run instead of pinned far right.
+    var plus_rect: ?ui.Rect = null;
+    for (h.t.ctx.a11y_items.items) |item| {
+        const r = h.t.ctx.rects.get(item.id) orelse continue;
+        if (r.y < chrome.header_height and std.mem.eql(u8, item.label, "New tab")) {
+            plus_rect = r;
+            break;
+        }
+    }
+    const plus = plus_rect orelse return error.MissingNewTabButton;
+    try testing.expect(plus.x >= rightmost_tab_right - 1);
+    try testing.expect(plus.x - rightmost_tab_right <= 40);
+
+    // 4. Switching to a single-pane workspace highlights only its tab in place too.
+    h.a.showTab(4);
+    h.t.settle(2);
+    if (std.c.getenv("NANO_TAB_POLISH_SNAP_DIR")) |dir| {
+        var buf: [1024]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, "{s}/after-tab-bar-single.png", .{std.mem.span(dir)})) |path| {
+            h.t.screenshot(path) catch {};
+        } else |_| {}
+    }
+    const juniper = topPrefix(&h.t.ctx, h.a.view.sidebar_width, "Juniper") orelse return error.MissingActiveSingleTab;
+    const linden = topPrefix(&h.t.ctx, h.a.view.sidebar_width, "Linden") orelse return error.MissingTrailingSingleTab;
+    var single_active: usize = 0;
+    var single_inactive: usize = 0;
+    var single_active_r: ui.Rect = .{};
+    for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (!node.style.control) continue;
+        if (r.y < chrome.header_height and @abs(r.h - 28) < 0.5 and r.w >= 72) {
+            const bg = node.style.background orelse return error.MissingSingleTabBackground;
+            if (bg.a > 0.5) {
+                try testing.expect(node.style.border != null);
+                single_active += 1;
+                single_active_r = r;
+            } else {
+                try testing.expectEqual(@as(f32, 0), bg.a);
+                try testing.expect(node.style.border == null);
+                single_inactive += 1;
+            }
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), single_active);
+    try testing.expectEqual(@as(usize, 5), single_inactive);
+    try testing.expect(juniper.x >= single_active_r.x and juniper.x < single_active_r.x + single_active_r.w);
+    try testing.expect(linden.x >= single_active_r.x + single_active_r.w);
+}

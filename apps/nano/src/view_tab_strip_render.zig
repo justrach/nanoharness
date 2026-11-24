@@ -10,6 +10,56 @@ const tabs = @import("tabs.zig");
 const strip = @import("view_tab_strip.zig");
 const tip = @import("view_tooltip.zig");
 const caption = @import("window_chrome.zig");
+const panel_chrome = @import("view_panel_chrome.zig");
+
+const light_tab_shadow = [_]ui.Shadow{
+    .{ .color = .{ .a = 0.08 }, .y = 1, .blur = 2.5 },
+};
+const dark_tab_shadow = [_]ui.Shadow{
+    .{ .color = .{ .a = 0.30 }, .y = 1, .blur = 3.0 },
+};
+
+pub const TabVisual = struct {
+    bg: ui.Color,
+    border: ?ui.Color,
+    shadows: []const ui.Shadow,
+    fg: ui.Color,
+    icon: ui.Color,
+    weight: ui.Weight,
+};
+
+pub fn tabStyle(k: theme.Colors, active: bool, hovered: bool) TabVisual {
+    if (active) {
+        const bg = if (!k.dark)
+            (if (k.frosted) ui.Color.white.alpha(0.86) else panel_chrome.zenPageBg(k))
+        else
+            (if (k.frosted) ui.Color.white.alpha(0.14) else @import("themes.zig").over(k.shell.alpha(1), k.text.alpha(0.12)));
+        return .{
+            .bg = bg,
+            .border = k.ink(if (k.dark) 0.16 else 0.14),
+            .shadows = if (k.dark) &dark_tab_shadow else &light_tab_shadow,
+            .fg = k.text,
+            .icon = k.text,
+            .weight = .medium,
+        };
+    }
+    return .{
+        .bg = .transparent,
+        .border = null,
+        .shadows = &.{},
+        .fg = if (hovered) k.text else k.muted,
+        .icon = if (hovered) k.text else k.muted,
+        .weight = .regular,
+    };
+}
+
+fn applyTabBox(div: ui.Div, k: theme.Colors, vis: TabVisual, active: bool) ui.Div {
+    var box = div.bg(vis.bg);
+    if (vis.border) |b| box = box.border(b).borderW(1);
+    if (vis.shadows.len > 0) box = box.shadows(vis.shadows);
+    if (!active) box = box.hover(k.hover);
+    return box;
+}
 
 pub const Layout = struct {
     targets: [tabs.max_panes + 2]strip.Panel = undefined,
@@ -149,28 +199,42 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, lane: Layout, pane_widths:
             for (lane.targets[0..n], widths[0..n], 0..) |target, width, ix| slot(c, a, k, target, ix, width);
         }
         ui.key(c, "instrument-workspaces");
+        const ws_avail = @max(0, c.size.w - a.view.sidebar_width - left - lane.right - 8);
+        const ws_n = a.tabs.items.items.len;
+        const active_ws = a.tabs.active;
+        const ws_win = singleWindow(ws_avail, ws_n, active_ws, 27);
         const actions = ui.div(c).fixed().offset(a.view.sidebar_width + left, 0)
-            .size(@max(0, c.size.w - a.view.sidebar_width - left - lane.right - 8), chrome.titlebar_height)
-            .pt(chrome.top_pad).row().gap(4).itemsCenter().layer(2);
+            .size(ws_avail, chrome.tab_height + chrome.tab_top)
+            .pt(chrome.top_pad).row().gap(3).itemsCenter().layer(2);
         defer actions.end();
-        if (avail_bar >= 118) {
-            const current = ui.div(c).row().h(27).px(8).gap(6).itemsCenter().rounded(6).bg(k.accent_wash);
-            icons.icon(c, .widget, 14, k.muted, 0);
-            ui.text(c, c.print("Split · {d} panes", .{strip.chatCount(a)}), .{ .size = 11.5, .weight = .medium, .color = k.text });
-            current.end();
-        }
-        otherWorkspaces(c, a, k, other_shown, other_pill_w);
-        if (other_shown < other_tabs and avail_bar >= chrome.slot_min) {
-            ui.key(c, "split-workspace-overflow");
-            const trigger = ui.div(c).size(24, 24).center().rounded(6).hover(k.hover).control();
-            icons.icon(c, .@"more-horizontal", 15, k.muted, 0);
-            if (@import("control_behavior.zig").activate(c, trigger, k, "More workspaces", true, false)) {
-                strip.open(a, .history, strip.active(a), c.rects.get(trigger.id()));
+        for (ws_win.win_start..ws_win.win_end) |ws| {
+            if (ws == active_ws) {
+                ui.key(c, c.print("top-workspace-tab-{d}", .{ws}));
+                const vis = tabStyle(k, true, false);
+                const split_lbl = c.print("Split · {d} panes", .{strip.chatCount(a)});
+                const pill_w: f32 = if (ws_n == 1)
+                    @min(ws_win.slot_w, @max(120, c.text.width(split_lbl, .{ .size = 11.5, .weight = vis.weight }) + 38))
+                else
+                    ws_win.slot_w;
+                var current = ui.div(c).row().size(pill_w, 28).px(8).gap(6).itemsCenter().rounded(8).clip().control();
+                current = applyTabBox(current, k, vis, true);
+                defer current.end();
+                icons.icon(c, .widget, 14, vis.icon, 0);
+                kit.ellipsisText(c, split_lbl, .{ .size = 11.5, .line_height = 14, .weight = vis.weight, .color = vis.fg }, @max(0, pill_w - 36));
+            } else {
+                topWorkspacePill(c, a, k, ws, ws_win.slot_w);
             }
-            trigger.end();
         }
-        ui.div(c).w(0).grow().end();
-        newTab(c, a, k);
+        if (ws_win.hidden_count > 0) {
+            ui.key(c, "split-workspace-overflow");
+            var more = ui.div(c).row().size(overflow_pill_w, 28).center().rounded(8)
+                .bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover).control();
+            more = tip.on(more, k, .{ .text = c.print("{d} more open tab{s}", .{ ws_win.hidden_count, if (ws_win.hidden_count == 1) "" else "s" }), .look = .tab });
+            defer more.end();
+            ui.text(c, c.print("+{d}", .{ws_win.hidden_count}), .{ .size = 11, .weight = .medium, .color = k.muted });
+            if (more.clicked()) strip.open(a, .history, strip.active(a), c.rects.get(c.node(more.index).id));
+        }
+        if (ws_avail >= 27) newTab(c, a, k);
         return;
     }
     const shared = @min(chrome.slot_max, chrome.sharedSlotRoom(@max(0, c.size.w - a.view.sidebar_width - other_reserve - lane.right), left, 8, n));
@@ -251,15 +315,17 @@ fn topWorkspacePill(c: *ui.Context, a: *App, k: theme.Colors, ws: usize, pill_w:
     const ch = if (cid) |id| a.findChat(id) else null;
     const t_name = if (ch) |v| @import("view_sidebar.zig").chatLabel(v) else "New tab";
     const panes_n = workspacePaneCount(a, ws);
-    const pill = ui.div(c).row().size(pill_w, chrome.tab_height).px(8).gap(6).itemsCenter().rounded(6).bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover).clip().control();
+    var pill = ui.div(c).row().size(pill_w, 28).px(8).gap(6).itemsCenter().rounded(8).clip().control();
+    pill = applyTabBox(pill, k, tabStyle(k, false, false), false);
     defer pill.end();
     const pill_hot = pill.hovered();
+    const vis = tabStyle(k, false, pill_hot);
     const hover_rules = @import("ux_rules.zig").HoverStability;
     const pill_wu: u32 = @intFromFloat(@round(@max(0, pill_w)));
     const reserve_close = hover_rules.tabControlsReserve(pill_wu, false, true);
     const label_budget: f32 = @floatFromInt(hover_rules.tabLabelWidth(pill_wu, false, pill_hot, true) -| 16);
-    if (!questionMark(c, k, workspaceNeedsInput(a, ws))) icons.icon(c, if (panes_n > 1) .widget else .@"chat-round-line", 13, k.muted, 0);
-    kit.ellipsisText(c, t_name, .{ .size = 11.5, .line_height = 14, .color = k.muted }, label_budget);
+    if (!questionMark(c, k, workspaceNeedsInput(a, ws))) icons.icon(c, if (panes_n > 1) .widget else .@"chat-round-line", 13, vis.icon, 0);
+    kit.ellipsisText(c, t_name, .{ .size = 11.5, .line_height = 14, .weight = vis.weight, .color = vis.fg }, label_budget);
     var closed = false;
     if (reserve_close > 0) {
         const spacer = ui.div(c).row().grow();
@@ -320,15 +386,17 @@ fn inactiveTabPill(c: *ui.Context, a: *App, k: theme.Colors, slot_ix: usize, pan
     ui.key(c, c.print("instrument-slot-{d}-tab-{d}", .{ slot_ix, tab_ix }));
     const ch = if (chat_id) |cid| a.findChat(cid) else null;
     const t_name = if (ch) |v| @import("view_sidebar.zig").chatLabel(v) else "New tab";
-    const pill = ui.div(c).row().size(pill_w, chrome.tab_height).px(7).gap(5).itemsCenter().rounded(6).bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover).clip().control();
+    var pill = ui.div(c).row().size(pill_w, chrome.tab_height).px(7).gap(5).itemsCenter().rounded(6).clip().control();
+    pill = applyTabBox(pill, k, tabStyle(k, false, false), false);
     defer pill.end();
     const pill_hot = pill.hovered();
+    const vis = tabStyle(k, false, pill_hot);
     const hover_rules = @import("ux_rules.zig").HoverStability;
     const pill_wu: u32 = @intFromFloat(@round(@max(0, pill_w)));
     const reserve_close = hover_rules.tabControlsReserve(pill_wu, false, true);
     const label_budget: f32 = @floatFromInt(hover_rules.tabLabelWidth(pill_wu, false, pill_hot, true) -| 16);
-    if (!questionMark(c, k, chatNeedsInput(a, chat_id))) icons.icon(c, .@"chat-round-line", 13, k.muted, 0);
-    kit.ellipsisText(c, t_name, .{ .size = 11.5, .line_height = 14, .color = k.muted }, label_budget);
+    if (!questionMark(c, k, chatNeedsInput(a, chat_id))) icons.icon(c, .@"chat-round-line", 13, vis.icon, 0);
+    kit.ellipsisText(c, t_name, .{ .size = 11.5, .line_height = 14, .weight = vis.weight, .color = vis.fg }, label_budget);
     var pill_closed = false;
     if (reserve_close > 0) {
         const spacer = ui.div(c).row().grow();
@@ -354,9 +422,12 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
     const computer = if (github_child) c.print("↳ {s}", .{@import("app_github_repository.zig").ownerTitle(a)}) else strip.deviceLabel(a, strip.device(a, target));
     const project = strip.folder(a, target);
     var box = ui.div(c).row().size(width, chrome.tab_height).pl(7).pr(4).gap(6).itemsCenter().rounded(6).clip().control();
-    box = if (on) box.bg(k.ink(if (k.dark) 0.16 else 0.10)) else box.bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover);
+    if (github_child and on) {
+        box = box.bg(k.background);
+    } else {
+        box = applyTabBox(box, k, tabStyle(k, on, false), on);
+    }
     if (github_child) {
-        if (on) box = box.bg(k.background);
         const measured = c.rects.get(c.node(box.index).id);
         if (!std.meta.eql(measured, a.view.strip.host_tab_rect)) {
             a.view.strip.host_tab_rect = measured;
@@ -370,6 +441,7 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
         if (c.rects.get(c.node(box.index).id)) |r| a.view.strip.active_tab_anchor = r;
     }
     const hot = box.hovered() or group_hot;
+    const vis = tabStyle(k, on, hot);
     const show_controls = hot or c.focus == c.node(box.index).id;
     const menu_count = strip.tabCount(a, target);
     var handled = false;
@@ -379,12 +451,12 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
         const mark = ui.div(c).row().size(14, 14).center();
         defer mark.end();
         ui.div(c).size(7, 7).rounded(3.5).bg(color).end();
-    } else icons.icon(c, strip.glyph(a, target), 14, if (github_child) k.accent else k.muted, 0);
+    } else icons.icon(c, strip.glyph(a, target), 14, if (github_child) k.accent else vis.icon, 0);
     {
         const text = ui.div(c).column().grow().w(0).clip();
         defer text.end();
         const room = @import("motion_rules.zig").slotTextRoom(width, show_controls, if (target == .chat) 1 else menu_count);
-        kit.ellipsisText(c, name, .{ .size = 12, .line_height = 14, .color = if (on) k.text else k.muted }, room);
+        kit.ellipsisText(c, name, .{ .size = 12, .line_height = 14, .weight = vis.weight, .color = vis.fg }, room);
         const meta = ui.div(c).row().h(14).wFull().gap(6).itemsCenter().clip();
         defer meta.end();
         const device_editable = target == .chat;
@@ -688,21 +760,20 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
         else
             slot_w;
         ui.key(c, c.print("panel-tab-{d}", .{ix}));
+        const active = ix == selected;
         var cap = ui.div(c).row().size(pill_w, if (zen) @as(f32, 28) else 30).px(8).gap(6).itemsCenter().rounded(7).clip().control();
-        cap = if (ix == selected)
-            cap.bg(k.ink(if (k.dark) 0.075 else 0.06)).hover(k.hover)
-        else
-            cap.bg(k.ink(if (k.dark) 0.035 else 0.025)).hover(k.hover);
+        cap = applyTabBox(cap, k, tabStyle(k, active, false), active);
         defer cap.end();
-        if (ix == selected) {
+        if (active) {
             if (c.rects.get(c.node(cap.index).id)) |r| a.view.strip.active_tab_anchor = r;
         }
         const hot = cap.hovered();
+        const vis = tabStyle(k, active, hot);
         const pending_question = switch (item) {
             .global => |ws| workspaceNeedsInput(a, ws),
             .panel => chatNeedsInput(a, chat),
         };
-        const show_close = !settings_open and (hot or (n > 1 and ix == selected));
+        const show_close = !settings_open and (hot or (n > 1 and active));
         const show_spacer = !show_close and !zen;
         const has_trailing = show_close or show_spacer;
         const show_monogram = !pending_question and zen and panes_n == 1 and ch != null;
@@ -715,16 +786,16 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
             if (show_monogram) {
                 @import("view_sidebar.zig").zenMonogram(c, a, k, ch.?, 16);
             } else {
-                icons.icon(c, if (panes_n > 1) .widget else .@"chat-round-line", 14, if (ix == selected) k.text else k.muted, 0);
+                icons.icon(c, if (panes_n > 1) .widget else .@"chat-round-line", 14, vis.icon, 0);
             }
         }
         {
             const labels = ui.div(c).column().grow().w(0).clip();
             defer labels.end();
             if (zen) {
-                kit.ellipsisText(c, label, .{ .size = 12.5, .line_height = 16, .weight = .medium, .color = if (ix == selected) k.text else k.muted }, label_w);
+                kit.ellipsisText(c, label, .{ .size = 12.5, .line_height = 16, .weight = vis.weight, .color = vis.fg }, label_w);
             } else {
-                kit.ellipsisText(c, label, .{ .size = 12, .line_height = 14, .color = if (ix == selected) k.text else k.muted }, label_w);
+                kit.ellipsisText(c, label, .{ .size = 12, .line_height = 14, .weight = vis.weight, .color = vis.fg }, label_w);
                 if (panes_n > 1) {
                     const meta = ui.div(c).row().gap(6).h(12).itemsCenter();
                     defer meta.end();
@@ -740,10 +811,11 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
             }
         }
         if (split_badge_text) |txt| {
-            var badge = ui.div(c).row().size(split_badge_w, 16).center().rounded(4).bg(k.ink(if (k.dark) 0.10 else 0.07));
+            var badge = ui.div(c).row().size(split_badge_w, 16).center().rounded(4)
+                .bg(k.ink(if (k.dark) (if (active) 0.12 else 0.08) else (if (active) 0.08 else 0.06)));
             badge = tip.on(badge, k, .{ .text = c.print("{d} split panes", .{panes_n}), .look = .tab });
             defer badge.end();
-            ui.text(c, txt, .{ .size = 10, .line_height = 12, .weight = .medium, .color = k.muted });
+            ui.text(c, txt, .{ .size = 10, .line_height = 12, .weight = .medium, .color = if (active) k.text else k.muted });
         }
         var handled = false;
         if (show_close) {
