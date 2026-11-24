@@ -1083,18 +1083,18 @@ pub const App = struct {
         }
         const chat = a.findChat(chat_id).?;
         const project = chat.space_id;
-        // A blank "New tab" (single tab or split pane with no unsent draft)
-        // opens the chosen conversation in place instead of abandoning the
-        // empty tab and opening a new tab/workspace elsewhere.
-        if (a.isBlankNewTab()) {
+        // Browse history separately, even when the live workspace has an
+        // empty split pane that an unopened live conversation could reuse.
+        if (chat.archived) {
+            a.newWorkspaceSession();
             a.tabs.setCurrent(chat_id);
             a.select(chat_id, project);
             return;
         }
-        // Reading history is not a project-pane replacement. Keep the live
-        // workspace (including its split and drafts) visible in its own tab.
-        if (chat.archived) {
-            a.newWorkspaceSession();
+        // A blank "New tab" (single tab or split pane with no unsent draft)
+        // opens the chosen live conversation in place instead of abandoning
+        // the empty tab and opening a new tab/workspace elsewhere.
+        if (a.isBlankNewTab()) {
             a.tabs.setCurrent(chat_id);
             a.select(chat_id, project);
             return;
