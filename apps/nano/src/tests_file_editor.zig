@@ -33,6 +33,307 @@ fn count(h: *Harness, method: []const u8) !usize {
     }
     return n;
 }
+test "file settings apply Show all to root expanded folders and active search" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try connect(&h,
+        \\{"ListWorkspaceDirectory":{"entries":[]},"SearchWorkspaceFiles":[]}
+    );
+    h.a.settings.set(.files_show_all, true);
+    files.toggle(&h.a);
+    files.toggleDir(&h.a, "synthetic-folder");
+    h.a.panels.search.set("synthetic");
+    files.search(&h.a);
+    try expectVisibilityRequests(&h, 0, true);
+    const before = h.a.engine.sent.items.len;
+    h.a.settings.set(.files_show_all, false);
+    _ = h.a.tick(h.a.now);
+    try expectVisibilityRequests(&h, before, false);
+}
+
+fn expectVisibilityRequests(h: *Harness, start: usize, include_ignored: bool) !void {
+    var root: usize = 0;
+    var expanded: usize = 0;
+    var search: usize = 0;
+    for (h.a.engine.sent.items[start..]) |frame| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, frame, .{});
+        defer parsed.deinit();
+        const method = parsed.value.object.get("method").?.string;
+        if (std.mem.eql(u8, method, "ListWorkspaceDirectory")) {
+            const params = parsed.value.object.get("params").?.object;
+            try testing.expectEqual(include_ignored, params.get("includeIgnored").?.bool);
+            const dir = params.get("directory").?.string;
+            if (dir.len == 0) root += 1;
+            if (std.mem.eql(u8, dir, "synthetic-folder")) expanded += 1;
+        } else if (std.mem.eql(u8, method, "SearchWorkspaceFiles")) {
+            const params = parsed.value.object.get("params").?.object;
+            try testing.expectEqual(include_ignored, params.get("includeIgnored").?.bool);
+            try testing.expectEqualStrings("synthetic", params.get("query").?.string);
+            search += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), root);
+    try testing.expectEqual(@as(usize, 1), expanded);
+    try testing.expectEqual(@as(usize, 1), search);
+}
+
+test "file settings Word wrap changes a mounted editor without changing its text" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try connect(&h, writable);
+    const e = try open(&h);
+    const long = "synthetic text for wrapping " ++ "with enough words to extend beyond the editor's viewport when the text should stay on a single physical line. " ++ "More synthetic words make the line reliably wider than the pane even if the pane is expanded by the window layout. " ++ "A further phrase provides room to test horizontal scrolling.";
+    edit(e, long ++ "\nsecond physical line");
+    h.t.settle(0.2);
+    const unwrapped = h.t.ctx.rects.get(e.field) orelse return error.MissingEditorGeometry;
+    const before_scroll = h.t.findText(long) orelse return error.MissingUnwrappedLine;
+    h.t.moveTo(unwrapped.x + unwrapped.w / 2, unwrapped.y + 8);
+    h.t.ctx.input.scroll = .{ .x = -200 };
+    h.t.frame();
+    const after_scroll = h.t.findText(long) orelse return error.MissingUnwrappedLine;
+    try testing.expect(after_scroll.x < before_scroll.x);
+    h.t.click(unwrapped.x + 12, unwrapped.y + 8);
+    const caret = h.t.ctx.focused_text orelse return error.MissingEditorFocus;
+    try testing.expect(caret.caret > 10 and caret.caret < long.len);
+    h.a.settings.set(.files_word_wrap, true);
+    h.t.settle(0.2);
+    const wrapped = h.t.ctx.rects.get(e.field) orelse return error.MissingEditorGeometry;
+    try testing.expect(wrapped.h > unwrapped.h);
+    try testing.expect(!h.t.hasText(long));
+    h.a.settings.set(.files_word_wrap, false);
+    h.t.settle(0.2);
+    const restored = h.t.ctx.rects.get(e.field) orelse return error.MissingEditorGeometry;
+    try testing.expectEqual(unwrapped.h, restored.h);
+    try testing.expectEqualStrings(long ++ "\nsecond physical line", e.buffer.text());
+}
+
+test "file settings Autosave debounces latest text and keeps its remote owner" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try connect(&h, writable);
+    h.a.openChatInTab("b");
+    const e = try open(&h);
+    const start = h.a.now;
+    edit(e, "still manual by default");
+    _ = h.a.tick(start + 5);
+    try testing.expectEqual(@as(usize, 0), try count(&h, "WriteWorkspaceFile"));
+    h.a.settings.set(.files_autosave_enabled, true);
+    edit(e, "intermediate edit");
+    _ = h.a.tick(start + 5.5);
+    edit(e, "latest remote edit");
+    h.a.openChatInTab("a");
+    _ = h.a.tick(start + 5.9); // Past the first edit's deadline, before the second's.
+    try testing.expectEqual(@as(usize, 0), try count(&h, "WriteWorkspaceFile"));
+    _ = h.a.tick(start + 7);
+    try testing.expectEqual(@as(usize, 1), try count(&h, "WriteWorkspaceFile"));
+    try testing.expect(e.dirty());
+    const write_id = e.save_id orelse return error.MissingAutosave;
+    for (h.a.engine.sent.items) |frame| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, frame, .{});
+        defer parsed.deinit();
+        if (parsed.value.object.get("id").?.integer != write_id) continue;
+        const params = parsed.value.object.get("params").?.object;
+        try testing.expectEqualStrings("b", params.get("chatId").?.string);
+        try testing.expectEqualStrings("remote", params.get("targetDeviceId").?.string);
+        try testing.expectEqualStrings("checkout-original", params.get("expectedCheckoutId").?.string);
+        try testing.expectEqualStrings("hash-original", params.get("expectedContentHash").?.string);
+        try testing.expectEqualStrings("latest remote edit", params.get("text").?.string);
+    }
+    _ = h.a.tick(start + 7.1);
+    try testing.expect(!e.dirty());
+    try testing.expectEqualStrings("hash-after-save", e.hash);
+    try testing.expectEqual(@as(usize, 1), try count(&h, "WriteWorkspaceFile"));
+}
+
+test "file settings Autosave stops on disable and disk conflict without losing text" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try connect(&h,
+        \\{"ReadWorkspaceFile":{"checkoutId":"checkout-original","path":"notes.txt","text":"original","contentHash":"hash-original","size":8,"encoding":"utf8","lineEnding":"lf","truncated":false},"WriteWorkspaceFile":{"status":"conflict","reason":"changed","currentContentHash":"external-hash"}}
+    );
+    const e = try open(&h);
+    const start = h.a.now;
+    h.a.settings.set(.files_autosave_enabled, true);
+    edit(e, "dirty before disable");
+    h.a.settings.set(.files_autosave_enabled, false);
+    _ = h.a.tick(start + 1);
+    try testing.expectEqual(@as(usize, 0), try count(&h, "WriteWorkspaceFile"));
+    try testing.expectEqualStrings("dirty before disable", e.buffer.text());
+    h.a.settings.set(.files_autosave_enabled, true);
+    edit(e, "retain on conflict");
+    _ = h.a.tick(start + 2); // Send.
+    _ = h.a.tick(start + 3); // Receive conflict.
+    _ = h.a.tick(start + 10);
+    try testing.expectEqual(@as(usize, 1), try count(&h, "WriteWorkspaceFile"));
+    try testing.expect(e.conflict and e.dirty() and e.error_text != null);
+    try testing.expectEqualStrings("retain on conflict", e.buffer.text());
+    try testing.expectEqualStrings("hash-original", e.hash);
+    editors.requestReload(&h.a, e);
+    editors.decide(&h.a, .cancel);
+    try testing.expectEqualStrings("retain on conflict", e.buffer.text());
+    editors.requestReload(&h.a, e);
+    editors.decide(&h.a, .discard);
+    _ = h.a.tick(start + 11);
+    try testing.expect(!e.dirty() and !e.conflict);
+    try testing.expectEqualStrings("original", e.buffer.text());
+}
+
+test "file settings Autosave waits for an in-flight acknowledgement before saving newer text" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try connect(&h, writable);
+    const e = try open(&h);
+    const start = h.a.now;
+    h.a.settings.set(.files_autosave_enabled, true);
+    edit(e, "manual snapshot");
+    try testing.expect(e.save());
+    try testing.expectEqual(@as(usize, 1), try count(&h, "WriteWorkspaceFile"));
+    edit(e, "newer unsaved snapshot");
+    _ = editors.tick(&h.a, start + 2); // Still awaiting the manual save reply.
+    try testing.expectEqual(@as(usize, 1), try count(&h, "WriteWorkspaceFile"));
+    _ = h.a.tick(start + 2); // Receive first acknowledgement, then autosave.
+    try testing.expectEqual(@as(usize, 2), try count(&h, "WriteWorkspaceFile"));
+    const write_id = e.save_id orelse return error.MissingFollowupAutosave;
+    var found = false;
+    for (h.a.engine.sent.items) |frame| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, frame, .{});
+        defer parsed.deinit();
+        if (parsed.value.object.get("id").?.integer != write_id) continue;
+        const params = parsed.value.object.get("params").?.object;
+        try testing.expectEqualStrings("hash-after-save", params.get("expectedContentHash").?.string);
+        try testing.expectEqualStrings("newer unsaved snapshot", params.get("text").?.string);
+        found = true;
+    }
+    try testing.expect(found);
+    _ = h.a.tick(start + 3);
+    try testing.expect(!e.dirty());
+}
+
+test "file settings Autosave does not write marked composition or bypass a close decision" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try connect(&h, writable);
+    const e = try open(&h);
+    h.t.settle(0.2);
+    try testing.expect(e.focused);
+    h.a.settings.set(.files_autosave_enabled, true);
+    h.t.textOps(&.{.{ .set_marked = .{ .text = "日本", .sel_start = 6, .sel_len = 0 } }});
+    try testing.expect(e.composing and e.dirty());
+    // The shortcut and close dialog also use Editor.save directly.
+    try testing.expect(!e.save());
+    h.t.time += 2;
+    h.t.frame();
+    try testing.expectEqual(@as(usize, 0), try count(&h, "WriteWorkspaceFile"));
+    h.t.textOps(&.{.unmark});
+    try testing.expect(!e.composing and e.autosave_at != null);
+    try testing.expect(h.t.ctx.frame_in != null);
+    @import("app_panels.zig").closeTab(&h.a, h.a.panels.active);
+    try testing.expectEqual(editors.Intent.tab, h.a.panels.file_close.intent.?);
+    h.t.time += 2;
+    h.t.frame();
+    try testing.expectEqual(@as(usize, 0), try count(&h, "WriteWorkspaceFile"));
+    try testing.expectEqualStrings("original日本", e.buffer.text());
+    editors.decide(&h.a, .cancel);
+    h.t.frame();
+    h.t.frame();
+    try testing.expectEqual(@as(usize, 1), try count(&h, "WriteWorkspaceFile"));
+    try testing.expect(!e.dirty());
+}
+
+test "file settings Autosave restores the selection replaced by pointer-canceled composition" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try connect(&h, writable);
+    const e = try open(&h);
+    h.t.settle(0.2);
+    try testing.expect(e.focused);
+    h.a.settings.set(.files_autosave_enabled, true);
+    h.t.textOps(&.{ .{ .select = .{ .anchor = 6, .caret = 2 } }, .{ .set_marked = .{ .text = "日本", .sel_start = 6, .sel_len = 0 } } });
+    try testing.expectEqualStrings("or日本al", e.buffer.text());
+    try testing.expect(e.composing);
+    const rect = h.t.ctx.rects.get(e.field) orelse return error.MissingEditorGeometry;
+    h.t.click(rect.x + 1, rect.y + 8);
+    try testing.expect(e.focused);
+    h.t.time += 2;
+    h.t.frame();
+    try testing.expectEqual(@as(usize, 0), try count(&h, "WriteWorkspaceFile"));
+    h.t.typeText("!");
+    h.t.time += 2;
+    h.t.frame();
+    try expectSingleFileWrite(&h, "!original");
+    try testing.expectEqualStrings("!original", e.buffer.text());
+}
+
+test "file settings Autosave preserves explicit IME insert and unmark of a replacement" {
+    for ([_]bool{ false, true }) |commit_by_unmark| {
+        var h: Harness = undefined;
+        try h.init(true);
+        defer h.deinit();
+        try connect(&h, writable);
+        const e = try open(&h);
+        h.t.settle(0.2);
+        try testing.expect(e.focused);
+        h.a.settings.set(.files_autosave_enabled, true);
+        h.t.textOps(&.{ .{ .select = .{ .anchor = 6, .caret = 2 } }, .{ .set_marked = .{ .text = "に", .sel_start = 3, .sel_len = 0 } } });
+        h.t.textOps(&.{.{ .set_marked = .{ .text = "日本", .sel_start = 6, .sel_len = 0 } }});
+        h.t.time += 2;
+        h.t.frame();
+        try testing.expectEqual(@as(usize, 0), try count(&h, "WriteWorkspaceFile"));
+        h.t.textOps(&.{if (commit_by_unmark) .unmark else .{ .insert = "日報" }});
+        const rect = h.t.ctx.rects.get(e.field) orelse return error.MissingEditorGeometry;
+        h.t.click(rect.x + 1, rect.y + 8);
+        h.t.time += 2;
+        h.t.frame();
+        const expected = if (commit_by_unmark) "or日本al" else "or日報al";
+        try expectSingleFileWrite(&h, expected);
+        try testing.expectEqualStrings(expected, e.buffer.text());
+    }
+}
+
+test "file settings Autosave retains an IME commit when a new mark in the same event is canceled" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try connect(&h, writable);
+    const e = try open(&h);
+    h.t.settle(0.2);
+    try testing.expect(e.focused);
+    h.a.settings.set(.files_autosave_enabled, true);
+    h.t.textOps(&.{.{ .set_marked = .{ .text = "ni", .sel_start = 2, .sel_len = 0 } }});
+    h.t.textOps(&.{ .{ .insert = "你" }, .{ .set_marked = .{ .text = "hao", .sel_start = 3, .sel_len = 0 } } });
+    h.t.time += 2;
+    h.t.frame();
+    try testing.expect(e.composing);
+    try testing.expectEqual(@as(usize, 0), try count(&h, "WriteWorkspaceFile"));
+    const rect = h.t.ctx.rects.get(e.field) orelse return error.MissingEditorGeometry;
+    h.t.click(rect.x + 1, rect.y + 8);
+    h.t.textOps(&.{.unmark}); // Unmark with no live mark cannot revive the canceled bytes.
+    h.t.time += 2;
+    h.t.frame();
+    try expectSingleFileWrite(&h, "original你");
+    try testing.expectEqualStrings("original你", e.buffer.text());
+}
+
+fn expectSingleFileWrite(h: *Harness, expected: []const u8) !void {
+    var writes: usize = 0;
+    for (h.a.engine.sent.items) |frame| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, frame, .{});
+        defer parsed.deinit();
+        if (!std.mem.eql(u8, parsed.value.object.get("method").?.string, "WriteWorkspaceFile")) continue;
+        writes += 1;
+        const params = parsed.value.object.get("params").?.object;
+        try testing.expectEqualStrings(expected, params.get("text").?.string);
+    }
+    try testing.expectEqual(@as(usize, 1), writes);
+}
+
 const Completion = struct {
     calls: usize = 0,
     fn done(ctx: *anyopaque) void {

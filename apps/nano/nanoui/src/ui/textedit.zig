@@ -127,15 +127,18 @@ pub fn handleUndoShortcuts(c: *Context, b: *tf.TextBuffer, e: *EditState, r: *tf
     if (c.undo_op != .none) {
         const redo = c.undo_op == .redo;
         c.undo_op = .none;
+        if (b.cancelPreedit(e)) r.preedit_changed = true;
         keymap.undoStep(b, e, r, redo);
         c.changed = true;
         return true;
     }
     if (c.shortcut(.{ .key = 'z', .cmd = true, .shift = true }) or c.shortcut(.{ .key = 'y', .cmd = true })) {
+        if (b.cancelPreedit(e)) r.preedit_changed = true;
         keymap.undoStep(b, e, r, true);
         return true;
     }
     if (c.shortcut(.{ .key = 'z', .cmd = true })) {
+        if (b.cancelPreedit(e)) r.preedit_changed = true;
         keymap.undoStep(b, e, r, false);
         return true;
     }
@@ -181,6 +184,7 @@ pub fn editState(c: *Context, id: u64, buffer: *tf.TextBuffer) ?*EditState {
     if (!entry.found_existing) entry.value_ptr.* = .{ .caret = len, .anchor = len };
     const e = entry.value_ptr;
     if (c.focus != id or !c.input.window_active or !c.window_focused or e.caret != e.anchor) e.blink = .{};
+    if (buffer.want_caret != null or buffer.want_selection != null) _ = buffer.cancelPreedit(e);
     if (buffer.want_caret) |at| {
         e.caret = at;
         e.anchor = at;

@@ -40,6 +40,8 @@ def fixedWindowChords : List Chord :=
   , { code := 'q'.toNat, cmd := true }
   , { code := 'h'.toNat, cmd := true }
   , { code := 'm'.toNat, cmd := true }
+  , { code := 'm'.toNat, cmd := true, shift := true }
+  , { code := 'd'.toNat, cmd := true, alt := true }
   , { code := '='.toNat, cmd := true }
   , { code := '-'.toNat, cmd := true }
   , { code := '0'.toNat, cmd := true }
@@ -88,9 +90,7 @@ def composerReservedChords : List Chord :=
     5 = toggleTerminalDock (Cmd+J)
     6 = openSettings (Cmd+,)
     7 = findSession (Cmd+F)
-    8 = appshot (Cmd+Shift+S)
-    9 = cycleUiMode (Cmd+Shift+M)
-    10 = toggleDesignCanvas (Cmd+Alt+D) -/
+    8 = appshot (Cmd+Shift+S) -/
 def defaultRebindableChords : List (Nat × Chord) :=
   [ (0,  { code := 'n'.toNat, cmd := true })
   , (1,  { code := 'o'.toNat, cmd := true })
@@ -101,8 +101,6 @@ def defaultRebindableChords : List (Nat × Chord) :=
   , (6,  { code := ','.toNat, cmd := true })
   , (7,  { code := 'f'.toNat, cmd := true })
   , (8,  { code := 's'.toNat, cmd := true, shift := true })
-  , (9,  { code := 'm'.toNat, cmd := true, shift := true })
-  , (10, { code := 'd'.toNat, cmd := true, alt := true })
   ]
 
 def memChord (c : Chord) (xs : List Chord) : Bool :=

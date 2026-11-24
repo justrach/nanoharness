@@ -47,6 +47,7 @@ test {
     _ = @import("termlog.zig");
     _ = @import("parity.zig");
     _ = @import("app_files.zig");
+    _ = @import("tests_file_editor.zig");
     _ = @import("queue.zig");
     _ = @import("app_queue.zig");
     _ = @import("chat_mode.zig");

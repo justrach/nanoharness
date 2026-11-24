@@ -52,8 +52,14 @@ pub const Diff = struct {
 /// An entry of a listed folder.
 pub const Entry = struct { path: []const u8, name: []const u8, dir: bool, ignored: bool };
 
-/// A folder's listing, as `ListWorkspaceDirectory` gave it.
-pub const Listing = struct { entries: []Entry = &.{}, loading: bool = true, err: ?[]const u8 = null };
+/// The accumulated pages of one folder's listing.
+pub const Listing = struct {
+    entries: std.ArrayList(Entry) = .empty,
+    next_cursor: ?[]const u8 = null,
+    loading: bool = false,
+    truncated: bool = false,
+    err: ?[]const u8 = null,
+};
 
 /// An open file's text, as `ReadWorkspaceFile` gave it.
 pub const FileText = struct { text: ?[]const u8 = null, reason: ?[]const u8 = null, loading: bool = true };
@@ -87,10 +93,13 @@ pub const Panels = struct {
     /// The explorer: listings by folder ("" the root), the folders open,
     /// the row selected, whether ignored files show, and git colours.
     arena: std.heap.ArenaAllocator,
+    /// Directory pages have a shorter lifetime than expanded paths and git colours.
+    listing_arena: std.heap.ArenaAllocator,
     listings: std.StringHashMapUnmanaged(Listing) = .empty,
     expanded: std.StringHashMapUnmanaged(void) = .empty,
     selected: ?[]const u8 = null,
-    show_all: bool = false,
+    /// Visibility used to populate the listing/search caches.
+    listed_show_all: bool = false,
     git: std.StringHashMapUnmanaged(GitKind) = .empty,
     w_git: ?u64 = null,
     file: FileText = .{},
@@ -105,7 +114,7 @@ pub const Panels = struct {
     github_repository: @import("app_github_repository.zig").State = .{},
 
     pub fn init(gpa: Allocator) Panels {
-        return .{ .gpa = gpa, .arena = .init(gpa) };
+        return .{ .gpa = gpa, .arena = .init(gpa), .listing_arena = .init(gpa) };
     }
 
     pub fn deinit(p: *Panels) void {
@@ -126,6 +135,7 @@ pub const Panels = struct {
         p.pending_lists.deinit(p.gpa);
         p.expanded.deinit(p.gpa);
         p.git.deinit(p.gpa);
+        p.listing_arena.deinit();
         p.arena.deinit();
         if (p.chat) |c| p.gpa.free(c);
     }
@@ -184,8 +194,9 @@ pub fn chatChanged(a: *App) void {
     p.diff_loading = false;
     if (p.diff_error) |e| a.retireSlice(e);
     p.diff_error = null;
-    p.listings.clearRetainingCapacity();
-    p.pending_lists.clearRetainingCapacity();
+    files.resetListings(a);
+    p.listed_show_all = a.settings.get(.files_show_all);
+    files.resetSearch(a);
     p.expanded.clearRetainingCapacity();
     p.git.clearRetainingCapacity();
     p.folded.clearRetainingCapacity();
@@ -479,6 +490,13 @@ fn intOf(o: std.json.ObjectMap, k: []const u8) u32 {
 }
 
 // ── the file explorer ────────────────────────────────────────────────
+
+/// Apply live file preferences before the view builds. Returns the next
+/// autosave deadline, if any, for the app's existing frame scheduler.
+pub fn tickFiles(a: *App, now: f64) ?f64 {
+    files.syncVisibility(a);
+    return @import("app_file_editor.zig").tick(a, now);
+}
 
 pub const files = @import("app_files.zig");
 pub const toggleFiles = files.toggle;

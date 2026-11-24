@@ -434,7 +434,12 @@ pub const KeymapPartition = struct {
     pub const key_up: u21 = 260;
     pub const key_down: u21 = 261;
 
+    pub const cycle_ui_mode: Chord = .{ .code = 'm', .cmd = true, .shift = true };
+    pub const toggle_design_canvas: Chord = .{ .code = 'd', .cmd = true, .alt = true };
+
     pub const fixed_window_chords = [_]Chord{
+        cycle_ui_mode,
+        toggle_design_canvas,
         .{ .code = 'w', .cmd = true },
         .{ .code = 'k', .cmd = true },
         .{ .code = 'l', .cmd = true },
@@ -491,8 +496,6 @@ pub const KeymapPartition = struct {
         .{ .action_id = 6, .chord = .{ .code = ',', .cmd = true } },
         .{ .action_id = 7, .chord = .{ .code = 'f', .cmd = true } },
         .{ .action_id = 8, .chord = .{ .code = 's', .cmd = true, .shift = true } },
-        .{ .action_id = 9, .chord = .{ .code = 'm', .cmd = true, .shift = true } },
-        .{ .action_id = 10, .chord = .{ .code = 'd', .cmd = true, .alt = true } },
     };
 
     pub fn memChord(c: Chord, xs: []const Chord) bool {

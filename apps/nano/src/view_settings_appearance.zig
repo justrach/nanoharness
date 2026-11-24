@@ -51,15 +51,18 @@ pub fn withAccent(k: theme.Colors, a: *const App) theme.Colors {
     return out;
 }
 
+const default_transcript_width: f32 = 736;
+const transcript_width_step: f32 = 16;
+
 /// The conversation's column, 560 to 1200 by 16 (`transcriptWidth`).
 pub fn transcriptWidth(a: *const App) f32 {
-    const w = a.settings.number("transcriptWidth") orelse 736;
+    const w = a.settings.number("transcriptWidth") orelse default_transcript_width;
     return normalizeWidth(@floatCast(w));
 }
 
 pub fn normalizeWidth(w: f32) f32 {
     const clamped = std.math.clamp(w, 560, 1200);
-    return 560 + @round((clamped - 560) / 16) * 16;
+    return 560 + @round((clamped - 560) / transcript_width_step) * transcript_width_step;
 }
 
 const phi: f32 = 1.618;
@@ -115,7 +118,7 @@ fn customThemeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
         defer r.end();
         set.tile(c, k, .@"magic-stick-3");
         words(c, k, "Backdrop studio", "Synthesize a custom palette + animated canvas from a prompt, or pick from 20 curated scenes.", 108);
-        if (compactAction(c, k, "Open studio")) @import("view_custom_theme_studio.zig").open(a);
+        if (compactAction(c, k, "Open studio", true)) @import("view_custom_theme_studio.zig").open(a);
     }
     ui.div(c).wFull().h(1).bg(k.border.alpha(0.55)).end();
     {
@@ -144,23 +147,26 @@ fn workspaceModeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
             defer info.end();
             ui.text(c, "Mode preset", set.st(c, 13.5, .{ .weight = .medium, .color = k.text }));
             const desc = if (customized)
-                (if (dev) "Customized Developer layout · individual parts overridden" else "Customized Zen layout · individual parts overridden")
-            else if (dev)
-                "Developer mode · full workspaces tree, project groups, git footer & rail"
-            else
-                "Zen mode · calm single flat session list without hierarchy clutter";
+                c.print("Customized {s} layout · individual parts overridden", .{ui_mode.label()})
+            else switch (ui_mode) {
+                .zen => "Zen mode · calm single flat session list without hierarchy clutter",
+                .developer => "Developer mode · full workspaces tree, project groups, git footer & rail",
+                .design => "Design mode · Design Canvas and a flat session list",
+            };
             ui.text(c, desc, .{ .size = 12, .line_height = 17, .color = k.muted, .wrap = true });
         }
         {
             const right = ui.div(c).row().gap(8).itemsCenter();
             defer right.end();
             if (customized) {
-                if (compactAction(c, k, "Reset")) {
+                if (compactAction(c, k, "Reset", true)) {
                     a.settings.applyUiMode(ui_mode);
                     a.redraw();
                 }
             }
-            kit.kbdHint(c, k, "⇧⌘M");
+            const shortcuts = @import("shortcuts.zig");
+            var shortcut_buf: [64]u8 = undefined;
+            kit.kbdHint(c, k, c.print("{s}", .{shortcuts.chordBadge(&shortcut_buf, shortcuts.cycle_ui_mode)}));
             const seg = ui.div(c).row().p(3).gap(3).rounded(8).bg(k.ink(if (k.dark) 0.08 else 0.055));
             defer seg.end();
             const is_dev = ui_mode == .developer;
@@ -349,7 +355,7 @@ fn themeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
             icons.icon(c, .check, 12, k.accent, 0);
             ui.text(c, "Active", .{ .size = 11.5, .line_height = 11.5 * phi, .weight = .medium, .color = k.accent });
         } else {
-            if (compactAction(c, k, "Use default")) applySystemDefault(a);
+            if (compactAction(c, k, "Use default", true)) applySystemDefault(a);
         }
     }
     inline for (.{ .{ .sun, "Light theme", false }, .{ .moon, "Dark theme", true } }) |t| {
@@ -548,20 +554,17 @@ fn windowCard(c: *ui.Context, a: *App, k: theme.Colors) void {
     const r = set.row(c, k, false, false);
     defer r.end();
     set.tile(c, k, .@"file-image");
-    // Choose image's own width: 10 before it, 10 a side, its words.
-    words(c, k, "New thread composer background", "Add an image behind the composer on empty new threads.", 10 + 2 * 10 + @ceil(c.text.width("Choose image", .{ .size = 11.5 })));
-    const act = ui.div(c).row().pl(10).gap(6);
-    defer act.end();
-    if (compactAction(c, k, "Choose image")) a.setNotice("A composer background isn't in Harness Nano yet: use Harness.");
+    words(c, k, "New thread composer background", "Custom images for empty new threads aren't available in NanoHarness.", 0);
 }
 
 /// `compact_action`: a small bordered button.
-fn compactAction(c: *ui.Context, k: theme.Colors, label: []const u8) bool {
+fn compactAction(c: *ui.Context, k: theme.Colors, label: []const u8, enabled: bool) bool {
     // Padding plus the border, which GPUI insets by too.
-    const b = ui.div(c).row().h(28).px(10).itemsCenter().rounded(7).border(k.border).borderW(1).bg(k.raised.alpha(0.34));
+    const b = ui.div(c).row().h(28).px(10).itemsCenter().rounded(7).border(k.border).borderW(1).bg(k.raised.alpha(0.34)).control();
     defer b.end();
-    ui.text(c, label, .{ .size = 11.5, .line_height = 11.5 * phi, .color = if (b.hovered()) k.text else k.muted });
-    return b.clicked();
+    if (!enabled) _ = b.opacity(0.55);
+    ui.text(c, label, .{ .size = 11.5, .line_height = 11.5 * phi, .color = if (enabled and b.hovered()) k.text else k.muted });
+    return @import("control_behavior.zig").activate(c, b, k, label, enabled, false);
 }
 
 // Motion.
@@ -613,66 +616,36 @@ fn fonts(c: *ui.Context, a: *App, k: theme.Colors) void {
     set.space(c, 36);
     const box = ui.div(c).column().wFull().gap(18);
     defer box.end();
-    const rows = .{
-        .{ "Interface font", "Menus, sidebars, and conversation text.", "uiFontFamily", "geist", "uiFontSize", 16.0 },
-        .{ "Terminal font", "Terminal panes and shell output. Fixed-width families only.", "terminalFontFamily", "geistMono", "terminalFontSize", 13.0 },
-        .{ "Code & diff font", "Code blocks, diffs, and workspace file editors.", "codeFontFamily", "geistMono", "codeFontSize", 12.5 },
+    const rows = [_]struct { title: []const u8, detail: []const u8, can_resize: bool = false }{
+        .{ .title = "Interface font", .detail = "Menus, sidebars, and conversation text. Font family can't be changed in NanoHarness.", .can_resize = true },
+        .{ .title = "Terminal font", .detail = "Terminal panes and shell output. Font family and size can't be changed in NanoHarness." },
+        .{ .title = "Code & diff font", .detail = "Code blocks, diffs, and workspace file editors. Font family and size can't be changed in NanoHarness." },
     };
-    inline for (rows) |f| {
-        const r = ui.div(c).row().wFull().gap(24).itemsCenter();
+    for (rows) |f| {
+        const gap = 24;
+        const control_w: f32 = if (f.can_resize) gap + 140 else 0;
+        const r = ui.div(c).row().wFull().gap(gap).itemsCenter();
         defer r.end();
         {
-            // `flex_1`: the row less the pair and the gap; the words at
-            // most 520 wide.
-            const lw = set.inner_w - 24 - 220 - 8 - 128;
-            const l = ui.div(c).column().w(lw).gap(4);
+            const l = ui.div(c).column().w(@min(set.inner_w - control_w, 520)).gap(4);
             defer l.end();
-            set.fieldLabel(c, k, f[0]);
-            const dw = ui.div(c).column().w(@min(lw, 520));
-            defer dw.end();
-            ui.text(c, f[1], .{ .size = 12, .line_height = 18, .wrap = true, .color = k.muted });
+            set.fieldLabel(c, k, f.title);
+            ui.text(c, f.detail, .{ .size = 12, .line_height = 18, .wrap = true, .color = k.muted });
         }
-        const family = a.settings.text(f[2]) orelse f[3];
-        const size = a.settings.number(f[4]) orelse f[5];
-        const pair = ui.div(c).row().gap(8);
-        defer pair.end();
-        if (dropdown(c, k, 220, familyLabel(family))) a.setNotice("Choosing a font isn't in Harness Nano yet: use Harness.");
-        if (dropdown(c, k, 128, c.print("{d} px", .{size}))) {
-            if (comptime std.mem.eql(u8, f[4], "uiFontSize")) {
-                const cur = a.settings.uiFontSize();
-                const next = if (cur >= 20) @as(f32, 12) else @import("settings.zig").stepUiFontSize(cur, 1);
-                a.settings.setUiFontSize(next);
-            } else {
-                a.setNotice("Choosing a size isn't in Harness Nano yet: use Harness.");
+        if (f.can_resize) {
+            const settings = @import("settings.zig");
+            const size = a.settings.uiFontSize();
+            if (compactAction(c, k, c.print("Cycle size · {d:.0} px", .{size}), true)) {
+                const sizes = settings.ui_font_sizes;
+                a.settings.setUiFontSize(if (size == sizes[sizes.len - 1]) sizes[0] else settings.stepUiFontSize(size, 1));
             }
         }
     }
     widthRow(c, a, k);
 }
 
-pub fn familyLabel(v: []const u8) []const u8 {
-    if (std.mem.eql(u8, v, "geist")) return "Geist";
-    if (std.mem.eql(u8, v, "geistMono")) return "Geist Mono";
-    if (std.mem.eql(u8, v, "system")) return "System UI";
-    if (std.mem.startsWith(u8, v, "installed:")) return v["installed:".len..];
-    return v;
-}
-
-/// A closed dropdown: its value and a chevron.
-fn dropdown(c: *ui.Context, k: theme.Colors, w: f32, label: []const u8) bool {
-    const d = ui.div(c).row().w(w).h(36).px(12).gap(8).itemsCenter().rounded(9).border(k.border).borderW(1).bg(k.ink(0.025));
-    defer d.end();
-    const n = ui.div(c).row().grow().w(0);
-    {
-        defer n.end();
-        ui.text(c, label, .{ .size = 14, .line_height = 14 * phi, .color = k.text });
-    }
-    icons.icon(c, .@"alt-arrow-down", 14, k.muted, 0);
-    return d.clicked();
-}
-
-/// "Conversation width": a slider from 560 to 1,200 points by 16; its
-/// readout and range show only while it's handled.
+/// "Conversation width": a slider from 560 to 1,200 points by 16 with a
+/// persistent readout and a reset to the default conversation width.
 fn widthRow(c: *ui.Context, a: *App, k: theme.Colors) void {
     const r = ui.div(c).row().wFull().gap(20).itemsCenter();
     defer r.end();
@@ -685,13 +658,21 @@ fn widthRow(c: *ui.Context, a: *App, k: theme.Colors) void {
     const col = ui.div(c).column().w(240).gap(4);
     defer col.end();
     const width = transcriptWidth(a);
-    // The readout above it ("736 px", Reset) shows only while it's handled;
-    // its room is kept.
-    _ = c.leaf(.{ .width = .{ .px = 240 }, .height = .{ .px = 16 } }, .none, null);
+    const value = c.print("{d:.0} px", .{width});
     {
-        const slider = ui.div(c).row().w(240).h(28);
+        const readout = ui.div(c).row().wFull().itemsCenter();
+        defer readout.end();
+        ui.text(c, value, set.st(c, 12, .{ .color = k.text }));
+        ui.spacer(c);
+        if (compactAction(c, k, "Reset to default", width != default_transcript_width)) {
+            a.settings.setNumber("transcriptWidth", default_transcript_width);
+        }
+    }
+    {
+        const slider = ui.div(c).row().w(240).h(28).control();
         const it = slider.interaction();
         defer slider.end();
+        c.adjustable(slider.index, .{ .label = "Conversation width", .value = value });
         const frac = (width - 560) / 640;
         const track = ui.div(c).absolute().offset(7, 12).w(226).h(4).roundedFull().bg(k.border);
         {
@@ -699,13 +680,17 @@ fn widthRow(c: *ui.Context, a: *App, k: theme.Colors) void {
             _ = c.leaf(.{ .width = .{ .px = 226 * frac }, .height = .fill, .radius = 2, .background = k.accent }, .none, null);
         }
         _ = c.leaf(.{ .absolute = true, .offset = .{ .x = 7 + 226 * frac - 7, .y = 12 - 5 }, .width = .{ .px = 14 }, .height = .{ .px = 14 }, .radius = 7, .background = k.accent }, .none, null);
+        var next = width;
         if (it.pressed) if (it.rect) |rect| {
             const f = std.math.clamp((c.input.mouse.x - rect.x - 7) / 226, 0, 1);
-            const w = normalizeWidth(560 + f * 640);
-            if (w != width) a.settings.setNumber("transcriptWidth", w);
+            next = normalizeWidth(560 + f * 640);
         };
+        if (it.a11y_step != 0) next = normalizeWidth(width + @as(f32, @floatFromInt(it.a11y_step)) * transcript_width_step);
+        if (next != width) {
+            a.settings.setNumber("transcriptWidth", next);
+            c.changed = true;
+        }
     }
-    _ = c.leaf(.{ .width = .{ .px = 240 }, .height = .{ .px = 14 } }, .none, null);
 }
 
 const testing = std.testing;
@@ -717,8 +702,98 @@ test "appearance values as the GPUI app keeps them" {
     try testing.expectEqual(@as(f32, 752), normalizeWidth(750));
     // Halfway rounds away from 560, as Rust's `round` does.
     try testing.expectEqual(@as(f32, 1008), normalizeWidth(1000));
-    try testing.expectEqualStrings("Geist Mono", familyLabel("geistMono"));
-    try testing.expectEqualStrings("Menlo", familyLabel("installed:Menlo"));
     try testing.expectEqual(@as(u24, 0xfb923c), presetNamed("orange").?.dark);
     try testing.expect(presetNamed("teal") == null);
+}
+
+// Render the actual Appearance rows without starting an engine or loading a profile.
+const AppearanceFixture = struct {
+    a: App,
+    t: ui.Tester,
+
+    fn init(f: *AppearanceFixture) !void {
+        f.a = .init(testing.allocator, testing.io, 1);
+        errdefer f.a.deinit();
+        f.a.offscreen = true;
+        try f.t.init(testing.allocator, .init(&f.a, view), .{ .width = 760, .height = 1100 });
+        f.t.settle(0.2);
+    }
+
+    fn deinit(f: *AppearanceFixture) void {
+        f.t.deinit();
+        f.a.deinit();
+    }
+
+    fn view(a: *App, c: *ui.Context) void {
+        const prev_w = set.inner_w;
+        defer set.inner_w = prev_w;
+        set.inner_w = 720;
+        const root = ui.div(c).column().w(set.inner_w).gap(12);
+        defer root.end();
+        const k = theme.colors(false);
+        windowCard(c, a, k);
+        workspaceModeCard(c, a, k);
+        fonts(c, a, k);
+    }
+};
+
+test "appearance explains unavailable image and font settings inline and still cycles interface size" {
+    var f: AppearanceFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.a.settings.apply(
+        \\{"uiFontFamily":"installed:Fixture UI","terminalFontFamily":"installed:Fixture Terminal","codeFontFamily":"installed:Fixture Code","terminalFontSize":13,"codeFontSize":12.5}
+    );
+    f.t.settle(0.2);
+    try testing.expect(f.t.hasText("Custom images for empty new threads aren't available in NanoHarness."));
+    try testing.expect(f.t.hasText("Menus, sidebars, and conversation text. Font family can't be changed in NanoHarness."));
+    try testing.expect(f.t.hasText("Terminal panes and shell output. Font family and size can't be changed in NanoHarness."));
+    try testing.expect(f.t.hasText("Code blocks, diffs, and workspace file editors. Font family and size can't be changed in NanoHarness."));
+    for ([_][]const u8{ "Choose image", "Fixture UI", "Fixture Terminal", "Fixture Code", "13 px", "12.5 px" }) |label| {
+        try testing.expect(!f.t.hasText(label));
+    }
+    try f.t.clickText("Cycle size · 16 px");
+    f.t.settle(0.2);
+    try testing.expectEqual(@as(f32, 18), f.a.settings.uiFontSize());
+    try testing.expect(f.t.hasText("Cycle size · 18 px"));
+}
+
+test "appearance conversation width reads back click and drag and resets to 736 px" {
+    var f: AppearanceFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try testing.expect(f.t.hasText("736 px"));
+    const slider_rect = for (f.t.ctx.a11y_items.items) |item| {
+        if (item.role == .slider and std.mem.eql(u8, item.label, "Conversation width")) {
+            break f.t.ctx.rects.get(item.id) orelse return error.MissingSliderRect;
+        }
+    } else return error.MissingConversationWidthSlider;
+    const y = slider_rect.y + slider_rect.h / 2;
+    const clicked_x = slider_rect.x + 7 + 0.775 * (slider_rect.w - 14);
+    f.t.click(clicked_x, y);
+    f.t.moveTo(750, 0);
+    try testing.expectEqual(@as(?f64, 1056), f.a.settings.number("transcriptWidth"));
+    try testing.expect(f.t.hasText("1056 px"));
+    f.t.drag(clicked_x, y, slider_rect.x + slider_rect.w / 2, y);
+    try testing.expectEqual(@as(?f64, 880), f.a.settings.number("transcriptWidth"));
+    try testing.expect(f.t.hasText("880 px"));
+    try f.t.clickText("Reset to default");
+    f.t.settle(0.2);
+    try testing.expectEqual(@as(?f64, 736), f.a.settings.number("transcriptWidth"));
+    try testing.expect(f.t.hasText("736 px"));
+}
+
+test "appearance names the Design preset in default and customized layouts" {
+    var f: AppearanceFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.t.clickText("Design");
+    f.t.settle(0.2);
+    try testing.expectEqual(@import("motion_rules.zig").UiMode.design, f.a.settings.uiMode());
+    try testing.expect(f.t.hasText("Design mode · Design Canvas and a flat session list"));
+    try testing.expect(!f.t.containsText("Zen mode ·"));
+    f.a.settings.toggleMovingPart(.prompt_rail);
+    f.t.settle(0.2);
+    try testing.expect(f.t.hasText("Customized Design layout · individual parts overridden"));
+    try testing.expect(!f.t.containsText("Customized Zen layout"));
 }

@@ -44,7 +44,7 @@ pub fn capture(c: *ui.Context, a: *App) void {
         .alt = s.alt,
         .shift = s.shift,
     };
-    if (kp.memChord(cand, &kp.fixed_window_chords)) {
+    if (kp.memChord(cand, &kp.fixed_window_chords) or shortcuts.isWorkspaceModeBinding(combo)) {
         return refuse(a, c.print("{s} is a fixed window shortcut.", .{shortcuts.display(&shown, combo)}));
     }
     // One past the page's shortcuts: the Appshots page's.
@@ -281,7 +281,9 @@ fn fixedGroup(c: *ui.Context, k: theme.Colors) void {
         defer r.end();
         ui.text(c, f.title, set.st(c, 13, .{ .color = k.text }));
         ui.spacer(c);
-        ui.text(c, f.keys, .{ .size = 12, .line_height = 12 * 1.618, .mono = true, .color = k.muted });
+        var buf: [64]u8 = undefined;
+        const keys = if (f.chord) |chord| c.print("{s}", .{shortcuts.chordBadge(&buf, chord)}) else f.keys;
+        ui.text(c, keys, .{ .size = 12, .line_height = 12 * 1.618, .mono = true, .color = k.muted });
     }
 }
 
