@@ -131,6 +131,14 @@ pub const Lifecycle = struct {
         self.detachPresentation();
     }
 
+    fn fullScreenChanged(ctx: *anyopaque, window: *nanoui.Window) void {
+        const self: *Lifecycle = @ptrCast(@alignCast(ctx));
+        if (self.state.window != window) return;
+        const on = window.isFullScreen();
+        self.state.view.full_screen_native = on;
+        self.state.applyFullScreenState(on);
+    }
+
     pub fn open(self: *Lifecycle) !void {
         const native = self.native orelse return;
         if (native.stopping) return;
@@ -162,6 +170,7 @@ pub const Lifecycle = struct {
             .traffic_lights = if (builtin.os.tag == .macos) .{ .x = 20, .y = @import("panel_chrome.zig").header_height / 2 } else null,
             .theme = theme.ui(nanoui.isDark()),
             .on_close = .{ .ctx = self, .func = closed },
+            .on_fullscreen = .{ .ctx = self, .func = fullScreenChanged },
             .should_close = .{ .ctx = self, .func = shouldClose },
             .content = .{ .view = blk: {
                 var view = nanoui.ui.View.init(self.state, @import("view.zig").view);
@@ -188,6 +197,7 @@ pub const Lifecycle = struct {
         for (native.windows.items) |window| {
             if (window != self.state.window) continue;
             window.on_close = null;
+            if (comptime @hasField(nanoui.Window, "on_fullscreen")) window.on_fullscreen = null;
             window.should_close = null;
             self.state.window = null;
             self.detachPresentation();
@@ -259,7 +269,10 @@ test "external navigation lifecycle registers native URL delivery" {
     var state: App = .init(std.testing.allocator, std.testing.io, 1);
     defer state.deinit();
     var lifecycle: Lifecycle = .{ .state = &state };
-    try std.testing.expect(lifecycle.options().on_open_urls != null);
+    const opts = lifecycle.options();
+    const win_opts = lifecycle.windowOptions();
+    try std.testing.expect(opts.on_open_urls != null);
+    try std.testing.expect(win_opts.on_fullscreen != null);
 }
 
 test "external navigation real native URL delegate reopens hidden window and focuses parked split without replacement" {

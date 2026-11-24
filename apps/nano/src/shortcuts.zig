@@ -105,6 +105,7 @@ pub const fixed = [_]Fixed{
     .{ .title = "Jump to the message box", .keys = "Cmd+L" },
     .{ .title = "Write the message on a full page (and back)", .keys = "Cmd+Shift+E" },
     .{ .title = "Command palette", .keys = "Cmd+K" },
+    .{ .title = "Enter or exit full screen", .keys = "Ctrl+Cmd+F" },
     .{ .title = "Toggle Zen / Developer mode", .chord = cycle_ui_mode },
     .{ .title = "Toggle Design Canvas", .chord = toggle_design_canvas },
     .{ .title = "Search sessions", .keys = "Cmd+F" },

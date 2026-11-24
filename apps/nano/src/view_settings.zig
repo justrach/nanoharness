@@ -71,11 +71,12 @@ pub fn space(c: *ui.Context, h: f32) void {
 pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
     const chrome = @import("panel_chrome.zig");
     const panel_chrome = @import("view_panel_chrome.zig");
+    const top_inset: f32 = if (a.view.full_screen) chrome.zen_gutter else chrome.header_height;
     const side = ui.div(c).column().w(sidebar.widthOf(a)).hFull()
-        .pt(chrome.header_height).pl(chrome.zen_gutter).pr(chrome.zen_gutter / 2.0).pb(chrome.zen_gutter);
+        .pt(top_inset).pl(chrome.zen_gutter).pr(chrome.zen_gutter / 2.0).pb(chrome.zen_gutter);
     defer side.end();
     ui.key(c, "zen-settings-nav-card");
-    const nav_card = panel_chrome.zenSidebar(c, k).wFull().grow().h(0).pt(4).clip();
+    const nav_card = panel_chrome.zenSidebarOn(c, k, a.view.full_screen).wFull().grow().h(0).pt(4).clip();
     defer nav_card.end();
     navBody(c, a, k, a.settings.uiMode() == .zen);
 }
