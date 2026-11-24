@@ -72,7 +72,8 @@ pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     const has_follow = composer_view.followUpShown(a);
     const follow_glyph_only = w < 240;
     const show_follow = has_follow and w >= 120;
-    const show_jump = jumpShown(a) and w >= 96;
+    const has_jump_slot = w >= 96;
+    const show_jump = jumpShown(a) and has_jump_slot;
     const show_acct = acct_view.hasRing(a) and w >= 200;
     const show_agent_work = w >= 200;
 
@@ -84,10 +85,12 @@ pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     const mid_gap: f32 = if (trailing_total > 0) item_gap else 0;
     const leading_budget = w - pad_x * 2 - follow_space - trailing_total - mid_gap;
     const jump_style = kit.style(c, 12, 16, .{ .weight = .medium, .color = k.text });
-    const labeled_jump_w = if (show_jump) @ceil(c.text.width(jump_label, jump_style)) + 13 + 4 + 12 else jump_size;
-    // Keep room for the model name before adding a second text label.
+    const labeled_jump_w = @ceil(c.text.width(jump_label, jump_style)) + 13 + 4 + 12;
+    // Reserve the slot even at the end of the chat. Giving its space back to
+    // the animated model chip makes the neighboring follow-up action move
+    // under the pointer when the jump hides.
     const jump_w: f32 = if (leading_budget >= labeled_jump_w + item_gap + 88) labeled_jump_w else jump_size;
-    const jump_space: f32 = if (show_jump) jump_w + item_gap else 0;
+    const jump_space: f32 = if (has_jump_slot) jump_w + item_gap else 0;
     const chip_budget: f32 = @max(28, @min(248, leading_budget - jump_space));
 
     const row = ui.div(c).row().w(w).h(height).px(pad_x).itemsCenter().clip();
@@ -98,7 +101,6 @@ pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         defer leading.end();
         model_w = composer_view.chipWithMax(c, a, k, chip_budget);
         if (show_follow) composer_view.followUpChip(c, a, k, follow_glyph_only);
-        if (show_jump) jumpButton(c, a, k, jump_w, jump_style);
     }
     {
         const agent_w: f32 = if (show_agent_work) (if (a.view.agent_work.anchor) |ar| ar.w + 6 else 26) else 0;
@@ -110,9 +112,17 @@ pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
             session(c, a, k, slot_w);
         }
     }
-    if (show_acct or show_agent_work or has_ctx) {
+    if (has_jump_slot or show_acct or show_agent_work or has_ctx) {
         const trailing = ui.div(c).row().hFull().gap(item_gap).itemsCenter();
         defer trailing.end();
+        if (has_jump_slot) {
+            // Anchor the hit target next to the status controls, not after
+            // the variable-width model and follow-up chips.
+            ui.key(c, "jump-slot");
+            const slot = ui.div(c).row().w(jump_w).hFull().itemsCenter();
+            defer slot.end();
+            if (show_jump) jumpButton(c, a, k, jump_w, jump_style);
+        }
         if (show_acct) acct_view.indicator(c, a, k);
         if (show_agent_work) @import("view_agent_work.zig").indicator(c, a, k);
         if (has_ctx) ctx_view.indicatorCompact(c, a, k, compact_ctx);
