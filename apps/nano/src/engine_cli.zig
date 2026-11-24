@@ -64,9 +64,9 @@ pub fn parse(args: []const []const u8) ParseError!Command {
     const simple = [_]struct { []const u8, Command }{
         .{ "headless", .headless }, .{ "status", .status },   .{ "sync", .sync },
         .{ "login", .login },       .{ "logout", .logout },   .{ "mcp", .mcp },
-        .{ "update", .update },
-        .{ "version", .version },   .{ "--version", .version }, .{ "-V", .version },
-        .{ "help", .help },         .{ "--help", .help },     .{ "-h", .help },
+        .{ "update", .update },     .{ "version", .version }, .{ "--version", .version },
+        .{ "-V", .version },        .{ "help", .help },       .{ "--help", .help },
+        .{ "-h", .help },
     };
     for (simple) |entry| {
         if (std.mem.eql(u8, sub, entry[0])) {
@@ -495,6 +495,7 @@ pub fn rpcCall(gpa: Allocator, io: Io, port: u16, method: []const u8, params_jso
             const id = obj.get("id") orelse continue;
             if (id != .integer or id.integer != 1) continue;
             if (obj.get("ok")) |v| return .{ .ok = try json.Stringify.valueAlloc(gpa, v, .{}) };
+            if (obj.get("item")) |v| return .{ .ok = try json.Stringify.valueAlloc(gpa, v, .{}) };
             if (obj.get("err")) |v| return .{ .err = if (v == .string) try gpa.dupe(u8, v.string) else try json.Stringify.valueAlloc(gpa, v, .{}) };
         }
     }
@@ -533,27 +534,173 @@ pub fn gitDetected(io: Io, path: []const u8) bool {
     return true;
 }
 
+pub const LiveAuth = struct {
+    phase: auth_host.AuthPhase,
+    email: []u8,
+    org_id: ?[]u8,
+
+    pub fn deinit(self: *LiveAuth, gpa: Allocator) void {
+        gpa.free(self.email);
+        if (self.org_id) |o| gpa.free(o);
+    }
+};
+
+fn parseUserOrg(gpa: Allocator, obj: json.ObjectMap, phase: auth_host.AuthPhase, keep_org: bool) !?LiveAuth {
+    const user_val = obj.get("user") orelse return null;
+    if (user_val != .object) return null;
+    const email_val = user_val.object.get("email") orelse return null;
+    if (email_val != .string) return null;
+    const org: ?[]const u8 = if (keep_org) blk: {
+        const ov = obj.get("orgId") orelse break :blk null;
+        break :blk if (ov == .string and ov.string.len > 0) ov.string else null;
+    } else null;
+    const email = try gpa.dupe(u8, email_val.string);
+    errdefer gpa.free(email);
+    return .{
+        .phase = phase,
+        .email = email,
+        .org_id = if (org) |o| try gpa.dupe(u8, o) else null,
+    };
+}
+
+/// Parses an `AuthStatus` stream item (`signedOut`, `needsOrganization`, `signedIn`).
+pub fn parseAuthStatusValue(gpa: Allocator, v: json.Value) !?LiveAuth {
+    if (v != .object) return null;
+    const obj = v.object;
+    const state_val = obj.get("state") orelse return null;
+    if (state_val != .string) return null;
+    const state = state_val.string;
+    if (std.mem.eql(u8, state, "signedOut")) {
+        return .{ .phase = .signed_out, .email = try gpa.dupe(u8, ""), .org_id = null };
+    }
+    if (std.mem.eql(u8, state, "needsOrganization")) {
+        return try parseUserOrg(gpa, obj, .needs_organization, false);
+    }
+    if (std.mem.eql(u8, state, "signedIn")) {
+        return try parseUserOrg(gpa, obj, .signed_in, true);
+    }
+    return null;
+}
+
+fn isValidSandboxToken(tok: []const u8) bool {
+    const prefix = "cg_lt_";
+    if (!std.mem.startsWith(u8, tok, prefix)) return false;
+    const hex = tok[prefix.len..];
+    if (hex.len != 48) return false;
+    for (hex) |b| if (!std.ascii.isHex(b)) return false;
+    return true;
+}
+
+/// Extracts a sandbox lease token (`cg_lt_` + 48 hex chars) from `{token_path}` content:
+/// JSON `{"apiKey": ...}` / `{"token": ...}`, or raw text (`read_sandbox_token` in `auth.rs`).
+pub fn parseSandboxTokenAlloc(gpa: Allocator, raw: []const u8) !?[]u8 {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    var parsed = json.parseFromSlice(json.Value, gpa, trimmed, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return if (isValidSandboxToken(trimmed)) try gpa.dupe(u8, trimmed) else null,
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+    const tok_val = parsed.value.object.get("apiKey") orelse parsed.value.object.get("token") orelse return null;
+    if (tok_val != .string) return null;
+    return if (isValidSandboxToken(tok_val.string)) try gpa.dupe(u8, tok_val.string) else null;
+}
+
+fn fetchSandboxAuth(gpa: Allocator, io: Io, edge_url: []const u8, token_path: []const u8) !?LiveAuth {
+    const raw = Io.Dir.cwd().readFileAlloc(io, token_path, gpa, .limited(4096)) catch return null;
+    defer gpa.free(raw);
+    const token = (try parseSandboxTokenAlloc(gpa, raw)) orelse return null;
+    defer gpa.free(token);
+    const base = std.mem.trimEnd(u8, edge_url, "/");
+    const url = try std.fmt.allocPrint(gpa, "{s}/auth/sandbox", .{base});
+    defer gpa.free(url);
+    const req_body = try std.fmt.allocPrint(gpa, "{{\"token\":{f}}}", .{json.fmt(token, .{})});
+    defer gpa.free(req_body);
+    var reply = auth_host.AuthManager.edgeRequestTimed(null, gpa, io, "POST", url, null, &.{}, req_body, 5000) catch return null;
+    defer reply.deinit(gpa);
+    if (reply.status < 200 or reply.status >= 300) return null;
+    var parsed = json.parseFromSlice(json.Value, gpa, reply.body, .{}) catch return null;
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+    const obj = parsed.value.object;
+    const has_org = if (obj.get("orgId")) |ov| (ov == .string and ov.string.len > 0) else false;
+    return try parseUserOrg(gpa, obj, if (has_org) .signed_in else .needs_organization, has_org);
+}
+
 /// `harness-engine status`; the exit code (1 when the account needs attention).
 pub fn status(c: Context) !u8 {
     const data_dir = try resolveDataDir(c.gpa, c.io, c.env);
     defer c.gpa.free(data_dir);
     const cfg = AuthEnv.from(c.env);
-    var auth = try auth_host.AuthManager.init(c.gpa);
-    defer auth.deinit();
-    var scope = try loadAuth(&auth, c.io, cfg, data_dir);
-    // A running engine's scope is fixed for its lifetime: prefer it.
+
+    // A running engine's scope and auth state are authoritative over local session files
+    // (critical on sandboxes and Cloud Computers where auth comes from a lease token).
+    var live_scope: ?Scope = null;
     if (rpcCall(c.gpa, c.io, c.port, "EngineInfo", "{}", 1500)) |reply| {
         defer reply.deinit(c.gpa);
         if (reply == .ok) if (json.parseFromSlice(json.Value, c.gpa, reply.ok, .{})) |parsed| {
             defer parsed.deinit();
             if (parsed.value == .object) if (parsed.value.object.get("workspaceScope")) |s| {
                 if (s == .string) if (Scope.parse(s.string)) |live| {
-                    scope = live;
+                    live_scope = live;
                 };
             };
         } else |_| {};
     } else |_| {}
-    const account = try accountStatus(c.gpa, scope, auth.phase, auth.email, auth.org_id);
+
+    var live_auth: ?LiveAuth = null;
+    defer if (live_auth) |*la| la.deinit(c.gpa);
+    if (rpcCall(c.gpa, c.io, c.port, "AuthStatus", "{}", 1500)) |reply| {
+        defer reply.deinit(c.gpa);
+        if (reply == .ok) if (json.parseFromSlice(json.Value, c.gpa, reply.ok, .{})) |parsed| {
+            defer parsed.deinit();
+            live_auth = parseAuthStatusValue(c.gpa, parsed.value) catch null;
+        } else |_| {};
+    } else |_| {}
+
+    const sandbox_token_file: ?[]const u8 = if (c.env.get("HARNESS_SANDBOX_TOKEN_FILE")) |p| blk: {
+        const t = std.mem.trim(u8, p, " \t\r\n");
+        break :blk if (t.len > 0) t else null;
+    } else null;
+
+    var auth = try auth_host.AuthManager.init(c.gpa);
+    defer auth.deinit();
+    var sandbox_auth: ?LiveAuth = null;
+    defer if (sandbox_auth) |*sa| sa.deinit(c.gpa);
+
+    var scope: Scope = undefined;
+    var phase: auth_host.AuthPhase = undefined;
+    var email: []const u8 = undefined;
+    var org_id: ?[]const u8 = null;
+
+    if (live_auth) |la| {
+        phase = la.phase;
+        email = la.email;
+        org_id = la.org_id;
+        scope = live_scope orelse (if (!cfg.codegraffEnabled()) .development else if (la.phase == .signed_in) .synced else .local);
+    } else if (cfg.codegraffEnabled() and sandbox_token_file != null) {
+        sandbox_auth = try fetchSandboxAuth(c.gpa, c.io, cfg.edge_url, sandbox_token_file.?);
+        if (sandbox_auth) |sa| {
+            phase = sa.phase;
+            email = sa.email;
+            org_id = sa.org_id;
+            scope = live_scope orelse if (sa.phase == .signed_in) .synced else .local;
+        } else {
+            phase = .signed_out;
+            email = "";
+            org_id = null;
+            scope = live_scope orelse .local;
+        }
+    } else {
+        const loaded_scope = try loadAuth(&auth, c.io, cfg, data_dir);
+        scope = live_scope orelse loaded_scope;
+        phase = auth.phase;
+        email = auth.email;
+        org_id = auth.org_id;
+    }
+
+    const account = try accountStatus(c.gpa, scope, phase, email, org_id);
     defer c.gpa.free(account.auth);
     try c.out.print("Data dir: {s}\nEdge:     {s}\nMode:     {s}\nAuth:     {s}\n", .{ data_dir, cfg.edge_url, account.mode, account.auth });
     switch (lockHolder(c.gpa, c.io, data_dir)) {
@@ -1355,4 +1502,227 @@ test "engine_cli: `update` is a command, as `harness update` was" {
     try std.testing.expectEqual(Command.update, try parse(&.{"update"}));
     try std.testing.expectError(error.UnexpectedArgument, parse(&.{ "update", "now" }));
     try std.testing.expect(std.mem.indexOf(u8, usage, "  update ") != null);
+}
+
+test "parseAuthStatusValue parses signedIn, needsOrganization, signedOut, and malformed inputs" {
+    const gpa = testing.allocator;
+    const cases = [_]struct {
+        body: []const u8,
+        expected: ?struct { phase: auth_host.AuthPhase, email: []const u8, org: ?[]const u8 },
+    }{
+        .{
+            .body = "{\"state\":\"signedIn\",\"user\":{\"id\":\"u-2\",\"email\":\"cloud@example.test\"},\"orgId\":\"user-2\"}",
+            .expected = .{ .phase = .signed_in, .email = "cloud@example.test", .org = "user-2" },
+        },
+        .{
+            .body = "{\"state\":\"signedIn\",\"user\":{\"id\":\"u-2\",\"email\":\"cloud@example.test\"}}",
+            .expected = .{ .phase = .signed_in, .email = "cloud@example.test", .org = null },
+        },
+        .{
+            .body = "{\"state\":\"needsOrganization\",\"user\":{\"id\":\"u-2\",\"email\":\"org@example.test\"}}",
+            .expected = .{ .phase = .needs_organization, .email = "org@example.test", .org = null },
+        },
+        .{
+            .body = "{\"state\":\"signedOut\"}",
+            .expected = .{ .phase = .signed_out, .email = "", .org = null },
+        },
+        .{ .body = "{\"state\":\"signedIn\"}", .expected = null },
+        .{ .body = "[]", .expected = null },
+    };
+    for (cases) |c| {
+        var parsed = try json.parseFromSlice(json.Value, gpa, c.body, .{});
+        defer parsed.deinit();
+        var got = try parseAuthStatusValue(gpa, parsed.value);
+        if (got) |*g| {
+            defer g.deinit(gpa);
+            const exp = c.expected.?;
+            try testing.expectEqual(exp.phase, g.phase);
+            try testing.expectEqualStrings(exp.email, g.email);
+            if (exp.org) |eo| {
+                try testing.expectEqualStrings(eo, g.org_id.?);
+            } else {
+                try testing.expect(g.org_id == null);
+            }
+        } else {
+            try testing.expect(c.expected == null);
+        }
+    }
+}
+
+test "parseSandboxTokenAlloc accepts JSON apiKey, JSON token, or raw cg_lt_ token and rejects malformed" {
+    const gpa = testing.allocator;
+    const tok = "cg_lt_a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4";
+    const valid = [_][]const u8{
+        "{\"apiKey\":\"" ++ tok ++ "\"}",
+        "  {\"token\":\"" ++ tok ++ "\"} \n",
+        " \t" ++ tok ++ "\n",
+    };
+    for (valid) |raw| {
+        const got = (try parseSandboxTokenAlloc(gpa, raw)).?;
+        defer gpa.free(got);
+        try testing.expectEqualStrings(tok, got);
+    }
+    const short_tok = "cg_lt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const bad_hex = "cg_lt_gggggggggggggggggggggggggggggggggggggggggggggggg";
+    for ([_][]const u8{ "", "{}", "{\"apiKey\":123}", "\"" ++ tok ++ "\"", short_tok, bad_hex, "{\"apiKey\":\"" ++ bad_hex ++ "\"}" }) |raw| {
+        try testing.expect((try parseSandboxTokenAlloc(gpa, raw)) == null);
+    }
+}
+
+test "status resolves HARNESS_SANDBOX_TOKEN_FILE via /auth/sandbox and ignores stale session.json" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var tmp: TmpDir = .{};
+    const dir = try tmp.make("sandbox-status");
+    defer tmp.remove();
+
+    // Plant a stale session.json to prove sandbox_token_file takes precedence.
+    const stale_path = try std.fs.path.join(gpa, &.{ dir, "session.json" });
+    defer gpa.free(stale_path);
+    try Io.Dir.cwd().writeFile(testing.io, .{
+        .sub_path = stale_path,
+        .data = "{\"refreshToken\":\"harness_rt_stale\",\"user\":{\"id\":\"old\",\"email\":\"stale@example.invalid\"},\"orgId\":\"old-org\"}",
+    });
+
+    const tok_path = try std.fs.path.join(gpa, &.{ dir, "access.json" });
+    defer gpa.free(tok_path);
+    try Io.Dir.cwd().writeFile(testing.io, .{
+        .sub_path = tok_path,
+        .data = "{\"apiKey\":\"cg_lt_0123456789abcdef0123456789abcdef0123456789abcdef\"}",
+    });
+
+    const routes = [_][2][]const u8{
+        .{ "/auth/sandbox", "{\"accessToken\":\"jwt\",\"user\":{\"id\":\"u-2\",\"email\":\"cloud@example.test\"},\"orgId\":\"user-2\"}" },
+    };
+    const addr = try Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var edge: FakeEdge = .{ .server = try addr.listen(testing.io, .{ .reuse_address = true }), .port = 0, .routes = &routes };
+    edge.port = edge.server.socket.address.getPort();
+    try edge.start();
+    defer edge.shutdown();
+
+    const dead = try addr.listen(testing.io, .{ .reuse_address = true });
+    const dead_port = dead.socket.address.getPort();
+    var dead_mut = dead;
+    dead_mut.deinit(testing.io);
+
+    var env = try syntheticEnv(dir);
+    defer env.deinit();
+    var edge_url_buf: [64]u8 = undefined;
+    try env.put("HARNESS_EDGE_URL", try std.fmt.bufPrint(&edge_url_buf, "http://127.0.0.1:{d}", .{edge.port}));
+    try env.put("HARNESS_CODEGRAFF_CLIENT_ID", "cg_client_synthetic");
+    try env.put("HARNESS_SANDBOX_TOKEN_FILE", tok_path);
+
+    var cap: Captured = .init("");
+    defer cap.deinit();
+    try testing.expectEqual(@as(u8, 0), try status(cap.ctx(&env, dead_port, false)));
+    const text = cap.text();
+    try testing.expect(std.mem.indexOf(u8, text, "Mode:     synced\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "Auth:     signed in as cloud@example.test (workspace user-2)\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "stale@example.invalid") == null);
+    try testing.expectEqual(@as(usize, 1), edge.seen_count);
+    try testing.expectEqualStrings("/auth/sandbox", edge.seen[0][0..edge.seen_len[0]]);
+}
+
+const FakeRpc = struct {
+    server: Io.net.Server,
+    port: u16,
+    thread: ?std.Thread = null,
+    stop: std.atomic.Value(bool) = .init(false),
+    exited: Io.Event = .unset,
+
+    fn start(self: *FakeRpc) !void {
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+    }
+
+    fn run(self: *FakeRpc) void {
+        defer self.exited.set(testing.io);
+        while (!self.stop.load(.acquire)) {
+            var stream = self.server.accept(testing.io) catch return;
+            defer stream.close(testing.io);
+            if (self.stop.load(.acquire)) return;
+            self.serveOne(&stream) catch {};
+        }
+    }
+
+    fn noPing(_: void, _: []const u8) void {}
+
+    fn writeServerTextFrame(w: *Io.Writer, payload: []const u8) !void {
+        var hdr: [4]u8 = undefined;
+        hdr[0] = 0x81;
+        if (payload.len < 126) {
+            hdr[1] = @intCast(payload.len);
+            try w.writeAll(hdr[0..2]);
+        } else {
+            hdr[1] = 126;
+            std.mem.writeInt(u16, hdr[2..4], @intCast(payload.len), .big);
+            try w.writeAll(hdr[0..4]);
+        }
+        try w.writeAll(payload);
+    }
+
+    fn serveOne(self: *FakeRpc, stream: *Io.net.Stream) !void {
+        _ = self;
+        var rbuf: [8192]u8 = undefined;
+        var wbuf: [8192]u8 = undefined;
+        var rd = Io.net.Stream.Reader.init(stream.*, testing.io, &rbuf);
+        var wr = Io.net.Stream.Writer.init(stream.*, testing.io, &wbuf);
+        const r = &rd.interface;
+        const w = &wr.interface;
+        const first = try r.takeDelimiterInclusive('\n');
+        if (std.mem.indexOf(u8, first, "HTTP/") == null) return;
+        while (true) {
+            const line = try r.takeDelimiterInclusive('\n');
+            if (line.len <= 2) break;
+        }
+        try w.writeAll("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
+        try w.flush();
+
+        var msg: std.ArrayList(u8) = .empty;
+        defer msg.deinit(testing.allocator);
+        _ = try ws.readMessageFrom(testing.allocator, r, &msg, {}, noPing);
+        var parsed = try json.parseFromSlice(json.Value, testing.allocator, msg.items, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return;
+        const method_val = parsed.value.object.get("method") orelse return;
+        if (method_val != .string) return;
+        const reply = if (std.mem.eql(u8, method_val.string, "EngineInfo"))
+            "{\"id\":1,\"ok\":{\"deviceId\":\"dev-cloud\",\"workspaceScope\":\"synced\"}}"
+        else if (std.mem.eql(u8, method_val.string, "AuthStatus"))
+            "{\"id\":1,\"item\":{\"state\":\"signedIn\",\"user\":{\"id\":\"u-2\",\"email\":\"live@example.test\"},\"orgId\":\"user-2\"}}"
+        else
+            "{\"id\":1,\"err\":\"unknown\"}";
+        try writeServerTextFrame(w, reply);
+        try w.flush();
+    }
+
+    fn shutdown(self: *FakeRpc) void {
+        self.stop.store(true, .release);
+        if (self.thread) |t| @import("test_server_stop.zig").stopAcceptLoop(testing.io, self.port, &self.exited, t);
+        self.server.deinit(testing.io);
+    }
+};
+
+test "status prefers running engine EngineInfo and AuthStatus IPC without session.json" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp: TmpDir = .{};
+    const dir = try tmp.make("live-ipc-status");
+    defer tmp.remove();
+
+    const addr = try Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var rpc: FakeRpc = .{ .server = try addr.listen(testing.io, .{ .reuse_address = true }), .port = 0 };
+    rpc.port = rpc.server.socket.address.getPort();
+    try rpc.start();
+    defer rpc.shutdown();
+
+    var env = try syntheticEnv(dir);
+    defer env.deinit();
+    try env.put("HARNESS_CODEGRAFF_CLIENT_ID", "cg_client_synthetic");
+
+    var cap: Captured = .init("");
+    defer cap.deinit();
+    try testing.expectEqual(@as(u8, 0), try status(cap.ctx(&env, rpc.port, false)));
+    const text = cap.text();
+    try testing.expect(std.mem.indexOf(u8, text, "Mode:     synced\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "Auth:     signed in as live@example.test (workspace user-2)\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "IPC:      listening on 127.0.0.1:") != null);
 }
