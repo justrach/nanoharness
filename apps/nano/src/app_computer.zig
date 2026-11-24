@@ -21,6 +21,7 @@ pub const Summary = struct {
     machine_id: ?[]const u8 = null,
     paid_through: ?i64 = null,
     retire_at: ?i64 = null,
+    complimentary: bool = false,
 };
 
 pub const Live = struct {
@@ -53,12 +54,29 @@ pub const State = struct {
     action_call: ?u64 = null,
     busy: ?Busy = null,
     next_read: ?f64 = null,
+    err_buf: [256]u8 = undefined,
+    err_len: usize = 0,
 
     pub fn deinit(s: *State) void {
         if (s.arena) |*ar| ar.deinit();
         s.* = .{};
     }
+
+    pub fn errText(s: *const State) ?[]const u8 {
+        return if (s.err_len > 0) s.err_buf[0..s.err_len] else null;
+    }
 };
+
+pub fn setErr(a: *App, msg: ?[]const u8) void {
+    const s = &a.cloud_computer;
+    if (msg) |m| {
+        const len = @min(m.len, s.err_buf.len);
+        @memcpy(s.err_buf[0..len], m[0..len]);
+        s.err_len = len;
+    } else {
+        s.err_len = 0;
+    }
+}
 
 fn str(o: json.ObjectMap, k: []const u8) ?[]const u8 {
     const v = o.get(k) orelse return null;
@@ -106,6 +124,7 @@ pub fn parse(ar: Allocator, v: json.Value) !?Info {
             .machine_id = try strDupe(ar, ov.object, "machineId"),
             .paid_through = intOpt(ov.object, "paidThrough"),
             .retire_at = intOpt(ov.object, "retireAt"),
+            .complimentary = if (ov.object.get("complimentary")) |cv| (cv == .bool and cv.bool) else false,
         };
     };
     if (o.get("live")) |lv| if (lv == .object) {
@@ -127,7 +146,18 @@ pub fn shown(a: *const App) ?Info {
 
 pub fn needsRefresh(info: ?Info) bool {
     const i = info orelse return false;
-    return std.mem.eql(u8, i.live.phase, "provisioning") or std.mem.eql(u8, i.live.phase, "starting");
+    for ([_][]const u8{
+        "provisioning",
+        "starting",
+        "attaching",
+        "paid",
+        "waiting_payment",
+        "waiting_capacity",
+        "resetting",
+    }) |p| {
+        if (std.mem.eql(u8, i.live.phase, p)) return true;
+    }
+    return false;
 }
 
 pub fn refresh(a: *App) void {
@@ -167,6 +197,13 @@ fn onOffer(a: *App, id: u64, r: rpc.Reply) void {
     s.call = null;
     switch (r) {
         .ok => |v| apply(a, v),
+        .err => |msg| {
+            if (s.info == null) {
+                const why = if (std.mem.eql(u8, msg, "not connected")) "Engine not connected" else msg;
+                setErr(a, why);
+            }
+            schedule(a);
+        },
         else => schedule(a),
     }
     a.redraw();
@@ -208,6 +245,7 @@ pub fn apply(a: *App, v: json.Value) void {
     if (s.arena) |*old| old.deinit();
     s.arena = ar;
     s.info = got;
+    s.err_len = 0;
     schedule(a);
     a.redraw();
 }
@@ -240,19 +278,30 @@ test "cloud computer offer parses promo, owned, null, and schedules polling whil
     try testing.expect(a.cloud_computer.next_read == null);
 
     const prov = try json.parseFromSlice(json.Value, testing.allocator,
-        \\{"enabled":true,"onSale":1,"freeSlots":0,"totalSlots":1,"priceMonthlyUsd":50,"spec":{"cpu":4,"memoryGiB":8,"diskGiB":60},"offer":{"state":"active","slot":1},"live":{"phase":"provisioning","machineId":"m_1"}}
+        \\{"enabled":true,"onSale":1,"freeSlots":0,"totalSlots":1,"priceMonthlyUsd":50,"spec":{"cpu":4,"memoryGiB":8,"diskGiB":60},"offer":{"state":"active","slot":1,"complimentary":true},"live":{"phase":"attaching","machineId":"m_1"}}
     , .{});
     defer prov.deinit();
+    setErr(&a, "Temporary error");
+    try testing.expectEqualStrings("Temporary error", a.cloud_computer.errText().?);
     apply(&a, prov.value);
     try testing.expect(shown(&a).?.offer != null);
+    try testing.expect(shown(&a).?.offer.?.complimentary);
+    try testing.expect(a.cloud_computer.errText() == null);
     try testing.expect(a.cloud_computer.next_read != null);
 
+    for ([_][]const u8{ "provisioning", "starting", "attaching", "paid", "waiting_payment", "waiting_capacity", "resetting" }) |phase| {
+        const poll_info: Info = .{ .enabled = true, .live = .{ .phase = phase } };
+        try testing.expect(needsRefresh(poll_info));
+    }
+
     const ready = try json.parseFromSlice(json.Value, testing.allocator,
-        \\{"enabled":true,"onSale":1,"freeSlots":0,"totalSlots":1,"priceMonthlyUsd":50,"spec":{"cpu":4,"memoryGiB":8,"diskGiB":60},"offer":{"state":"active","slot":1},"live":{"phase":"ready","machineId":"m_1","deviceName":"Node D"}}
+        \\{"enabled":true,"onSale":1,"freeSlots":0,"totalSlots":1,"priceMonthlyUsd":50,"spec":{"cpu":4,"memoryGiB":8,"diskGiB":60},"offer":{"state":"provisioned","slot":1},"live":{"phase":"running","machineId":"m_1","deviceName":"Node D"}}
     , .{});
     defer ready.deinit();
     apply(&a, ready.value);
     try testing.expect(a.cloud_computer.next_read == null);
+    try testing.expect(!needsRefresh(.{ .enabled = true, .live = .{ .phase = "ready" } }));
+    try testing.expect(!needsRefresh(.{ .enabled = true, .live = .{ .phase = "harness_error" } }));
     try testing.expectEqualStrings("Node D", shown(&a).?.live.device_name.?);
 
     const invalid = try json.parseFromSlice(json.Value, testing.allocator, "[1,2]", .{});

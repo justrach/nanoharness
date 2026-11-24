@@ -9,7 +9,7 @@ use serde_json::Value;
 use super::{CodegraffAuth, http};
 
 pub const CODEGRAFF_API_BASE: &str = "https://codegraff.com";
-const TIMEOUT: Duration = Duration::from_secs(30);
+const TIMEOUT: Duration = Duration::from_secs(90);
 
 fn api_base() -> String {
     std::env::var("HARNESS_CODEGRAFF_API_BASE")
@@ -38,6 +38,7 @@ pub struct CodegraffComputerSummary {
     pub machine_id: Option<String>,
     pub paid_through: Option<i64>,
     pub retire_at: Option<i64>,
+    pub complimentary: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -203,10 +204,17 @@ mod tests {
                     let req = String::from_utf8_lossy(&buf[..n]);
                     let line = req.lines().next().unwrap_or("");
                     let (status, body) = if line.starts_with("GET /api/computer/offer") {
-                        (
-                            "200 OK",
-                            r#"{"enabled":true,"onSale":1,"freeSlots":1,"totalSlots":1,"priceMonthlyUsd":50,"spec":{"cpu":4,"memoryGiB":8,"diskGiB":60},"offer":null,"live":{"phase":"none"},"manageUrl":"https://codegraff.com/dashboard/sandboxes#computer","billingUrl":"https://codegraff.com/dashboard/billing"}"#,
-                        )
+                        if req.contains("Bearer cg_sk_complimentary") {
+                            (
+                                "200 OK",
+                                r#"{"enabled":true,"onSale":1,"freeSlots":0,"totalSlots":1,"priceMonthlyUsd":50,"spec":{"cpu":4,"memoryGiB":8,"diskGiB":60},"offer":{"state":"provisioned","slot":1,"machineId":"m_123","paidThrough":1798133213,"complimentary":true},"live":{"phase":"running","machineId":"m_123","deviceName":"Cloud computer"},"manageUrl":"https://codegraff.com/dashboard/sandboxes#computer","billingUrl":"https://codegraff.com/dashboard/billing"}"#,
+                            )
+                        } else {
+                            (
+                                "200 OK",
+                                r#"{"enabled":true,"onSale":1,"freeSlots":1,"totalSlots":1,"priceMonthlyUsd":50,"spec":{"cpu":4,"memoryGiB":8,"diskGiB":60},"offer":{"state":"paid","slot":1},"live":{"phase":"none"},"manageUrl":"https://codegraff.com/dashboard/sandboxes#computer","billingUrl":"https://codegraff.com/dashboard/billing"}"#,
+                            )
+                        }
                     } else if line.starts_with("POST /api/computer/checkout") {
                         if req.contains("Bearer cg_sk_soldout") {
                             ("409 Conflict", r#"{"error":"computers_sold_out"}"#)
@@ -251,6 +259,7 @@ mod tests {
         assert!(offer.enabled);
         assert_eq!(offer.free_slots, 1);
         assert_eq!(offer.price_monthly_usd, 50);
+        assert!(!offer.offer.as_ref().unwrap().complimentary);
 
         let checkout = auth.computer_checkout_at(&base).await.unwrap();
         assert_eq!(
@@ -261,6 +270,15 @@ mod tests {
         let started = auth.computer_start_at(&base).await.unwrap();
         assert_eq!(started.phase, "provisioning");
         assert_eq!(started.machine_id.as_deref(), Some("m_123"));
+
+        write_private(
+            &dir.path().join("home").join(KEY_FILE),
+            br#"{"api_key":"cg_sk_complimentary"}"#,
+        )
+        .unwrap();
+        let comp = auth.computer_offer_at(&base).await.unwrap().unwrap();
+        assert!(comp.offer.as_ref().unwrap().complimentary);
+        assert_eq!(comp.live.phase, "running");
 
         write_private(
             &dir.path().join("home").join(KEY_FILE),

@@ -103,6 +103,7 @@ test {
     _ = @import("artifact_url.zig");
     _ = @import("app_artifacts.zig");
     _ = @import("app_computer.zig");
+    _ = @import("tests_ui_computer.zig");
     _ = @import("parity_sandboxes.zig");
     _ = @import("tests_ui_sandboxes.zig");
     _ = @import("run_errors.zig");
