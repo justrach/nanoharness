@@ -688,3 +688,84 @@ test "github code review uses numbered colored source rows instead of wrapped pa
         try testing.expectEqual(calls, try githubCalls(&h));
     }
 }
+
+test "repository github analytics dashboard renders overview charts and filters client side without extra RPCs" {
+    const dashboard_items = [_]flow.Item{
+        .{ .number = 156, .title = "Starred named operators and gathered equations fall back", .url = "https://github.com/demo/fieldnotes/issues/156", .state = "open", .author = "lin", .updatedAt = "2026-11-24", .createdAt = "2026-11-24", .labels = &.{"math"} },
+        .{ .number = 155, .title = "A dollar price steals the opener of a later equation", .url = "https://github.com/demo/fieldnotes/issues/155", .state = "open", .author = "lin", .updatedAt = "2026-11-24", .createdAt = "2026-11-24", .labels = &.{"math"} },
+        .{ .number = 153, .title = "An unmatched math opener disables later complete math", .url = "https://github.com/demo/fieldnotes/issues/153", .state = "open", .author = "lin", .updatedAt = "2026-11-24", .createdAt = "2026-11-24", .labels = &.{"math"} },
+        .{ .number = 150, .title = "Unsaved edits in other panes block blank pane reuse", .url = "https://github.com/demo/fieldnotes/issues/150", .state = "open", .author = "ada", .updatedAt = "2026-11-23", .createdAt = "2026-11-23", .labels = &.{"splits"} },
+        .{ .number = 149, .title = "Returning to a parked split restores wrong model pick", .url = "https://github.com/demo/fieldnotes/issues/149", .state = "open", .author = "ada", .updatedAt = "2026-11-23", .createdAt = "2026-11-23", .labels = &.{"splits"} },
+        .{ .number = 143, .title = "Accepted slash commands have no composer highlight", .url = "https://github.com/demo/fieldnotes/issues/143", .state = "closed", .author = "sam", .updatedAt = "2026-11-22", .createdAt = "2026-11-22", .labels = &.{"composer"} },
+        .{ .number = 138, .title = "Session reveal jumps to a parked duplicate", .url = "https://github.com/demo/fieldnotes/issues/138", .state = "closed", .author = "ada", .updatedAt = "2026-11-22", .createdAt = "2026-11-21", .labels = &.{"splits"} },
+        .{ .number = 128, .title = "Explicit spacing around binary operators falls back", .url = "https://github.com/demo/fieldnotes/issues/128", .state = "closed", .author = "lin", .updatedAt = "2026-11-21", .createdAt = "2026-11-20", .labels = &.{"math"} },
+        .{ .number = 124, .title = "Thin space after boxed math triggers literal fallback", .url = "https://github.com/demo/fieldnotes/issues/124", .state = "closed", .author = "lin", .updatedAt = "2026-11-21", .createdAt = "2026-11-20", .labels = &.{"math"} },
+        .{ .number = 119, .title = "Appearance font controls do nothing in Settings", .url = "https://github.com/demo/fieldnotes/issues/119", .state = "closed", .author = "kai", .updatedAt = "2026-11-20", .createdAt = "2026-11-19", .labels = &.{"settings"} },
+        .{ .number = 116, .title = "Scroll to bottom button hops sideways in narrow panes", .url = "https://github.com/demo/fieldnotes/issues/116", .state = "closed", .author = "sam", .updatedAt = "2026-11-20", .createdAt = "2026-11-19", .labels = &.{"composer"} },
+        .{ .number = 114, .title = "Dragging transcript scrollbar thumb fails to scroll chat", .url = "https://github.com/demo/fieldnotes/issues/114", .state = "closed", .author = "sam", .updatedAt = "2026-11-19", .createdAt = "2026-11-19", .labels = &.{"composer"} },
+    };
+    const dashboard_page: flow.Page = .{
+        .repository = repo,
+        .kind = .issues,
+        .page = 1,
+        .hasNextPage = false,
+        .items = &dashboard_items,
+    };
+
+    for ([_]bool{ false, true }) |dark| {
+        var h: Harness = undefined;
+        try setup(&h, dark, &.{ pulls, dashboard_page });
+        defer h.deinit();
+        try h.t.clickText("Repository");
+        try h.t.clickText("Issues");
+        h.t.settle(0.1);
+
+        // Split pane view (~500px host width)
+        h.t.resize(1120, 760);
+        h.t.settle(0.1);
+        try testing.expect(h.t.hasText("On This Page"));
+        try testing.expect(h.t.hasText("State Split"));
+        try testing.expect(h.t.hasText("By Label"));
+        try testing.expect(h.t.hasText("Recent Activity"));
+        if (dark) try screenshot(&h, "dashboard-split-dark");
+
+        // Expanded wide view (~900px host width)
+        h.a.view.strip.expanded = .host;
+        h.t.resize(1120, 760);
+        h.t.settle(0.1);
+        for (h.t.ctx.nodes.items) |node| switch (node.content) {
+            .text => {
+                try testing.expect(node.rect.x >= -0.5);
+                try testing.expect(node.rect.x + node.rect.w <= h.t.size.w + 0.5);
+            },
+            else => {},
+        };
+        try screenshot(&h, if (dark) "dashboard-wide-dark" else "dashboard-wide-light");
+
+        if (dark) {
+            const calls_before = try githubCalls(&h);
+            // Click the "math" label bar in By Label -> filters client-side with 0 extra RPCs.
+            try h.t.clickText("math");
+            h.t.settle(0.1);
+            try testing.expectEqual(calls_before, try githubCalls(&h));
+            try testing.expect(h.t.hasText("Showing 5 of 12 (label: math)"));
+            try testing.expect(h.t.hasText("Starred named operators and gathered equations fall back"));
+            try testing.expect(!h.t.hasText("Unsaved edits in other panes block blank pane reuse"));
+
+            // Click State Split "Open" legend row -> combines with label filter (`open` AND `math`).
+            const open_legend = try labeledControl(&h, "Filter state: Open");
+            h.t.ctx.focus = open_legend;
+            h.t.key(.enter);
+            h.t.settle(0.1);
+            try testing.expectEqual(calls_before, try githubCalls(&h));
+            try testing.expect(h.t.hasText("Showing 3 of 12 (state: open · math)"));
+
+            // Reset filter restores all 12 items without touching RPCs.
+            try h.t.clickText("Clear filter");
+            h.t.settle(0.1);
+            try testing.expectEqual(calls_before, try githubCalls(&h));
+            try testing.expect(!h.t.hasText("Clear filter"));
+            try testing.expect(h.t.hasText("Unsaved edits in other panes block blank pane reuse"));
+        }
+    }
+}

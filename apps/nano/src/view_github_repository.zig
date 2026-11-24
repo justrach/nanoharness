@@ -89,7 +89,7 @@ pub fn view(c: *ui.Context, a: *App, k: theme.Colors) void {
         const content = ui.div(c).column().wFull().p(14).gap(10);
         defer content.end();
         switch (s.kind) {
-            .pulls, .issues => list(c, a, k, current, ready and s.error_text == null),
+            .pulls, .issues => list(c, a, k, current, width, ready and s.error_text == null),
             .pull, .issue => summary(c, a, k, current),
             .files => files(c, a, k, current),
             .activity => activity(c, a, k, current),
@@ -136,9 +136,12 @@ fn detailHeader(c: *ui.Context, a: *App, k: theme.Colors, ready: bool) void {
             const box = ui.div(c).column().wFull().px(14).pt(4).pb(12).gap(8);
             defer box.end();
             {
-                const top = ui.div(c).row().wFull().gap(8).itemsCenter();
+                const top = ui.div(c).row().wFull().gap(6).itemsCenter();
                 defer top.end();
                 stateBadge(c, k, detail.number, detail.state, detail.isDraft, s.selected_kind == .pull);
+                for (detail.labels[0..@min(2, detail.labels.len)]) |lbl| {
+                    labelChip(c, k, lbl, 96);
+                }
             }
             ui.text(c, detail.title, .{ .size = 17, .line_height = 23, .weight = .semibold, .wrap = true, .color = k.text });
             {
@@ -157,10 +160,13 @@ fn detailHeader(c: *ui.Context, a: *App, k: theme.Colors, ready: bool) void {
                     ui.text(c, c.print("{s} → {s}", .{ head, detail.baseRef orelse "" }), .{ .size = 11, .mono = true, .color = k.text.alpha(0.85), .wrap = true });
                 }
                 if (detail.changedFiles) |count| {
-                    const stat_pill = ui.div(c).row().px(8).py(3).gap(5).itemsCenter().rounded(6).bg(k.ink(if (k.dark) 0.035 else 0.03)).border(k.border).borderW(1);
+                    const adds = detail.additions orelse 0;
+                    const dels = detail.deletions orelse 0;
+                    const stat_pill = ui.div(c).row().px(8).py(3).gap(6).itemsCenter().rounded(6).bg(k.ink(if (k.dark) 0.035 else 0.03)).border(k.border).borderW(1);
                     defer stat_pill.end();
                     icons.icon(c, .@"file-code", 11, k.muted, 0);
-                    ui.text(c, c.print("{d} files · +{d} / −{d}", .{ count, detail.additions orelse 0, detail.deletions orelse 0 }), .{ .size = 11, .mono = true, .color = k.muted, .wrap = true });
+                    ui.text(c, c.print("{d} files · +{d} / −{d}", .{ count, adds, dels }), .{ .size = 11, .mono = true, .color = k.muted, .wrap = true });
+                    diffRatioBar(c, k, adds, dels);
                 }
             }
         };
@@ -178,8 +184,10 @@ fn detailHeader(c: *ui.Context, a: *App, k: theme.Colors, ready: bool) void {
     rule(c, k);
 }
 
-fn list(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, enabled: bool) void {
-    const is_pull = a.panels.github_repository.list_kind == .pulls;
+fn list(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, width: f32, enabled: bool) void {
+    const s = &a.panels.github_repository;
+    const is_pull = s.list_kind == .pulls;
+    const compact = width < 420;
     if (page.items.len == 0) {
         const empty = ui.div(c).column().wFull().p(28).gap(10).itemsCenter().rounded(12).bg(k.ink(if (k.dark) 0.02 else 0.015)).border(k.border).borderW(1);
         defer empty.end();
@@ -188,17 +196,29 @@ fn list(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, enabled: bool
         glyph_box.end();
         ui.text(c, "No matching items", .{ .size = 14, .weight = .semibold, .color = k.text });
         ui.text(c, if (page.hasNextPage) "No matches on this page. Try the next page or another filter." else "Try another state filter, or Refresh to check again.", .{ .size = 12, .color = k.muted, .wrap = true });
+        return;
     }
+
+    @import("view_github_overview.zig").draw(c, a, k, page, width, enabled);
+
+    var shown: usize = 0;
     for (page.items) |item| {
+        if (!flow.itemMatchesFilter(s, item)) continue;
+        shown += 1;
         ui.key(c, c.print("github-{d}", .{item.number}));
         const card = ui.div(c).column().wFull().p(13).gap(7).bg(k.ink(if (k.dark) 0.028 else 0.018)).border(k.border).borderW(1).rounded(8);
         defer card.end();
         if (enabled) _ = card.hover(k.ink(if (k.dark) 0.055 else 0.042)).control();
         const activated = behavior.activate(c, card, k, item.title, enabled, false);
         {
-            const top = ui.div(c).row().wFull().gap(8).itemsCenter();
+            const top = ui.div(c).row().wFull().gap(6).itemsCenter();
             defer top.end();
             stateBadge(c, k, item.number, item.state, item.isDraft, is_pull);
+            if (!compact and item.labels.len > 0) {
+                for (item.labels[0..@min(2, item.labels.len)]) |lbl| {
+                    labelChip(c, k, lbl, 84);
+                }
+            }
             ui.spacer(c);
             icons.icon(c, .@"alt-arrow-right", 12, k.faint, 0);
         }
@@ -210,6 +230,12 @@ fn list(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, enabled: bool
             ui.text(c, c.print("{s} · updated {s}", .{ item.author, date(item.updatedAt) }), .{ .size = 11, .color = k.muted, .wrap = true });
         }
         if (activated) flow.openItem(a, item.number);
+    }
+    if (shown == 0) {
+        const empty = ui.div(c).column().wFull().p(22).gap(8).itemsCenter().rounded(10).bg(k.ink(if (k.dark) 0.02 else 0.015)).border(k.border).borderW(1);
+        defer empty.end();
+        ui.text(c, "No items match the active chart filter", .{ .size = 13, .weight = .semibold, .color = k.text });
+        if (actionButton(c, k, "Reset chart filters", null, null, enabled, false)) flow.clearClientFilters(a);
     }
 }
 
@@ -346,11 +372,29 @@ fn activity(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page) void {
 }
 
 fn stateBadge(c: *ui.Context, k: theme.Colors, number: u64, state: []const u8, draft: bool, is_pull: bool) void {
-    const tone = if (draft) k.muted else if (std.mem.eql(u8, state, "open")) k.success else if (std.mem.eql(u8, state, "closed")) k.danger else k.accent;
-    const badge = ui.div(c).row().px(8).py(3).gap(5).itemsCenter().rounded(999).bg(tone.alpha(0.11)).border(tone.alpha(0.24)).borderW(1);
+    const tone = if (draft) k.muted else if (std.mem.eql(u8, state, "open")) k.warning else if (std.mem.eql(u8, state, "closed")) k.success else k.accent;
+    const badge = ui.div(c).row().px(8).py(3).gap(5).itemsCenter().rounded(999).bg(tone.alpha(0.12)).border(tone.alpha(0.28)).borderW(1);
     defer badge.end();
     icons.icon(c, if (is_pull) .@"pull-request" else .@"chat-round-line", 12, tone, 0);
     ui.text(c, c.print("#{d} · {s}{s}", .{ number, state, if (draft) " · draft" else "" }), .{ .size = 10.5, .weight = .semibold, .color = tone, .wrap = true });
+}
+
+fn labelChip(c: *ui.Context, k: theme.Colors, label: []const u8, max_w: f32) void {
+    const chip = ui.div(c).row().px(6).py(2).itemsCenter().rounded(5).bg(k.ink(if (k.dark) 0.045 else 0.035)).border(k.border).borderW(1).clip();
+    defer chip.end();
+    kit.ellipsisText(c, label, .{ .size = 10, .color = k.muted }, max_w);
+}
+
+fn diffRatioBar(c: *ui.Context, k: theme.Colors, additions: u64, deletions: u64) void {
+    const total = additions + deletions;
+    if (total == 0) return;
+    const bar_w: f32 = 40;
+    const add_w = @max(@as(f32, if (additions > 0) 4 else 0), @floor(bar_w * @as(f32, @floatFromInt(additions)) / @as(f32, @floatFromInt(total))));
+    const del_w = @max(@as(f32, if (deletions > 0) 4 else 0), bar_w - add_w);
+    const bar = ui.div(c).row().w(bar_w).h(6).rounded(3).bg(k.ink(0.06)).clip();
+    defer bar.end();
+    if (additions > 0) _ = c.leaf(.{ .width = .{ .px = @min(bar_w, add_w) }, .height = .fill, .background = k.diff_add }, .none, null);
+    if (deletions > 0) _ = c.leaf(.{ .width = .{ .px = @min(bar_w, del_w) }, .height = .fill, .background = k.diff_del }, .none, null);
 }
 
 fn date(text: []const u8) []const u8 {

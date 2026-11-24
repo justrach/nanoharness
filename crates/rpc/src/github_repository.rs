@@ -60,6 +60,10 @@ pub struct GitHubRepositoryItem {
     pub is_draft: bool,
     pub author: String,
     pub updated_at: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,6 +82,8 @@ pub struct GitHubRepositoryDetail {
     pub additions: Option<u64>,
     pub deletions: Option<u64>,
     pub changed_files: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

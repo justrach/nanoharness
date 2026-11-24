@@ -853,3 +853,47 @@ fn github_repository_caps_page_and_serialized_output_and_rejects_bad_shapes() {
     p.number = Some(2);
     assert!(decode(&response(item(1), false), repository(), &p).is_err());
 }
+
+#[test]
+fn github_repository_decodes_bounded_labels_and_created_at() {
+    let long_label = "l".repeat(72);
+    let labeled = json!({
+        "number": 9,
+        "title": "Synthetic labeled item",
+        "state": "open",
+        "user": {"login": "synthetic-user"},
+        "created_at": "2026-11-20T01:02:03Z",
+        "updated_at": "2026-11-24T04:05:06Z",
+        "labels": [
+            {"name": "  "},
+            {"name": " math "},
+            {"name": "splits"},
+            {"name": "composer"},
+            {"name": "settings"},
+            {"name": long_label}
+        ]
+    });
+    let list_res = decode(
+        &response(json!([labeled.clone(), item(10)]), false),
+        repository(),
+        &params(Kind::Issues),
+    )
+    .unwrap();
+    assert!(!list_res.truncated);
+    assert_eq!(list_res.items[0].created_at, "2026-11-20T01:02:03Z");
+    assert_eq!(
+        list_res.items[0].labels,
+        vec!["math", "splits", "composer", "settings"]
+    );
+    assert_eq!(list_res.items[1].created_at, "2026-01-01T00:00:00Z");
+    assert!(list_res.items[1].labels.is_empty());
+
+    let mut clipped = labeled;
+    clipped["labels"] = json!([{"name": "l".repeat(72)}]);
+    let mut detail_params = params(Kind::Issue);
+    detail_params.number = Some(9);
+    let detail_res = decode(&response(clipped, false), repository(), &detail_params).unwrap();
+    assert!(detail_res.truncated);
+    let detail = detail_res.detail.unwrap();
+    assert_eq!(detail.labels, vec!["l".repeat(48)]);
+}
