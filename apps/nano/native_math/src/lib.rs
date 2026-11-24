@@ -3,8 +3,8 @@
 //! are shared with that implementation; nano paints trusted paths/rules via
 //! its native SVG primitive. No browser, scripts, URLs, or input XML.
 use latex_rust::{
-    AtomKind, BoxContent, Dim, EnvRow, EqNumber, MathBox, MathFont, MathNode, MathParams,
-    MathStyle, MatrixStyle, ParseOptions, SpaceKind, SvgOptions, Token,
+    BoxContent, Dim, EnvRow, EqNumber, MathBox, MathFont, MathNode, MathStyle, ParseOptions,
+    SpaceKind, SvgOptions, Token,
 };
 use std::{cell::RefCell, collections::VecDeque, sync::OnceLock};
 const MAX_SOURCE_BYTES: usize = 4096;
@@ -194,12 +194,6 @@ fn preflight(source: &str) -> Result<(), String> {
                     // missing rule/style intent cannot be recovered reliably.
                     return Err(format!("Unsupported equation command: {name}"));
                 }
-                // parse_atom retains limit modifiers only on named text operators,
-                // not Sum/Product/Integral. Scoped style declarations are
-                // split at top-level/braced scope in `layout_source`.
-                if matches!(name.as_str(), "limits" | "nolimits") {
-                    return Err(format!("Unsupported equation command: {name}"));
-                }
             }
             _ => {}
         }
@@ -218,124 +212,11 @@ fn scalar(dim: &Dim) -> Result<f32, String> {
     Ok(value)
 }
 
-// Explicit glue is classless upstream. Track known atom classes so we can
-// restore missing glue without interfering with binary reclassification.
-fn spacing_atom_kind(node: &MathNode) -> Option<AtomKind> {
-    match node {
-        MathNode::Atom(_, kind) | MathNode::SizedDelim(_, _, kind) => Some(*kind),
-        MathNode::Text(_, _) | MathNode::Ref(_) => Some(AtomKind::Ord),
-        MathNode::Operator(_, _)
-        | MathNode::Sum(_, _)
-        | MathNode::Product(_, _)
-        | MathNode::Integral(_, _, _)
-        | MathNode::Limit(_) => Some(AtomKind::Op),
-        MathNode::Fraction(_, _) | MathNode::Radical(_, _) | MathNode::Delimited(_, _, _) => {
-            Some(AtomKind::Inner)
-        }
-        MathNode::Symbol(name) => Some(latex_rust::symbol_atom_kind(name)),
-        MathNode::Row(nodes) if nodes.len() == 1 => spacing_atom_kind(&nodes[0]),
-        MathNode::Row(_) => Some(AtomKind::Ord),
-        MathNode::Superscript(base, _)
-        | MathNode::Subscript(base, _)
-        | MathNode::SubSup(base, _, _)
-        | MathNode::Color(_, base)
-        | MathNode::TextColor(_, base)
-        | MathNode::Phantom(_, base) => spacing_atom_kind(base),
-        _ => None,
-    }
-}
-
-fn zero_implicit_glue(left: Option<AtomKind>, right: Option<AtomKind>) -> bool {
-    use AtomKind::*;
-    // Zero entries in TeX's inter-atom spacing table, excluding Bin because
-    // a classless neighbor also changes binary reclassification. Unknown
-    // compound atom classes conservatively retain their source instead.
-    matches!(
-        (left, right),
-        (Some(Ord | Close), Some(Ord | Open | Close | Punct))
-            | (
-                Some(Open),
-                Some(Ord | Op | Rel | Open | Close | Punct | Inner)
-            )
-            | (Some(Op), Some(Open | Close | Punct))
-            | (Some(Rel), Some(Rel | Close | Punct))
-            | (Some(Inner), Some(Close))
-    )
-}
-
-// Nonzero relation entries in latex-rust's TeX inter-atom spacing table.
-// All but Rel→Open are suppressed in script styles. No Bin touches these gaps.
-fn relation_glue(
-    left: Option<AtomKind>,
-    right: Option<AtomKind>,
-    script: bool,
-) -> Option<SpaceKind> {
-    use AtomKind::*;
-    match (left, right) {
-        (Some(Rel), Some(Open)) => Some(SpaceKind::Thick),
-        (Some(Ord | Op | Close | Inner), Some(Rel)) | (Some(Rel), Some(Ord | Op | Inner))
-            if !script =>
-        {
-            Some(SpaceKind::Thick)
-        }
-        (Some(Punct), Some(Rel)) if !script => Some(SpaceKind::Thin),
-        _ => None,
-    }
-}
-
-// Yield one boundary per run of explicit skips, not one per skip.
-fn spaced_boundaries(
-    nodes: &[MathNode],
-) -> impl Iterator<Item = (usize, Option<AtomKind>, Option<AtomKind>)> + '_ {
-    let mut previous = None;
-    nodes
-        .iter()
-        .enumerate()
-        .filter(|(_, node)| !matches!(node, MathNode::Space(_)))
-        .filter_map(move |(index, right)| {
-            let (left_index, left) = previous.replace((index, right))?;
-            (index - left_index > 1)
-                .then(|| (index, spacing_atom_kind(left), spacing_atom_kind(right)))
-        })
-}
-
-fn validate_row_spacing(nodes: &[MathNode]) -> Result<bool, String> {
-    let mut restore_relation_glue = false;
-    for (_, left, right) in spaced_boundaries(nodes) {
-        if relation_glue(left, right, false).is_some() {
-            restore_relation_glue = true;
-        } else if !zero_implicit_glue(left, right) {
-            return Err("Explicit spacing affecting automatic math glue is unsupported".into());
-        }
-    }
-    Ok(restore_relation_glue)
-}
-
-fn restore_row_relation_glue(nodes: &mut Vec<MathNode>, style: MathStyle) {
-    let script = style.script_level() > 0;
-    let extra: Vec<_> = spaced_boundaries(nodes)
-        .filter_map(|(index, left, right)| Some((index, relation_glue(left, right, script)?)))
-        .collect();
-    if extra.is_empty() {
-        return;
-    }
-    let mut row = Vec::with_capacity(nodes.len() + extra.len());
-    let mut extra = extra.into_iter().peekable();
-    for (index, node) in nodes.drain(..).enumerate() {
-        if let Some((_, glue)) = extra.next_if(|(at, _)| *at == index) {
-            row.push(MathNode::Space(glue));
-        }
-        row.push(node);
-    }
-    *nodes = row;
-}
-
 // Validate the AST before potentially expensive grid/assembly layout. This also
 // catches left-associated script chains which need not nest source braces.
-fn validate_ast(root: &MathNode) -> Result<bool, String> {
+fn validate_ast(root: &MathNode, em_pt: &Dim) -> Result<(), String> {
     let mut pending = vec![(root, 0usize)];
     let mut count = 0;
-    let mut restore_relation_glue = false;
     while let Some((node, depth)) = pending.pop() {
         count += 1;
         if count > MAX_AST_NODES || depth > MAX_DEPTH {
@@ -371,9 +252,6 @@ fn validate_ast(root: &MathNode) -> Result<bool, String> {
             | MathNode::Phantom(_, body)
             | MathNode::Tag { body, .. } => push(body),
             MathNode::Row(nodes) | MathNode::Substack(nodes) => {
-                if matches!(node, MathNode::Row(_)) {
-                    restore_relation_glue |= validate_row_spacing(nodes)?;
-                }
                 for node in nodes {
                     push(node);
                 }
@@ -381,6 +259,14 @@ fn validate_ast(root: &MathNode) -> Result<bool, String> {
             MathNode::Sum(lower, upper)
             | MathNode::Product(lower, upper)
             | MathNode::Integral(_, lower, upper) => {
+                for node in lower.iter().chain(upper) {
+                    push(node);
+                }
+            }
+            MathNode::OperatorWithLimits {
+                base, lower, upper, ..
+            } => {
+                push(base);
                 for node in lower.iter().chain(upper) {
                     push(node);
                 }
@@ -423,6 +309,11 @@ fn validate_ast(root: &MathNode) -> Result<bool, String> {
                     return Err("Equation spacing exceeds limit".into());
                 }
             }
+            MathNode::Space(SpaceKind::HspacePt(value)) => {
+                if scalar(&(value / em_pt))?.abs() > 64.0 {
+                    return Err("Equation spacing exceeds limit".into());
+                }
+            }
             MathNode::Strut(height, depth) => {
                 for value in [height, depth] {
                     if !(0.0..=64.0).contains(&scalar(value)?) {
@@ -433,913 +324,25 @@ fn validate_ast(root: &MathNode) -> Result<bool, String> {
             _ => {}
         }
     }
-    Ok(restore_relation_glue)
-}
-
-fn trivia(bytes: &[u8], mut i: usize) -> usize {
-    loop {
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        if bytes.get(i) != Some(&b'%') {
-            return i;
-        }
-        while i < bytes.len() && bytes[i] != b'\n' {
-            i += 1;
-        }
-    }
-}
-
-fn command_end(bytes: &[u8], mut i: usize) -> usize {
-    if bytes.get(i).is_some_and(u8::is_ascii_alphabetic) {
-        while bytes.get(i).is_some_and(u8::is_ascii_alphabetic) {
-            i += 1;
-        }
-    } else if i < bytes.len() {
-        // Control symbols may be non-ASCII; advance to a UTF-8 boundary.
-        i += 1;
-        while bytes.get(i).is_some_and(|b| b & 0xc0 == 0x80) {
-            i += 1;
-        }
-    }
-    i
-}
-
-fn group_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let (mut i, mut depth) = (start + 1, 1usize);
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' => {
-                i = trivia(bytes, i);
-                continue;
-            }
-            b'\\' => {
-                i = command_end(bytes, i + 1);
-                continue;
-            }
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    None
-}
-
-// Rewrite only real math commands, never substrings in literal text, comments,
-// or escaped control sequences. The caller parses the original first, so this
-// cannot repair malformed input into an accepted equation. Keep the original
-// source for copying and cache keys; this temporary string is layout-only.
-fn normalize_absolute_hspace(source: &str, size: f32) -> Result<(String, Vec<Dim>), String> {
-    let bytes = source.as_bytes();
-    let (mut i, mut copied) = (0, 0);
-    let mut out = String::new();
-    let mut spaces = Vec::new();
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            i = trivia(bytes, i);
-            continue;
-        }
-        if bytes[i] != b'\\' {
-            i += 1;
-            continue;
-        }
-        let command_start = i;
-        let end = command_end(bytes, i + 1);
-        let name = &source[i + 1..end];
-        i = end;
-        if !matches!(
-            name,
-            "hspace" | "text" | "mbox" | "operatorname" | "intertext" | "label" | "ref"
-        ) {
-            continue;
-        }
-        let start = trivia(bytes, end);
-        if bytes.get(start) != Some(&b'{') {
-            continue;
-        }
-        let Some(close) = group_end(bytes, start) else {
-            continue;
-        };
-        i = close + 1;
-        if name != "hspace" {
-            continue;
-        }
-        let tokens = latex_rust::tokenize(&source[start + 1..close]).map_err(|e| e.to_string())?;
-        let mut spec = String::new();
-        for token in tokens {
-            match token {
-                Token::Char(c) => spec.push(c),
-                Token::Space => spec.push(' '),
-                _ => return Err("Invalid equation spacing".into()),
-            }
-        }
-        let spec = spec.trim();
-        let Some(number) = spec.strip_suffix("pt").or_else(|| spec.strip_suffix("bp")) else {
-            continue;
-        };
-        let points: f64 = number
-            .trim()
-            .parse()
-            .map_err(|_| "Invalid equation spacing")?;
-        let em = points / (f64::from(size) * 0.75);
-        if !em.is_finite() || em.abs() > 64.0 {
-            return Err("Equation spacing exceeds limit".into());
-        }
-        out.push_str(&source[copied..command_start]);
-        // Original AST validation reserves values above 64 for these markers.
-        // Resolve each marker after parsing, using the actual enclosing style.
-        out.push_str(&format!(r"\hspace{{{}em}}", 65 + spaces.len()));
-        spaces.push(Dim::from_ieee32_bits((em as f32).to_bits()));
-        copied = close + 1;
-    }
-    out.push_str(&source[copied..]);
-    Ok((out, spaces))
-}
-
-// Mirror latex-rust's layout style transitions. Cramping does not affect scale,
-// but retaining it here makes nested fractions/scripts follow the engine too.
-fn resolve_layout_spacing(
-    node: &mut MathNode,
-    style: MathStyle,
-    spaces: &[Dim],
-    params: &MathParams,
-) {
-    let visit = |node: &mut MathNode, style| {
-        resolve_layout_spacing(node, style, spaces, params);
-    };
-    match node {
-        MathNode::Space(SpaceKind::Hspace(value)) => {
-            for (index, desired) in spaces.iter().enumerate() {
-                if *value == Dim::from_i64(65 + index as i64) {
-                    *value = desired / &params.scale(style);
-                    break;
-                }
-            }
-        }
-        MathNode::Fraction(num, den) => {
-            visit(num, style.numerator());
-            visit(den, style.denominator());
-        }
-        MathNode::Superscript(base, sup) => {
-            visit(base, style);
-            visit(sup, style.into_script().cramp());
-        }
-        MathNode::Subscript(base, sub) => {
-            visit(base, style);
-            visit(sub, style.into_script());
-        }
-        MathNode::SubSup(base, sub, sup) => {
-            visit(base, style);
-            visit(sub, style.into_script());
-            visit(sup, style.into_script().cramp());
-        }
-        MathNode::Radical(index, body) => {
-            visit(body, style.cramp());
-            if let Some(index) = index {
-                visit(index, MathStyle::ScriptScript);
-            }
-        }
-        MathNode::CancelTo(value, body) => {
-            visit(value, style.into_script());
-            visit(body, style);
-        }
-        MathNode::Sum(lower, upper) | MathNode::Product(lower, upper) => {
-            if let Some(lower) = lower {
-                visit(lower, style.into_script());
-            }
-            if let Some(upper) = upper {
-                visit(
-                    upper,
-                    if style.is_display() {
-                        style.into_script()
-                    } else {
-                        style.into_script().cramp()
-                    },
-                );
-            }
-        }
-        MathNode::Integral(_, lower, upper) => {
-            if let Some(lower) = lower {
-                visit(lower, style.into_script());
-            }
-            if let Some(upper) = upper {
-                visit(upper, style.into_script().cramp());
-            }
-        }
-        MathNode::Limit(lower) => {
-            if let Some(lower) = lower {
-                visit(lower, style.into_script());
-            }
-        }
-        MathNode::OverUnder(body, upper, lower) => {
-            visit(body, style);
-            for node in upper.iter_mut().chain(lower) {
-                visit(node, style.into_script());
-            }
-        }
-        MathNode::Row(nodes) => {
-            restore_row_relation_glue(nodes, style);
-            for node in nodes {
-                visit(node, style);
-            }
-        }
-        MathNode::Substack(nodes) => {
-            for node in nodes {
-                visit(node, MathStyle::Script);
-            }
-        }
-        MathNode::Intertext(body) | MathNode::Tag { body, .. } => visit(body, MathStyle::Text),
-        MathNode::Accent(body, kind) => {
-            use latex_rust::AccentKind::*;
-            let cramped = matches!(
-                kind,
-                Hat | Check
-                    | Breve
-                    | Acute
-                    | Grave
-                    | Tilde
-                    | Bar
-                    | Vec
-                    | Dot
-                    | Ddot
-                    | Dddot
-                    | Ddddot
-                    | Ring
-                    | WideHat
-                    | WideTilde
-                    | Overleftarrow
-                    | Overrightarrow
-                    | Overleftrightarrow
-                    | Underleftarrow
-                    | Underrightarrow
-                    | Underleftrightarrow
-                    | Overbrace
-                    | Underbrace
-            );
-            visit(body, if cramped { style.cramp() } else { style });
-        }
-        MathNode::Delimited(_, body, _)
-        | MathNode::Color(_, body)
-        | MathNode::TextColor(_, body)
-        | MathNode::ColorBox(_, body)
-        | MathNode::FColorBox(_, _, body)
-        | MathNode::Phantom(_, body) => visit(body, style),
-        MathNode::Matrix(kind, _, rows) => {
-            let cell_style = match kind {
-                MatrixStyle::Aligned
-                    if rows.iter().all(|row| matches!(row, EnvRow::Cells { .. })) =>
-                {
-                    MathStyle::Display
-                }
-                MatrixStyle::Aligned => style,
-                kind if kind.is_display_env() => MathStyle::Display,
-                MatrixStyle::Array | MatrixStyle::Split => style,
-                _ => MathStyle::Text,
-            };
-            for row in rows {
-                match row {
-                    EnvRow::Cells { cells, number, .. } => {
-                        for cell in cells {
-                            visit(cell, cell_style);
-                        }
-                        if let EqNumber::Tag { body, .. } = number {
-                            visit(body, MathStyle::Text);
-                        }
-                    }
-                    EnvRow::Intertext(body) => visit(body, MathStyle::Text),
-                    EnvRow::Hline => {}
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-struct StyleSegment {
-    style: MathStyle,
-    source: String,
-    is_braced_group: bool,
-}
-
-fn style_for_command(name: &str) -> Option<MathStyle> {
-    match name {
-        "displaystyle" => Some(MathStyle::Display),
-        "textstyle" => Some(MathStyle::Text),
-        "scriptstyle" => Some(MathStyle::Script),
-        "scriptscriptstyle" => Some(MathStyle::ScriptScript),
-        _ => None,
-    }
-}
-
-fn is_literal_text_command(name: &str) -> bool {
-    matches!(
-        name,
-        "text"
-            | "textrm"
-            | "textit"
-            | "textbf"
-            | "textsf"
-            | "texttt"
-            | "mbox"
-            | "operatorname"
-            | "intertext"
-            | "label"
-            | "ref"
-    )
-}
-
-fn command_arg_counts(name: &str) -> (bool, u8) {
-    match name {
-        "sqrt" => (true, 1),
-        "fcolorbox" | "definecolor" => (false, 3),
-        "frac" | "dfrac" | "tfrac" | "cfrac" | "binom" | "dbinom" | "tbinom" | "cancelto"
-        | "overset" | "underset" | "stackrel" | "textcolor" | "colorbox" | "rule" => (false, 2),
-        "hat"
-        | "check"
-        | "breve"
-        | "acute"
-        | "grave"
-        | "tilde"
-        | "bar"
-        | "vec"
-        | "dot"
-        | "ddot"
-        | "dddot"
-        | "ddddot"
-        | "widehat"
-        | "widetilde"
-        | "overline"
-        | "underline"
-        | "overbrace"
-        | "underbrace"
-        | "overleftarrow"
-        | "overrightarrow"
-        | "overleftrightarrow"
-        | "underleftarrow"
-        | "underrightarrow"
-        | "underleftrightarrow"
-        | "cancel"
-        | "bcancel"
-        | "xcancel"
-        | "boxed"
-        | "fbox"
-        | "mathring"
-        | "mathrm"
-        | "mathbf"
-        | "mathit"
-        | "mathsf"
-        | "mathtt"
-        | "mathbb"
-        | "mathcal"
-        | "mathfrak"
-        | "mathscr"
-        | "hspace"
-        | "phantom"
-        | "vphantom"
-        | "hphantom"
-        | "substack"
-        | "tag"
-        | "text"
-        | "textrm"
-        | "textit"
-        | "textbf"
-        | "textsf"
-        | "texttt"
-        | "mbox"
-        | "operatorname"
-        | "label"
-        | "ref"
-        | "intertext" => (false, 1),
-        _ => (false, 0),
-    }
-}
-
-fn has_non_trivia(source: &str) -> bool {
-    let bytes = source.as_bytes();
-    trivia(bytes, 0) < bytes.len()
-}
-
-fn skip_bracket_arg(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut i = start + 1;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' => {
-                i = trivia(bytes, i);
-                continue;
-            }
-            b'\\' => {
-                i = command_end(bytes, i + 1);
-                continue;
-            }
-            b'{' => {
-                i = group_end(bytes, i)? + 1;
-                continue;
-            }
-            b']' => return Some(i),
-            _ => i += 1,
-        }
-    }
-    None
-}
-
-fn contains_style_declaration(source: &str) -> bool {
-    let bytes = source.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            i = trivia(bytes, i);
-            continue;
-        }
-        if bytes[i] != b'\\' {
-            i += 1;
-            continue;
-        }
-        let end = command_end(bytes, i + 1);
-        let name = &source[i + 1..end];
-        if style_for_command(name).is_some() {
-            return true;
-        }
-        if is_literal_text_command(name) {
-            let mut after = trivia(bytes, end);
-            if matches!(name, "operatorname" | "tag") && bytes.get(after) == Some(&b'*') {
-                after = trivia(bytes, after + 1);
-            }
-            if bytes.get(after) == Some(&b'{')
-                && let Some(close) = group_end(bytes, after)
-            {
-                i = close + 1;
-                continue;
-            }
-        }
-        i = end;
-    }
-    false
-}
-
-// Split depth-0 style switches (`\displaystyle ...`) and standalone braced
-// style groups (`{\displaystyle ...}`) into per-style segments. Commands
-// nested inside fractions, scripts, delimiters, or environments stay inside
-// their enclosing segment and are rejected below rather than silently ignored.
-fn split_style_segments(source: &str, base_style: MathStyle) -> Result<Vec<StyleSegment>, String> {
-    let bytes = source.as_bytes();
-    let mut segments = Vec::new();
-    let mut current_style = base_style;
-    let mut seg_start = 0usize;
-    let mut i = 0usize;
-    let mut env_depth = 0usize;
-    let mut delim_depth = 0usize;
-    let mut pending_opt_arg = false;
-    let mut pending_brace_args = 0u8;
-    let mut trailing_switch = false;
-    let mut need_tail = false;
-
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' => {
-                i = trivia(bytes, i);
-                continue;
-            }
-            b if b.is_ascii_whitespace() => {
-                i += 1;
-                continue;
-            }
-            b'\\' => {
-                let cmd_start = i;
-                let end = command_end(bytes, i + 1);
-                let name = &source[i + 1..end];
-                if name == "begin" {
-                    env_depth += 1;
-                    i = end;
-                    continue;
-                }
-                if name == "end" {
-                    env_depth = env_depth.saturating_sub(1);
-                    i = end;
-                    continue;
-                }
-                if name == "left" {
-                    delim_depth += 1;
-                    i = end;
-                    continue;
-                }
-                if name == "right" {
-                    delim_depth = delim_depth.saturating_sub(1);
-                    i = end;
-                    continue;
-                }
-                if env_depth > 0 || delim_depth > 0 || trailing_switch {
-                    i = end;
-                    continue;
-                }
-                if pending_brace_args > 0 {
-                    let (opt, args) = command_arg_counts(name);
-                    pending_opt_arg = opt;
-                    pending_brace_args = (pending_brace_args - 1).saturating_add(args);
-                    i = end;
-                    continue;
-                }
-                if let Some(new_style) = style_for_command(name) {
-                    let prefix = &source[seg_start..cmd_start];
-                    if has_non_trivia(prefix) {
-                        segments.push(StyleSegment {
-                            style: current_style,
-                            source: prefix.to_string(),
-                            is_braced_group: false,
-                        });
-                    }
-                    current_style = new_style;
-                    need_tail = true;
-                    seg_start = end;
-                    i = end;
-                    continue;
-                }
-                if name == "color" {
-                    trailing_switch = true;
-                    i = end;
-                    continue;
-                }
-                if is_literal_text_command(name) {
-                    let mut after = trivia(bytes, end);
-                    if matches!(name, "operatorname" | "tag") && bytes.get(after) == Some(&b'*') {
-                        after = trivia(bytes, after + 1);
-                    }
-                    if bytes.get(after) == Some(&b'{')
-                        && let Some(close) = group_end(bytes, after)
-                    {
-                        i = close + 1;
-                        pending_opt_arg = false;
-                        pending_brace_args = 0;
-                        continue;
-                    }
-                }
-                let (opt, args) = command_arg_counts(name);
-                pending_opt_arg = opt;
-                pending_brace_args = args;
-                i = end;
-            }
-            b'^' | b'_' if env_depth == 0 && delim_depth == 0 => {
-                pending_brace_args = 1;
-                pending_opt_arg = false;
-                i += 1;
-            }
-            b'[' if env_depth == 0 && delim_depth == 0 && pending_opt_arg => {
-                if let Some(close) = skip_bracket_arg(bytes, i) {
-                    pending_opt_arg = false;
-                    i = close + 1;
-                } else {
-                    pending_opt_arg = false;
-                    i += 1;
-                }
-            }
-            b'{' => {
-                let close =
-                    group_end(bytes, i).ok_or_else(|| "Unmatched brace in equation".to_string())?;
-                if env_depth > 0 || delim_depth > 0 || trailing_switch {
-                    i = close + 1;
-                    continue;
-                }
-                if pending_brace_args > 0 {
-                    pending_brace_args -= 1;
-                    pending_opt_arg = false;
-                    i = close + 1;
-                    continue;
-                }
-                let inner_start = trivia(bytes, i + 1);
-                if inner_start < close && bytes[inner_start] == b'\\' {
-                    let cmd_end = command_end(bytes, inner_start + 1);
-                    let name = &source[inner_start + 1..cmd_end];
-                    if let Some(group_style) = style_for_command(name) {
-                        let body = &source[cmd_end..close];
-                        if !has_non_trivia(body) {
-                            return Err(format!("Unsupported empty math style group: {name}"));
-                        }
-                        if contains_style_declaration(body) {
-                            return Err(format!("Unsupported nested equation command: {name}"));
-                        }
-                        let prefix = &source[seg_start..i];
-                        if has_non_trivia(prefix) {
-                            segments.push(StyleSegment {
-                                style: current_style,
-                                source: prefix.to_string(),
-                                is_braced_group: false,
-                            });
-                        }
-                        segments.push(StyleSegment {
-                            style: group_style,
-                            source: body.to_string(),
-                            is_braced_group: true,
-                        });
-                        need_tail = false;
-                        seg_start = close + 1;
-                        i = close + 1;
-                        continue;
-                    }
-                }
-                i = close + 1;
-            }
-            _ => {
-                if env_depth == 0 && delim_depth == 0 {
-                    pending_opt_arg = false;
-                    if pending_brace_args > 0 {
-                        pending_brace_args -= 1;
-                    }
-                }
-                i += 1;
-                while bytes.get(i).is_some_and(|b| b & 0xc0 == 0x80) {
-                    i += 1;
-                }
-            }
-        }
-    }
-
-    let tail = &source[seg_start..];
-    if has_non_trivia(tail) {
-        segments.push(StyleSegment {
-            style: current_style,
-            source: tail.to_string(),
-            is_braced_group: false,
-        });
-    } else if need_tail {
-        return Err("Unsupported trailing math style declaration".into());
-    }
-    Ok(segments)
-}
-
-fn atom_kind_index(kind: AtomKind) -> usize {
-    match kind {
-        AtomKind::Ord => 0,
-        AtomKind::Op => 1,
-        AtomKind::Bin => 2,
-        AtomKind::Rel => 3,
-        AtomKind::Open => 4,
-        AtomKind::Close => 5,
-        AtomKind::Punct => 6,
-        AtomKind::Inner => 7,
-    }
-}
-
-fn tex_convert_bin(prev: Option<AtomKind>, kind: AtomKind, next: Option<AtomKind>) -> AtomKind {
-    if kind != AtomKind::Bin {
-        return kind;
-    }
-    let invalid_prev = matches!(
-        prev,
-        None | Some(
-            AtomKind::Bin | AtomKind::Op | AtomKind::Rel | AtomKind::Open | AtomKind::Punct
-        )
-    );
-    let invalid_next = matches!(
-        next,
-        None | Some(AtomKind::Rel | AtomKind::Close | AtomKind::Punct)
-    );
-    if invalid_prev || invalid_next {
-        AtomKind::Ord
-    } else {
-        AtomKind::Bin
-    }
-}
-
-// Mirror latex-rust's private layout::space::TABLE inter-atom spacing table.
-fn tex_atom_space_mu(left: AtomKind, right: AtomKind, style: MathStyle) -> i64 {
-    const TABLE: [[i8; 8]; 8] = [
-        [0, 3, -4, -5, 0, 0, 0, -3],
-        [3, 3, 0, -5, 0, 0, 0, -3],
-        [-4, -4, 0, 0, -4, 0, 0, -4],
-        [-5, -5, 0, 0, 5, 0, 0, -5],
-        [0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 3, -4, -5, 0, 0, 0, -3],
-        [-3, -3, 0, -3, -3, -3, -3, -3],
-        [-3, 3, -4, -5, -3, 0, -3, -3],
-    ];
-    let raw = TABLE[atom_kind_index(left)][atom_kind_index(right)];
-    if raw > 0 {
-        i64::from(raw)
-    } else if raw < 0 && style.script_level() == 0 {
-        i64::from(-raw)
-    } else {
-        0
-    }
-}
-
-fn boundary_atom_kind(node: &MathNode) -> Option<AtomKind> {
-    spacing_atom_kind(node).or(match node {
-        MathNode::Space(_) | MathNode::Label(_) | MathNode::NoNumber | MathNode::Hline => None,
-        MathNode::ColorBox(_, _) | MathNode::FColorBox(_, _, _) => Some(AtomKind::Inner),
-        _ => Some(AtomKind::Ord),
-    })
-}
-
-fn is_non_printing_node(node: &MathNode) -> bool {
-    matches!(
-        node,
-        MathNode::Space(_) | MathNode::Label(_) | MathNode::NoNumber | MathNode::Hline
-    )
-}
-
-fn insert_edge_strut(ast: &mut MathNode, at_start: bool, at_end: bool) {
-    if !at_start && !at_end {
-        return;
-    }
-    if !matches!(ast, MathNode::Row(_)) {
-        let single = std::mem::replace(ast, MathNode::Row(Vec::new()));
-        *ast = MathNode::Row(vec![single]);
-    }
-    if let MathNode::Row(nodes) = ast {
-        if at_start && let Some(first_idx) = nodes.iter().position(|n| !is_non_printing_node(n)) {
-            nodes.insert(first_idx, MathNode::Strut(Dim::zero(), Dim::zero()));
-        }
-        if at_end && let Some(last_idx) = nodes.iter().rposition(|n| !is_non_printing_node(n)) {
-            nodes.insert(last_idx + 1, MathNode::Strut(Dim::zero(), Dim::zero()));
-        }
-    }
-}
-
-fn parse_normalized_ast(source: &str, size: f32) -> Result<(MathNode, Vec<Dim>, bool), String> {
-    let (ast, _) =
-        latex_rust::parse_with_options(source, &ParseOptions::new().with_max_depth(MAX_DEPTH))
-            .map_err(|e| e.to_string())?;
-    // Reject user-provided marker values and bound traversal before rewriting.
-    let restore_relation_glue = validate_ast(&ast)?;
-    let (normalized, spaces) = normalize_absolute_hspace(source, size)?;
-    let ast = if normalized == source {
-        ast
-    } else {
-        latex_rust::parse_with_options(&normalized, &ParseOptions::new().with_max_depth(MAX_DEPTH))
-            .map_err(|e| e.to_string())?
-            .0
-    };
-    Ok((ast, spaces, restore_relation_glue))
+    Ok(())
 }
 
 fn layout_source(source: &str, display: bool, size: f32) -> Result<MathBox, String> {
     validate_size(size)?;
     preflight(source)?;
-    // Parse the full source first so segmentation never hides syntax or depth errors.
-    let _ = latex_rust::parse_with_options(source, &ParseOptions::new().with_max_depth(MAX_DEPTH))
-        .map_err(|e| e.to_string())?;
-    let base_style = if display {
+    let (ast, _) =
+        latex_rust::parse_with_options(source, &ParseOptions::new().with_max_depth(MAX_DEPTH))
+            .map_err(|e| e.to_string())?;
+    let style = if display {
         MathStyle::Display
     } else {
         MathStyle::Text
     };
-    let segments = split_style_segments(source, base_style)?;
-    if segments.is_empty() {
-        return Err("Equation is empty or exceeds source size limit".into());
-    }
-    for segment in &segments {
-        if contains_style_declaration(&segment.source) {
-            return Err("Unsupported nested equation math style declaration".into());
-        }
-    }
     // 1 logical CSS pixel = 3/4 point; this matters for AMS absolute spacing.
     let em_pt = Dim::from_ieee32_bits((size * 0.75).to_bits());
-    let params = MathParams::from_font(font()?).map_err(|e| e.to_string())?;
-
-    let tree = if segments.len() == 1 {
-        let seg = &segments[0];
-        let (mut ast, spaces, restore_relation_glue) = parse_normalized_ast(&seg.source, size)?;
-        if restore_relation_glue || !spaces.is_empty() {
-            resolve_layout_spacing(&mut ast, seg.style, &spaces, &params);
-        }
-        validate_ast(&ast)?;
-        // Layout's own recursion guard is 32. The AST is restricted further above.
-        latex_rust::layout_with_em_size_pt(&ast, font()?, seg.style, &em_pt)
-            .map_err(|e| e.to_string())?
-    } else {
-        struct ParsedSegment {
-            style: MathStyle,
-            is_braced_group: bool,
-            ast: MathNode,
-            raw_kinds: Vec<AtomKind>,
-            outer_first: Option<AtomKind>,
-            outer_last: Option<AtomKind>,
-            left_has_strut: bool,
-            right_has_strut: bool,
-        }
-
-        let mut parsed = Vec::with_capacity(segments.len());
-        for seg in &segments {
-            let (mut ast, spaces, restore_relation_glue) = parse_normalized_ast(&seg.source, size)?;
-            if restore_relation_glue || !spaces.is_empty() {
-                resolve_layout_spacing(&mut ast, seg.style, &spaces, &params);
-            }
-            validate_ast(&ast)?;
-            let raw_kinds: Vec<AtomKind> = match &ast {
-                MathNode::Row(nodes) => nodes.iter().filter_map(boundary_atom_kind).collect(),
-                node => boundary_atom_kind(node).into_iter().collect(),
-            };
-            parsed.push(ParsedSegment {
-                style: seg.style,
-                is_braced_group: seg.is_braced_group,
-                ast,
-                raw_kinds,
-                outer_first: None,
-                outer_last: None,
-                left_has_strut: false,
-                right_has_strut: false,
-            });
-        }
-
-        // Resolve TeX atom classes left-to-right across segment boundaries so
-        // binary operators split by style scopes retain binary status/glue.
-        for idx in 0..parsed.len() {
-            let prev_outer = idx.checked_sub(1).and_then(|p| parsed[p].outer_last);
-            let next_raw_first = parsed.get(idx + 1).and_then(|n| {
-                if n.is_braced_group {
-                    Some(AtomKind::Ord)
-                } else {
-                    n.raw_kinds.first().copied()
-                }
-            });
-            if parsed[idx].is_braced_group {
-                parsed[idx].outer_first = Some(AtomKind::Ord);
-                parsed[idx].outer_last = Some(AtomKind::Ord);
-                continue;
-            }
-            let kinds = &parsed[idx].raw_kinds;
-            if kinds.is_empty() {
-                parsed[idx].outer_last = prev_outer;
-                continue;
-            }
-            let mut left = prev_outer;
-            let mut first_eff = None;
-            let mut prev_before_last = prev_outer;
-            for pos in 0..kinds.len() {
-                let raw = kinds[pos];
-                let right = kinds.get(pos + 1).copied().or(next_raw_first);
-                let conv = tex_convert_bin(left, raw, right);
-                if pos == 0 {
-                    first_eff = Some(conv);
-                }
-                if pos + 1 == kinds.len() {
-                    prev_before_last = left;
-                }
-                left = Some(conv);
-            }
-            parsed[idx].outer_first = first_eff;
-            parsed[idx].outer_last = left;
-
-            let lead_bin_valid = parsed[idx].raw_kinds.first() == Some(&AtomKind::Bin)
-                && first_eff == Some(AtomKind::Bin)
-                && matches!(
-                    prev_outer,
-                    Some(AtomKind::Ord | AtomKind::Close | AtomKind::Inner)
-                );
-            let trail_bin_valid = parsed[idx].raw_kinds.last() == Some(&AtomKind::Bin)
-                && left == Some(AtomKind::Bin)
-                && matches!(
-                    prev_before_last,
-                    Some(AtomKind::Ord | AtomKind::Close | AtomKind::Inner)
-                )
-                && matches!(
-                    next_raw_first,
-                    Some(
-                        AtomKind::Ord
-                            | AtomKind::Op
-                            | AtomKind::Bin
-                            | AtomKind::Open
-                            | AtomKind::Inner
-                    )
-                );
-            parsed[idx].left_has_strut = lead_bin_valid;
-            parsed[idx].right_has_strut = trail_bin_valid;
-            insert_edge_strut(&mut parsed[idx].ast, lead_bin_valid, trail_bin_valid);
-        }
-
-        let mut boxes = Vec::with_capacity(parsed.len() * 2);
-        let mut last_non_empty: Option<usize> = None;
-        for (idx, seg) in parsed.iter().enumerate() {
-            if let Some(prev_idx) = last_non_empty
-                && let (Some(left_kind), Some(right_kind)) =
-                    (parsed[prev_idx].outer_last, seg.outer_first)
-                && !parsed[prev_idx].right_has_strut
-                && !seg.left_has_strut
-            {
-                let boundary_style = if parsed[prev_idx].is_braced_group {
-                    base_style
-                } else {
-                    seg.style
-                };
-                let mu = tex_atom_space_mu(left_kind, right_kind, boundary_style);
-                if mu != 0 {
-                    boxes.push(MathBox::kern(params.mu(boundary_style) * Dim::from_i64(mu)));
-                }
-            }
-            let bx = latex_rust::layout_with_em_size_pt(&seg.ast, font()?, seg.style, &em_pt)
-                .map_err(|e| e.to_string())?;
-            boxes.push(bx);
-            if !seg.raw_kinds.is_empty() || seg.is_braced_group {
-                last_non_empty = Some(idx);
-            }
-        }
-        MathBox::hpack(boxes)
-    };
+    validate_ast(&ast, &em_pt)?;
+    let tree = latex_rust::layout_with_em_size_pt(&ast, font()?, style, &em_pt)
+        .map_err(|e| e.to_string())?;
 
     let mut pending = vec![(&tree, 0usize)];
     let mut count = 0;
@@ -1464,6 +467,160 @@ mod tests {
 
     fn value(dim: &Dim) -> f32 {
         scalar(dim).unwrap()
+    }
+
+    #[test]
+    fn math_coverage_boxed_spacing_keeps_the_requested_skip() {
+        let width = |s| value(&layout_source(s, false, 20.).unwrap().width);
+        let thin = width(r"u\,g") - width("ug");
+        for (base, spaced) in [
+            (r"\boxed{u}g", r"\boxed{u}\,g"),
+            (r"\boxed{=}g", r"\boxed{=}\,g"),
+        ] {
+            assert!(
+                (width(spaced) - width(base) - thin).abs() < 0.0005,
+                "{spaced}"
+            );
+        }
+    }
+
+    #[test]
+    fn math_coverage_binary_spacing_supplements_automatic_glue() {
+        let width = |s: &str| value(&layout_source(s, false, 20.).unwrap().width);
+        for (base, spaced, control, control_spaced) in [
+            ("a+b", r"a\,+\,b", "ab", r"a\,\,b"),
+            ("a+b", r"a\,+b", "ab", r"a\,b"),
+            ("a+b", r"a+\,b", "ab", r"a\,b"),
+            ("a+b", r"a+\hspace{-1pt}b", "ab", r"a\hspace{-1pt}b"),
+            (r"a\times b", r"a\,\times\,b", "ab", r"a\,\,b"),
+            ("a+b", r"a\displaystyle +b", "ab", "ab"),
+            ("-a", r"-\,a", "ab", r"a\,b"),
+            ("a+-b", r"a+\,-b", "ab", r"a\,b"),
+            ("(a+)", r"(a\,+)", "ab", r"a\,b"),
+            ("x^{a+b}", r"x^{a+\,b}", "x^{ab}", r"x^{a\,b}"),
+        ] {
+            assert!(
+                (width(spaced) - width(base) - (width(control_spaced) - width(control))).abs()
+                    < 0.0005,
+                "incorrect glue for {spaced}"
+            );
+        }
+        let glyph_positions = |s| {
+            let row = layout_source(s, false, 20.).unwrap();
+            let BoxContent::HList(items) = row.content else {
+                panic!("expected row")
+            };
+            let mut x = Dim::zero();
+            items
+                .into_iter()
+                .filter_map(|item| {
+                    let position = value(&x);
+                    x = &x + &item.width;
+                    matches!(item.content, BoxContent::Glyph { .. }).then_some(position)
+                })
+                .collect::<Vec<_>>()
+        };
+        let base = glyph_positions("a+b");
+        assert_eq!(base.len(), 3);
+        let thin = width(r"a\,b") - width("ab");
+        for (s, offsets) in [(r"a\,+b", [0., thin, thin]), (r"a+\,b", [0., 0., thin])] {
+            for ((actual, base), offset) in glyph_positions(s).into_iter().zip(&base).zip(offsets) {
+                assert!((actual - base - offset).abs() < 0.0005, "{s}");
+            }
+        }
+    }
+
+    #[test]
+    fn math_coverage_nested_styles_preserve_scope_and_size() {
+        for (plain, styled) in [
+            (
+                r"\frac{\frac{u}{v}}{w}",
+                r"\frac{\displaystyle\frac{u}{v}}{w}",
+            ),
+            (r"z^{\frac{u}{v}}", r"z^{\displaystyle\frac{u}{v}}"),
+            (r"z_{\frac{u}{v}}", r"z_{\displaystyle\frac{u}{v}}"),
+            (
+                r"\left(\frac{u}{v}\right)",
+                r"\left(\displaystyle\frac{u}{v}\right)",
+            ),
+        ] {
+            assert!(
+                vector(styled, false).height > vector(plain, false).height,
+                "{styled}"
+            );
+        }
+        let scoped = layout_source(
+            r"\begin{matrix}\displaystyle\frac{u}{v}&\frac{p}{q}\end{matrix}",
+            false,
+            20.,
+        )
+        .unwrap();
+        let unscoped = layout_source(
+            r"\begin{matrix}\displaystyle\frac{u}{v}&\displaystyle\frac{p}{q}\end{matrix}",
+            false,
+            20.,
+        )
+        .unwrap();
+        assert!(value(&scoped.width) < value(&unscoped.width));
+        let width = |s| value(&layout_source(s, false, 20.).unwrap().width);
+        assert!(
+            (20. * (width(r"z^{\displaystyle a\hspace{1pt}b}") - width(r"z^{\displaystyle ab}"))
+                - 4. / 3.)
+                .abs()
+                < 0.01
+        );
+        for (styled, plain) in [
+            (r"\frac{\textstyle u}{\textstyle v}", r"\frac{u}{v}"),
+            (r"z^{\scriptstyle 2}+q", "z^{2}+q"),
+            (
+                r"\begin{matrix}\textstyle u&v\end{matrix}",
+                r"\begin{matrix}u&v\end{matrix}",
+            ),
+        ] {
+            assert_eq!(
+                vector(styled, true).svg,
+                vector(plain, true).svg,
+                "{styled}"
+            );
+        }
+    }
+
+    #[test]
+    fn math_coverage_explicit_operator_limits_override_the_default() {
+        for (placed, plain) in [
+            (r"\sum\nolimits_{i}^{n}", r"\sum_{i}^{n}"),
+            (r"\prod\nolimits_{i}^{n}", r"\prod_{i}^{n}"),
+        ] {
+            assert!(
+                vector(placed, true).height < vector(plain, true).height,
+                "{placed}"
+            );
+            assert_eq!(
+                vector(placed, false).svg,
+                vector(plain, false).svg,
+                "{placed}"
+            );
+        }
+        for display in [false, true] {
+            assert!(
+                vector(r"\int\limits_{u}^{v}", display).height
+                    > vector(r"\int_{u}^{v}", display).height
+            );
+            assert!(vector(r"\lim\nolimits_i", display).depth < vector(r"\lim_i", display).depth);
+            assert_eq!(
+                vector(r"\int\nolimits_{u}^{v}", display).svg,
+                vector(r"\int_{u}^{v}", display).svg
+            );
+            assert_eq!(
+                vector(r"\sum_i^n\limits", display).svg,
+                vector(r"\sum\limits_i^n", display).svg
+            );
+        }
+        assert_eq!(
+            vector(r"\sum\limits_{i}^{n}", true).svg,
+            vector(r"\sum_{i}^{n}", true).svg
+        );
+        assert!(render_svg(r"x\limits^2", false, 20., [0; 4]).is_err());
     }
 
     #[test]
@@ -1606,11 +763,6 @@ mod tests {
                 (width(r"x^{a\;=\;b}") - script - 2. * script_thin).abs() < 0.0005,
                 "explicit script spacing must remain without text-style relation glue"
             );
-
-            assert!(
-                layout_source(r"a\;+\;b", display, 20.).is_err(),
-                "spacing that can reclassify a binary atom must remain unsupported"
-            );
         }
     }
 
@@ -1654,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_math_style_declarations_apply_scoped_styles_and_reject_nested() {
+    fn explicit_math_style_declarations_apply_scoped_styles_and_reject_empty() {
         for command in [
             "displaystyle",
             "textstyle",
@@ -1702,38 +854,11 @@ mod tests {
         let unspaced_eq = render_svg(r"{\displaystyle \frac{a}{b}}1", false, 20.0, [0; 4]).unwrap();
         assert!(spaced_eq.width > unspaced_eq.width);
 
-        for unsupported in [
-            r"\frac{\displaystyle a}{b}",
-            r"\frac{a}{\displaystyle b}",
-            r"x^{\displaystyle 2}",
-            r"x_{\displaystyle i}",
-            r"\left(\displaystyle x\right)",
-            r"\begin{matrix}\displaystyle a\end{matrix}",
-            r"{\displaystyle}",
-            r"x+\displaystyle",
-            r"{\displaystyle {\scriptscriptstyle x}}",
-            r"\color{red}\displaystyle \frac{a}{b}",
-        ] {
+        for unsupported in [r"{\displaystyle}", r"x+\displaystyle", r"z^\displaystyle 2"] {
             assert!(
                 render_svg(unsupported, false, 20.0, [0; 4]).is_err(),
-                "unexpectedly accepted nested/empty style command: {unsupported}"
+                "unexpectedly accepted misplaced/empty style command: {unsupported}"
             );
-        }
-    }
-
-    #[test]
-    fn explicit_large_operator_limit_modifiers_are_not_silently_ignored() {
-        for display in [false, true] {
-            for source in [
-                r"\sum\nolimits_{i}^{n}",
-                r"\prod\nolimits_{i}^{n}",
-                r"\int\limits_{a}^{b}",
-            ] {
-                assert!(
-                    render_svg(source, display, 20.0, [0; 4]).is_err(),
-                    "silently ignored: {source}"
-                );
-            }
         }
     }
 
@@ -2165,7 +1290,7 @@ mod tests {
             let base = render_svg(baseline, display, 20.0, [0; 4]).unwrap();
             assert!((actual.width - base.width - 8.0 / 3.0).abs() < 0.001);
         }
-        // A user cannot inject or collide with internal marker dimensions.
+        // Relative skips still have a bounded range.
         for source in [
             r"x\hspace{65em}x",
             r"x^{\hspace{66em}}",
@@ -2176,26 +1301,25 @@ mod tests {
     }
 
     #[test]
-    fn absolute_hspace_normalization_preserves_literals_comments_and_escapes() {
+    fn absolute_hspace_parsing_preserves_literals_comments_and_escapes() {
         for source in [
             r"\text{x\hspace{1pt}y}",
             r"\mbox{x\hspace{1bp}y}",
             r"\operatorname{x\hspace{1pt}y}",
             r"\text{nested {x\hspace{1pt}} y}",
-            r"\\hspace{1pt}",
-            r"\hspaceother{1pt}",
+            r"\text{\\hspace{1pt}}",
             "x% \\hspace{1pt}\ny",
         ] {
-            assert_eq!(normalize_absolute_hspace(source, 20.0).unwrap().0, source);
+            let (ast, _) = latex_rust::parse_with_options(source, &ParseOptions::new()).unwrap();
+            assert!(!ast.gold().contains("(space hspace-pt"), "{source}");
         }
         let source = "x\\hspace % comment\n {1% inner\n pt}x";
         let base = vector("xx", false);
         let spaced = vector(source, false);
         assert!((spaced.width - base.width - 4.0 / 3.0).abs() < 0.01);
         let source = r"\text{\hspace{1pt}}x\hspace{1bp}x";
-        let (normalized, _) = normalize_absolute_hspace(source, 20.0).unwrap();
-        assert!(normalized.starts_with(r"\text{\hspace{1pt}}x"));
-        assert!(normalized.ends_with("em}x"));
+        let (ast, _) = latex_rust::parse_with_options(source, &ParseOptions::new()).unwrap();
+        assert_eq!(ast.gold().matches("(space hspace-pt").count(), 1);
         for source in [
             r"x\hspace{1pt",
             r"x\hspace{{1pt}}x",

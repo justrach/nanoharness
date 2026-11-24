@@ -2,7 +2,7 @@
 
 Nano retains the original desktop equation implementation (`math_layout.rs`
 before the native-UI migration), including its geometry corrections and safety
-checks. The pinned `latex-rust = 2.1.1` dependency supplies the real TeX AST,
+checks. The vendored `latex-rust` 2.1.1 SVG backend supplies the TeX AST,
 exact-rational box layout, and embedded STIX Two Math font. `usvg` measures
 trusted generated glyph outlines to keep italic bearings and negative spacing
 inside the viewport. No system math-font installation or network access is
@@ -21,12 +21,12 @@ operator limits, text/font commands, colors, and supported absolute spacing.
 Inline equations share a baseline with surrounding styled prose and links.
 Selection copies the original delimited equation source, not flattened math.
 
-The original intentional literal fallbacks remain: unknown/malformed input,
-explicit style declarations, explicit `limits`/`nolimits` overrides,
-barless/style-specific fraction commands, `rule`, and explicit spacing whose
-semantics the upstream AST loses. Explicit spacing around relation atoms is
-retained alongside the relation's automatic TeX glue; unsupported spacing that
-could change binary-operator classification still falls back to literal source.
+Math style declarations apply within the current math list, including fractions,
+scripts, delimiters, and matrix cells. `\limits` and `\nolimits` override the
+operator's default placement. Explicit skips are added to automatic TeX glue
+without changing how binary operators are classified; `pt`/`bp` skips keep
+physical width across style changes. Unknown or malformed input, barless and
+style-specific fraction commands, and `\rule` still fall back to literal source.
 Source/token/depth/AST/grid/box/output/area limits and the 32-entry/2-MiB vector
 cache are retained. FFI panics are caught; failed layouts return literal source
 rather than a changed equation.
@@ -41,3 +41,15 @@ scripts/heavy-build.sh cargo test --locked --manifest-path apps/nano/native_math
 The first build requires Cargo and its pinned dependency sources; release
 binaries contain the math engine and font and require neither Cargo nor a
 runtime download.
+
+## Vendored parser and layout
+
+`vendor/latex-rust` is sourced from the crates.io 2.1.1 release (upstream
+`e377ecb4af876b8b75e62b8b83e8a9535499944c`), with only the SVG backend built.
+The patch preserves style declarations, explicit operator placement and
+absolute skips in the AST and resolves spacing in the actual row layout.
+The upstream crate discarded the declarations and treated skips as atom
+boundaries; moving the behavior here avoids guessing from source strings or
+repairing geometry after layout. Keep the upstream notices and font license
+when updating it. Remove the local dependency once upstream preserves these
+semantics and the native and transcript regressions still pass.
