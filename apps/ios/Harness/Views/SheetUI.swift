@@ -20,8 +20,8 @@ struct SheetCard<Content: View>: View {
         VStack(spacing: 0) {
             content
         }
-        .background(SheetStyle.cardFill, in: RoundedRectangle(cornerRadius: SheetStyle.cardRadius))
-        .overlay(RoundedRectangle(cornerRadius: SheetStyle.cardRadius)
+        .background(SheetStyle.cardFill, in: RoundedRectangle(cornerRadius: SheetStyle.cardRadius, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: SheetStyle.cardRadius, style: .continuous)
             .strokeBorder(hairline(0.06), lineWidth: 1))
     }
 }

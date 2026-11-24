@@ -392,6 +392,7 @@ struct ComposerView: View {
     @AppStorage(HomeUiMode.storageKey) private var uiModeRaw = HomeUiMode.zen.rawValue
     @AppStorage(HomeMovingPart.overridesStorageKey) private var uiPartOverridesRaw = ""
     let questionClosedAtMs: Int64?
+    let onOpenPullRequest: ((ChangeRequestSummary) -> Void)?
 
     private var showsGitChrome: Bool {
         HomeHierarchyProfile.resolved(baseModeRaw: uiModeRaw, overridesRaw: uiPartOverridesRaw).showsGitCheckoutChrome
@@ -447,11 +448,13 @@ struct ComposerView: View {
     @State private var attachmentLease: QueueEditLease?
 
     init(store: SessionStore, chat: Chat, runLive: Bool, attachmentDraft: AttachmentDraft,
-         questionClosedAtMs: Int64? = nil) {
+         questionClosedAtMs: Int64? = nil,
+         onOpenPullRequest: ((ChangeRequestSummary) -> Void)? = nil) {
         self.store = store
         self.chat = chat
         self.runLive = runLive
         self.questionClosedAtMs = questionClosedAtMs
+        self.onOpenPullRequest = onOpenPullRequest
         self.attachmentDraft = attachmentDraft
         _text = State(initialValue: DraftStore.load(DraftStore.chatKey(chat.id)))
     }
@@ -663,7 +666,11 @@ struct ComposerView: View {
                 onVoice: editingQueuedId == nil ? { showVoiceMode = true } : nil
             ) {
                 if showsGitChrome, let pullRequest = model.changeRequest(for: chat) {
-                    PullRequestBadge(summary: pullRequest, surface: .composer)
+                    PullRequestBadge(
+                        summary: pullRequest,
+                        surface: .composer,
+                        onOpen: onOpenPullRequest.map { handler in { handler(pullRequest) } }
+                    )
                 }
                 if showsGitChrome, let branch = chat.branch?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !branch.isEmpty {

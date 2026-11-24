@@ -8,9 +8,9 @@ enum PullRequestBadgeSurface {
 extension ChangeRequestState {
     var badgeColor: Color {
         switch self {
-        case .open: return Theme.statusCompleted
-        case .merged: return Theme.inlineCodeText
-        case .closed: return Theme.danger
+        case .open: return Theme.warning
+        case .merged: return Theme.accent
+        case .closed: return Theme.statusCompleted
         }
     }
 }
@@ -28,13 +28,17 @@ struct PullRequestBadge: View {
     @Environment(\.colorScheme) private var colorScheme
     let summary: ChangeRequestSummary
     var surface: PullRequestBadgeSurface = .sessionRow
+    var onOpen: (() -> Void)? = nil
 
     private var composer: Bool { surface == .composer }
 
     var body: some View {
         Button {
-            guard let url = URL(string: summary.url) else { return }
-            openURL(url)
+            if let onOpen {
+                onOpen()
+            } else if let url = URL(string: summary.url) {
+                openURL(url)
+            }
         } label: {
             HStack(spacing: composer ? 6 : 0) {
                 if composer {
@@ -53,7 +57,7 @@ struct PullRequestBadge: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(summary.accessibilityLabel)
-        .accessibilityHint("Opens in your browser")
+        .accessibilityHint(onOpen != nil ? "Opens GitHub dashboard" : "Opens in your browser")
     }
 
     private var badgeShape: RoundedRectangle {

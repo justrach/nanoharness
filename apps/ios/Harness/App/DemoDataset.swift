@@ -539,6 +539,139 @@ final class DemoDataset {
         }
     }
 
+    // MARK: GitHub repository browser demo
+
+    func browseGitHub(
+        kind: GitHubRepositoryKind,
+        state: GitHubRepositoryState?,
+        number: UInt64?,
+        page: Int?
+    ) -> BrowseCheckoutGitHubResponse {
+        let repo = GitHubRepositoryIdentity(
+            key: "github.com/demo/fieldnotes",
+            host: "github.com",
+            owner: "demo",
+            name: "fieldnotes",
+            url: "https://github.com/demo/fieldnotes"
+        )
+        let issues: [GitHubRepositoryItem] = [
+            GitHubRepositoryItem(number: 156, title: "Starred named operators and gathered equations fall back", url: "\(repo.url)/issues/156", state: "open", isDraft: false, author: "lin", updatedAt: "2026-11-24T12:00:00Z", createdAt: "2026-11-24T08:00:00Z", labels: ["math"]),
+            GitHubRepositoryItem(number: 155, title: "A dollar price steals the opener of a later equation", url: "\(repo.url)/issues/155", state: "open", isDraft: false, author: "lin", updatedAt: "2026-11-24T09:00:00Z", createdAt: "2026-11-24T07:30:00Z", labels: ["math"]),
+            GitHubRepositoryItem(number: 154, title: "Display math inside a list item loses its paragraph", url: "\(repo.url)/issues/154", state: "open", isDraft: false, author: "kai", updatedAt: "2026-11-23T18:00:00Z", createdAt: "2026-11-23T10:00:00Z", labels: ["math"]),
+            GitHubRepositoryItem(number: 153, title: "Opening a link stays inside its own pane", url: "\(repo.url)/issues/153", state: "closed", isDraft: false, author: "maya", updatedAt: "2026-11-22T14:00:00Z", createdAt: "2026-11-21T09:00:00Z", labels: ["splits"]),
+            GitHubRepositoryItem(number: 152, title: "Keyboard shortcut hint clips in split headers", url: "\(repo.url)/issues/152", state: "open", isDraft: false, author: "maya", updatedAt: "2026-11-23T11:00:00Z", createdAt: "2026-11-22T15:00:00Z", labels: ["splits"]),
+            GitHubRepositoryItem(number: 151, title: "Composer mentions menu loses selection on reload", url: "\(repo.url)/issues/151", state: "closed", isDraft: false, author: "lin", updatedAt: "2026-11-21T16:00:00Z", createdAt: "2026-11-20T14:00:00Z", labels: ["composer"]),
+            GitHubRepositoryItem(number: 150, title: "Voice button tooltip stays stuck after opening sheet", url: "\(repo.url)/issues/150", state: "open", isDraft: false, author: "noah", updatedAt: "2026-11-23T08:00:00Z", createdAt: "2026-11-22T19:00:00Z", labels: ["splits"]),
+            GitHubRepositoryItem(number: 149, title: "Draft persistence drops trailing attachment chip", url: "\(repo.url)/issues/149", state: "closed", isDraft: false, author: "lin", updatedAt: "2026-11-21T12:00:00Z", createdAt: "2026-11-20T09:00:00Z", labels: ["composer"]),
+            GitHubRepositoryItem(number: 148, title: "Aligned environments fail to parse nested fractions", url: "\(repo.url)/issues/148", state: "closed", isDraft: false, author: "kai", updatedAt: "2026-11-20T15:00:00Z", createdAt: "2026-11-19T12:00:00Z", labels: ["math"]),
+            GitHubRepositoryItem(number: 147, title: "Equation baseline shifts inside blockquotes", url: "\(repo.url)/issues/147", state: "closed", isDraft: false, author: "lin", updatedAt: "2026-11-20T10:00:00Z", createdAt: "2026-11-19T10:00:00Z", labels: ["math"]),
+            GitHubRepositoryItem(number: 146, title: "Appearance sheet forgets warm accent on relaunch", url: "\(repo.url)/issues/146", state: "closed", isDraft: false, author: "noah", updatedAt: "2026-11-19T17:00:00Z", createdAt: "2026-11-19T08:00:00Z", labels: ["settings"]),
+            GitHubRepositoryItem(number: 145, title: "Queued message edit clears draft attachment preview", url: "\(repo.url)/issues/145", state: "closed", isDraft: false, author: "maya", updatedAt: "2026-11-22T09:00:00Z", createdAt: "2026-11-21T11:00:00Z", labels: ["composer"]),
+        ]
+        let pulls: [GitHubRepositoryItem] = [
+            GitHubRepositoryItem(number: 90, title: "Stream pull request status on every client", url: "\(repo.url)/pull/90", state: "open", isDraft: false, author: "lin", updatedAt: "2026-11-24T11:30:00Z", createdAt: "2026-11-23T14:00:00Z", labels: ["sync", "ui"]),
+            GitHubRepositoryItem(number: 89, title: "Add editorial analytics cards to repository sheet", url: "\(repo.url)/pull/89", state: "open", isDraft: true, author: "maya", updatedAt: "2026-11-24T10:00:00Z", createdAt: "2026-11-24T08:00:00Z", labels: ["ui"]),
+            GitHubRepositoryItem(number: 88, title: "Match Direct3D squircle corners to Metal shader", url: "\(repo.url)/pull/88", state: "merged", isDraft: false, author: "kai", updatedAt: "2026-11-23T16:00:00Z", createdAt: "2026-11-22T12:00:00Z", labels: ["perf", "ui"]),
+            GitHubRepositoryItem(number: 87, title: "Deduplicate checkout change request streams", url: "\(repo.url)/pull/87", state: "merged", isDraft: false, author: "lin", updatedAt: "2026-11-22T17:00:00Z", createdAt: "2026-11-21T10:00:00Z", labels: ["sync"]),
+            GitHubRepositoryItem(number: 86, title: "Guard empty body in repository issue summary", url: "\(repo.url)/pull/86", state: "closed", isDraft: false, author: "noah", updatedAt: "2026-11-21T14:00:00Z", createdAt: "2026-11-20T16:00:00Z", labels: ["rpc"]),
+            GitHubRepositoryItem(number: 85, title: "Coalesce host proof echo timer under background wake", url: "\(repo.url)/pull/85", state: "merged", isDraft: false, author: "kai", updatedAt: "2026-11-20T18:00:00Z", createdAt: "2026-11-19T14:00:00Z", labels: ["perf", "rpc"]),
+        ]
+
+        func filterByState(_ source: [GitHubRepositoryItem]) -> [GitHubRepositoryItem] {
+            switch state ?? .open {
+            case .all: return source
+            case .open: return source.filter { $0.state == "open" }
+            case .closed: return source.filter { $0.state == "closed" || $0.state == "merged" }
+            }
+        }
+
+        switch kind {
+        case .issues:
+            return BrowseCheckoutGitHubResponse(
+                repository: repo, kind: .issues, items: filterByState(issues),
+                page: page ?? 1, hasNextPage: false, truncated: false
+            )
+        case .pulls:
+            return BrowseCheckoutGitHubResponse(
+                repository: repo, kind: .pulls, items: filterByState(pulls),
+                page: page ?? 1, hasNextPage: false, truncated: false
+            )
+        case .pull, .issue:
+            let num = number ?? (kind == .pull ? 90 : 156)
+            let matched = (pulls + issues).first { $0.number == num }
+            let detail = GitHubRepositoryDetail(
+                number: num,
+                title: matched?.title ?? "Repository item #\(num)",
+                url: "\(repo.url)/\(kind == .pull ? "pull" : "issues")/\(num)",
+                state: matched?.state ?? "open",
+                body: """
+                Updates the repository browser so chart filters operate directly on the loaded page with zero extra round trips.
+
+                - Adds KPI strip (`On This Page`, `Open`, `Closed`, `Contributors`)
+                - Renders interactive `State Split` donut and `By Label` bars
+                - Preserves read-only relay boundaries
+                """,
+                author: matched?.author ?? "lin",
+                createdAt: matched?.createdAt ?? "2026-11-24T08:00:00Z",
+                updatedAt: matched?.updatedAt ?? "2026-11-24T12:00:00Z",
+                isDraft: matched?.isDraft ?? false,
+                baseRef: kind == .pull ? "main" : nil,
+                headRef: kind == .pull ? "veil-fade" : nil,
+                additions: kind == .pull ? 184 : nil,
+                deletions: kind == .pull ? 42 : nil,
+                changedFiles: kind == .pull ? 4 : nil,
+                labels: matched?.labels ?? ["math"]
+            )
+            return BrowseCheckoutGitHubResponse(repository: repo, kind: kind, detail: detail)
+        case .files:
+            let sampleFiles = [
+                GitHubRepositoryFile(
+                    filename: "apps/ios/Harness/Views/GitHubRepositorySheet.swift",
+                    status: "added",
+                    additions: 142,
+                    deletions: 0,
+                    patch: """
+                    +struct GitHubOverviewSection: View {
+                    +    let stats: GitHubOverviewStats
+                    +    @Binding var filter: GitHubClientFilter
+                    +}
+                    """,
+                    previousFilename: nil,
+                    patchTruncated: false
+                ),
+                GitHubRepositoryFile(
+                    filename: "apps/ios/Harness/Views/PullRequestBadge.swift",
+                    status: "modified",
+                    additions: 12,
+                    deletions: 6,
+                    patch: """
+                     struct PullRequestBadge: View {
+                    -    // Always opens browser directly
+                    +    var onOpen: (() -> Void)? = nil
+                     }
+                    """,
+                    previousFilename: nil,
+                    patchTruncated: false
+                ),
+            ]
+            return BrowseCheckoutGitHubResponse(repository: repo, kind: .files, files: sampleFiles)
+        case .activity:
+            let sampleEvents = [
+                GitHubRepositoryEvent(
+                    id: "ev-1", event: "commented", author: "maya", createdAt: "2026-11-24T11:40:00Z",
+                    body: "Verified dark and light Contrast checks pass across both Chart cards and item chips.",
+                    commitSha: nil
+                ),
+                GitHubRepositoryEvent(
+                    id: "ev-2", event: "committed", author: "lin", createdAt: "2026-11-24T10:15:00Z",
+                    body: "Add client-side State Split donut and By Label filter reset",
+                    commitSha: "a9c45a5aa544"
+                ),
+            ]
+            return BrowseCheckoutGitHubResponse(repository: repo, kind: .activity, events: sampleEvents)
+        }
+    }
+
     // MARK: Streaming simulation
 
     private func simulateTurn(store: SessionStore, chatId: String, prompt: String) {
