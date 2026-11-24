@@ -15,6 +15,9 @@ const Lifecycle = @import("window_lifecycle.zig").Lifecycle;
 pub const std_options: std.Options = .{ .log_level = .warn, .enable_segfault_handler = true };
 
 pub fn main(init: std.process.Init) !void {
+    if (comptime @import("builtin").os.tag == .macos) {
+        @import("mac_bundle.zig").seed(init.gpa, init.io, init.environ_map);
+    }
     theme.registerFonts();
     var a: App = .init(init.gpa, init.io, Engine.portFrom(init.environ_map));
     defer a.deinit();
