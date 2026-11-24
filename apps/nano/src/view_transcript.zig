@@ -893,6 +893,7 @@ fn part(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const 
         .@"error" => errorPart(c, a, k, e, p, at),
         .image => @import("view_reply_images.zig").draw(c, a, k, at.chat_id, p.path, p.text.items, null),
         .visual => @import("view_visual.zig").draw(c, a, k, e, p),
+        .artifact => @import("view_artifact.zig").draw(c, a, k, e, p),
         .delegation => attachment(c, k, .widget, "Delegated to a subagent"),
         .input => {
             // The stored part still records the request for history and sync;
@@ -1347,6 +1348,10 @@ pub fn estimateEntryHeight(e: *const tr.Entry, col_w: f32) f32 {
                 .image, .visual => {
                     in_tools = false;
                     h += 240;
+                },
+                .artifact => {
+                    in_tools = false;
+                    h += 88;
                 },
                 .input => {
                     in_tools = false;

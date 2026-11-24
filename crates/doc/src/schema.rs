@@ -82,6 +82,14 @@ struct DocPartJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     script: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    visibility: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     text: Option<String>,
     /// Thinking body for `kind: "reasoning"` (additive). Deliberately NOT the
     /// `text` field: old readers' unknown-kind fallback renders `text` as
@@ -161,6 +169,33 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
                 kind: "visual".into(),
                 title: Some(title.clone()),
                 script: Some(script.clone()),
+                ..Default::default()
+            }
+        }
+        MessagePart::Artifact {
+            id,
+            artifact_id,
+            title,
+            format,
+            visibility,
+            url,
+        } => {
+            harness_proto::artifact::validate_artifact(
+                artifact_id,
+                title,
+                format,
+                visibility,
+                url,
+            )
+            .map_err(|error| DocError::Schema(error.into()))?;
+            DocPartJson {
+                id: id.clone(),
+                kind: "artifact".into(),
+                artifact_id: Some(artifact_id.clone()),
+                title: Some(title.trim().to_owned()),
+                format: Some(format.clone()),
+                visibility: Some(visibility.clone()),
+                url: Some(url.clone()),
                 ..Default::default()
             }
         }
@@ -266,11 +301,55 @@ fn visual_part(id: String, title: Option<String>, script: Option<String>) -> Mes
     }
 }
 
+/// Keep invalid or off-origin artifact records out of rendering, including salvage reads.
+fn artifact_part(
+    id: String,
+    artifact_id: Option<String>,
+    title: Option<String>,
+    format: Option<String>,
+    visibility: Option<String>,
+    url: Option<String>,
+) -> MessagePart {
+    match (artifact_id, title, format, visibility, url) {
+        (Some(artifact_id), Some(title), Some(format), Some(visibility), Some(url))
+            if harness_proto::artifact::validate_artifact(
+                &artifact_id,
+                &title,
+                &format,
+                &visibility,
+                &url,
+            )
+            .is_ok() =>
+        {
+            MessagePart::Artifact {
+                id,
+                artifact_id,
+                title: title.trim().to_owned(),
+                format,
+                visibility,
+                url,
+            }
+        }
+        _ => MessagePart::Text {
+            id,
+            text: String::new(),
+        },
+    }
+}
+
 /// Doc part json → app part (mirror of `fromDocParts`; malformed degrades to empty text).
 fn from_doc_part(p: DocPartJson) -> MessagePart {
     match p.kind.as_str() {
         "image" => image_part(p.id, p.path, p.name, p.mime_type),
         "visual" => visual_part(p.id, p.title, p.script),
+        "artifact" => artifact_part(
+            p.id,
+            p.artifact_id,
+            p.title,
+            p.format,
+            p.visibility,
+            p.url,
+        ),
         "tool" => match p.call.and_then(|c| serde_json::from_value(c).ok()) {
             Some(call) => MessagePart::Tool {
                 id: p.id,
@@ -1071,6 +1150,10 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
         ("mimeType", &doc_part.mime_type),
         ("title", &doc_part.title),
         ("script", &doc_part.script),
+        ("artifactId", &doc_part.artifact_id),
+        ("format", &doc_part.format),
+        ("visibility", &doc_part.visibility),
+        ("url", &doc_part.url),
     ] {
         if let Some(value) = value {
             map.insert(key, value.as_str())?;
@@ -1265,6 +1348,17 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
     if obj.get("kind").and_then(|v| v.as_str()) == Some("visual") {
         let field = |key| obj.get(key).and_then(|v| v.as_str()).map(str::to_owned);
         return Some(visual_part(id, field("title"), field("script")));
+    }
+    if obj.get("kind").and_then(|v| v.as_str()) == Some("artifact") {
+        let field = |key| obj.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+        return Some(artifact_part(
+            id,
+            field("artifactId"),
+            field("title"),
+            field("format"),
+            field("visibility"),
+            field("url"),
+        ));
     }
     if obj.get("kind").and_then(|v| v.as_str()) == Some("image") {
         let field = |key| obj.get(key).and_then(|v| v.as_str()).map(str::to_owned);
@@ -1661,6 +1755,10 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
         ("mimeType", &doc_part.mime_type),
         ("title", &doc_part.title),
         ("script", &doc_part.script),
+        ("artifactId", &doc_part.artifact_id),
+        ("format", &doc_part.format),
+        ("visibility", &doc_part.visibility),
+        ("url", &doc_part.url),
     ] {
         if let Some(value) = value {
             map.insert(key, value.as_str())?;
@@ -2062,6 +2160,54 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn generated_artifact_persists_updates_roundtrips_and_salvages() {
+        let art_id = "art-0123456789abcdef01234567";
+        let url = format!("https://codegraff.com/a/{art_id}");
+        let doc = SessionDoc::init("artifacts").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a", "owner", 1).unwrap();
+        let mut parts = vec![MessagePart::Artifact {
+            id: format!("show-artifact:{art_id}"),
+            artifact_id: art_id.into(),
+            title: "Diagram".into(),
+            format: "html".into(),
+            visibility: "private".into(),
+            url: url.clone(),
+        }];
+        writer.sync(&parts).unwrap();
+        if let MessagePart::Artifact { visibility, .. } = &mut parts[0] {
+            *visibility = "public".into();
+        }
+        writer.sync(&parts).unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0].parts, parts);
+        let valid = serde_json::json!({
+            "kind": "artifact",
+            "id": "a1",
+            "artifactId": art_id,
+            "title": "Diagram",
+            "format": "html",
+            "visibility": "private",
+            "url": url,
+            "isError": 42
+        });
+        assert!(matches!(
+            salvage_part(&valid, "a", 0),
+            Some(MessagePart::Artifact { .. })
+        ));
+        for bad in [
+            serde_json::json!({"kind":"artifact", "id":"a1", "text":"must not leak"}),
+            serde_json::json!({"kind":"artifact", "id":"a1", "artifactId":"bad", "title":"X", "format":"html", "visibility":"private", "url":"https://codegraff.com/a/bad"}),
+            serde_json::json!({"kind":"artifact", "id":"a1", "artifactId":art_id, "title":"X", "format":"html", "visibility":"private", "url":format!("{url}?t=secret")}),
+        ] {
+            assert!(
+                matches!(from_doc_part(serde_json::from_value(bad.clone()).unwrap()), MessagePart::Text { text, .. } if text.is_empty())
+            );
+            assert!(
+                matches!(salvage_part(&bad, "a", 0), Some(MessagePart::Text { text, .. }) if text.is_empty())
+            );
+        }
     }
 
     #[test]

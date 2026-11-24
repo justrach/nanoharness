@@ -120,6 +120,22 @@ pub mod methods {
     /// Publish bounded inline native visual data into a local live run.
     /// Local-owner only, never forwarded. `{ chatId, id, title, script }`.
     pub const SHOW_VISUAL: &str = "ShowVisual";
+    /// Create a hosted artifact (`POST /v1/artifacts`) and attach it to a local live run.
+    /// Local-only: `{ chatId, id, title, format, content, visibility? }`.
+    pub const CREATE_ARTIFACT: &str = "CreateArtifact";
+    /// Update a hosted artifact (`PATCH /v1/artifacts/:id`) and emit the updated part.
+    /// Local-only: `{ chatId, artifactId, title?, format?, content?, visibility? }`.
+    pub const UPDATE_ARTIFACT: &str = "UpdateArtifact";
+    /// Mint a short-lived signed frame URL (`POST /v1/artifacts/:id/frame-url`).
+    pub const CODEGRAFF_ARTIFACT_FRAME_URL: &str = "CodegraffArtifactFrameUrl";
+    /// Change an artifact's sharing visibility (`PATCH /v1/artifacts/:id`).
+    pub const CODEGRAFF_ARTIFACT_SET_VISIBILITY: &str = "CodegraffArtifactSetVisibility";
+    /// Cloud computer availability + owned status (`GET /api/computer/offer`).
+    pub const CODEGRAFF_COMPUTER: &str = "CodegraffComputer";
+    /// Reserve a Cloud Computer slot and open Stripe Checkout (`POST /api/computer/checkout`).
+    pub const CODEGRAFF_COMPUTER_CHECKOUT: &str = "CodegraffComputerCheckout";
+    /// Trigger provisioning/attach after checkout (`POST /api/computer/start`).
+    pub const CODEGRAFF_COMPUTER_START: &str = "CodegraffComputerStart";
     /// Steer this row into the live turn without interrupting it.
     /// `{ chatId, id }` → `{ sent }`.
     pub const STEER_QUEUED_MESSAGE_NOW: &str = "SteerQueuedMessageNow";

@@ -56,3 +56,38 @@ describe("generated image parts", () => {
     }
   });
 });
+
+describe("hosted artifact parts", () => {
+  const artifactId = "art-0123456789abcdef01234567";
+  const url = `https://codegraff.com/a/${artifactId}`;
+  const artifact = {
+    kind: "artifact" as const,
+    id: `show-artifact:${artifactId}`,
+    artifactId,
+    title: "Architecture",
+    format: "html" as const,
+    visibility: "private" as const,
+    url
+  };
+
+  it("round-trips validated metadata and rejects signed URLs or invalid fields", () => {
+    const parts = [
+      { kind: "text" as const, id: "before", text: "Before" },
+      artifact,
+      { kind: "text" as const, id: "after", text: "After" }
+    ];
+    expect(fromDocParts(toDocParts(toRenderParts(parts)))).toEqual(parts);
+
+    for (const bad of [
+      { ...artifact, artifactId: "bad-id" },
+      { ...artifact, url: `${url}?t=1900000000.sig` },
+      { ...artifact, format: "pdf" },
+      { ...artifact, visibility: "unlisted" },
+      { ...artifact, title: "   \n", text: "must not leak" }
+    ]) {
+      const fallback = [{ kind: "text", id: artifact.id, text: "" }];
+      expect(toDocParts([bad as unknown as typeof artifact])).toEqual(fallback);
+      expect(fromDocParts([bad as unknown as DocMessagePart])).toEqual(fallback);
+    }
+  });
+});

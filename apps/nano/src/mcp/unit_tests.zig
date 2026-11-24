@@ -374,7 +374,7 @@ test "mcp catalog: tools/list serves protocol/mcp-tools.json exactly: names, ord
     defer f.destroy();
     const a = f.arena.allocator();
     const shared = try sharedCatalog(a);
-    try testing.expectEqual(@as(usize, 31), shared.len);
+    try testing.expectEqual(@as(usize, 33), shared.len);
     for (shared) |t| {
         const has_ann = u.get(t, "annotations") != null;
         // Exactly these keys, so nothing else could be served.
@@ -402,7 +402,7 @@ test "mcp catalog: tools/list serves protocol/mcp-tools.json exactly: names, ord
     var k: usize = 0;
     for (shared) |want| {
         const name = u.str(want, "name").?;
-        if (std.mem.eql(u8, name, "show_image") or std.mem.eql(u8, name, "show_visual")) continue;
+        if (std.mem.eql(u8, name, "show_image") or std.mem.eql(u8, name, "show_visual") or std.mem.eql(u8, name, "create_artifact") or std.mem.eql(u8, name, "update_artifact")) continue;
         try testing.expectEqualStrings(try u.stringify(a, want), try u.stringify(a, plain[k]));
         k += 1;
     }
@@ -415,11 +415,11 @@ test "mcp catalog: the shared catalog is the Rust server's tool list" {
     const a = arena.allocator();
     const all = try json.parseFromSliceLeaky(Value, a, tools.catalog_json, .{});
     const want = [_][]const u8{
-        "whoami",      "list_devices", "list_projects", "list_harnesses", "list_models",    "list_chats",    "get_chat",
-        "create_chat", "read_chat",    "send_message",  "wait_for_turn",  "interrupt_chat", "dismiss_input", "respond_to_input",
-        "rename_chat", "archive_chat", "show_visual",   "show_image",     "list_rooms",     "create_room",   "join_room",
-        "leave_room",  "post_room",    "release_claim", "read_room",      "room_inbox",     "archive_room",  "destroy_room",
-        "list_bots",   "run_bot",      "run_due_bots",
+        "whoami",       "list_devices", "list_projects", "list_harnesses", "list_models",     "list_chats",      "get_chat",
+        "create_chat",  "read_chat",    "send_message",  "wait_for_turn",  "interrupt_chat",  "dismiss_input",   "respond_to_input",
+        "rename_chat",  "archive_chat", "show_visual",   "show_image",     "create_artifact", "update_artifact", "list_rooms",
+        "create_room",  "join_room",    "leave_room",    "post_room",      "release_claim",   "read_room",       "room_inbox",
+        "archive_room", "destroy_room", "list_bots",     "run_bot",        "run_due_bots",
     };
     try testing.expectEqual(want.len, all.array.items.len);
     for (all.array.items, want) |t, name| {
@@ -457,12 +457,12 @@ test "mcp protocol: initialize, ping, list, and protocol errors match the Rust s
     const unknown = try mcp.handleRequest(&f.t, a, u.i(6), "tools/call", try json.parseFromSliceLeaky(Value, a, "{\"name\":\"render_visual\"}", .{}));
     try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":6,\"error\":{\"code\":-32602,\"message\":\"unknown tool: render_visual\"}}", unknown);
 
-    // Without an origin chat, show_image/show_visual are hidden.
+    // Without an origin chat, show_image/show_visual/create_artifact/update_artifact are hidden.
     const listed = try json.parseFromSliceLeaky(Value, a, try mcp.handleRequest(&f.t, a, u.i(7), "tools/list", .null), .{});
     try testing.expectEqual(@as(usize, 29), u.array(u.get(listed, "result").?, "tools").?.len);
     f.t.origin = .{ .chat_id = "chat-beta-2" };
     const listed2 = try json.parseFromSliceLeaky(Value, a, try mcp.handleRequest(&f.t, a, u.i(8), "tools/list", .null), .{});
-    try testing.expectEqual(@as(usize, 31), u.array(u.get(listed2, "result").?, "tools").?.len);
+    try testing.expectEqual(@as(usize, 33), u.array(u.get(listed2, "result").?, "tools").?.len);
 
     // A tool error is a result with isError, never a protocol error.
     const failed = try json.parseFromSliceLeaky(Value, a, try mcp.handleRequest(&f.t, a, u.i(9), "tools/call", try json.parseFromSliceLeaky(Value, a, "{\"name\":\"get_chat\",\"arguments\":{\"chat\":\"nope\"}}", .{})), .{});
@@ -763,6 +763,12 @@ test "mcp show_image and show_visual: scripted engine surfaces errors and valida
     try testing.expect(tools.validateVisual(try repeat(w.arena.allocator(), "界", 200), try repeat(w.arena.allocator(), "é", 32768)) == null);
     try testing.expect(tools.validateVisual(try repeat(w.arena.allocator(), "界", 201), "x") != null);
     try testing.expect(tools.validateVisual("title", try repeat(w.arena.allocator(), "é", 32769)) != null);
+
+    // create_artifact & update_artifact validate inputs locally and forward the RPC shape.
+    try expectErr(try w.call("create_artifact", "{\"title\":\"  \",\"format\":\"html\",\"content\":\"<h1>x</h1>\"}"), "artifact title must be nonblank and at most 200 characters");
+    try expectErr(try w.call("create_artifact", "{\"title\":\"Chart\",\"format\":\"pdf\",\"content\":\"x\"}"), "artifact format must be html, svg, or markdown");
+    try expectErr(try w.call("update_artifact", "{\"artifactId\":\"bad\"}"), "artifactId must be art- followed by 24 lowercase hex characters");
+    try expectErr(try w.call("update_artifact", "{\"artifactId\":\"art-0123456789abcdef01234567\"}"), "update_artifact needs at least one of title, format, content, or visibility");
 }
 
 // ---- rooms -------------------------------------------------------------------------------

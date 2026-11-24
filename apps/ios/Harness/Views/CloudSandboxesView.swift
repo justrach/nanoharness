@@ -81,6 +81,7 @@ struct CloudSandboxesView: View {
     @State private var pickedSize: String?
     @State private var actionError: String?
     @State private var confirmDelete: CodegraffSandbox?
+    @State private var computerOffer: CodegraffComputerOffer?
 
     enum LoadState {
         case idle
@@ -179,19 +180,28 @@ struct CloudSandboxesView: View {
             }
             .harnessListRow()
         case .loaded(nil):
-            Section {
-                Text("This computer isn't signed in to Codegraff. Sign in with Codegraff in Harness on it to use cloud sandboxes.")
-                    .foregroundStyle(.secondary)
-            }
-            .harnessListRow()
-            .accessibilityIdentifier("cloud-sandboxes-signed-out")
-        case .loaded(let list?):
-            if !list.enabled {
+            if let offer = computerOffer?.offer {
+                cloudComputerSection(computerOffer!, offer: offer)
+            } else {
                 Section {
-                    Text("Harness on this computer doesn't offer cloud sandboxes.")
+                    Text("This computer isn't signed in to Codegraff. Sign in with Codegraff in Harness on it to use cloud sandboxes.")
                         .foregroundStyle(.secondary)
                 }
                 .harnessListRow()
+                .accessibilityIdentifier("cloud-sandboxes-signed-out")
+            }
+        case .loaded(let list?):
+            if let offer = computerOffer?.offer {
+                cloudComputerSection(computerOffer!, offer: offer)
+            }
+            if !list.enabled {
+                if computerOffer?.offer == nil {
+                    Section {
+                        Text("Harness on this computer doesn't offer cloud sandboxes.")
+                            .foregroundStyle(.secondary)
+                    }
+                    .harnessListRow()
+                }
             } else {
                 summarySection(list)
                 sandboxesSection(list)
@@ -339,15 +349,41 @@ struct CloudSandboxesView: View {
         .harnessListRow()
     }
 
+    /// Read-only status of the user's owned Cloud Computer (never shows purchase/checkout prompts on iOS).
+    private func cloudComputerSection(_ info: CodegraffComputerOffer,
+                                      offer: CodegraffComputerSummary) -> some View {
+        let phase = info.live.phase
+        let status: String = switch phase {
+        case "ready": "Ready"
+        case "provisioning", "starting": "Provisioning…"
+        default: offer.state == "canceling" ? "Canceling at period end" : "Stopped"
+        }
+        return Section("Cloud computer") {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(info.live.deviceName ?? "Cloud Computer")
+                    .font(.body.weight(.medium))
+                Text("\(status) · \(info.spec.cpu) vCPU · \(info.spec.memoryGiB) GiB RAM · \(info.spec.diskGiB) GiB disk")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 2)
+            .accessibilityIdentifier("cloud-computer-status")
+        }
+        .harnessListRow()
+    }
+
     // MARK: Calls
 
     private func reload() async {
         guard let deviceId else { return }
         if case .loaded = state, loadedDeviceId == deviceId {} else { state = .loading }
+        async let loadedComputer: CodegraffComputerOffer? = try? await model.cloudComputer(deviceId: deviceId)
         let result: Result<CodegraffSandboxes?, Error>
         do { result = .success(try await model.cloudSandboxes(deviceId: deviceId)) } catch { result = .failure(error) }
+        let fetchedComputer = await loadedComputer
         guard self.deviceId == deviceId else { return }
         now = Date()
+        computerOffer = fetchedComputer
         switch result {
         case .success(let list):
             loadedDeviceId = deviceId

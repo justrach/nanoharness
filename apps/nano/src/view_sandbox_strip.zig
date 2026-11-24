@@ -151,9 +151,19 @@ pub fn strip(c: *ui.Context, a: *App, k: theme.Colors, pb: f32) void {
         // One line at rest (the detail is in the tooltip); a problem gets
         // its own line.
         if (sum.warning) {
-            const d = ui.div(c).row().pl(12);
+            const d = ui.div(c).row().pl(12).gap(6).itemsCenter();
             defer d.end();
             kit.ellipsisText(c, sum.detail, st(c, 10.5, .{ .color = k.warning }), text_w - 12);
+            if (std.mem.indexOf(u8, sum.detail, "Out of credit") != null) {
+                ui.key(c, "cloud-sandbox-add-credits");
+                var ab = ui.div(c).row().px(5).py(1).rounded(4).hover(k.warning.alpha(0.18));
+                defer ab.end();
+                ui.text(c, "Add credits", st(c, 10.5, .{ .weight = .medium, .color = k.text }));
+                if (ab.clicked()) {
+                    _ = nanoui.shell.openUrl("https://codegraff.com/dashboard/billing");
+                    return;
+                }
+            }
         }
         if (open.clicked()) openCard(a);
     }

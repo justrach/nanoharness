@@ -401,3 +401,210 @@ enum CloudSandboxRules {
         }
     }
 }
+
+struct CodegraffArtifactFrame: Decodable, Equatable, Sendable {
+    var id: String = ""
+    var visibility: String = "private"
+    var url: String = ""
+    var publicUrl: String?
+    var frameUrl: String = ""
+    var frameExpiresAt: Int64?
+
+    enum CodingKeys: String, CodingKey {
+        case id, visibility, url, publicUrl, frameUrl, frameExpiresAt
+    }
+
+    init(id: String = "", visibility: String = "private", url: String = "",
+         publicUrl: String? = nil, frameUrl: String = "", frameExpiresAt: Int64? = nil) {
+        self.id = id
+        self.visibility = visibility
+        self.url = url
+        self.publicUrl = publicUrl
+        self.frameUrl = frameUrl
+        self.frameExpiresAt = frameExpiresAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decodeIfPresent(String.self, forKey: .id)) ?? ""
+        visibility = (try? c.decodeIfPresent(String.self, forKey: .visibility)) ?? "private"
+        url = (try? c.decodeIfPresent(String.self, forKey: .url)) ?? ""
+        publicUrl = try? c.decodeIfPresent(String.self, forKey: .publicUrl)
+        frameUrl = (try? c.decodeIfPresent(String.self, forKey: .frameUrl)) ?? ""
+        frameExpiresAt = try? c.decodeIfPresent(Int64.self, forKey: .frameExpiresAt)
+    }
+}
+
+struct CodegraffArtifactMeta: Decodable, Equatable, Sendable {
+    var id: String = ""
+    var title: String = ""
+    var format: String = "html"
+    var visibility: String = "private"
+    var url: String = ""
+    var publicUrl: String?
+    var frameUrl: String?
+    var frameExpiresAt: Int64?
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, format, visibility, url, publicUrl, frameUrl, frameExpiresAt
+    }
+
+    init(id: String = "", title: String = "", format: String = "html",
+         visibility: String = "private", url: String = "", publicUrl: String? = nil,
+         frameUrl: String? = nil, frameExpiresAt: Int64? = nil) {
+        self.id = id
+        self.title = title
+        self.format = format
+        self.visibility = visibility
+        self.url = url
+        self.publicUrl = publicUrl
+        self.frameUrl = frameUrl
+        self.frameExpiresAt = frameExpiresAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decodeIfPresent(String.self, forKey: .id)) ?? ""
+        title = (try? c.decodeIfPresent(String.self, forKey: .title)) ?? ""
+        format = (try? c.decodeIfPresent(String.self, forKey: .format)) ?? "html"
+        visibility = (try? c.decodeIfPresent(String.self, forKey: .visibility)) ?? "private"
+        url = (try? c.decodeIfPresent(String.self, forKey: .url)) ?? ""
+        publicUrl = try? c.decodeIfPresent(String.self, forKey: .publicUrl)
+        frameUrl = try? c.decodeIfPresent(String.self, forKey: .frameUrl)
+        frameExpiresAt = try? c.decodeIfPresent(Int64.self, forKey: .frameExpiresAt)
+    }
+}
+
+struct ArtifactPresentation: Identifiable, Hashable, Sendable {
+    var id: String { artifactId }
+    var artifactId: String
+    var title: String
+    var format: String
+    var visibility: String
+    var url: String
+}
+
+struct CodegraffComputerSpec: Decodable, Equatable, Sendable {
+    var cpu: Int = 4
+    var memoryGiB: Int = 8
+    var diskGiB: Int = 60
+
+    enum CodingKeys: String, CodingKey { case cpu, memoryGiB, diskGiB }
+
+    init(cpu: Int = 4, memoryGiB: Int = 8, diskGiB: Int = 60) {
+        self.cpu = cpu
+        self.memoryGiB = memoryGiB
+        self.diskGiB = diskGiB
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        cpu = (try? c.decodeIfPresent(Int.self, forKey: .cpu)) ?? 4
+        memoryGiB = (try? c.decodeIfPresent(Int.self, forKey: .memoryGiB)) ?? 8
+        diskGiB = (try? c.decodeIfPresent(Int.self, forKey: .diskGiB)) ?? 60
+    }
+}
+
+struct CodegraffComputerSummary: Decodable, Equatable, Sendable {
+    var state: String = ""
+    var slot: Int = 0
+    var machineId: String?
+    var paidThrough: Int64?
+    var retireAt: Int64?
+
+    enum CodingKeys: String, CodingKey { case state, slot, machineId, paidThrough, retireAt }
+
+    init(state: String = "", slot: Int = 0, machineId: String? = nil,
+         paidThrough: Int64? = nil, retireAt: Int64? = nil) {
+        self.state = state
+        self.slot = slot
+        self.machineId = machineId
+        self.paidThrough = paidThrough
+        self.retireAt = retireAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        state = (try? c.decodeIfPresent(String.self, forKey: .state)) ?? ""
+        slot = (try? c.decodeIfPresent(Int.self, forKey: .slot)) ?? 0
+        machineId = try? c.decodeIfPresent(String.self, forKey: .machineId)
+        paidThrough = try? c.decodeIfPresent(Int64.self, forKey: .paidThrough)
+        retireAt = try? c.decodeIfPresent(Int64.self, forKey: .retireAt)
+    }
+}
+
+struct CodegraffComputerLive: Decodable, Equatable, Sendable {
+    var phase: String = "none"
+    var machineId: String?
+    var state: String?
+    var deviceName: String?
+    var message: String?
+
+    enum CodingKeys: String, CodingKey { case phase, machineId, state, deviceName, message }
+
+    init(phase: String = "none", machineId: String? = nil, state: String? = nil,
+         deviceName: String? = nil, message: String? = nil) {
+        self.phase = phase
+        self.machineId = machineId
+        self.state = state
+        self.deviceName = deviceName
+        self.message = message
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        phase = (try? c.decodeIfPresent(String.self, forKey: .phase)) ?? "none"
+        machineId = try? c.decodeIfPresent(String.self, forKey: .machineId)
+        state = try? c.decodeIfPresent(String.self, forKey: .state)
+        deviceName = try? c.decodeIfPresent(String.self, forKey: .deviceName)
+        message = try? c.decodeIfPresent(String.self, forKey: .message)
+    }
+}
+
+struct CodegraffComputerOffer: Decodable, Equatable, Sendable {
+    var enabled: Bool = false
+    var onSale: Int = 0
+    var freeSlots: Int = 0
+    var totalSlots: Int = 0
+    var priceMonthlyUsd: Int = 50
+    var spec: CodegraffComputerSpec = CodegraffComputerSpec()
+    var offer: CodegraffComputerSummary?
+    var live: CodegraffComputerLive = CodegraffComputerLive()
+    var manageUrl: String = "https://codegraff.com/dashboard/sandboxes#computer"
+    var billingUrl: String = "https://codegraff.com/dashboard/billing"
+
+    enum CodingKeys: String, CodingKey {
+        case enabled, onSale, freeSlots, totalSlots, priceMonthlyUsd, spec, offer, live, manageUrl, billingUrl
+    }
+
+    init(enabled: Bool = false, onSale: Int = 0, freeSlots: Int = 0, totalSlots: Int = 0,
+         priceMonthlyUsd: Int = 50, spec: CodegraffComputerSpec = CodegraffComputerSpec(),
+         offer: CodegraffComputerSummary? = nil, live: CodegraffComputerLive = CodegraffComputerLive(),
+         manageUrl: String = "https://codegraff.com/dashboard/sandboxes#computer",
+         billingUrl: String = "https://codegraff.com/dashboard/billing") {
+        self.enabled = enabled
+        self.onSale = onSale
+        self.freeSlots = freeSlots
+        self.totalSlots = totalSlots
+        self.priceMonthlyUsd = priceMonthlyUsd
+        self.spec = spec
+        self.offer = offer
+        self.live = live
+        self.manageUrl = manageUrl
+        self.billingUrl = billingUrl
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = (try? c.decodeIfPresent(Bool.self, forKey: .enabled)) ?? false
+        onSale = (try? c.decodeIfPresent(Int.self, forKey: .onSale)) ?? 0
+        freeSlots = (try? c.decodeIfPresent(Int.self, forKey: .freeSlots)) ?? 0
+        totalSlots = (try? c.decodeIfPresent(Int.self, forKey: .totalSlots)) ?? 0
+        priceMonthlyUsd = (try? c.decodeIfPresent(Int.self, forKey: .priceMonthlyUsd)) ?? 50
+        spec = (try? c.decodeIfPresent(CodegraffComputerSpec.self, forKey: .spec)) ?? CodegraffComputerSpec()
+        offer = try? c.decodeIfPresent(CodegraffComputerSummary.self, forKey: .offer)
+        live = (try? c.decodeIfPresent(CodegraffComputerLive.self, forKey: .live)) ?? CodegraffComputerLive()
+        manageUrl = (try? c.decodeIfPresent(String.self, forKey: .manageUrl)) ?? "https://codegraff.com/dashboard/sandboxes#computer"
+        billingUrl = (try? c.decodeIfPresent(String.self, forKey: .billingUrl)) ?? "https://codegraff.com/dashboard/billing"
+    }
+}

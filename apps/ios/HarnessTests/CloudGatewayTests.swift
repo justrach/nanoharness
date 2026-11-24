@@ -147,4 +147,45 @@ final class CloudGatewayTests: XCTestCase {
             $0.url?.path == "/v1/sandboxes" && $0.httpMethod == "POST"
         }.count, 2)
     }
+
+    func testArtifactFrameUrlVisibilityAndComputerOffer() async throws {
+        let calls = Requests()
+        let artId = "art-0123456789abcdef01234567"
+        let gateway = CloudGateway(apiKey: "cg_sk_art", transport: { request in
+            calls.append(request)
+            let path = request.url?.path ?? ""
+            if path == "/v1/artifacts/\(artId)/frame-url" && request.httpMethod == "POST" {
+                return self.response(#"{"id":"art-0123456789abcdef01234567","visibility":"private","url":"https://codegraff.com/a/art-0123456789abcdef01234567","publicUrl":null,"frameUrl":"https://artifact.codegraff.com/art-0123456789abcdef01234567?t=1900000900.sig","frameExpiresAt":1900000900}"#)
+            }
+            if path == "/v1/artifacts/\(artId)" && request.httpMethod == "PATCH" {
+                return self.response(#"{"id":"art-0123456789abcdef01234567","title":"Diagram","format":"html","visibility":"public","url":"https://codegraff.com/a/art-0123456789abcdef01234567","publicUrl":"https://codegraff.com/public/a/art-0123456789abcdef01234567","frameUrl":"https://artifact.codegraff.com/art-0123456789abcdef01234567"}"#)
+            }
+            if path == "/api/computer/offer" && request.httpMethod == "GET" {
+                return self.response(#"{"enabled":true,"onSale":1,"freeSlots":0,"totalSlots":1,"priceMonthlyUsd":50,"spec":{"cpu":4,"memoryGiB":8,"diskGiB":60},"offer":{"state":"active","slot":1},"live":{"phase":"ready","deviceName":"Node D"}}"#)
+            }
+            return self.response(#"{}"#, status: 404)
+        })
+
+        let frame = try await gateway.artifactFrameURL(artId)
+        XCTAssertTrue(frame.frameUrl.hasPrefix("https://artifact.codegraff.com/\(artId)?t="))
+        XCTAssertEqual(frame.frameExpiresAt, 1900000900)
+
+        let updated = try await gateway.setArtifactVisibility(artId, visibility: "public")
+        XCTAssertEqual(updated.visibility, "public")
+        XCTAssertEqual(updated.publicUrl, "https://codegraff.com/public/a/\(artId)")
+
+        let computer = try await gateway.computerOffer()
+        XCTAssertEqual(computer?.offer?.state, "active")
+        XCTAssertEqual(computer?.live.deviceName, "Node D")
+
+        XCTAssertTrue(ArtifactFramePolicy.isAllowedMainFrame(URL(string: frame.frameUrl)!))
+        XCTAssertFalse(ArtifactFramePolicy.isAllowedMainFrame(URL(string: "https://evil.example/\(artId)")!))
+        XCTAssertFalse(ArtifactFramePolicy.isAllowedMainFrame(URL(string: "https://artifact.codegraff.com/not-an-id")!))
+
+        let disabledGateway = CloudGateway(apiKey: "cg_sk_art", transport: { _ in
+            self.response(#"{"enabled":false}"#, status: 404)
+        })
+        let missingOffer = try await disabledGateway.computerOffer()
+        XCTAssertNil(missingOffer)
+    }
 }

@@ -66,6 +66,8 @@ pub const Browser = struct {
     title: nanoui.ui.TextBuffer = .{},
     notice: nanoui.ui.TextBuffer = .{},
     saved_view: ?saved.View = null,
+    artifact_id: ?[]u8 = null,
+    frame_url: ?[]u8 = null,
     native: ?*Native = null,
     zoom: f64 = 1.0,
     body_node: u64 = 0,
@@ -86,9 +88,15 @@ pub const Browser = struct {
         @import("text_buffer.zig").deinit(&b.notice);
         if (comptime builtin.os.tag == .macos) if (b.native) |n| n.destroy();
         const gpa = b.app.gpa;
+        if (b.artifact_id) |aid| gpa.free(aid);
+        if (b.frame_url) |furl| gpa.free(furl);
         gpa.free(b.parent);
         gpa.free(b.url);
         gpa.destroy(b);
+    }
+
+    pub fn usesEmbeddedWebView(b: *const Browser) bool {
+        return b.artifact_id != null or @import("ux_rules.zig").BrowseConnect.routeUrl(b.url) == .local_saved_view;
     }
 
     pub fn belongsTo(b: *const Browser, parent: ?[]const u8) bool {
@@ -103,7 +111,7 @@ pub const Browser = struct {
     }
 
     pub fn navigate(b: *Browser, input: []const u8) void {
-        if (b.saved_view != null or source(b.app, b.parent) == null) return;
+        if (b.saved_view != null or b.artifact_id != null or source(b.app, b.parent) == null) return;
         const url = web.normalize(b.app.gpa, input) catch |err| {
             b.notice.set(web.message(err));
             b.app.redraw();
@@ -114,9 +122,8 @@ pub const Browser = struct {
         b.address.set(url);
         b.notice.clear();
         b.focus_address = false;
-        const route = @import("ux_rules.zig").BrowseConnect.routeUrl(b.url);
-        if (route == .local_saved_view) {
-            if (comptime builtin.os.tag == .macos) if (b.native) |n| n.navigate(b.url);
+        if (b.usesEmbeddedWebView()) {
+            if (comptime builtin.os.tag == .macos) if (b.native) |n| n.navigate(b.frame_url orelse b.url);
         } else {
             if (comptime builtin.os.tag == .macos) if (b.native) |n| n.show(false);
             if (b.app.window != null and !b.app.offscreen) {
@@ -131,15 +138,15 @@ pub const Browser = struct {
     pub fn ensureNative(b: *Browser) void {
         if (comptime builtin.os.tag != .macos) return;
         if (b.native != null or b.url.len == 0 or b.app.window == null) return;
-        if (@import("ux_rules.zig").BrowseConnect.routeUrl(b.url) != .local_saved_view) return;
+        if (!b.usesEmbeddedWebView()) return;
         const home = if (b.app.env) |env| env.get("HOME") orelse "" else "";
-        const n = Native.create(b.app.gpa, b.app.io, home, .{ .ctx = b, .changed = nativeChanged }) catch {
+        const n = Native.createWithOptions(b.app.gpa, b.app.io, home, .{ .ctx = b, .changed = nativeChanged }, b.artifact_id != null) catch {
             b.notice.set("The integrated browser could not start.");
             return;
         };
         b.native = n;
         if (b.zoom != 1.0) n.setZoom(b.zoom);
-        n.navigate(b.url);
+        n.navigate(b.frame_url orelse b.url);
     }
 
     pub fn applyZoom(b: *Browser, dir: enum { in, out, reset }) void {
@@ -164,15 +171,15 @@ pub const Browser = struct {
         const b: *Browser = @ptrCast(@alignCast(ctx));
         const n = b.native orelse return;
         const title = n.title();
-        if (title.len > 0) b.title.set(title);
+        if (title.len > 0 and b.artifact_id == null) b.title.set(title);
         const url = n.url();
-        if (b.saved_view == null and url.len > 0 and web.allowedNavigation(url) and !std.mem.eql(u8, b.url, url)) {
+        if (b.saved_view == null and b.artifact_id == null and url.len > 0 and web.allowedNavigation(url) and !std.mem.eql(u8, b.url, url)) {
             if (b.app.gpa.dupe(u8, url)) |owned| {
                 b.app.gpa.free(b.url);
                 b.url = owned;
             } else |_| {}
         }
-        if (!b.editing and url.len > 0) b.address.set(url);
+        if (!b.editing and b.artifact_id == null and url.len > 0) b.address.set(url);
         if (n.error_len > 0) b.notice.set(n.error_text[0..n.error_len]) else b.notice.clear();
         b.app.redraw();
     }
@@ -231,6 +238,48 @@ pub fn openSaved(a: *App, parent: []const u8, view: saved.View) void {
     const host = chat.device_id orelse return a.setNotice("This view's host is not known yet.");
     if (!std.mem.eql(u8, local, host)) return a.setNotice("This view is saved on another computer. Open it there.");
     open(a, parent, null, view);
+}
+
+/// Opens a hosted CodeGraff artifact inside an ephemeral split-pane WKWebView on macOS,
+/// reusing any already-open tab for `(parent, artifact_id)`, or opens externally elsewhere.
+pub fn openArtifact(a: *App, parent: []const u8, artifact_id: []const u8, title: []const u8, frame_url: []const u8) void {
+    const art = @import("artifact_url.zig");
+    if (!art.isValidId(artifact_id) or !art.isSandboxFrameUrl(frame_url)) return;
+    if (builtin.os.tag != .macos) {
+        _ = open_external_url(frame_url);
+        return;
+    }
+    const owner = source(a, parent) orelse return;
+    var canon_buf: [64]u8 = undefined;
+    const canon_url = art.canonicalUrl(&canon_buf, artifact_id) orelse return;
+    for (a.panels.tabs.items, 0..) |tab, idx| {
+        const existing = tab.browser orelse continue;
+        if (tab.kind != .browser or !std.mem.eql(u8, existing.parent, parent)) continue;
+        const eid = existing.artifact_id orelse continue;
+        if (!std.mem.eql(u8, eid, artifact_id)) continue;
+        const owned_frame = a.gpa.dupe(u8, frame_url) catch return;
+        if (existing.frame_url) |old| a.gpa.free(old);
+        existing.frame_url = owned_frame;
+        if (title.len > 0) existing.title.set(title);
+        existing.notice.clear();
+        if (existing.native) |n| n.navigate(owned_frame);
+        a.panels.active = idx;
+        a.panels.host_open = true;
+        a.view.strip.focused = .host;
+        a.redraw();
+        return;
+    }
+    const b = Browser.create(a, parent) catch return;
+    b.pending_source = owner;
+    b.artifact_id = a.gpa.dupe(u8, artifact_id) catch return b.destroy();
+    b.frame_url = a.gpa.dupe(u8, frame_url) catch return b.destroy();
+    b.url = a.gpa.dupe(u8, canon_url) catch return b.destroy();
+    b.address.set(b.url);
+    b.title.set(if (title.len > 0) title else "Artifact");
+    b.focus_address = false;
+    if (a.panels.pending_browser) |old| old.destroy();
+    a.panels.pending_browser = b;
+    a.redraw();
 }
 
 fn open(a: *App, parent: []const u8, url: ?[]const u8, view: ?saved.View) void {
@@ -311,9 +360,9 @@ pub fn syncNative(a: *App, c: *nanoui.ui.Context) void {
     const modal = a.view.setup != null or a.view.project_setup.open or a.view.settings_open or a.picker != .none or a.view.palette.open or a.view.theme_import != null or
         a.view.strip.menu != null or a.view.account_menu or a.view.more_menu or a.view.filter_menu or a.view.space_menu or a.view.checkout_menu or a.view.ref_menu;
     for (a.panels.tabs.items) |t| if (t.browser) |b| {
-        // Public http/https links route to `justrach/browse` Connected Apps; only
-        // sandboxed internal `graff-view://` artifacts mount local WKWebView.
-        const is_local = @import("ux_rules.zig").BrowseConnect.routeUrl(b.url) == .local_saved_view;
+        // Public http/https links route to `justrach/browse` Connected Apps;
+        // sandboxed internal `graff-view://` and hosted artifact panes mount local WKWebView.
+        const is_local = b.usesEmbeddedWebView();
         const visible = is_local and active == b and a.panels.host_open and b.belongsTo(a.selected) and !modal;
         if (visible) b.ensureNative();
         const n = b.native orelse continue;

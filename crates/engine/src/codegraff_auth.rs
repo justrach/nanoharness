@@ -20,8 +20,15 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub(crate) mod artifacts;
+pub(crate) mod computer;
 mod github_runners;
 mod sandboxes;
+pub use artifacts::{CodegraffArtifact, CodegraffArtifactFrame};
+pub use computer::{
+    CodegraffComputerCheckout, CodegraffComputerLive, CodegraffComputerOffer,
+    CodegraffComputerSpec, CodegraffComputerSummary,
+};
 pub use github_runners::{
     GithubRunners, RunnerAction, RunnerInstallation, RunnerJob, RunnerRepo, RunnerSize,
 };
@@ -589,7 +596,7 @@ fn fingerprint(key: &str) -> String {
 
 /// Write via a fresh 0600 temp file and rename, so a crash never leaves a
 /// half-written or world-readable credential, and a symlink cannot redirect it.
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(super) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(".codegraff-{}.tmp", uuid::Uuid::new_v4().simple()));
@@ -797,7 +804,7 @@ mod tests {
         (base, seen)
     }
 
-    fn auth_in(dir: &Path, gateway: String) -> Arc<CodegraffAuth> {
+    pub(super) fn auth_in(dir: &Path, gateway: String) -> Arc<CodegraffAuth> {
         Arc::new(CodegraffAuth::new(
             dir,
             Some(dir.join("home").join(KEY_FILE)),

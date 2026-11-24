@@ -753,6 +753,16 @@ pub enum AgentEvent {
         title: String,
         script: String,
     },
+    /// Metadata for a CodeGraff hosted artifact (`artifact.codegraff.com`).
+    #[serde(rename_all = "camelCase")]
+    GeneratedArtifact {
+        id: String,
+        artifact_id: String,
+        title: String,
+        format: String,
+        visibility: String,
+        url: String,
+    },
     ReasoningDelta {
         text: String,
     },
@@ -1270,6 +1280,25 @@ mod generated_image_tests {
         let value = serde_json::to_value(&event).unwrap();
         assert_eq!(value["type"], "generatedVisual");
         assert_eq!(value["title"], "Overview");
+        assert_eq!(serde_json::from_value::<AgentEvent>(value).unwrap(), event);
+    }
+
+    #[test]
+    fn generated_artifact_event_round_trip() {
+        let id = "art-0123456789abcdef01234567";
+        let event = AgentEvent::GeneratedArtifact {
+            id: format!("show-artifact:{id}"),
+            artifact_id: id.into(),
+            title: "Architecture".into(),
+            format: "html".into(),
+            visibility: "private".into(),
+            url: format!("https://codegraff.com/a/{id}"),
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["type"], "generatedArtifact");
+        assert_eq!(value["artifactId"], id);
+        assert_eq!(value["format"], "html");
+        assert_eq!(value["visibility"], "private");
         assert_eq!(serde_json::from_value::<AgentEvent>(value).unwrap(), event);
     }
 

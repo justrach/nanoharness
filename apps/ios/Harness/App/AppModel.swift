@@ -1068,6 +1068,55 @@ final class AppModel {
         return try await workspace.codegraffSandboxes(deviceId: deviceId)
     }
 
+    func cloudComputer(deviceId: String) async throws -> CodegraffComputerOffer? {
+        if demo != nil { return nil }
+        if deviceId == self.deviceId {
+            guard let credential = phoneGatewayCredential else { return nil }
+            do { return try await phoneCloud.computerOffer(credential) }
+            catch { invalidatePhoneGatewayKeyIfRejected(error); throw error }
+        }
+        guard let workspace else { throw RelayError.notConnected }
+        return try await workspace.codegraffComputer(deviceId: deviceId)
+    }
+
+    func artifactFrameURL(artifactId: String, hostDeviceId: String?) async throws -> CodegraffArtifactFrame {
+        if let credential = phoneGatewayCredential {
+            do { return try await phoneCloud.artifactFrameURL(credential, id: artifactId) }
+            catch { invalidatePhoneGatewayKeyIfRejected(error); throw error }
+        }
+        guard let workspace, let target = artifactHostDeviceId(preferred: hostDeviceId) else {
+            throw RelayError.notConnected
+        }
+        return try await workspace.codegraffArtifactFrameURL(deviceId: target, artifactId: artifactId)
+    }
+
+    func setArtifactVisibility(artifactId: String, visibility: String,
+                               hostDeviceId: String?) async throws -> CodegraffArtifactMeta {
+        if let credential = phoneGatewayCredential {
+            do {
+                return try await phoneCloud.setArtifactVisibility(credential, id: artifactId, visibility: visibility)
+            } catch {
+                invalidatePhoneGatewayKeyIfRejected(error)
+                throw error
+            }
+        }
+        guard let workspace, let target = artifactHostDeviceId(preferred: hostDeviceId) else {
+            throw RelayError.notConnected
+        }
+        return try await workspace.codegraffArtifactSetVisibility(deviceId: target, artifactId: artifactId,
+                                                                 visibility: visibility)
+    }
+
+    private func artifactHostDeviceId(preferred: String?) -> String? {
+        if let preferred, !preferred.isEmpty, preferred != self.deviceId, deviceOnline(preferred) {
+            return preferred
+        }
+        if let online = devices.first(where: { $0.canHostSessions && deviceOnline($0.id) }) {
+            return online.id
+        }
+        return preferred
+    }
+
     @discardableResult
     func createCloudSandbox(deviceId: String, size: String?) async throws -> String? {
         if let demo {

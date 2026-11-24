@@ -557,6 +557,8 @@ final class ParityTests: XCTestCase {
             return "image \(id) \(reference.path) \(reference.name) \(reference.mimeType)"
         case .visual(let id, let title, _):
             return "visual \(id) \(title)"
+        case .artifact(let id, let artifactId, let title, let format, let visibility, _):
+            return "artifact \(id) \(artifactId) \(format) \(visibility) \(title)"
         case .tool(let id, let call, let isError, let resolved):
             let fields = call.fields.keys.sorted().map { "\($0)=\(field(call.fields[$0]!))" }.joined(separator: ",")
             return "tool \(id) \(call.tag) resolved=\(resolved) error=\(isError) fields=\(fields)"

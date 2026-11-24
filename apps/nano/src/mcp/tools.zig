@@ -83,17 +83,24 @@ pub const Tools = struct {
         return self.origin.chat_id != null;
     }
 
-    /// `tools/list`: the catalog, without `show_image`/`show_visual` when
-    /// there is no origin chat to publish into.
+    /// `tools/list`: the catalog, without `show_image`/`show_visual` /
+    /// `create_artifact`/`update_artifact` when there is no origin chat.
     pub fn list(self: *const Tools, a: Allocator) !Value {
         const all = try json.parseFromSliceLeaky(Value, a, catalog_json, .{});
         var out = u.arr(a);
         for (all.array.items) |t| {
             const name = u.str(t, "name").?;
-            if (self.origin.chat_id == null and (std.mem.eql(u8, name, "show_image") or std.mem.eql(u8, name, "show_visual"))) continue;
+            if (self.origin.chat_id == null and isChatOnlyTool(name)) continue;
             try out.append(t);
         }
         return .{ .array = out };
+    }
+
+    fn isChatOnlyTool(name: []const u8) bool {
+        return std.mem.eql(u8, name, "show_image") or
+            std.mem.eql(u8, name, "show_visual") or
+            std.mem.eql(u8, name, "create_artifact") or
+            std.mem.eql(u8, name, "update_artifact");
     }
 
     pub fn has(name: []const u8) bool {
@@ -134,6 +141,8 @@ fn dispatch(c: *Ctx, name: []const u8, args: Value) !Value {
     if (eq(u8, name, "archive_chat")) return archiveChat(c, args);
     if (eq(u8, name, "show_image")) return showImage(c, args);
     if (eq(u8, name, "show_visual")) return showVisual(c, args);
+    if (eq(u8, name, "create_artifact")) return createArtifact(c, args);
+    if (eq(u8, name, "update_artifact")) return updateArtifact(c, args);
     if (rooms.handles(name)) return rooms.call(c, name, args);
     if (bots.handles(name)) return bots.call(c, name, args);
     return c.fail("unknown tool: {s}", .{name});
@@ -502,7 +511,6 @@ pub fn summarizeChat(c: *Ctx, chat: Value, all_spaces: []const Value, all_sessio
     try o.put("createdAt", try timeValue(a, chat, "createdAt"));
     return o;
 }
-
 
 // ---- harness rows ----------------------------------------------------------------------
 
@@ -1618,4 +1626,83 @@ fn showVisual(c: *Ctx, args: Value) !Value {
     try p.put("title", u.s(title));
     try p.put("script", u.s(script));
     return c.call("ShowVisual", p.value());
+}
+
+pub const artifact_title_max_chars: usize = 200;
+pub const artifact_content_max_bytes: usize = 2 * 1024 * 1024;
+
+fn isValidArtifactFormat(fmt: []const u8) bool {
+    return std.mem.eql(u8, fmt, "html") or std.mem.eql(u8, fmt, "svg") or std.mem.eql(u8, fmt, "markdown");
+}
+
+fn isValidArtifactVisibility(vis: []const u8) bool {
+    return std.mem.eql(u8, vis, "private") or std.mem.eql(u8, vis, "public");
+}
+
+fn createArtifact(c: *Ctx, args: Value) !Value {
+    try decode(c, args, "CreateArtifactArgs", &.{
+        .{ .name = "title", .kind = .string, .required = true },
+        .{ .name = "format", .kind = .string, .required = true },
+        .{ .name = "content", .kind = .string, .required = true },
+        .{ .name = "visibility", .kind = .string },
+    }, true);
+    const chat_id = c.t.origin.chat_id orelse return c.failMsg("create_artifact needs a chat context: this server is not running inside a chat");
+    const title = argStr(args, "title").?;
+    const format = argStr(args, "format").?;
+    const content = argStr(args, "content").?;
+    const visibility = argStr(args, "visibility");
+    if (u.isBlank(title) or u.charCount(std.mem.trim(u8, title, " \t\r\n")) > artifact_title_max_chars) {
+        return c.failMsg("artifact title must be nonblank and at most 200 characters");
+    }
+    if (!isValidArtifactFormat(format)) return c.failMsg("artifact format must be html, svg, or markdown");
+    if (content.len == 0 or content.len > artifact_content_max_bytes) {
+        return c.failMsg("artifact content must be non-empty and at most 2 MiB");
+    }
+    if (visibility) |vis| if (!isValidArtifactVisibility(vis)) return c.failMsg("artifact visibility must be private or public");
+    var p = u.obj(c.a);
+    try p.put("chatId", u.s(chat_id));
+    try p.put("id", u.s(try newId(c)));
+    try p.put("title", u.s(std.mem.trim(u8, title, " \t\r\n")));
+    try p.put("format", u.s(format));
+    try p.put("content", u.s(content));
+    if (visibility) |vis| try p.put("visibility", u.s(vis));
+    return c.call("CreateArtifact", p.value());
+}
+
+fn updateArtifact(c: *Ctx, args: Value) !Value {
+    try decode(c, args, "UpdateArtifactArgs", &.{
+        .{ .name = "artifactId", .kind = .string, .required = true },
+        .{ .name = "title", .kind = .string },
+        .{ .name = "format", .kind = .string },
+        .{ .name = "content", .kind = .string },
+        .{ .name = "visibility", .kind = .string },
+    }, true);
+    const chat_id = c.t.origin.chat_id orelse return c.failMsg("update_artifact needs a chat context: this server is not running inside a chat");
+    const artifact_id = argStr(args, "artifactId").?;
+    if (!@import("../artifact_url.zig").isValidId(artifact_id)) {
+        return c.failMsg("artifactId must be art- followed by 24 lowercase hex characters");
+    }
+    const title = argStr(args, "title");
+    const format = argStr(args, "format");
+    const content = argStr(args, "content");
+    const visibility = argStr(args, "visibility");
+    if (title == null and format == null and content == null and visibility == null) {
+        return c.failMsg("update_artifact needs at least one of title, format, content, or visibility");
+    }
+    if (title) |t| if (u.isBlank(t) or u.charCount(std.mem.trim(u8, t, " \t\r\n")) > artifact_title_max_chars) {
+        return c.failMsg("artifact title must be nonblank and at most 200 characters");
+    };
+    if (format) |f| if (!isValidArtifactFormat(f)) return c.failMsg("artifact format must be html, svg, or markdown");
+    if (content) |body| if (body.len == 0 or body.len > artifact_content_max_bytes) {
+        return c.failMsg("artifact content must be non-empty and at most 2 MiB");
+    };
+    if (visibility) |vis| if (!isValidArtifactVisibility(vis)) return c.failMsg("artifact visibility must be private or public");
+    var p = u.obj(c.a);
+    try p.put("chatId", u.s(chat_id));
+    try p.put("artifactId", u.s(artifact_id));
+    if (title) |t| try p.put("title", u.s(std.mem.trim(u8, t, " \t\r\n")));
+    if (format) |f| try p.put("format", u.s(f));
+    if (content) |body| try p.put("content", u.s(body));
+    if (visibility) |vis| try p.put("visibility", u.s(vis));
+    return c.call("UpdateArtifact", p.value());
 }

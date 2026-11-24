@@ -12,7 +12,7 @@ const Allocator = std.mem.Allocator;
 pub const Role = enum { user, assistant, system };
 pub const EntryStatus = enum { streaming, complete, aborted };
 
-pub const PartKind = enum { text, reasoning, tool, image, visual, delegation, input, @"error", other };
+pub const PartKind = enum { text, reasoning, tool, image, visual, artifact, delegation, input, @"error", other };
 
 /// A tool call's kind (`ToolCall`, crates/proto/src/agent.rs).
 pub const ToolKind = enum { exec, readFile, writeFile, editFile, applyPatch, search, glob, webFetch, webSearch, todo, mcp, unknown };
@@ -121,6 +121,11 @@ pub const Part = struct {
     reauth: ?@import("reauth_recovery.zig").Provider = null,
     /// A visual part's bounded Luau source script.
     script: []u8 = &.{},
+    /// A hosted CodeGraff artifact part (`artifact.codegraff.com`).
+    artifact_id: []u8 = &.{},
+    artifact_format: []u8 = &.{},
+    artifact_visibility: []u8 = &.{},
+    artifact_url: []u8 = &.{},
     /// An input part's request and its questions, in `arena`.
     request_id: []const u8 = "",
     questions: []const Question = &.{},
@@ -143,6 +148,10 @@ pub const Part = struct {
         if (p.diff_old) |s| gpa.free(s);
         if (p.diff_new) |s| gpa.free(s);
         gpa.free(p.script);
+        gpa.free(p.artifact_id);
+        gpa.free(p.artifact_format);
+        gpa.free(p.artifact_visibility);
+        gpa.free(p.artifact_url);
         p.text.deinit(gpa);
         if (p.arena) |a| {
             a.deinit();
@@ -426,6 +435,23 @@ fn parsePart(gpa: Allocator, o: json.ObjectMap) !Part {
         .visual => {
             try p.text.appendSlice(gpa, string(o.get("title")) orelse "");
             if (string(o.get("script"))) |sc| p.script = try gpa.dupe(u8, sc);
+        },
+        .artifact => {
+            const art_id = string(o.get("artifactId")) orelse "";
+            const art_title = string(o.get("title")) orelse "";
+            const art_fmt = string(o.get("format")) orelse "";
+            const art_vis = string(o.get("visibility")) orelse "";
+            const art_url = string(o.get("url")) orelse "";
+            if (@import("artifact_url.zig").validatePart(art_id, art_title, art_fmt, art_vis, art_url)) {
+                try p.text.appendSlice(gpa, std.mem.trim(u8, art_title, " \t\r\n"));
+                p.artifact_id = try gpa.dupe(u8, art_id);
+                p.artifact_format = try gpa.dupe(u8, art_fmt);
+                p.artifact_visibility = try gpa.dupe(u8, art_vis);
+                p.artifact_url = try gpa.dupe(u8, art_url);
+            } else {
+                // Reject malformed metadata or signed ?t= URLs into an inert empty text part.
+                p.kind = .text;
+            }
         },
         .delegation, .other => {},
     }

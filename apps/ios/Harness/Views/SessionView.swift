@@ -63,6 +63,7 @@ struct SessionView: View {
     /// When the question panel last gave way to the composer (`StopGuard`).
     @State private var questionClosedAtMs: Int64?
     @State private var hostLink: HostLink?
+    @State private var openedArtifact: ArtifactPresentation?
     @State private var renamingSession = false
     @State private var renameChatId: String?
     @State private var renameTitle = ""
@@ -440,6 +441,10 @@ struct SessionView: View {
                 .harnessAppearance()
             }
         }
+        .sheet(item: $openedArtifact) { item in
+            let host = chat.flatMap { model.sessionStore(for: $0)?.hostDeviceId } ?? chat?.deviceId
+            ArtifactSheetView(artifact: item, hostDeviceId: host)
+        }
         .onAppear {
             model.attachSessionView(chatId: chatId)
             model.markSeen(chatId: chatId)
@@ -521,7 +526,8 @@ struct SessionView: View {
         return VStack(spacing: 0) {
             VStack(spacing: 0) {
                 TranscriptView(store: store, chatId: chat.id, scroll: scroll, cwd: chat.cwd,
-                               onHostLink: { hostLink = $0 }, chat: chat, runLive: running,
+                               onHostLink: { hostLink = $0 },
+                               onOpenArtifact: { openedArtifact = $0 }, chat: chat, runLive: running,
                                hostName: model.deviceName(store.hostDeviceId ?? chat.deviceId),
                                duoChat: duoChat,
                                inspectDiff: { summary in
@@ -638,7 +644,8 @@ struct SessionView: View {
         return HStack(spacing: 0) {
         VStack(spacing: 0) {
             TranscriptView(store: store, chatId: chat.id, scroll: scroll, cwd: chat.cwd,
-                           onHostLink: { hostLink = $0 }, chat: chat, runLive: status == .working,
+                           onHostLink: { hostLink = $0 },
+                           onOpenArtifact: { openedArtifact = $0 }, chat: chat, runLive: status == .working,
                            hostName: model.deviceName(store.hostDeviceId ?? chat.deviceId),
                            duoChat: duoChat,
                            inspectDiff: flat ? { summary in

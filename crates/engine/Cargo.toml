@@ -74,3 +74,6 @@ name = "previews"
 
 [[test]]
 name = "show_visual"
+
+[[test]]
+name = "show_artifact"

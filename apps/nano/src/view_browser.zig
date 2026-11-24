@@ -17,7 +17,7 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, b: *Browser) void {
     {
         const bar = ui.div(c).row().wFull().h(38).px(8).gap(4).itemsCenter().border(k.border).borderW(1);
         defer bar.end();
-        const is_external = ux.routeUrl(b.url) == .external_browse;
+        const is_external = !b.usesEmbeddedWebView();
         if (is_external) {
             const bc = a.ensureBrowseClient();
             const conn = bc.status() == .connected;
@@ -26,11 +26,15 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, b: *Browser) void {
             if (kit.iconButton(c, k, .refresh, .{ .size = 24, .icon = 13, .tip = .{ .text = "Reload" } }) and conn) bc.spawnOp(.reload, "", 0, 0);
         } else if (comptime builtin.os.tag == .macos) {
             const n = b.native;
-            if (kit.iconButton(c, k, .@"arrow-left", .{ .size = 24, .icon = 13, .tip = .{ .text = "Back" } })) if (n) |native| if (native.canBack()) native.back();
-            if (kit.iconButton(c, k, .@"arrow-right", .{ .size = 24, .icon = 13, .tip = .{ .text = "Forward" } })) if (n) |native| if (native.canForward()) native.forward();
+            if (b.artifact_id == null) {
+                if (kit.iconButton(c, k, .@"arrow-left", .{ .size = 24, .icon = 13, .tip = .{ .text = "Back" } })) if (n) |native| if (native.canBack()) native.back();
+                if (kit.iconButton(c, k, .@"arrow-right", .{ .size = 24, .icon = 13, .tip = .{ .text = "Forward" } })) if (n) |native| if (native.canForward()) native.forward();
+            }
             if (kit.iconButton(c, k, .refresh, .{ .size = 24, .icon = 13, .tip = .{ .text = "Reload" } })) if (n) |native| native.reload();
         }
-        if (b.saved_view != null) {
+        if (b.artifact_id != null) {
+            kit.fadeText(c, b.title.text(), .{ .size = 11.5, .weight = .medium, .color = k.text }, 330);
+        } else if (b.saved_view != null) {
             kit.fadeText(c, b.address.text(), .{ .size = 11, .color = k.muted }, 330);
         } else {
             const field = ui.div(c).row().grow().w(0).px(6).itemsCenter().rounded(5).bg(k.ink(0.04));
@@ -55,11 +59,11 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, b: *Browser) void {
             if (kit.iconButton(c, k, .@"arrow-up-right", .{ .size = 24, .icon = 13, .tip = .{ .text = "Open in browser" } })) _ = @import("app_browser.zig").open_external_url(b.url);
         }
     }
-    if (ux.routeUrl(b.url) == .external_browse) {
+    if (!b.usesEmbeddedWebView()) {
         drawBrowseViewport(c, a, k, b);
         return;
     }
-    if (b.saved_view == null and b.url.len > 0 and @import("browser_url.zig").requiresSystemBrowserForPasskeys(b.url)) {
+    if (b.saved_view == null and b.artifact_id == null and b.url.len > 0 and @import("browser_url.zig").requiresSystemBrowserForPasskeys(b.url)) {
         ui.key(c, "browser-passkey-handoff");
         const bar = ui.div(c).row().wFull().px(12).py(8).gap(10).itemsCenter().bg(k.ink(0.05)).border(k.border).borderW(1);
         defer bar.end();

@@ -2277,6 +2277,54 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
+            methods::CODEGRAFF_ARTIFACT_FRAME_URL => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                struct P {
+                    artifact_id: String,
+                }
+                let p: P = parse_params(params)?;
+                let frame = crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
+                    .artifact_frame_url(&p.artifact_id)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&frame)
+            }
+            methods::CODEGRAFF_ARTIFACT_SET_VISIBILITY => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                struct P {
+                    artifact_id: String,
+                    visibility: String,
+                }
+                let p: P = parse_params(params)?;
+                let artifact = crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
+                    .update_artifact(&p.artifact_id, None, None, None, Some(&p.visibility))
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&artifact)
+            }
+            methods::CODEGRAFF_COMPUTER => {
+                let offer = crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
+                    .computer_offer()
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&offer)
+            }
+            methods::CODEGRAFF_COMPUTER_CHECKOUT => {
+                let checkout = crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
+                    .computer_checkout()
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&checkout)
+            }
+            methods::CODEGRAFF_COMPUTER_START => {
+                let live = crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
+                    .computer_start()
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&live)
+            }
             methods::ROOM_REQUEST => {
                 #[derive(Deserialize)]
                 struct P {
@@ -2538,6 +2586,196 @@ impl RpcService for EngineRpc {
                     "attached": true,
                     "id": format!("show-visual:{}", p.id),
                     "title": p.title,
+                }))
+            }
+            methods::CREATE_ARTIFACT => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                struct P {
+                    chat_id: String,
+                    id: String,
+                    title: String,
+                    format: String,
+                    content: String,
+                    visibility: Option<String>,
+                }
+                let p: P = parse_params(params)?;
+                let chat = self
+                    .workspace
+                    .chat(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                    .ok_or_else(|| RpcError::BadParams("chat not found".into()))?;
+                if chat.device_id != self.doc_host.device_id() {
+                    return Err(RpcError::BadParams("chat belongs to another device".into()));
+                }
+                self.sessions
+                    .ensure_active_artifact_run(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if p.id.is_empty()
+                    || p.id.len() > 128
+                    || !p.id
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                {
+                    return Err(RpcError::BadParams("create_artifact id is invalid".into()));
+                }
+                let trimmed_title = p.title.trim();
+                if trimmed_title.is_empty()
+                    || trimmed_title.chars().count()
+                        > harness_proto::artifact::ARTIFACT_TITLE_MAX_CHARS
+                {
+                    return Err(RpcError::BadParams(
+                        "Artifact title must be 1 to 200 characters.".into(),
+                    ));
+                }
+                if !harness_proto::artifact::is_valid_artifact_format(&p.format) {
+                    return Err(RpcError::BadParams(
+                        "Artifact format must be html, svg, or markdown.".into(),
+                    ));
+                }
+                if p.content.is_empty()
+                    || p.content.len() > crate::codegraff_auth::artifacts::MAX_ARTIFACT_BYTES
+                {
+                    return Err(RpcError::BadParams(
+                        "Artifact content must be non-empty and at most 2 MiB.".into(),
+                    ));
+                }
+                if let Some(vis) = p.visibility.as_deref()
+                    && !harness_proto::artifact::is_valid_artifact_visibility(vis)
+                {
+                    return Err(RpcError::BadParams(
+                        "Artifact visibility must be private or public.".into(),
+                    ));
+                }
+                let art = crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
+                    .create_artifact(trimmed_title, &p.format, &p.content, p.visibility.as_deref())
+                    .await
+                    .map_err(RpcError::Failed)?;
+                self.sessions
+                    .show_artifact(
+                        &p.chat_id,
+                        &art.id,
+                        &art.id,
+                        &art.title,
+                        &art.format,
+                        &art.visibility,
+                        &art.url,
+                    )
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({
+                    "attached": true,
+                    "id": format!("show-artifact:{}", art.id),
+                    "artifactId": art.id,
+                    "title": art.title,
+                    "format": art.format,
+                    "visibility": art.visibility,
+                    "url": art.url,
+                    "publicUrl": art.public_url,
+                    "frameUrl": art.frame_url,
+                    "frameExpiresAt": art.frame_expires_at,
+                }))
+            }
+            methods::UPDATE_ARTIFACT => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                struct P {
+                    chat_id: String,
+                    artifact_id: String,
+                    title: Option<String>,
+                    format: Option<String>,
+                    content: Option<String>,
+                    visibility: Option<String>,
+                }
+                let p: P = parse_params(params)?;
+                let chat = self
+                    .workspace
+                    .chat(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                    .ok_or_else(|| RpcError::BadParams("chat not found".into()))?;
+                if chat.device_id != self.doc_host.device_id() {
+                    return Err(RpcError::BadParams("chat belongs to another device".into()));
+                }
+                self.sessions
+                    .ensure_active_artifact_run(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if !harness_proto::artifact::is_valid_artifact_id(&p.artifact_id) {
+                    return Err(RpcError::BadParams("Invalid artifactId.".into()));
+                }
+                let trimmed_title = p.title.as_deref().map(str::trim);
+                if let Some(title) = trimmed_title
+                    && (title.is_empty()
+                        || title.chars().count()
+                            > harness_proto::artifact::ARTIFACT_TITLE_MAX_CHARS)
+                {
+                    return Err(RpcError::BadParams(
+                        "Artifact title must be 1 to 200 characters.".into(),
+                    ));
+                }
+                if let Some(format) = p.format.as_deref()
+                    && !harness_proto::artifact::is_valid_artifact_format(format)
+                {
+                    return Err(RpcError::BadParams(
+                        "Artifact format must be html, svg, or markdown.".into(),
+                    ));
+                }
+                if let Some(content) = p.content.as_deref()
+                    && (content.is_empty()
+                        || content.len() > crate::codegraff_auth::artifacts::MAX_ARTIFACT_BYTES)
+                {
+                    return Err(RpcError::BadParams(
+                        "Artifact content must be non-empty and at most 2 MiB.".into(),
+                    ));
+                }
+                if let Some(vis) = p.visibility.as_deref()
+                    && !harness_proto::artifact::is_valid_artifact_visibility(vis)
+                {
+                    return Err(RpcError::BadParams(
+                        "Artifact visibility must be private or public.".into(),
+                    ));
+                }
+                if trimmed_title.is_none()
+                    && p.format.is_none()
+                    && p.content.is_none()
+                    && p.visibility.is_none()
+                {
+                    return Err(RpcError::BadParams(
+                        "Provide at least one artifact field to update.".into(),
+                    ));
+                }
+                let art = crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
+                    .update_artifact(
+                        &p.artifact_id,
+                        trimmed_title,
+                        p.format.as_deref(),
+                        p.content.as_deref(),
+                        p.visibility.as_deref(),
+                    )
+                    .await
+                    .map_err(RpcError::Failed)?;
+                self.sessions
+                    .show_artifact(
+                        &p.chat_id,
+                        &art.id,
+                        &art.id,
+                        &art.title,
+                        &art.format,
+                        &art.visibility,
+                        &art.url,
+                    )
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({
+                    "attached": true,
+                    "id": format!("show-artifact:{}", art.id),
+                    "artifactId": art.id,
+                    "title": art.title,
+                    "format": art.format,
+                    "visibility": art.visibility,
+                    "url": art.url,
+                    "publicUrl": art.public_url,
+                    "frameUrl": art.frame_url,
+                    "frameExpiresAt": art.frame_expires_at,
                 }))
             }
             methods::SHOW_IMAGE => {
@@ -4906,6 +5144,8 @@ mod tests {
     fn local_device_is_not_forwardable() {
         assert!(!forwardable(methods::LOCAL_DEVICE));
         assert!(!forwardable(methods::SHOW_VISUAL));
+        assert!(!forwardable(methods::CREATE_ARTIFACT));
+        assert!(!forwardable(methods::UPDATE_ARTIFACT));
         assert!(!forwardable(methods::FOCUS_CHAT));
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));

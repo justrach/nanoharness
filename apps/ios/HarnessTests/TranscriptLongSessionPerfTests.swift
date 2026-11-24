@@ -184,6 +184,7 @@ final class TranscriptLongSessionPerfTests: XCTestCase {
         switch row.kind {
         case .generatedImage: return "image"
         case .visual: return "visual"
+        case .artifact: return "artifact"
         case .user: return "user"
         case .markdown: return "markdown"
         case .toolGroup: return "toolGroup"

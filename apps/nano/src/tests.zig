@@ -100,6 +100,9 @@ test {
     _ = @import("view_settings_accounts_browse.zig");
     _ = @import("sandboxes.zig");
     _ = @import("app_sandboxes.zig");
+    _ = @import("artifact_url.zig");
+    _ = @import("app_artifacts.zig");
+    _ = @import("app_computer.zig");
     _ = @import("parity_sandboxes.zig");
     _ = @import("tests_ui_sandboxes.zig");
     _ = @import("run_errors.zig");

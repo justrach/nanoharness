@@ -12,6 +12,7 @@ import Foundation
 enum RowKind {
     case generatedImage(owner: String, reference: GeneratedImageReference)
     case visual(title: String, script: String)
+    case artifact(artifactId: String, title: String, format: String, visibility: String, url: String)
     case user(text: String)
     case markdown(block: MDBlock, streaming: Bool)
     case toolGroup(tools: [ToolItem], autoOpen: Bool)
@@ -246,6 +247,18 @@ enum TranscriptRowBuilder {
                 rows.append(TranscriptRow(id: "\(entry.id)#\(partId)", version: version,
                                           turnStart: first,
                                           kind: .visual(title: title, script: script),
+                                          entryId: entry.id,
+                                          timestamp: nil,
+                                          partKey: nil))
+                first = false
+
+            case .artifact(let partId, let artifactId, let title, let format, let visibility, let url):
+                flushTools(lastIx: ix - 1)
+                let version = fnv1a("\(artifactId)\0\(title)\0\(format)\0\(visibility)\0\(url)")
+                rows.append(TranscriptRow(id: "\(entry.id)#\(partId)", version: version,
+                                          turnStart: first,
+                                          kind: .artifact(artifactId: artifactId, title: title, format: format,
+                                                          visibility: visibility, url: url),
                                           entryId: entry.id,
                                           timestamp: nil,
                                           partKey: nil))

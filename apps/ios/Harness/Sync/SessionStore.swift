@@ -886,6 +886,21 @@ final class SessionStore {
                   !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   title.unicodeScalars.count <= 200 else { return nil }
             return .visual(id: id, title: title, script: m["script"]?.stringValue ?? "")
+        case "artifact":
+            guard let artifactId = m["artifactId"]?.stringValue,
+                  ArtifactFramePolicy.isValidId(artifactId),
+                  let rawTitle = m["title"]?.stringValue,
+                  case let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !title.isEmpty,
+                  title.unicodeScalars.count <= 200,
+                  let format = m["format"]?.stringValue,
+                  ["html", "svg", "markdown"].contains(format),
+                  let visibility = m["visibility"]?.stringValue,
+                  ["private", "public"].contains(visibility),
+                  let url = m["url"]?.stringValue,
+                  url == "https://codegraff.com/a/\(artifactId)" else { return nil }
+            return .artifact(id: id, artifactId: artifactId, title: title,
+                             format: format, visibility: visibility, url: url)
         case "image":
             let reference = GeneratedImageReference(path: m["path"]?.stringValue ?? "",
                                                     name: m["name"]?.stringValue ?? "",

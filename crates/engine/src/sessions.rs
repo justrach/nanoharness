@@ -136,6 +136,8 @@ struct RunHandle {
     image_tx: mpsc::Sender<ShowImageRequest>,
     /// Bounded native-visual intake; shares the normal sequential publish pipeline.
     visual_tx: mpsc::Sender<ShowVisualRequest>,
+    /// Bounded hosted-artifact intake; shares the normal sequential publish pipeline.
+    artifact_tx: mpsc::Sender<ShowArtifactRequest>,
     /// The run's harness, for turn-only interrupts
     /// ([`harness_adapters::Harness::interrupt_turn`]).
     harness: Arc<dyn Harness>,
@@ -188,6 +190,26 @@ struct PendingShowVisual {
     request_id: String,
     title: String,
     script: String,
+    reply: oneshot::Sender<Result<(), EngineError>>,
+}
+
+struct ShowArtifactRequest {
+    id: String,
+    artifact_id: String,
+    title: String,
+    format: String,
+    visibility: String,
+    url: String,
+    reply: oneshot::Sender<Result<(), EngineError>>,
+}
+
+struct PendingShowArtifact {
+    request_id: String,
+    artifact_id: String,
+    title: String,
+    format: String,
+    visibility: String,
+    url: String,
     reply: oneshot::Sender<Result<(), EngineError>>,
 }
 
@@ -793,6 +815,7 @@ impl SessionsEngine {
         let (engine_tx, engine_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let (image_tx, image_rx) = mpsc::channel::<ShowImageRequest>(8);
         let (visual_tx, visual_rx) = mpsc::channel::<ShowVisualRequest>(8);
+        let (artifact_tx, artifact_rx) = mpsc::channel::<ShowArtifactRequest>(8);
         let pending_inputs: PendingInputs = Arc::new(Mutex::new(HashMap::new()));
 
         // Input bridge: the harness asks questions; we mint the request id, park the
@@ -857,6 +880,7 @@ impl SessionsEngine {
                 routed_steers: Arc::new(Mutex::new(Some(std::collections::VecDeque::new()))),
                 image_tx,
                 visual_tx,
+                artifact_tx,
                 harness: harness.clone(),
                 turn_interrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 stop_reason: Arc::new(Mutex::new(None)),
@@ -887,6 +911,7 @@ impl SessionsEngine {
             engine_rx,
             image_rx,
             visual_rx,
+            artifact_rx,
             cancel_rx,
             RunResumeState {
                 user_message_id: user_id,
@@ -1258,6 +1283,67 @@ impl SessionsEngine {
         .map_err(|_| EngineError::Other("Run no longer accepts visual requests".into()))?;
         rx.await.map_err(|_| {
             EngineError::Other("Run ended before the visual request completed".into())
+        })?
+    }
+
+    pub fn ensure_active_artifact_run(&self, chat_id: &str) -> Result<(), EngineError> {
+        let active = lock(&self.inner.runs).get(chat_id).is_some_and(|run| {
+            !*run.cancel.borrow()
+                && !run.interrupt_token.is_cancelled()
+                && !run
+                    .turn_interrupted
+                    .load(std::sync::atomic::Ordering::Acquire)
+        });
+        if active {
+            Ok(())
+        } else {
+            Err(EngineError::Other(
+                "No active run accepts artifacts for this chat".into(),
+            ))
+        }
+    }
+
+    /// Publish CodeGraff artifact metadata through the live run, ACKing only after journal+doc sync.
+    pub async fn show_artifact(
+        &self,
+        chat_id: &str,
+        id: &str,
+        artifact_id: &str,
+        title: &str,
+        format: &str,
+        visibility: &str,
+        url: &str,
+    ) -> Result<(), EngineError> {
+        if id.is_empty()
+            || id.len() > 128
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(EngineError::Other("show_artifact id is invalid".into()));
+        }
+        harness_proto::artifact::validate_artifact(artifact_id, title, format, visibility, url)
+            .map_err(|error| EngineError::Other(error.into()))?;
+        let tx = lock(&self.inner.runs)
+            .get(chat_id)
+            .map(|h| h.artifact_tx.clone())
+            .ok_or_else(|| {
+                EngineError::Other("No active run accepts artifacts for this chat".into())
+            })?;
+        let (reply, rx) = oneshot::channel();
+        tx.send(ShowArtifactRequest {
+            id: id.into(),
+            artifact_id: artifact_id.into(),
+            title: title.trim().into(),
+            format: format.into(),
+            visibility: visibility.into(),
+            url: url.into(),
+            reply,
+        })
+        .await
+        .map_err(|_| EngineError::Other("Run no longer accepts artifact requests".into()))?;
+        rx.await.map_err(|_| {
+            EngineError::Other("Run ended before the artifact request completed".into())
         })?
     }
 
@@ -1633,6 +1719,27 @@ impl Inner {
         if let AgentEvent::GeneratedVisual { title, script, .. } = &leaf {
             if harness_proto::visual::validate_visual(title, script).is_err()
                 || check_visual_script(script.clone()).await.is_err()
+            {
+                return vec![];
+            }
+        }
+        if let AgentEvent::GeneratedArtifact {
+            artifact_id,
+            title,
+            format,
+            visibility,
+            url,
+            ..
+        } = &leaf
+        {
+            if harness_proto::artifact::validate_artifact(
+                artifact_id,
+                title,
+                format,
+                visibility,
+                url,
+            )
+            .is_err()
             {
                 return vec![];
             }
@@ -2835,6 +2942,7 @@ async fn drive_run(
     mut engine_rx: mpsc::UnboundedReceiver<AgentEvent>,
     mut image_rx: mpsc::Receiver<ShowImageRequest>,
     mut visual_rx: mpsc::Receiver<ShowVisualRequest>,
+    mut artifact_rx: mpsc::Receiver<ShowArtifactRequest>,
     mut cancel_rx: watch::Receiver<bool>,
     resume_state: RunResumeState,
 ) {
@@ -2953,16 +3061,37 @@ async fn drive_run(
     // Entries drop with the run, so a retiring run never strands a caller.
     let mut pending_show_images: HashMap<String, PendingShowImage> = HashMap::new();
     let mut seen_show_visuals: HashMap<String, (String, String)> = HashMap::new();
+    let mut seen_show_artifacts: HashMap<String, (String, String, String, String, String)> =
+        HashMap::new();
     for entry in doc_ref.read_entries().unwrap_or_default() {
         for part in entry.parts {
-            if let MessagePart::Visual { id, title, script } = part
-                && let Some(request_id) = id.strip_prefix("show-visual:")
-            {
-                seen_show_visuals.insert(request_id.into(), (title, script));
+            match part {
+                MessagePart::Visual { id, title, script } => {
+                    if let Some(request_id) = id.strip_prefix("show-visual:") {
+                        seen_show_visuals.insert(request_id.into(), (title, script));
+                    }
+                }
+                MessagePart::Artifact {
+                    id,
+                    artifact_id,
+                    title,
+                    format,
+                    visibility,
+                    url,
+                } => {
+                    if let Some(request_id) = id.strip_prefix("show-artifact:") {
+                        seen_show_artifacts.insert(
+                            request_id.into(),
+                            (artifact_id, title, format, visibility, url),
+                        );
+                    }
+                }
+                _ => {}
             }
         }
     }
     let mut pending_show_visuals: HashMap<String, PendingShowVisual> = HashMap::new();
+    let mut pending_show_artifacts: HashMap<String, PendingShowArtifact> = HashMap::new();
     let mut entry_id = new_id();
     let mut segment_started = now_ms();
     let mut segment_started_instant = std::time::Instant::now();
@@ -3365,6 +3494,70 @@ async fn drive_run(
                     });
                     continue;
                 }
+                Some(req) = artifact_rx.recv() => {
+                    if interrupted || *cancel_rx.borrow() || !inner.visual_run_active(&chat_id, &run_id) {
+                        let _ = req.reply.send(Err(EngineError::Other(
+                            "Run was interrupted; no artifact can be published".into(),
+                        )));
+                        continue;
+                    }
+                    if idle_since.is_some() {
+                        let _ = req.reply.send(Err(EngineError::Other(
+                            "Run is parked idle; no artifact can be published".into(),
+                        )));
+                        continue;
+                    }
+                    if let Err(why) = harness_proto::artifact::validate_artifact(
+                        &req.artifact_id,
+                        &req.title,
+                        &req.format,
+                        &req.visibility,
+                        &req.url,
+                    ) {
+                        let _ = req.reply.send(Err(EngineError::Other(why.into())));
+                        continue;
+                    }
+                    if let Some((art_id, title, format, visibility, url)) =
+                        seen_show_artifacts.get(&req.id)
+                    {
+                        if art_id != &req.artifact_id {
+                            let _ = req.reply.send(Err(EngineError::Other(
+                                "show_artifact id already used for a different artifact".into(),
+                            )));
+                            continue;
+                        }
+                        if title == &req.title
+                            && format == &req.format
+                            && visibility == &req.visibility
+                            && url == &req.url
+                        {
+                            let _ = req.reply.send(Ok(()));
+                            continue;
+                        }
+                    }
+                    let part_id = format!("show-artifact:{}", req.id);
+                    prepared_events.push_back(AgentEvent::GeneratedArtifact {
+                        id: part_id.clone(),
+                        artifact_id: req.artifact_id.clone(),
+                        title: req.title.clone(),
+                        format: req.format.clone(),
+                        visibility: req.visibility.clone(),
+                        url: req.url.clone(),
+                    });
+                    pending_show_artifacts.insert(
+                        part_id,
+                        PendingShowArtifact {
+                            request_id: req.id,
+                            artifact_id: req.artifact_id,
+                            title: req.title,
+                            format: req.format,
+                            visibility: req.visibility,
+                            url: req.url,
+                            reply: req.reply,
+                        },
+                    );
+                    continue;
+                }
                 Some(event) = engine_rx.recv() => event,
                 next = stream.next() => match next {
                     Some(Ok(event)) => event,
@@ -3548,6 +3741,16 @@ async fn drive_run(
         {
             let _ = pending.reply.send(Err(EngineError::Other(
                 "Run was interrupted; no visual can be published".into(),
+            )));
+            continue;
+        }
+
+        if let AgentEvent::GeneratedArtifact { id, .. } = &event
+            && (interrupted || *cancel_rx.borrow() || !inner.visual_run_active(&chat_id, &run_id))
+            && let Some(pending) = pending_show_artifacts.remove(id)
+        {
+            let _ = pending.reply.send(Err(EngineError::Other(
+                "Run was interrupted; no artifact can be published".into(),
             )));
             continue;
         }
@@ -4373,6 +4576,40 @@ async fn drive_run(
             } else {
                 Err(EngineError::Other(
                     "show_visual could not sync the visual into the chat".into(),
+                ))
+            };
+            let _ = pending.reply.send(result);
+        }
+
+        if let AgentEvent::GeneratedArtifact { id, .. } = &event
+            && let Some(pending) = pending_show_artifacts.remove(id)
+        {
+            let synced = publish_seq != 0
+                && sync_segment(
+                    doc_ref,
+                    &mut writer,
+                    &entry_id,
+                    &device_id,
+                    segment_started,
+                    &folded,
+                )
+                .is_ok();
+            let result = if synced {
+                dirty = false;
+                seen_show_artifacts.insert(
+                    pending.request_id,
+                    (
+                        pending.artifact_id,
+                        pending.title,
+                        pending.format,
+                        pending.visibility,
+                        pending.url,
+                    ),
+                );
+                Ok(())
+            } else {
+                Err(EngineError::Other(
+                    "show_artifact could not sync the artifact into the chat".into(),
                 ))
             };
             let _ = pending.reply.send(result);

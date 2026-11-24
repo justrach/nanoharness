@@ -5,6 +5,7 @@ import Foundation
 /// the dedicated CodeGraff API key is sent, never the Harness sync bearer.
 struct CloudGateway: Sendable {
     static let baseURL = URL(string: "https://gateway.codegraff.com")!
+    static let siteBaseURL = URL(string: "https://codegraff.com")!
     typealias Transport = @Sendable (URLRequest) async throws -> (Data, URLResponse)
 
     private let apiKey: String
@@ -67,6 +68,43 @@ struct CloudGateway: Sendable {
     func keepRunning(_ id: String, enabled: Bool) async throws {
         _ = try await request("/v1/sandboxes/\(Self.pathID(id))/keep-running", method: "POST",
                               body: ["enabled": enabled], timeout: 20)
+    }
+
+    func artifactFrameURL(_ id: String) async throws -> CodegraffArtifactFrame {
+        let data = try await request("/v1/artifacts/\(Self.pathID(id))/frame-url", method: "POST", timeout: 30)
+        do { return try JSONDecoder().decode(CodegraffArtifactFrame.self, from: data) }
+        catch { throw CloudGatewayError.unavailable("CodeGraff returned an invalid artifact frame response") }
+    }
+
+    func setArtifactVisibility(_ id: String, visibility: String) async throws -> CodegraffArtifactMeta {
+        let data = try await request("/v1/artifacts/\(Self.pathID(id))", method: "PATCH",
+                                     body: ["visibility": visibility], timeout: 30)
+        do { return try JSONDecoder().decode(CodegraffArtifactMeta.self, from: data) }
+        catch { throw CloudGatewayError.unavailable("CodeGraff returned an invalid artifact update response") }
+    }
+
+    func computerOffer() async throws -> CodegraffComputerOffer? {
+        guard var components = URLComponents(url: Self.siteBaseURL, resolvingAgainstBaseURL: false) else {
+            throw CloudGatewayError.unavailable("Invalid CodeGraff URL")
+        }
+        components.path = "/api/computer/offer"
+        guard let url = components.url else { throw CloudGatewayError.unavailable("Invalid computer status request") }
+        var req = URLRequest(url: url, timeoutInterval: 20)
+        req.httpMethod = "GET"
+        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await transport(req)
+        guard let http = response as? HTTPURLResponse else {
+            throw CloudGatewayError.unavailable("CodeGraff returned an invalid response")
+        }
+        if http.statusCode == 404 { return nil }
+        guard (200..<300).contains(http.statusCode) else {
+            let message = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+                .flatMap { ($0["error"] as? String) ?? (($0["error"] as? [String: Any])?["message"] as? String) }
+                .map { String($0.prefix(300)) }
+            throw CloudGatewayError.http(http.statusCode, message)
+        }
+        do { return try JSONDecoder().decode(CodegraffComputerOffer.self, from: data) }
+        catch { throw CloudGatewayError.unavailable("CodeGraff returned an invalid computer status") }
     }
 
     static func deviceName(for sandboxID: String) -> String {
@@ -242,5 +280,18 @@ actor PhoneCloudSandboxCoordinator {
         case .keepRunningOn: try await gateway.keepRunning(id, enabled: true)
         case .keepRunningOff: try await gateway.keepRunning(id, enabled: false)
         }
+    }
+
+    func artifactFrameURL(_ credential: GraffGatewayCredential, id: String) async throws -> CodegraffArtifactFrame {
+        try await gateway(credential).artifactFrameURL(id)
+    }
+
+    func setArtifactVisibility(_ credential: GraffGatewayCredential, id: String,
+                               visibility: String) async throws -> CodegraffArtifactMeta {
+        try await gateway(credential).setArtifactVisibility(id, visibility: visibility)
+    }
+
+    func computerOffer(_ credential: GraffGatewayCredential) async throws -> CodegraffComputerOffer? {
+        try await gateway(credential).computerOffer()
     }
 }

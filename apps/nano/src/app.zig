@@ -527,6 +527,10 @@ pub const App = struct {
     account: account.Account = .{},
     /// The account's Codegraff cloud sandboxes (app_sandboxes.zig).
     cloud_sandboxes: @import("app_sandboxes.zig").State = .{},
+    /// Hosted CodeGraff artifacts (`artifact.codegraff.com`) cache & auto-open state.
+    hosted_artifacts: @import("app_artifacts.zig").State = .{},
+    /// Dedicated Node D Cloud Computer offer/live state (app_computer.zig).
+    cloud_computer: @import("app_computer.zig").State = .{},
     /// What the window shows that isn't the engine's: the sidebar, its
     /// project filter and search, open sections and tool groups.
     view: View = .{},
@@ -595,6 +599,7 @@ pub const App = struct {
         a.artifacts.deinit(a);
         // An engine started from here stays up: others may be on it now.
         a.engine.deinit();
+        a.hosted_artifacts.deinit(a.gpa);
         a.completion.deinit(a.gpa);
         a.external_navigation.deinit(a.gpa);
         a.reap();
@@ -633,6 +638,7 @@ pub const App = struct {
         a.prompt_nav.reset(a.gpa);
         a.account.deinit(a.gpa);
         a.cloud_sandboxes.deinit();
+        a.cloud_computer.deinit();
         a.settings.deinit();
         a.mcp.deinit(a.gpa);
         a.extensions.deinit(a.gpa);
@@ -764,6 +770,7 @@ pub const App = struct {
                 // A cloud sandbox left running keeps costing credit: show it
                 // from the start.
                 @import("app_sandboxes.zig").refresh(a);
+                @import("app_computer.zig").refresh(a);
                 if (a.selected != null) {
                     a.watchDoc(true);
                     queue_mod.watch(a);
@@ -853,6 +860,7 @@ pub const App = struct {
         if (account.tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("app_reauth.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("app_sandboxes.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
+        if (@import("app_computer.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (change_requests.tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("agent_updates.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("app_subagents.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
@@ -1729,11 +1737,16 @@ pub const App = struct {
     fn onDoc(a: *App, id: u64, r: rpc.Reply) void {
         if (a.w_doc.id != id) return onPeerDoc(a, id, r);
         switch (r) {
-            .item => |v| a.transcript.apply(v) catch {
-                // Out of step: start over from a fresh reset.
-                a.engine.cancel(id);
-                a.w_doc = .{};
-                a.watchDoc(false);
+            .item => |v| {
+                const was_reset = v == .object and v.object.get("reset") != null;
+                if (a.transcript.apply(v)) |_| {
+                    @import("app_artifacts.zig").onTranscriptFrame(a, was_reset);
+                } else |_| {
+                    // Out of step: start over from a fresh reset.
+                    a.engine.cancel(id);
+                    a.w_doc = .{};
+                    a.watchDoc(false);
+                }
             },
             .done, .err => a.ended(&a.w_doc),
             .ok => {},

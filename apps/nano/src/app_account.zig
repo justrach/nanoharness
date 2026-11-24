@@ -286,7 +286,10 @@ fn onCodegraff(a: *App, _: u64, r: rpc.Reply) void {
     if (pending) acc.codegraff.pending = true;
     // A sign-in just finished: the account may already have a sandbox
     // running.
-    if (got.signed_in and !got.pending and acc.poll_at != null) @import("app_sandboxes.zig").refresh(a);
+    if (got.signed_in and !got.pending and acc.poll_at != null) {
+        @import("app_sandboxes.zig").refresh(a);
+        @import("app_computer.zig").refresh(a);
+    }
     if (got.signed_in) acc.poll_at = null;
     a.redraw();
 }

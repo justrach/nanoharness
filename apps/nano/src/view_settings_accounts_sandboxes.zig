@@ -141,9 +141,17 @@ fn sandboxRow(c: *ui.Context, a: *App, k: theme.Colors, s: sandboxes.Sandbox, no
     // Stable across feed refreshes/reordering, without borrowing the feed's ID.
     const copy_id = std.hash.Wyhash.hash(0x534258, s.id);
     const copied = a.view.copy_feedback.shown(c, copy_id);
-    const G = struct { g: rows.Ghost, what: enum { copy, start, keep, stop, delete } };
-    var gs: [5]G = undefined;
+    const out_of_credit = if (s.renew_error) |re| blk: {
+        const trimmed = std.mem.trim(u8, re, " \t\n");
+        break :blk std.mem.eql(u8, trimmed, "insufficient_credit") or std.mem.eql(u8, trimmed, "insufficient_credits");
+    } else false;
+    const G = struct { g: rows.Ghost, what: enum { copy, credits, start, keep, stop, delete } };
+    var gs: [6]G = undefined;
     var n: usize = 0;
+    if (out_of_credit) {
+        gs[n] = .{ .g = .{ .label = "Add credits" }, .what = .credits };
+        n += 1;
+    }
     if (sandboxes.isTemporary(s)) {
         gs[n] = .{ .g = .{ .label = if (copied) "Copied" else "Copy ID", .width = rows.ghostW(c, .{ .label = "Copy ID" }), .tip = "Use this ID with sandbox API/tools." }, .what = .copy };
         n += 1;
@@ -179,6 +187,7 @@ fn sandboxRow(c: *ui.Context, a: *App, k: theme.Colors, s: sandboxes.Sandbox, no
             c.clipboard.write(c.clipboard.ctx, s.id);
             a.view.copy_feedback.confirm(c, copy_id);
         },
+        .credits => _ = nanoui.shell.openUrl("https://codegraff.com/dashboard/billing"),
         .start => if (!any) act(a, s.id, "start"),
         .keep => if (!any) act(a, s.id, "keep-running-on"),
         .stop => if (!any) act(a, s.id, "stop"),
