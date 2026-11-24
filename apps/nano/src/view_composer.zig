@@ -37,7 +37,7 @@ pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
     const queued = a.queue.items.len > 0;
     // Queue and input are separate flow surfaces. Never lift the input over
     // the queue's scroll viewport or use decorative padding as scroll content.
-    const outer = ui.div(c).column().wFull().px(16).pb(40).gap(if (queued) queue_view.gap else 0).itemsCenter();
+    const outer = ui.div(c).column().wFull().px(16).pb(if (a.selected == null and @import("view_newchat.zig").needsTargetRow(c, a, w)) @as(f32, 64) else 40).gap(if (queued) queue_view.gap else 0).itemsCenter();
     defer outer.end();
     // Anchor the work cue to the whole dock so it clears queued rows.
     {
@@ -483,12 +483,25 @@ fn keepFocus(c: *ui.Context, a: *App, id: u64) void {
 /// The model chip: what the next message runs on, 24 tall at the footer's
 /// leading edge (`PickerKind::HarnessModel`'s trigger). Returns the width
 /// it takes this frame, for the footer to share out the rest.
-pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) f32 {
-    return chipWithMax(c, a, k, null);
-}
+const chip_measure_style: ui.TextStyle = .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight };
 
-pub fn chipWithMax(c: *ui.Context, a: *App, k: theme.Colors, max_w_override: ?f32) f32 {
-    const mp = @import("model_picker.zig");
+const ChipMeasure = struct {
+    t: @import("app_agent.zig").Target,
+    chat_harness: bool,
+    max_chip_w: f32,
+    unresolved: bool,
+    label_loading: bool,
+    failed: bool,
+    label_text: []const u8,
+    suffix_text: ?[]const u8,
+    icon_only: bool,
+    wanted_w: f32,
+    target_w: f32,
+    glyph_w: f32,
+    idle_drawn_w: f32,
+};
+
+fn measureChip(c: *ui.Context, a: *const App, max_w_override: ?f32) ChipMeasure {
     const t = a.target();
     const room = @max(28, transcript_view.paneWidth(c, a) - 32 - 100);
     const max_chip_w = if (max_w_override) |m| @max(28, @min(248, m)) else @min(248, room);
@@ -498,33 +511,60 @@ pub fn chipWithMax(c: *ui.Context, a: *App, k: theme.Colors, max_w_override: ?f3
     const failed = if (label_loading) (if (a.view.model_picker.catalogs.get(t.harness)) |cat| cat.failed else false) else false;
     const label_text = if (!unresolved and !label_loading) a.modelLabel(t.model) else "";
     const suffix_text: ?[]const u8 = if (!unresolved and !label_loading) (if (t.reasoning) |level| rules.reasoningLabel(level) else null) else null;
-    const st_measure: ui.TextStyle = .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight };
     const icon_only = max_chip_w < 52;
     var wanted_w: f32 = 12 + 16;
     if (!unresolved and !icon_only) {
         if (label_loading) {
             if (!failed) wanted_w += 6 + 56;
         } else {
-            wanted_w += 6 + @ceil(c.text.width(label_text, st_measure));
-            if (suffix_text) |sfx| wanted_w += 6 + @ceil(c.text.width(sfx, st_measure));
+            wanted_w += 6 + @ceil(c.text.width(label_text, chip_measure_style));
+            if (suffix_text) |sfx| wanted_w += 6 + @ceil(c.text.width(sfx, chip_measure_style));
         }
     }
-    const target_w = @min(wanted_w, max_chip_w);
-    const width_sample = mp.ScalarTransition.sample(&a.view.model_picker.chip_width, target_w, c.time, c.reduced_motion);
+    const glyph_w: f32 = if (!unresolved and a.harnesses.items.len == 0 and !chat_harness) 5 else 16;
+    return .{
+        .t = t,
+        .chat_harness = chat_harness,
+        .max_chip_w = max_chip_w,
+        .unresolved = unresolved,
+        .label_loading = label_loading,
+        .failed = failed,
+        .label_text = label_text,
+        .suffix_text = suffix_text,
+        .icon_only = icon_only,
+        .wanted_w = wanted_w,
+        .target_w = @min(wanted_w, max_chip_w),
+        .glyph_w = glyph_w,
+        .idle_drawn_w = @min(@max(wanted_w - 16, 12 + (if (icon_only) @as(f32, 0) else 6)) + glyph_w, max_chip_w),
+    };
+}
+
+/// Non-mutating chip width estimate for layout probes before the footer draws.
+pub fn chipWidth(c: *ui.Context, a: *const App) f32 {
+    return measureChip(c, a, null).idle_drawn_w;
+}
+
+pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) f32 {
+    return chipWithMax(c, a, k, null);
+}
+
+pub fn chipWithMax(c: *ui.Context, a: *App, k: theme.Colors, max_w_override: ?f32) f32 {
+    const mp = @import("model_picker.zig");
+    const m = measureChip(c, a, max_w_override);
+    const width_sample = mp.ScalarTransition.sample(&a.view.model_picker.chip_width, m.target_w, c.time, c.reduced_motion);
     if (width_sample.moving) c.frameIn(1.0 / 120.0);
 
-    var base = ui.div(c).row().h(24).maxW(max_chip_w).px(6).gap(if (icon_only) 0 else 6).itemsCenter().rounded(8).clip();
+    var base = ui.div(c).row().h(24).maxW(m.max_chip_w).px(6).gap(if (m.icon_only) 0 else 6).itemsCenter().rounded(8).clip();
     if (width_sample.moving) base = base.w(width_sample.value);
-    const full_hint: ?[]const u8 = if (!unresolved and !label_loading and (icon_only or wanted_w > max_chip_w))
-        (if (suffix_text) |sfx| c.print("{s} · {s}", .{ label_text, sfx }) else label_text)
+    const full_hint: ?[]const u8 = if (!m.unresolved and !m.label_loading and (m.icon_only or m.wanted_w > m.max_chip_w))
+        (if (m.suffix_text) |sfx| c.print("{s} · {s}", .{ m.label_text, sfx }) else m.label_text)
     else
         null;
     if (full_hint) |hint| base = @import("view_tooltip.zig").on(base, k, .{ .text = hint });
     // At rest it is its content: the glyph (the 5-point loader until an
     // agent is known) in its insets, the label's gap (kept even for no
     // label), and the words.
-    const glyph_w: f32 = if (!unresolved and a.harnesses.items.len == 0 and !chat_harness) 5 else 16;
-    const drawn_w = if (width_sample.moving) @min(width_sample.value, max_chip_w) else @min(@max(wanted_w - 16, 12 + (if (icon_only) @as(f32, 0) else 6)) + glyph_w, max_chip_w);
+    const drawn_w = if (width_sample.moving) @min(width_sample.value, m.max_chip_w) else m.idle_drawn_w;
     // GPUI's trigger uses on_hover: closing by keyboard doesn't move the
     // pointer and must not clear the wash until the pointer actually moves.
     const b = kit.listenerHover(&a.view.hovers, if (a.picker != .none) base.bg(k.hover) else base, k.hover).div;
@@ -537,12 +577,12 @@ pub fn chipWithMax(c: *ui.Context, a: *App, k: theme.Colors, max_w_override: ?f3
     // The list failed and nothing names an agent: GPUI's `effective_harness`
     // is none, so a muted terminal and no label, not a loader.
     // Its label is always a child, empty or not, so its gap stays.
-    if (unresolved) {
+    if (m.unresolved) {
         icons.icon(c, .terminal, 16, k.muted, 0);
-        if (!icon_only) _ = c.leaf(.{ .width = .{ .px = 0 } }, .none, null);
+        if (!m.icon_only) _ = c.leaf(.{ .width = .{ .px = 0 } }, .none, null);
         return drawn_w;
     }
-    if (a.harnesses.items.len == 0 and !chat_harness) {
+    if (a.harnesses.items.len == 0 and !m.chat_harness) {
         kit.snake(c, k);
     } else if (chipMaker(a)) |maker| {
         // With the two-step picker, the model's maker names it, untinted
@@ -550,25 +590,25 @@ pub fn chipWithMax(c: *ui.Context, a: *App, k: theme.Colors, max_w_override: ?f3
         // `model_maker`/`maker_icon` over `model_chip_icon`).
         icons.icon(c, maker, 16, k.muted, 0);
     } else {
-        const mark = icons.harnessMark(t.harness);
+        const mark = icons.harnessMark(m.t.harness);
         icons.icon(c, mark.name, 16, mark.brand orelse k.muted, 0);
     }
-    if (icon_only) return drawn_w;
-    if (label_loading) {
+    if (m.icon_only) return drawn_w;
+    if (m.label_loading) {
         // A failed catalog has nothing to name: no label, no ghost bar.
-        if (failed) _ = c.leaf(.{ .width = .{ .px = 0 } }, .none, null) else skeleton(c);
+        if (m.failed) _ = c.leaf(.{ .width = .{ .px = 0 } }, .none, null) else skeleton(c);
         return drawn_w;
     }
     // `hover_blend`: the label brightens under the pointer, rolling Scritto-style when changed.
     // Re-read after `togglePickerCompact` in case opening the picker synced `a.models`.
     const live_t = a.target();
-    const live_label = if (!unresolved and !label_loading) a.modelLabel(live_t.model) else label_text;
-    const live_suffix: ?[]const u8 = if (!unresolved and !label_loading) (if (live_t.reasoning) |level| rules.reasoningLabel(level) else null) else suffix_text;
+    const live_label = if (!m.unresolved and !m.label_loading) a.modelLabel(live_t.model) else m.label_text;
+    const live_suffix: ?[]const u8 = if (!m.unresolved and !m.label_loading) (if (live_t.reasoning) |level| rules.reasoningLabel(level) else null) else m.suffix_text;
     const label_st: ui.TextStyle = .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = if (b.hovered()) k.text else k.text.alpha(0.9) };
     const suffix_st: ui.TextStyle = .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = k.muted.alpha(0.7) };
-    const text_room = @max(0, max_chip_w - (12 + glyph_w + 6));
-    const live_label_w = @ceil(c.text.width(live_label, st_measure));
-    const live_suffix_w: f32 = if (live_suffix) |sfx| 6 + @ceil(c.text.width(sfx, st_measure)) else 0;
+    const text_room = @max(0, m.max_chip_w - (12 + m.glyph_w + 6));
+    const live_label_w = @ceil(c.text.width(live_label, chip_measure_style));
+    const live_suffix_w: f32 = if (live_suffix) |sfx| 6 + @ceil(c.text.width(sfx, chip_measure_style)) else 0;
     if (live_label_w + live_suffix_w <= text_room) {
         kit.rollText(c, "composer-model-label", live_label, label_st);
         if (live_suffix) |sfx| kit.rollText(c, "composer-effort-suffix", sfx, suffix_st);

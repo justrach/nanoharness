@@ -47,6 +47,7 @@ pub const View = struct {
     full_screen: bool = false,
     full_screen_native: bool = false,
     full_screen_restore_sidebar: bool = true,
+    fs_top_peek: bool = false,
     /// A prompt was just sent: position the new turn near the top, even
     /// when the reader was browsing older work.
     stick_end: bool = false,
@@ -1263,6 +1264,7 @@ pub const App = struct {
         @import("app_navigation.zig").validateCurrent(a);
         a.view.split_reveal = null;
         a.view.strip.expanded = null;
+        a.view.fs_top_peek = false;
         a.view.strip.menu = null;
         a.view.strip.pending_folder = null;
         const focus_pane = if (a.tabs.layout()) |s| s.focus else null;
@@ -2188,6 +2190,7 @@ pub const App = struct {
     pub fn applyFullScreenState(a: *App, on: bool) void {
         if (a.view.full_screen == on) return;
         a.view.full_screen = on;
+        a.view.fs_top_peek = false;
         if (on) {
             a.view.full_screen_restore_sidebar = a.view.sidebar_open;
             a.view.sidebar_open = false;

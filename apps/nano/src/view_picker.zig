@@ -470,7 +470,7 @@ pub fn popover(c: *ui.Context, a: *App, k: theme.Colors) void {
         break :blk p.height;
     };
     const chrome = @import("panel_chrome.zig");
-    const top_margin: f32 = (if (a.view.full_screen) chrome.zen_gutter else chrome.header_height) + 6;
+    const top_margin: f32 = (if (a.view.full_screen) chrome.fs_top_inset else chrome.header_height) + 6;
     const geometry = placementTop(anchor, c.size, a.selected == null, wanted_h, top_margin);
     const h = geometry.h;
     const x = std.math.clamp(anchor.x, 8, @max(8, c.size.w - w - 8));
@@ -730,7 +730,7 @@ fn detail(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, row: ui.Rect,
     const x = if (left) row.x - 10 - detail_width else @min(right, @max(8, c.size.w - detail_width - 8));
     const est: f32 = if (p.detail_rect) |d| d.h else 172;
     const chrome = @import("panel_chrome.zig");
-    const top_margin: f32 = (if (a.view.full_screen) chrome.zen_gutter else chrome.header_height) + 6;
+    const top_margin: f32 = (if (a.view.full_screen) chrome.fs_top_inset else chrome.header_height) + 6;
     const y = std.math.clamp(row.y, top_margin, @max(top_margin, c.size.h - est - 8));
     ui.key(c, "model-detail-card");
     const card = kit.shadowLg(ui.div(c).fixed().offset(x, y).motion(exit).w(detail_width).layer(7).column().p(16 + 1).gap(11)

@@ -101,7 +101,7 @@ test "minimal fullscreen paints pure #000000 canvas, removes the top bar, and re
             try testing.expectEqual(@as(f32, chrome.header_height), h.a.view.chrome.y);
             try testing.expect(h.a.view.strip.active_tab_anchor != null);
 
-            // Enter fullscreen: black surround, collapsed sidebar, zero top bar.
+            // Enter fullscreen: black surround, collapsed sidebar, 10pt top bezel handle + 28pt borderless pane header.
             h.a.setFullScreen(true);
             h.t.settle(1);
             try testing.expect(h.a.view.full_screen);
@@ -110,21 +110,24 @@ test "minimal fullscreen paints pure #000000 canvas, removes the top bar, and re
             try testing.expectEqual(@as(f32, 0), h.t.ctx.title_bar_height);
             try testing.expectEqual(ui.Color.black, h.t.ctx.node(0).style.background.?);
             try testing.expectEqual(ui.Color.black, h.t.ctx.theme.background);
-            try testing.expectEqual(@as(f32, chrome.zen_gutter), h.a.view.chrome.y);
-            try testing.expectEqual(@as(f32, 780 - 12), h.a.view.chrome.height);
+            try testing.expectEqual(@as(f32, chrome.fs_top_inset), h.a.view.chrome.y);
+            try testing.expectEqual(@as(f32, 780 - chrome.fs_top_inset - chrome.zen_gutter), h.a.view.chrome.height);
             try testing.expect(h.a.view.strip.active_tab_anchor == null);
             try testing.expect(h.a.view.updates_anchor == null);
-            try testing.expectEqual(@as(usize, 1), countCardRects(&h, chrome.zen_gutter, 780 - 12, ui.Color.white.alpha(0.095)));
+            try testing.expectEqual(@as(usize, 1), countCardRects(&h, chrome.fs_top_inset, 780 - chrome.fs_top_inset - chrome.zen_gutter, ui.Color.white.alpha(0.095)));
             // Cards keep their crisp light/dark fill rather than turning black.
             const k = theme.colors(dark);
             try testing.expect(!std.meta.eql(panel_chrome.zenPageBg(k), ui.Color.black));
 
-            // Other open tab label does not linger in a hidden top bar.
+            // Other open tab label ("Cedar") does not linger in a hidden top bar, while active session ("Rowan") sits in the 28pt strip.
             for (h.t.ctx.nodes.items) |node| {
+                if (node.content == .text and node.rect.y < chrome.fs_handle_h) return error.TopTabBarRenderedInFullScreen;
                 if (node.content == .text and std.mem.startsWith(u8, node.content.text.str, "Cedar") and node.rect.y < chrome.header_height) {
                     return error.TopTabBarRenderedInFullScreen;
                 }
             }
+            const strip_title = h.t.findText("Rowan palette review") orelse return error.MissingPaneHeaderTitle;
+            try testing.expect(strip_title.y >= chrome.fs_handle_h and strip_title.y + strip_title.h <= chrome.fs_top_inset);
 
             // Exit fullscreen restores prior sidebar state and 42pt header geometry.
             h.a.setFullScreen(false);
@@ -137,7 +140,7 @@ test "minimal fullscreen paints pure #000000 canvas, removes the top bar, and re
     }
 }
 
-test "split panes sit flush at 6pt black top inset with no pane row in fullscreen" {
+test "split panes sit in borderless 28pt black header strips at 38pt top inset in fullscreen" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
@@ -146,24 +149,25 @@ test "split panes sit flush at 6pt black top inset with no pane row in fullscree
     h.a.setFullScreen(true);
     h.t.settle(1);
 
-    try testing.expectEqual(@as(f32, chrome.zen_gutter), h.a.view.chrome.y);
-    try testing.expectEqual(@as(f32, 780 - 12), h.a.view.chrome.height);
+    try testing.expectEqual(@as(f32, chrome.fs_top_inset), h.a.view.chrome.y);
+    try testing.expectEqual(@as(f32, 780 - chrome.fs_top_inset - chrome.zen_gutter), h.a.view.chrome.height);
     try testing.expect(!h.t.hasText("Split · 2 panes"));
 
     var pane_cards: usize = 0;
     for (h.t.ctx.nodes.items) |node| {
         if (@abs(node.style.radius - chrome.zen_radius) < 0.1 and
-            @abs(node.rect.y - chrome.zen_gutter) < 0.5 and
-            @abs(node.rect.h - (780 - 12)) < 0.5 and
+            @abs(node.rect.y - chrome.fs_top_inset) < 0.5 and
+            @abs(node.rect.h - (780 - chrome.fs_top_inset - chrome.zen_gutter)) < 0.5 and
             node.rect.w > 400 and node.rect.w < 700)
         {
             pane_cards += 1;
         }
     }
     try testing.expectEqual(@as(usize, 2), pane_cards);
+    h.snap("browse-fs-split");
 }
 
-test "⌘K drives fullscreen entry, open tab switching, sidebar peeking, and fullscreen exit without a top bar" {
+test "⌘K drives fullscreen entry, open tab switching, sidebar peeking, top handle peek, and fullscreen exit" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
@@ -185,6 +189,16 @@ test "⌘K drives fullscreen entry, open tab switching, sidebar peeking, and ful
     try testing.expect(!h.a.view.sidebar_open);
     h.snap("fullscreen-after-clean");
 
+    // Click top bezel pill handle to reveal the floating top tab bar, then Escape to tuck it away.
+    try testing.expect(!h.a.view.fs_top_peek);
+    h.t.click(600, 5);
+    h.t.settle(1);
+    try testing.expect(h.a.view.fs_top_peek);
+    try testing.expect(h.t.hasText("Rowan palette review"));
+    h.press(.{ .key = S.escape });
+    try testing.expect(!h.a.view.fs_top_peek);
+    try testing.expect(h.a.view.full_screen);
+
     // Open ⌘K in fullscreen: placeholder mentions open tabs, idle commands show Exit full screen / Toggle sidebar / Split pane right,
     // and Section 0 surfaces Rowan (the inactive open workspace tab).
     h.press(.{ .key = 'k', .cmd = true });
@@ -193,20 +207,21 @@ test "⌘K drives fullscreen entry, open tab switching, sidebar peeking, and ful
     try testing.expect(h.t.hasText("Exit full screen"));
     try testing.expect(h.t.hasText("Toggle sidebar"));
     try testing.expect(h.t.hasText("Split pane right"));
-    try testing.expect(h.t.hasText("Open tab"));
+    try testing.expect(h.t.hasText("2 open"));
     h.snap("fullscreen-after-palette");
     // First item is the other open tab ("Rowan palette review"): Return switches cleanly without opening a duplicate tab.
     h.press(.{ .key = S.enter });
     try testing.expectEqualStrings("rowan", h.a.selected.?);
     try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
 
-    // Toggle sidebar inside fullscreen via ⌘K: sidebar card opens aligned at y = 6pt without a traffic-light header row.
+    // Toggle sidebar inside fullscreen via ⌘K: sidebar opens with its titlebar above y = 38pt aligned cleanly with the chat card.
     h.press(.{ .key = 'k', .cmd = true });
     h.t.typeText("toggle sidebar");
     h.t.settle(1);
     h.press(.{ .key = S.enter });
     try testing.expect(h.a.view.sidebar_open);
-    try testing.expectEqual(@as(usize, 2), countCardRects(&h, chrome.zen_gutter, 780 - 12, ui.Color.white.alpha(0.095)));
+    try testing.expectEqual(@as(usize, 2), countCardRects(&h, chrome.fs_top_inset, 780 - chrome.fs_top_inset - chrome.zen_gutter, ui.Color.white.alpha(0.095)));
+    h.snap("browse-fs-cmdb");
 
     // Exit full screen via ⌘K (Cmd+Ctrl+F shortcut also toggles cleanly in headless mode).
     h.press(.{ .key = 'k', .cmd = true });

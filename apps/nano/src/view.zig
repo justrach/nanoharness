@@ -171,6 +171,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     strip.settle(a);
     @import("view_attachment_drop.zig").prepare(a);
     if (!@import("view_image_preview.zig").keys(c, a) and !@import("github_images.zig").keys(c, a)) keys(c, a);
+    @import("view_fullscreen_chrome.zig").updatePeek(c, a);
     c.setZoom(a.settings.uiFontSize() / 16.0);
     if (!a.offscreen and c.time < a.view.resize_until) c.frameIn(1.0 / 120.0);
     a.syncPeers();
@@ -248,7 +249,7 @@ pub fn view(a: *App, c: *ui.Context) void {
         a.view.seam_inset = 2;
         const zen = a.settings.uiMode() == .zen;
         const ws_gutter = chrome.zen_gutter;
-        const top_inset: f32 = if (fs) chrome.zen_gutter else chrome.header_height;
+        const top_inset: f32 = if (fs) chrome.fs_top_inset else chrome.header_height;
         const layout = a.tabs.layout();
         const github_host = strip.hasHost(a) and @import("app_github_repository.zig").surface(a);
         const preferred_host = if (github_host) @max(chrome.right_pane_default, a.settings.rightPaneWidth()) else a.settings.rightPaneWidth();
@@ -264,14 +265,17 @@ pub fn view(a: *App, c: *ui.Context) void {
         const main = ui.div(c).column().grow().w(0).hFull();
         defer main.end();
         if (a.view.settings_open) {
-            const wrap = ui.div(c).row().pt(top_inset).pl(a.view.chrome.leading).pr(chrome.zen_gutter).pb(chrome.zen_gutter).hFull().wFull();
+            const wrap = ui.div(c).row().pt(if (fs) chrome.fs_handle_h else top_inset).pl(a.view.chrome.leading).pr(chrome.zen_gutter).pb(chrome.zen_gutter).hFull().wFull();
             defer wrap.end();
+            const col = ui.div(c).column().grow().w(0).hFull();
+            defer col.end();
+            if (fs) @import("view_fullscreen_chrome.zig").settingsHeader(c, a);
             ui.key(c, "zen-settings-page-card");
-            const card = panel_chrome.zenBodyOn(c, k, fs).grow().w(0).hFull().clip();
+            const card = panel_chrome.zenBodyOn(c, k, fs).grow().wFull().h(0).clip();
             defer card.end();
             settings_view.page(c, a, k);
         } else {
-            const workspace = ui.div(c).row().pt(a.view.chrome.y).pl(a.view.chrome.leading).pr(ws_gutter).pb(ws_gutter).hFull().wFull();
+            const workspace = ui.div(c).row().pt(if (fs) chrome.fs_handle_h else a.view.chrome.y).pl(a.view.chrome.leading).pr(ws_gutter).pb(ws_gutter).hFull().wFull();
             defer workspace.end();
             const expanded = strip.layoutExpanded(a);
             if (expanded == null or expanded.? == .chat) {
@@ -292,7 +296,10 @@ pub fn view(a: *App, c: *ui.Context) void {
             if (strip.hasFiles(a) and (expanded == null or expanded.? == .files)) {
                 if (expanded == null) ui.div(c).w(ws_gutter).hFull().end();
                 if (expanded != null) a.view.chrome.files_width = a.view.chrome.width;
-                const files = panel_chrome.bodyForOn(c, k, zen, fs).w(a.view.chrome.files_width).hFull().clip();
+                const fcol = ui.div(c).column().w(a.view.chrome.files_width).hFull();
+                defer fcol.end();
+                if (fs) @import("view_fullscreen_chrome.zig").filesHeader(c, a, k, a.view.strip.focused == .files);
+                const files = panel_chrome.bodyForOn(c, k, zen, fs).grow().wFull().h(0).clip();
                 defer files.end();
                 if (c.input.pressed and files.interaction().hovered) a.view.strip.focused = .files;
                 @import("view_files.zig").explorer(c, a, k);
@@ -303,6 +310,10 @@ pub fn view(a: *App, c: *ui.Context) void {
         strip.draw(c, a, k, strip_layout, &pane_widths);
         titlebar(c, a, k);
         @import("window_chrome.zig").draw(c, a, k);
+    } else {
+        const fs_chrome = @import("view_fullscreen_chrome.zig");
+        fs_chrome.drawTopHandle(c, a);
+        fs_chrome.drawTopPeek(c, a, strip_layout, &pane_widths);
     }
     if (c.input.released) a.view.sidebar_press_focus = false;
     const popup = surfaces.popup(k);
@@ -419,7 +430,13 @@ fn seam(c: *ui.Context, a: *App, k: theme.Colors) void {
 /// chat's page.
 fn chatPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     const zen = a.settings.uiMode() == .zen;
-    const panel = panel_chrome.bodyForOn(c, k, zen, a.view.full_screen).grow().wFull().h(0);
+    const fs = a.view.full_screen;
+    if (fs) {
+        const pane_ix = if (a.tabs.layout()) |s| s.focus else 0;
+        const pane_w = @max(0, a.view.chrome.chat_width);
+        @import("view_fullscreen_chrome.zig").chatHeader(c, a, k, pane_ix, a.selected, pane_w, true, false);
+    }
+    const panel = panel_chrome.bodyForOn(c, k, zen, fs).grow().wFull().h(0);
     defer panel.end();
     @import("view_attachment_drop.zig").target(c, a, panel.index, if (a.tabs.layout()) |s| s.focus else null);
     @import("view_attachment_drop.zig").shade(c, a, k, panel.index);
@@ -463,8 +480,12 @@ fn githubChildInSplit(a: *const App) bool {
 
 fn hostPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     const zen = a.settings.uiMode() == .zen;
+    const fs = a.view.full_screen;
+    const hcol = ui.div(c).column().w(a.view.chrome.host_width).hFull();
+    defer hcol.end();
+    if (fs) @import("view_fullscreen_chrome.zig").hostHeader(c, a, k, a.view.strip.focused == .host);
     ui.key(c, "workspace-host-body");
-    const host = panel_chrome.bodyForOn(c, k, zen, a.view.full_screen).w(a.view.chrome.host_width).hFull();
+    const host = panel_chrome.bodyForOn(c, k, zen, fs).grow().wFull().h(0);
     defer host.end();
     if (c.input.pressed and host.interaction().hovered) a.view.strip.focused = .host;
     if (!a.view.full_screen and !zen and @import("app_github_repository.zig").surface(a)) {
@@ -487,7 +508,7 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split, widths: *[tab
     var box = ui.div(c).grow().wFull().h(0);
     box = if (across) box.row() else box.column();
     defer box.end();
-    const total: f32 = if (across) a.view.chrome.chat_width else a.view.chrome.height;
+    const total: f32 = if (across) a.view.chrome.chat_width else (a.view.chrome.height + (if (a.view.full_screen) chrome.fs_pane_header_h else 0));
     var focus: ?usize = null;
     const press = a.view.pane_press;
     if (c.input.pressed or c.input.released) a.view.pane_press = null;
@@ -538,8 +559,18 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split, widths: *[tab
             // In a vertical split only the parent's row shares its width.
             if (!across and child_parent != null and !owns_child) a.view.chrome.chat_width += a.view.chrome.host_width + ws_gutter;
             defer a.view.chrome.chat_width = saved_width;
+            const slot_w = if (across) size else a.view.chrome.chat_width;
+            const slot_box = if (across)
+                ui.div(c).column().w(slot_w).hFull()
+            else
+                ui.div(c).column().h(size).w(slot_w);
+            defer slot_box.end();
+            if (a.view.full_screen) {
+                const pane_chat = if (ix == s.focus) a.selected else chat;
+                @import("view_fullscreen_chrome.zig").chatHeader(c, a, k, ix, pane_chat, slot_w, ix == s.focus, true);
+            }
             const bpct = @import("ux_rules.zig").FocusAndClose.splitPaneBorderPct(@intCast(s.panes.items.len), ix == s.focus);
-            var pane = panel_chrome.bodyForOn(c, k, zen, a.view.full_screen).clip().w(if (across) size else a.view.chrome.chat_width).hFull();
+            var pane = panel_chrome.bodyForOn(c, k, zen, a.view.full_screen).clip().grow().wFull().h(0);
             if (bpct == 100) {
                 pane = pane.border(k.accent.alpha(0.45));
             } else if (bpct > 0) {
@@ -558,7 +589,7 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split, widths: *[tab
                 if (c.input.released and it.hovered and c.window_focused) if (press) |p| {
                     if (p.tab == @import("pane_gesture.zig").context(a, c) and p.pane == ix) focus = ix;
                 };
-                const neighbor_w = @max(0, (if (across) size else a.view.chrome.chat_width) - a.view.seam_inset);
+                const neighbor_w = @max(0, slot_w - a.view.seam_inset);
                 if (neighbor(c, a, k, ix, chat, neighbor_w)) return;
             }
         }
@@ -899,6 +930,10 @@ fn keys(c: *ui.Context, a: *App) void {
     // A session menu or its dialog, over everything, takes Escape first.
     // An unobscured question owns Escape (Back); the no-menu fallback
     // must not consume it before the question's surface can see it.
+    if (a.view.full_screen and a.view.fs_top_peek and !menuKeepsKeys(a) and c.shortcut(.{ .key = S.escape })) {
+        a.view.fs_top_peek = false;
+        return a.redraw();
+    }
     if (a.view.link_menu.open and c.shortcut(.{ .key = S.escape })) {
         a.view.link_menu.open = false;
     } else if (@import("view_chat_menu.zig").anyOpen(a) and c.shortcut(.{ .key = S.escape })) {

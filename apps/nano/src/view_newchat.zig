@@ -158,25 +158,34 @@ fn modeLabel(plain: bool) []const u8 {
 /// narrow for them all (a split pane), `footerChipWidths` shortens long
 /// labels, then leaves controls their glyph alone, so none is cut at the
 /// composer's edge or pushed out of reach.
-pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
+const FooterLayout = struct {
+    wide: bool,
+    note: ?[]const u8,
+    note_max: f32,
+    note_w: f32,
+    git_chrome: bool,
+    labels: [control_count]?[]const u8,
+    slots: [control_count]rules.FooterSlot,
+    need_target_row: bool,
+};
+
+fn computeFooterLayout(c: *ui.Context, a: *const App, w: f32, model_w: f32) FooterLayout {
     const wide = w >= rules.footer_wide_w;
-    var r = ui.div(c).row().w(w).h(24).px(10).gap(rules.footerRowGap(w)).itemsCenter().clip();
-    if (wide) r = r.justifyCenter();
-    defer r.end();
-    const model_w = composer.chip(c, a, k);
-    if (wide) ui.div(c).size(3, 3).rounded(1.5).bg(k.muted.alpha(0.35)).end();
     const note = agent.chatNote(a);
-    const note_st: ui.TextStyle = .{ .size = 11.5, .line_height = 11.5 * phi, .color = k.muted };
     const note_max = @max(0, w - 200);
-    const note_w = if (note) |text| @min(@ceil(c.text.width(text, note_st)), note_max) else 0;
+    const note_w = if (note) |text| @min(@ceil(c.text.width(text, .{ .size = 11.5, .line_height = 11.5 * phi })), note_max) else 0;
 
     const strip = @import("view_tab_strip.zig");
     const space = a.newChatSpace();
     const git_chrome = a.settings.hierarchyProfile().shows_git_checkout_chrome;
+    const show_computer = git_chrome or a.devices.items.len > 0 or a.view.full_screen;
     var labels: [control_count]?[]const u8 = @splat(null);
     labels[ix(.mode)] = modeLabel(a.new_chat_mode);
     if (composer.followUpShown(a)) labels[ix(.follow)] = composer.followUpLabel(a);
-    if (git_chrome) labels[ix(.computer)] = c.print("Run on: {s}", .{strip.deviceLabel(a, strip.device(a, strip.active(a)))});
+    if (show_computer) {
+        const dev = strip.deviceLabel(a, strip.device(a, strip.active(a)));
+        labels[ix(.computer)] = if (git_chrome) c.print("Run on: {s}", .{dev}) else dev;
+    }
     // Desktop exposes project choice only before sending a coding session.
     if (!a.new_chat_mode) labels[ix(.project)] = if (space) |s| s.name else "No project";
     if (git_chrome) if (space) |s| if (s.git) {
@@ -199,48 +208,143 @@ pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         slot.* = fitted[n];
         n += 1;
     };
+    const is_split = if (a.tabs.layout()) |s| s.panes.items.len > 1 else false;
+    const proj_crushed = labels[ix(.project)] != null and slots[ix(.project)].label == 0;
+    const comp_crushed = labels[ix(.computer)] != null and slots[ix(.computer)].label == 0;
+    return .{
+        .wide = wide,
+        .note = note,
+        .note_max = note_max,
+        .note_w = note_w,
+        .git_chrome = git_chrome,
+        .labels = labels,
+        .slots = slots,
+        .need_target_row = proj_crushed or (comp_crushed and (!git_chrome or a.view.full_screen or is_split)),
+    };
+}
+
+/// True when the narrow footer had to crush Folder or Computer down to a bare
+/// icon, so the composer allocates an extra target-selector strip row.
+pub fn needsTargetRow(c: *ui.Context, a: *const App, w: f32) bool {
+    return computeFooterLayout(c, a, w, composer.chipWidth(c, a)).need_target_row;
+}
+
+fn targetSlotForBudget(c: *ui.Context, label: []const u8, budget: f32) rules.FooterSlot {
+    const nat = @min(@ceil(c.text.width(label, chip_st)), chip_max_w - chip_chrome);
+    const label_w = @min(nat, @max(0, budget - chip_chrome));
+    if (label_w >= 24) return .{ .w = chip_chrome + label_w, .label = label_w };
+    if (nat > 0 and budget >= 28) return .{ .w = 28, .label = 0 };
+    return .{};
+}
+
+pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
+    const col = ui.div(c).column().w(w).gap(2);
+    defer col.end();
+
+    var model_w: f32 = 0;
+    var lay: FooterLayout = undefined;
     {
-        const slot = if (wide)
-            ui.div(c).row().hFull().gap(rules.footer_chip_gap).itemsCenter().clip()
-        else
-            ui.div(c).row().grow().w(0).hFull().gap(rules.footer_chip_gap).itemsCenter().clip();
-        defer slot.end();
-        modeSwitch(c, a, k, slots[ix(.mode)]);
-        if (slots[ix(.follow)].w > 0) composer.followUpChip(c, a, k, slots[ix(.follow)].label == 0);
-        // Keep the execution target beside the draft, not only in the
-        // titlebar. Picking another host clears an incompatible project.
-        var computer: ?ui.Rect = null;
-        if (labels[ix(.computer)]) |label| {
-            if (footerChipAt(c, k, "picker-computer", .monitor, label, slots[ix(.computer)], &computer))
-                strip.open(a, .device, strip.active(a), computer);
+        var r = ui.div(c).row().w(w).h(24).px(10).gap(rules.footerRowGap(w)).itemsCenter().clip();
+        if (w >= rules.footer_wide_w) r = r.justifyCenter();
+        defer r.end();
+        model_w = composer.chip(c, a, k);
+        lay = computeFooterLayout(c, a, w, model_w);
+        if (lay.wide) ui.div(c).size(3, 3).rounded(1.5).bg(k.muted.alpha(0.35)).end();
+
+        const strip = @import("view_tab_strip.zig");
+        const space = a.newChatSpace();
+        const note_st: ui.TextStyle = .{ .size = 11.5, .line_height = 11.5 * phi, .color = k.muted };
+        {
+            const slot = if (lay.wide)
+                ui.div(c).row().hFull().gap(rules.footer_chip_gap).itemsCenter().clip()
+            else
+                ui.div(c).row().grow().w(0).hFull().gap(rules.footer_chip_gap).itemsCenter().clip();
+            defer slot.end();
+            modeSwitch(c, a, k, lay.slots[ix(.mode)]);
+            if (lay.slots[ix(.follow)].w > 0) composer.followUpChip(c, a, k, lay.slots[ix(.follow)].label == 0);
+            // Keep the execution target beside the draft, not only in the
+            // titlebar. Picking another host clears an incompatible project.
+            var computer: ?ui.Rect = null;
+            if (lay.labels[ix(.computer)]) |label| {
+                if (footerChipAt(c, k, "picker-computer", .monitor, label, lay.slots[ix(.computer)], &computer))
+                    strip.open(a, .device, strip.active(a), computer);
+            }
+            if (lay.labels[ix(.project)]) |label| projectChip(c, a, k, label, lay.slots[ix(.project)]);
+            if (lay.git_chrome) if (space) |s| if (s.git) {
+                if (lay.labels[ix(.checkout)]) |label| if (footerChipAt(c, k, "picker-checkout", if (a.new_checkout_local) .folder else .@"folder-with-files", label, lay.slots[ix(.checkout)], &a.view.checkout_anchor)) {
+                    a.view.checkout_menu = !a.view.checkout_menu;
+                    a.view.ref_menu = false;
+                };
+                if (lay.labels[ix(.branch)]) |label| if (footerChipAt(c, k, "picker-branch", .@"git-branch", label, lay.slots[ix(.branch)], &a.view.ref_anchor)) {
+                    a.view.ref_menu = !a.view.ref_menu;
+                    a.view.checkout_menu = false;
+                    if (a.view.ref_menu) @import("view_menus.zig").ensureRefs(a, s);
+                };
+            };
         }
-        if (labels[ix(.project)]) |label| projectChip(c, a, k, label, slots[ix(.project)]);
-        if (git_chrome) if (space) |s| if (s.git) {
-            if (labels[ix(.checkout)]) |label| if (footerChipAt(c, k, "picker-checkout", if (a.new_checkout_local) .folder else .@"folder-with-files", label, slots[ix(.checkout)], &a.view.checkout_anchor)) {
-                a.view.checkout_menu = !a.view.checkout_menu;
-                a.view.ref_menu = false;
-            };
-            if (labels[ix(.branch)]) |label| if (footerChipAt(c, k, "picker-branch", .@"git-branch", label, slots[ix(.branch)], &a.view.ref_anchor)) {
-                a.view.ref_menu = !a.view.ref_menu;
-                a.view.checkout_menu = false;
-                if (a.view.ref_menu) @import("view_menus.zig").ensureRefs(a, s);
-            };
-        };
+        if (lay.note) |text| kit.ellipsisText(c, text, note_st, lay.note_max);
     }
-    if (note) |text| kit.ellipsisText(c, text, note_st, note_max);
+
+    if (lay.need_target_row) {
+        const strip = @import("view_tab_strip.zig");
+        ui.key(c, "draft-narrow-targets");
+        var row2 = ui.div(c).row().w(w).h(22).px(10).gap(6).itemsCenter().clip();
+        if (lay.wide) row2 = row2.justifyCenter();
+        defer row2.end();
+        const room = @max(0, w - 20);
+        const proj_l = lay.labels[ix(.project)];
+        const comp_l = lay.labels[ix(.computer)];
+        var proj_slot: rules.FooterSlot = .{};
+        var comp_slot: rules.FooterSlot = .{};
+        if (proj_l != null and comp_l != null) {
+            const p_nat = chip_chrome + @min(@ceil(c.text.width(proj_l.?, chip_st)), chip_max_w - chip_chrome);
+            const c_nat = chip_chrome + @min(@ceil(c.text.width(comp_l.?, chip_st)), chip_max_w - chip_chrome);
+            const avail = @max(0, room - 6);
+            if (p_nat + c_nat <= avail) {
+                proj_slot = targetSlotForBudget(c, proj_l.?, p_nat);
+                comp_slot = targetSlotForBudget(c, comp_l.?, c_nat);
+            } else {
+                const half = avail / 2;
+                const p_w = if (p_nat <= half) p_nat else if (c_nat <= half) avail - c_nat else half;
+                const c_w = avail - p_w;
+                proj_slot = targetSlotForBudget(c, proj_l.?, p_w);
+                comp_slot = targetSlotForBudget(c, comp_l.?, c_w);
+            }
+        } else if (proj_l) |pl| {
+            proj_slot = targetSlotForBudget(c, pl, room);
+        } else if (comp_l) |cl| {
+            comp_slot = targetSlotForBudget(c, cl, room);
+        }
+        if (proj_l) |pl| {
+            var row2_space: ?ui.Rect = null;
+            if (footerChipAt(c, k, "picker-project", .folder, pl, proj_slot, &row2_space)) {
+                if (row2_space) |r| a.view.space_anchor = r;
+                toggleSpaceMenu(a);
+            }
+        }
+        var row2_computer: ?ui.Rect = null;
+        if (comp_l) |cl| {
+            if (footerChipAt(c, k, "picker-computer", .monitor, cl, comp_slot, &row2_computer))
+                strip.open(a, .device, strip.active(a), row2_computer);
+        }
+    }
+}
+
+fn toggleSpaceMenu(a: *App) void {
+    if (a.view.strip.menu == .folder and a.view.strip.footer_folder) {
+        a.view.strip.menu = null;
+        a.view.space_menu = false;
+    } else {
+        a.view.space_menu = true;
+    }
+    a.redraw();
 }
 
 /// The shared strip owns the project's searchable menu and panel-local
 /// mutation.
 fn projectChip(c: *ui.Context, a: *App, k: theme.Colors, label: []const u8, slot: rules.FooterSlot) void {
     if (footerChipAt(c, k, "picker-project", .folder, label, slot, &a.view.space_anchor)) {
-        if (a.view.strip.menu == .folder and a.view.strip.footer_folder) {
-            a.view.strip.menu = null;
-            a.view.space_menu = false;
-        } else {
-            a.view.space_menu = true;
-        }
-        a.redraw();
+        toggleSpaceMenu(a);
     }
 }
 

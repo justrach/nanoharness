@@ -119,7 +119,7 @@ test "minimal full screen keeps project, chat title, branch, host, and clickable
     h.t.settle(1);
 
     const kbd = if (comptime builtin.os.tag == .macos) "\u{2318}K" else "Ctrl+K";
-    try testing.expectEqual(@as(f32, chrome.zen_gutter), h.a.view.chrome.y);
+    try testing.expectEqual(@as(f32, chrome.fs_top_inset), h.a.view.chrome.y);
     try testing.expect(h.t.hasText("fieldnotes"));
     try testing.expect(h.t.hasText("Cedar layout audit for desktop shell"));
     try testing.expect(h.t.hasText("feat/context-bar"));
@@ -166,4 +166,63 @@ test "non-git projects show folder and title cleanly without leaking git branch 
     try testing.expect(!h.t.hasText("Local checkout"));
     try testing.expect(!h.t.hasText("Worktree"));
     try testing.expect(!h.t.hasText("No ref"));
+}
+
+test "3-pane split draft always exposes clickable folder and computer selectors in narrow Developer and fullscreen Zen modes" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try seedTranscript(&h);
+    h.a.view.sidebar_open = false;
+    h.a.splitPane(.horizontal);
+    h.a.openChat("rowan", null);
+    h.a.splitPane(.horizontal);
+    h.t.settle(1);
+
+    // Focused 3rd pane is a ~380px draft split off pane 2 ("rowan" on "builder"): developer mode keeps labeled Project and Computer pills reachable.
+    try testing.expect(h.t.hasText("No project") or h.t.hasText("harbor"));
+    try testing.expect(h.t.hasText("Run on: Build box") or h.t.hasText("Build box"));
+    h.snap("browse-narrow-zen-draft");
+
+    // Fullscreen keeps labeled targets both in the 28pt draft header and under the composer when narrow.
+    h.a.settings.applyUiMode(.zen);
+    h.a.setFullScreen(true);
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("Build box"));
+    try testing.expect(h.t.hasText("No project") or h.t.hasText("harbor"));
+    h.snap("browse-fs-draft-targets");
+}
+
+test "browse-style Cmd+K switcher previews selected items, splits with Cmd+D, and closes background tabs with Cmd+Backspace" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.openChatInTab("rowan");
+    h.a.openChatInTab("note");
+    h.a.showTab(0);
+    try seedTranscript(&h);
+    h.t.settle(1);
+    try testing.expectEqual(@as(usize, 3), h.a.tabs.items.items.len);
+
+    _ = h.t.shortcut(.{ .key = 'k', .cmd = true });
+    h.t.settle(1);
+    try testing.expect(h.a.view.palette.open);
+    try testing.expect(h.t.hasText("Open Tabs"));
+    try testing.expect(h.t.hasText("3 open"));
+    try testing.expect(h.t.hasText("Switch to Tab ↩"));
+    try testing.expect(h.t.hasText("Split ⌘D"));
+    h.snap("browse-cmdk-preview");
+
+    // Close highlighted open tab with Cmd+Backspace while keeping palette open.
+    _ = h.t.shortcut(S.native(.{ .cmd = true, .key = S.backspace }));
+    h.t.settle(1);
+    try testing.expect(h.a.view.palette.open);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+
+    // Split open highlighted tab with Cmd+D.
+    _ = h.t.shortcut(S.native(.{ .cmd = true, .key = 'd' }));
+    h.t.settle(1);
+    try testing.expect(!h.a.view.palette.open);
+    try testing.expect(h.a.tabs.layout() != null);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
 }

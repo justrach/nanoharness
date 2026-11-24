@@ -20,7 +20,7 @@ pub const bar_height: f32 = 32;
 const phi: f32 = 1.618;
 
 pub fn shownInMode(a: *const App) bool {
-    return a.settings.uiMode() == .zen or a.view.full_screen;
+    return a.settings.uiMode() == .zen and !a.view.full_screen;
 }
 
 pub fn height(a: *const App) f32 {

@@ -31,19 +31,17 @@ pub const titlebar_h: f32 = 38;
 
 pub fn sidebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     const zen = a.settings.uiMode() == .zen;
+    const fs = a.view.full_screen;
     const chrome = @import("panel_chrome.zig");
     const panel_chrome = @import("view_panel_chrome.zig");
     const side = ui.div(c).column().w(widthOf(a)).hFull();
     defer side.end();
-    if (!a.view.full_screen) {
-        sidebarTitlebar(c, a, k);
-        ui.div(c).h(chrome.top_pad).end();
-    }
-    var wrap = ui.div(c).column().wFull().grow().h(0).pl(chrome.zen_gutter).pr(chrome.zen_gutter / 2.0).pb(chrome.zen_gutter);
-    if (a.view.full_screen) wrap = wrap.pt(chrome.zen_gutter);
+    sidebarTitlebar(c, a, k);
+    if (!fs) ui.div(c).h(chrome.top_pad).end();
+    const wrap = ui.div(c).column().wFull().grow().h(0).pl(chrome.zen_gutter).pr(chrome.zen_gutter / 2.0).pb(chrome.zen_gutter);
     defer wrap.end();
     ui.key(c, "zen-sidebar-card");
-    const card = panel_chrome.zenSidebarOn(c, k, a.view.full_screen).wFull().grow().h(0).pt(6).clip();
+    const card = panel_chrome.zenSidebarOn(c, k, fs).wFull().grow().h(0).pt(6).clip();
     defer card.end();
     if (zen) {
         zenNavRows(c, a, k);
@@ -101,26 +99,40 @@ pub fn navHistoryControls(c: *ui.Context, a: *App, k: theme.Colors) void {
 
 fn sidebarTitlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     const zen = a.settings.uiMode() == .zen;
+    const fs = a.view.full_screen;
     const menus = @import("view_sidebar_menus.zig");
     const side_w = widthOf(a);
+    const bar_k = if (fs) theme.colors(true) else k;
     const layout = if (zen) @import("motion_rules.zig").zenSidebarTitlebarLayout(side_w) else @import("motion_rules.zig").sidebarTitlebarLayout(side_w);
     const group_gap: f32 = if (side_w >= 240) 8 else 4;
     const right_margin: f32 = if (zen) 10 else if (side_w >= 240) 8 else 4;
-    const bar = ui.div(c).row().wFull().h(titlebar_h).pt(4).pl(layout.back_x).pr(right_margin).itemsCenter();
+    const lead_x: f32 = if (fs) 10 else layout.back_x;
+    const bar = ui.div(c).row().wFull().h(titlebar_h).pt(4).pl(lead_x).pr(right_margin).itemsCenter();
     defer bar.end();
-    navHistoryControls(c, a, k);
+    if (fs) {
+        ui.key(c, "fullscreen-sidebar-toggle");
+        if (kit.iconButton(c, bar_k, .@"sidebar-minimalistic-left", .{ .size = 24, .radius = 6, .icon = 16, .color = bar_k.muted, .tip = .{ .text = "Hide sidebar (\u{2318}B)", .delay = tip.quick } })) {
+            a.view.sidebar_open = false;
+            @import("view_sidebar_search.zig").close(a);
+            a.view.search.focus = false;
+            a.view.focus_composer = true;
+            a.redraw();
+        }
+        ui.div(c).w(6).end();
+    }
+    navHistoryControls(c, a, bar_k);
     ui.div(c).w(group_gap).end();
     if (!zen) {
         ui.key(c, "sidebar-titlebar-new-session");
-        if (kit.iconButton(c, k, .plus, .{ .size = 24, .radius = 6, .icon = 16, .color = k.muted, .tip = .{ .text = "New session", .delay = tip.quick } }))
+        if (kit.iconButton(c, bar_k, .plus, .{ .size = 24, .radius = 6, .icon = 16, .color = bar_k.muted, .tip = .{ .text = "New session", .delay = tip.quick } }))
             a.newWorkspaceSession();
     }
     ui.spacer(c);
     {
         ui.key(c, "sidebar-view-options");
-        const more = tip.on(ui.div(c).row(), k, .{ .text = if (a.view.more_menu) "" else "Sidebar view options", .delay = tip.quick });
+        const more = tip.on(ui.div(c).row(), bar_k, .{ .text = if (a.view.more_menu) "" else "Sidebar view options", .delay = tip.quick });
         defer more.end();
-        if (kit.iconButton(c, k, .@"more-horizontal", .{ .size = 24, .radius = 6, .icon = 16, .color = k.muted, .on = a.view.more_menu }))
+        if (kit.iconButton(c, bar_k, .@"more-horizontal", .{ .size = 24, .radius = 6, .icon = 16, .color = bar_k.muted, .on = a.view.more_menu }))
             if (a.view.more_menu) menus.close(a) else menus.openView(a);
         if (c.rects.get(c.node(more.index).id)) |r| a.view.more_anchor = r;
     }

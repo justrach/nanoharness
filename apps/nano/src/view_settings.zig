@@ -71,7 +71,7 @@ pub fn space(c: *ui.Context, h: f32) void {
 pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
     const chrome = @import("panel_chrome.zig");
     const panel_chrome = @import("view_panel_chrome.zig");
-    const top_inset: f32 = if (a.view.full_screen) chrome.zen_gutter else chrome.header_height;
+    const top_inset: f32 = if (a.view.full_screen) chrome.fs_top_inset else chrome.header_height;
     const side = ui.div(c).column().w(sidebar.widthOf(a)).hFull()
         .pt(top_inset).pl(chrome.zen_gutter).pr(chrome.zen_gutter / 2.0).pb(chrome.zen_gutter);
     defer side.end();
