@@ -479,14 +479,15 @@ test "the sidebar search and the palette take each other's place" {
     try testing.expect(!h.a.view.palette.open);
 }
 
-test "/resume sent from the composer opens the palette that replaces the current tab" {
+test "/resume accepted from the composer opens the palette that replaces the current tab" {
     var h: Harness = undefined;
     try h.init(two, "a");
     defer h.deinit();
     h.a.view.focus_composer = true;
     h.t.settle(1);
     h.typed("/resume");
-    h.t.key(.enter);
+    h.t.settle(2);
+    h.t.textOps(&.{.{ .command = .insert_tab }});
     h.t.settle(1);
     try testing.expect(h.a.view.palette.open);
     try testing.expectEqual(palette.Navigation.replace_current, h.a.view.palette.navigation);

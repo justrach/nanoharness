@@ -211,20 +211,18 @@ test "custom theme persistence round-trip, slash completion, and palette preserv
     };
     try testing.expect(found_slash);
 
-    // Disconnected `/custom-theme` execution synthesizes locally without failing or sending chat.
-    a.composer.set("/custom-theme Cyberpunk Tokyo Rain");
-    a.sendFollowUp(null);
+    // A prompt submitted explicitly to the disconnected studio synthesizes locally.
+    @import("view_custom_theme_studio.zig").openWithPrompt(&a, "Cyberpunk Tokyo Rain");
     t.settle(1);
     try testing.expect(a.view.custom_theme_open);
     try testing.expectEqualStrings("ai-cyberpunk-tokyo-rain", a.settings.themeId(a.dark orelse true));
 
-    // Connected `/custom-theme` with an engine scene sends `GenerateCustomTheme` RPC and applies the reply.
+    // The connected studio sends `GenerateCustomTheme` RPC and applies the reply.
     a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
         \\{"GenerateCustomTheme":{"id":"rpc-sakura-mist","name":"RPC Sakura Mist","dark":false,"scene":"petals","speed":0.9,"intensity":0.58,"shell":"#f7f1ee","sidebar":"#faf5f3","background":"#fffaf8","card":"#fbf2ef","border":"#e6d6d2","text":"#261a1c","muted":"#735c60","accent":"#c83e6b","glowPrimary":"#f472b6","glowSecondary":"#fb7185","source":"model"}}
     , .{});
     a.engine.state = .connected;
-    a.composer.set("/custom-theme Alpine Glaze");
-    a.sendFollowUp(null);
+    @import("view_custom_theme_studio.zig").openWithPrompt(&a, "Alpine Glaze");
     try testing.expect(a.view.custom_theme_generating);
     var saw_rpc = false;
     for (a.engine.sent.items) |frame| {
@@ -235,10 +233,9 @@ test "custom theme persistence round-trip, slash completion, and palette preserv
     try testing.expect(!a.view.custom_theme_generating);
     try testing.expectEqualStrings("rpc-sakura-mist", a.settings.themeId(false));
 
-    // `/zen` command toggles workspace mode cleanly.
+    // The explicit workspace-mode action still toggles Zen cleanly.
     const before_mode = a.settings.uiMode();
-    a.composer.set("/zen");
-    a.sendFollowUp(null);
+    completion.activate(&a, .zen_mode);
     try testing.expect(a.settings.uiMode() != before_mode);
 
     // Settings > Appearance exposes both the upgraded Workspace mode card and Custom themes studio.

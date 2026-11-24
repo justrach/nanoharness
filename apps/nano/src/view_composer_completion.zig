@@ -14,6 +14,21 @@ fn available(c: *ui.Context, a: *App) bool {
     return e.marked == null and e.caret == e.anchor;
 }
 
+// Key rows by their content, not just rank, so a newly discovered command
+// cannot inherit a pending click or Tab from a previously painted suggestion.
+fn choiceKey(a: *const App, tok: @import("completion_rules.zig").Token, entry: complete.Entry, rank: usize) u64 {
+    var hash = std.hash.Wyhash.init(rank);
+    hash.update(a.completion.scope orelse "");
+    hash.update(std.mem.asBytes(&tok.range.start));
+    hash.update(&.{ tok.prefix, entry.prefix(), if (entry.action) |action| @as(u8, @backingInt(action)) else 255 });
+    hash.update(tok.query);
+    hash.update(&.{0});
+    hash.update(entry.name);
+    hash.update(&.{0});
+    hash.update(entry.path orelse "");
+    return hash.final();
+}
+
 /// Called before the field/history sees these keys. Consume both the shortcut
 /// and native TextOp: a physical Tab must not also traverse focus/submit.
 pub fn keys(c: *ui.Context, a: *App) bool {
@@ -40,7 +55,14 @@ pub fn keys(c: *ui.Context, a: *App) bool {
     };
     const k = key orelse return false;
     if (k != ui.Shortcut.tab and k != ui.Shortcut.enter and k != ui.Shortcut.up and k != ui.Shortcut.down and k != ui.Shortcut.escape) return false;
+    // Return keeps the normal send/newline behavior for slash text.
+    if (k == ui.Shortcut.enter and tok.prefix == '/') return false;
     if (k != ui.Shortcut.escape and list.len == 0) return false;
+    if (k == ui.Shortcut.tab) {
+        const choice = a.completion.menu_choice orelse return false;
+        const active = @min(a.completion.active, list.len - 1);
+        if (!c.rects.contains(choice.id) or choice.key != choiceKey(a, tok, list[active], active)) return false;
+    }
     c.input.shortcut = null;
     c.input.ops = &.{};
     c.input.key = null;
@@ -58,6 +80,7 @@ pub fn keys(c: *ui.Context, a: *App) bool {
 /// Built from the composer's parent (outside its clipping surface), so the
 /// menu overlays transcript whitespace without adding permanent chrome.
 pub fn menu(c: *ui.Context, a: *App, k: theme.Colors, width: f32) void {
+    a.completion.menu_choice = null;
     if (!available(c, a)) return;
     const caret = if (c.edits.get(a.view.composer_id)) |e| e.caret else return;
     const tok = complete.refresh(a, caret) orelse return;
@@ -76,8 +99,10 @@ pub fn menu(c: *ui.Context, a: *App, k: theme.Colors, width: f32) void {
     const active = if (list.len > 0) @min(a.completion.active, list.len - 1) else 0;
     const start = if (active >= shown and shown > 0) active - shown + 1 else 0;
     for (list[start..@min(list.len, start + shown)], start..) |entry, ix| {
-        ui.keyInt(c, ix);
+        const key = choiceKey(a, tok, entry, ix);
+        ui.keyInt(c, key);
         const row = ui.div(c).column().wFull().h(46).px(8).justifyCenter().rounded(7).bg(if (ix == active) k.selected else .transparent).hover(k.selected);
+        if (ix == active) a.completion.menu_choice = .{ .key = key, .id = c.node(row.index).id };
         {
             defer row.end();
             ui.text(c, c.print("{c}{s}", .{ entry.prefix(), entry.name }), .{ .size = 13, .color = k.text });

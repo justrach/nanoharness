@@ -57,6 +57,7 @@ pub const State = struct {
     dismissed: bool = false,
     token_start: ?usize = null,
     menu_id: u64 = 0,
+    menu_choice: ?struct { key: u64, id: u64 } = null,
     parked: std.StringHashMapUnmanaged([]u8) = .empty,
     undo_refs: std.ArrayList([]u8) = .empty,
     long_edit: ?LongEdit = null,
