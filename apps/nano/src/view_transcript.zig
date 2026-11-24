@@ -88,7 +88,9 @@ pub fn transcript(c: *ui.Context, a: *App, k: theme.Colors) void {
     rail.step(c, &a.view.rail);
     const just_stuck = a.view.stick_end;
     const pane_w = paneWidth(c, a);
-    const drawn = entries(c, a, k, &a.transcript, pane_w, a.w_doc.id != null, 64 - sidebar.titlebar_h);
+    const header_view = @import("view_chat_header.zig");
+    const top_pad: f32 = if (header_view.height(a) > 0) 16 else 64 - @import("view_sidebar.zig").titlebar_h;
+    const drawn = entries(c, a, k, &a.transcript, pane_w, a.w_doc.id != null, top_pad);
     if (a.settings.hierarchyProfile().shows_prompt_rail)
         rail.rail(c, k, &a.view.rail, &a.transcript, drawn.ticks, drawn.box, pane_w + a.view.seam_inset);
     if (!just_stuck and !drawn.turn_anchored) recoverBlank(c, a, drawn);

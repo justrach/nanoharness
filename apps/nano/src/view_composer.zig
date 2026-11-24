@@ -71,7 +71,7 @@ pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
         c.node(pane).layout_dependent = true;
         const pane_h = if (c.rects.get(c.node(pane).id)) |r| r.h else c.size.h;
         return @import("view_question.zig").panel(c, a, k, w, .{
-            .height = pane_h - actions.toolbarHeight(a) - actions.dockHeight(a),
+            .height = pane_h - @import("view_chat_header.zig").height(a) - actions.toolbarHeight(a) - actions.dockHeight(a),
             .dock = outer.index,
         });
     }

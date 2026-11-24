@@ -148,7 +148,10 @@ fn jumpButton(c: *ui.Context, a: *App, k: theme.Colors, w: f32, style: ui.TextSt
 }
 
 fn session(c: *ui.Context, a: *App, k: theme.Colors, slot_w: f32) void {
-    if (!a.settings.hierarchyProfile().shows_git_checkout_chrome) return;
+    if (!a.settings.hierarchyProfile().shows_git_checkout_chrome) {
+        zenSessionLocation(c, a, k, slot_w);
+        return;
+    }
     const id = a.selected orelse return;
     const chat = a.findChat(id) orelse return;
     const space = a.findSpace(chat.space_id) orelse return;
@@ -169,6 +172,45 @@ fn session(c: *ui.Context, a: *App, k: theme.Colors, slot_w: f32) void {
     const pr = @import("app_change_requests.zig").forChat(a, chat) orelse return;
     prs.mergeControls(c, a, k, chat, pr[0]);
     prs.badge(c, k, pr[0], pr[1], .composer, true);
+}
+
+fn zenSessionLocation(c: *ui.Context, a: *App, k: theme.Colors, slot_w: f32) void {
+    if (slot_w < 56) return;
+    const id = a.selected orelse return;
+    const chat = a.findChat(id) orelse return;
+    const space = a.findSpace(chat.space_id);
+    const header = @import("view_chat_header.zig");
+
+    var proj_icon: icons.Name = .folder;
+    var proj_name: ?[]const u8 = null;
+    if (space) |sp| {
+        if (sp.git and checkoutOf(chat, sp) != .local) proj_icon = .@"folder-with-files";
+        proj_name = sp.name;
+    } else if (chat.cwd) |cwd| {
+        if (cwd.len > 0) proj_name = header.pathBasename(cwd);
+    }
+
+    const branch: ?[]const u8 = if (space) |sp| (if (sp.git) (chat.row_branch orelse chat.branch) else null) else null;
+    if (proj_name == null and branch == null) return;
+
+    const show_branch = branch != null and slot_w >= 170;
+    const usable = @max(0, slot_w - 20);
+    const proj_cap: f32 = if (show_branch) @min(132, usable * 0.48) else @min(160, usable);
+    const branch_cap: f32 = if (show_branch) @min(132, @max(0, usable - proj_cap - 38)) else 0;
+
+    const row = ui.div(c).row().grow().w(0).hFull().px(10).gap(4).itemsCenter().clip();
+    defer row.end();
+    if (proj_name) |pn| label(c, k, proj_icon, pn, slot_w >= 72, proj_cap);
+    if (show_branch) if (branch) |br| {
+        label(c, k, .@"git-branch", br, branch_cap >= 24, branch_cap);
+    };
+    const spring = ui.div(c).grow().w(0);
+    spring.end();
+    if (space != null and space.?.git and slot_w >= 260) {
+        if (@import("app_change_requests.zig").forChat(a, chat)) |pr| {
+            prs.badge(c, k, pr[0], pr[1], .composer, true);
+        }
+    }
 }
 
 /// `footer_label`: a 12-point glyph and words (or 28px icon-only when tight), quiet, 20 tall.

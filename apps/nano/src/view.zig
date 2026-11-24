@@ -447,6 +447,7 @@ fn focused(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (a.selected == null) {
         @import("view_newchat.zig").canvas(c, a, k);
     } else {
+        @import("view_chat_header.zig").draw(c, a, k, a.selected.?, transcript_view.paneWidth(c, a), true);
         if (a.settings.hierarchyProfile().shows_action_toolbar) @import("view_actions.zig").toolbar(c, a, k);
         @import("view_bots.zig").strip(c, a, k, @min(transcript_view.paneWidth(c, a), transcript_view.column_w));
         transcript_view.transcript(c, a, k);
@@ -626,9 +627,11 @@ fn divider(c: *ui.Context, a: *App, k: theme.Colors, ix: usize, across: bool, to
 /// where a click starts a chat. True when the ✕ closed it.
 fn neighbor(c: *ui.Context, a: *App, k: theme.Colors, ix: usize, chat_id: ?[]const u8, w: f32) bool {
     _ = ix;
-    // The strip is this panel's only header, even when unfocused.
     if (chat_id) |id| {
-        if (a.peer(id)) |p| _ = transcript_view.entries(c, a, k, &p.transcript, w, p.watch != null, 8);
+        const header_view = @import("view_chat_header.zig");
+        header_view.draw(c, a, k, id, w, false);
+        const peer_top: f32 = if (header_view.shownInMode(a)) 16 else 8;
+        if (a.peer(id)) |p| _ = transcript_view.entries(c, a, k, &p.transcript, w, p.watch != null, peer_top);
         return false;
     }
     const body = ui.div(c).column().grow().wFull();

@@ -141,6 +141,8 @@ test {
     _ = @import("palette.zig");
     _ = @import("tests_ui_palette.zig");
     _ = @import("tests_ui_fullscreen.zig");
+    _ = @import("view_chat_header.zig");
+    _ = @import("tests_ui_chat_context.zig");
     _ = @import("tests_ui_setup.zig");
     _ = @import("tests_ui_archived.zig");
     _ = @import("tests_ui_devices.zig");
