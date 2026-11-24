@@ -51,6 +51,12 @@ fn jumpRect(tester: *ui.Tester) !ui.Rect {
     return error.MissingJumpButton;
 }
 
+fn expectSameRect(expected: ui.Rect, actual: ui.Rect) !void {
+    for ([_]f32{ expected.x, expected.y, expected.w, expected.h }, [_]f32{ actual.x, actual.y, actual.w, actual.h }) |want, got| {
+        try t.expectApproxEqAbs(want, got, 0.01);
+    }
+}
+
 fn clickJump(tester: *ui.Tester) !void {
     const r = try jumpRect(tester);
     tester.click(r.x + r.w / 2, r.y + r.h / 2);
@@ -257,6 +263,61 @@ test "composer dock puts the jump action below the input at every pane width" {
         try t.expectEqual(@as(f32, 0), a.view.jump_distance);
     }
 }
+test "composer dock keeps the narrow footer stable through a jump to bottom" {
+    theme.registerFonts();
+    var a: App = .init(t.allocator, t.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.dark = false;
+    const chats = try std.json.parseFromSlice(std.json.Value, t.allocator,
+        \\[ {"id":"synthetic","deviceId":"d","title":"Example conversation","archived":false,"spaceId":"synthetic","config":{"harness":"graff","model":"Example model with a long display name","reasoning":"max"}} ]
+    , .{});
+    defer chats.deinit();
+    try a.chats.replace(chats.value);
+    a.openChat("synthetic", null);
+    a.transcript.window = 200_000;
+    a.transcript.tokens = 96_000;
+    a.view.jump_box = 777;
+    try t.expect(@import("view_composer.zig").followUpShown(&a));
+
+    var tester: ui.Tester = undefined;
+    try tester.init(t.allocator, .init(&a, view), .{ .width = 170, .height = 240 });
+    defer tester.deinit();
+    tester.advance(0.3);
+    const rest = a.view.chip_anchor orelse return error.MissingModelChipAnchor;
+
+    a.view.jump_distance = 800;
+    tester.advance(0.3);
+    const jump = try jumpRect(&tester);
+    try t.expect(tester.findText("Scroll to bottom") == null);
+    const x = jump.x + jump.w / 2;
+    const y = jump.y + jump.h / 2;
+    tester.moveTo(x, y);
+    tester.down(x, y);
+    // The model can change independently of the scroll position. Make its
+    // chip visibly resize while held; the jump target must not follow it.
+    const workspace = @import("workspace.zig");
+    try t.expect(workspace.setChatConfig(&a.chats, "synthetic", "X", null, null, null));
+    for (0..16) |_| {
+        tester.frame();
+        try expectSameRect(jump, try jumpRect(&tester));
+    }
+    const compact_model = a.view.chip_anchor orelse return error.MissingModelChipAnchor;
+    try t.expect(compact_model.w < rest.w);
+    try t.expect(workspace.setChatConfig(&a.chats, "synthetic", "Example model with a long display name", "max", null, null));
+    for (0..16) |_| {
+        tester.frame();
+        try expectSameRect(jump, try jumpRect(&tester));
+    }
+    tester.up();
+    try t.expect(tester.ctx.scroll_follow.get(777) orelse false);
+    for (0..16) |_| {
+        tester.frame();
+        try t.expectError(error.MissingJumpButton, jumpRect(&tester));
+        try expectSameRect(rest, a.view.chip_anchor orelse return error.MissingModelChipAnchor);
+    }
+}
+
 test "composer dock separates queue tray jump button and growing input" {
     theme.registerFonts();
     for ([_]usize{ 320, 520, 900 }) |width| for (0..3) |draft| for ([_]usize{ 1, 8 }) |count| {
