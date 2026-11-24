@@ -20,6 +20,9 @@ const palette_view = @import("view_palette.zig");
 const App = @import("app.zig").App;
 
 const phi: f32 = 1.618;
+pub const left_edge_px: f32 = 8.0;
+pub const left_dwell_s: f64 = 0.14;
+pub const left_grace_s: f64 = 0.28;
 
 fn knownDevice(a: *const App, id: ?[]const u8) ?[]const u8 {
     const want = id orelse return null;
@@ -27,8 +30,27 @@ fn knownDevice(a: *const App, id: ?[]const u8) ?[]const u8 {
     return null;
 }
 
+pub fn clearLeftPeek(a: *App) void {
+    a.view.fs_left_peek = false;
+    a.view.fs_left_peek_w = 0;
+    a.view.fs_left_peek_tween = null;
+    a.view.fs_left_edge_at = null;
+    a.view.fs_left_leave_at = null;
+    a.view.fs_left_need_exit = false;
+}
+
+pub fn dismissLeftPeek(a: *App) void {
+    a.view.fs_left_peek = false;
+    a.view.fs_left_edge_at = null;
+    a.view.fs_left_leave_at = null;
+    a.view.fs_left_need_exit = true;
+}
+
 pub fn updatePeek(c: *ui.Context, a: *App) void {
     if (!a.view.full_screen) return;
+    if (a.view.fs_left_need_exit and (c.input.mouse.x > left_edge_px + 4 or a.view.sidebar_open)) {
+        a.view.fs_left_need_exit = false;
+    }
     if (!a.view.fs_top_peek and
         !c.input.pressed and
         !c.input.released and
@@ -40,7 +62,80 @@ pub fn updatePeek(c: *ui.Context, a: *App) void {
         a.view.strip.menu == null)
     {
         a.view.fs_top_peek = true;
+        clearLeftPeek(a);
         a.redraw();
+        return;
+    }
+
+    const blocked = a.view.sidebar_open or a.view.fs_top_peek or a.view.palette.open or a.view.tab_overview.open or a.view.settings_open or a.view.strip.menu != null;
+    if (blocked) {
+        if (a.view.fs_left_peek or a.view.fs_left_edge_at != null or a.view.fs_left_leave_at != null) {
+            a.view.fs_left_peek = false;
+            a.view.fs_left_edge_at = null;
+            a.view.fs_left_leave_at = null;
+        }
+        return;
+    }
+
+    if (!a.view.fs_left_peek) {
+        if (a.view.fs_left_need_exit) {
+            a.view.fs_left_edge_at = null;
+            return;
+        }
+        const in_edge = !c.input.pressed and
+            !c.input.released and
+            c.input.mouse.x >= 0 and
+            c.input.mouse.x <= left_edge_px and
+            c.input.mouse.y >= chrome.fs_top_inset and
+            c.input.mouse.y <= c.size.h - chrome.zen_gutter;
+        if (in_edge) {
+            if (a.view.fs_left_edge_at) |since| {
+                const elapsed = c.time - since;
+                if (elapsed >= left_dwell_s) {
+                    a.view.fs_left_peek = true;
+                    a.view.fs_left_edge_at = null;
+                    a.view.fs_left_leave_at = null;
+                    a.redraw();
+                } else {
+                    c.frameIn(@floatCast(@max(0.016, left_dwell_s - elapsed)));
+                }
+            } else {
+                a.view.fs_left_edge_at = c.time;
+                c.frameIn(@floatCast(left_dwell_s));
+            }
+        } else {
+            a.view.fs_left_edge_at = null;
+        }
+        return;
+    }
+
+    const holding = a.view.filter_menu or
+        a.view.more_menu or
+        a.view.chat_menu.open or
+        a.view.search.focus or
+        a.view.menus.ctx_at != null or
+        a.view.dialogs.rename != null or
+        a.view.dialogs.delete != null;
+    const side_w = a.settings.sidebarWidth();
+    const over = holding or (c.input.mouse.x >= 0 and c.input.mouse.x <= side_w + 12 and c.input.mouse.y >= 0 and c.input.mouse.y <= c.size.h);
+    if (c.input.pressed and !over) {
+        a.view.fs_left_peek = false;
+        a.view.fs_left_leave_at = null;
+        a.redraw();
+    } else if (over) {
+        a.view.fs_left_leave_at = null;
+    } else if (a.view.fs_left_leave_at) |left_at| {
+        const elapsed = c.time - left_at;
+        if (elapsed >= left_grace_s) {
+            a.view.fs_left_peek = false;
+            a.view.fs_left_leave_at = null;
+            a.redraw();
+        } else {
+            c.frameIn(@floatCast(@max(0.016, left_grace_s - elapsed)));
+        }
+    } else {
+        a.view.fs_left_leave_at = c.time;
+        c.frameIn(@floatCast(left_grace_s));
     }
 }
 
@@ -78,17 +173,73 @@ pub fn drawTopHandle(c: *ui.Context, a: *App) void {
 }
 
 pub fn drawLeftHandle(c: *ui.Context, a: *App) void {
-    if (!a.view.full_screen or a.view.sidebar_open or a.view.fs_top_peek or a.view.palette.open or a.view.tab_overview.open) return;
+    if (!a.view.full_screen or a.view.sidebar_open or a.view.fs_top_peek or a.view.fs_left_peek or a.view.fs_left_peek_w > 0.5 or a.view.palette.open or a.view.tab_overview.open) return;
     if (c.size.h < 180) return;
     const dk = theme.colors(true);
     const y = @max(chrome.fs_top_inset, (c.size.h - 96) / 2);
     ui.key(c, "fullscreen-left-handle-bar");
     const bar = ui.div(c).fixed().offset(0, y).size(10, 96).row().itemsCenter().layer(3);
     defer bar.end();
-    if (drawBezelPill(c, dk, "fullscreen-left-handle", "Click to show sidebar (\u{2318}B)", true)) {
+    if (drawBezelPill(c, dk, "fullscreen-left-handle", "Hover to peek or click to dock sidebar (\u{2318}B)", true)) {
+        clearLeftPeek(a);
         a.view.sidebar_open = true;
         a.redraw();
     }
+}
+
+pub fn drawLeftPeek(c: *ui.Context, a: *App, k: theme.Colors) void {
+    if (!a.view.full_screen or a.view.sidebar_open or a.view.settings_open) {
+        if (a.view.fs_left_peek_w > 0 or a.view.fs_left_peek) clearLeftPeek(a);
+        return;
+    }
+    const side_w = a.settings.sidebarWidth();
+    const target_w: f32 = if (a.view.fs_left_peek) side_w else 0;
+    if (c.reduced_motion) {
+        a.view.fs_left_peek_w = target_w;
+        a.view.fs_left_peek_tween = null;
+    } else {
+        var tween = a.view.fs_left_peek_tween;
+        if (tween == null and @abs(a.view.fs_left_peek_w - target_w) > 0.01) {
+            const start_time = if (a.window != null and !a.offscreen) c.time - (1.0 / 120.0) else c.time;
+            tween = .{ .from = a.view.fs_left_peek_w, .to = target_w, .started = start_time };
+        }
+        if (tween) |*tw| {
+            if (tw.started == null) tw.started = c.time;
+            if (tw.to != target_w) {
+                const prev_raw: f32 = @floatCast(std.math.clamp((c.time - (tw.started orelse c.time)) / 0.18, 0, 1));
+                const prev_eased = ui.motion.Easing.css_ease_out.sample(prev_raw)[0];
+                tw.from = tw.from + (tw.to - tw.from) * prev_eased;
+                tw.to = target_w;
+                tw.started = c.time;
+            }
+            const raw: f32 = @floatCast(std.math.clamp((c.time - (tw.started orelse c.time)) / 0.18, 0, 1));
+            if (raw >= 1) {
+                a.view.fs_left_peek_w = target_w;
+                tween = null;
+            } else {
+                const eased = ui.motion.Easing.css_ease_out.sample(raw)[0];
+                a.view.fs_left_peek_w = tw.from + (tw.to - tw.from) * eased;
+                c.frame_in = null;
+                c.animationFrame();
+            }
+        }
+        a.view.fs_left_peek_tween = tween;
+    }
+    if (a.view.fs_left_peek_w <= 0.5) return;
+
+    ui.key(c, "fullscreen-left-peek-panel");
+    const panel = kit.shadowLg(
+        ui.div(c).fixed().offset(0, 0).size(a.view.fs_left_peek_w, c.size.h)
+            .bg(ui.Color.black).clip().layer(4),
+    );
+    defer panel.end();
+    {
+        const content = ui.div(c).absolute().offset(a.view.fs_left_peek_w - side_w, 0).w(side_w).hFull();
+        defer content.end();
+        sidebar.sidebar(c, a, k);
+    }
+    ui.div(c).absolute().offset(@max(0, a.view.fs_left_peek_w - 1), 0).size(1, c.size.h)
+        .bg(ui.Color.white.alpha(0.10)).end();
 }
 
 pub fn drawTopPeek(c: *ui.Context, a: *App, strip_layout: strip.rendering.Layout, pane_widths: *const [tabs.max_panes]?f32) void {

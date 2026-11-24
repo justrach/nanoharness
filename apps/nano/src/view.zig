@@ -314,6 +314,7 @@ pub fn view(a: *App, c: *ui.Context) void {
         const fs_chrome = @import("view_fullscreen_chrome.zig");
         fs_chrome.drawTopHandle(c, a);
         fs_chrome.drawLeftHandle(c, a);
+        fs_chrome.drawLeftPeek(c, a, k);
         fs_chrome.drawTopPeek(c, a, strip_layout, &pane_widths);
     }
     if (c.input.released) a.view.sidebar_press_focus = false;
@@ -984,6 +985,10 @@ fn keys(c: *ui.Context, a: *App) void {
         a.view.fs_top_peek = false;
         return a.redraw();
     }
+    if (a.view.full_screen and a.view.fs_left_peek and !menuKeepsKeys(a) and c.shortcut(.{ .key = S.escape })) {
+        @import("view_fullscreen_chrome.zig").dismissLeftPeek(a);
+        return a.redraw();
+    }
     if (a.view.link_menu.open and c.shortcut(.{ .key = S.escape })) {
         a.view.link_menu.open = false;
     } else if (@import("view_chat_menu.zig").anyOpen(a) and c.shortcut(.{ .key = S.escape })) {
@@ -1077,6 +1082,7 @@ fn sessionNavigationKeys(c: *ui.Context, a: *App) bool {
 /// Mouse and keyboard share search cleanup and return hidden controls' focus
 /// to the composer. Motion is owned entirely by nanoui on the next layout.
 fn toggleSidebar(c: *ui.Context, a: *App, pointer: bool) void {
+    @import("view_fullscreen_chrome.zig").clearLeftPeek(a);
     a.view.sidebar_open = !a.view.sidebar_open;
     if (!a.view.sidebar_open) {
         // A pointer press on the toggle may already have blurred the search

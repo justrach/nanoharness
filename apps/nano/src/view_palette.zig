@@ -65,6 +65,7 @@ pub fn toggle(a: *App, navigation: Navigation) void {
     if (p.open and p.navigation == navigation) return close(a);
     // The session search, overview grid and the header's menus give way.
     a.view.tab_overview.open = false;
+    @import("view_fullscreen_chrome.zig").clearLeftPeek(a);
     @import("view_sidebar_search.zig").close(a);
     @import("view_sidebar_menus.zig").close(a);
     p.open = true;
@@ -291,7 +292,19 @@ pub fn activate(a: *App, e: Entry) void {
     }
 }
 
-const PreviewAction = enum { none, activate, split, close };
+const PreviewAction = enum { none, activate, split, rename, duplicate, close };
+
+fn entryChatId(a: *const App, e: Entry) ?[]const u8 {
+    return switch (e) {
+        .chat => |id| id,
+        .open_tab => |ot| openTabChatId(a, ot),
+        .pane => |ix| if (a.tabs.layout()) |s|
+            (if (ix == s.focus) a.tabs.current() else if (ix < s.panes.items.len) s.panes.items[ix] else null)
+        else
+            null,
+        else => null,
+    };
+}
 
 fn openTabChatId(a: *const App, ot: pal.OpenTab) ?[]const u8 {
     const render = @import("view_tab_strip_render.zig");
@@ -316,6 +329,58 @@ fn sectionTitle(e: Entry) []const u8 {
         .external, .import_all => "Other Tools",
         else => "Commands",
     };
+}
+
+/// Opens rename dialog pre-filled with the highlighted session (`⌘R`).
+pub fn renameEntry(a: *App, e: Entry) void {
+    const cid = entryChatId(a, e) orelse return;
+    const ch = a.findChat(cid) orelse return;
+    close(a);
+    @import("view_chat_menu.zig").renameChat(a, ch);
+    a.redraw();
+}
+
+/// Opens a fresh sibling tab targeted to the same project & computer (`⇧⌘D`).
+pub fn duplicateEntry(a: *App, e: Entry) void {
+    if (e != .chat and e != .open_tab and e != .pane) return;
+    const cid = entryChatId(a, e);
+    const ch = if (cid) |id| a.findChat(id) else null;
+    const ws_proj: ?[]const u8 = if (e == .open_tab and e.open_tab.pane_tab == null) a.workspaceProject(e.open_tab.ws) else null;
+    const space_id: ?[]const u8 = if (ch) |chat| chat.space_id else ws_proj;
+    const device_id: ?[]const u8 = if (ch) |chat| chat.device_id else null;
+    const no_project = (ch != null and ch.?.space_id == null);
+
+    var space_buf: [256]u8 = undefined;
+    const space_copy: ?[]const u8 = if (space_id) |sp| blk: {
+        const s = space_buf[0..@min(sp.len, space_buf.len)];
+        @memcpy(s, sp[0..s.len]);
+        break :blk s;
+    } else null;
+    var device_buf: [256]u8 = undefined;
+    const device_copy: ?[]const u8 = if (device_id) |dv| blk: {
+        const s = device_buf[0..@min(dv.len, device_buf.len)];
+        @memcpy(s, dv[0..s.len]);
+        break :blk s;
+    } else null;
+
+    close(a);
+    a.view.settings_open = false;
+    a.newTab();
+    if (space_copy) |sp| {
+        if (a.space) |old| a.retireSlice(old);
+        a.space = a.gpa.dupe(u8, sp) catch null;
+        a.new_no_project = false;
+    } else if (no_project) {
+        if (a.space) |old| a.retireSlice(old);
+        a.space = null;
+        a.new_no_project = true;
+    }
+    if (device_copy) |dv| {
+        if (a.new_device) |old| a.retireSlice(old);
+        a.new_device = a.gpa.dupe(u8, dv) catch null;
+    }
+    a.ensureModels(a.target().harness);
+    a.redraw();
 }
 
 /// Opens `e` in a horizontal split beside the current pane (`⌘D`).
@@ -352,7 +417,7 @@ pub fn splitEntry(a: *App, e: Entry) void {
     }
 }
 
-/// Closes an open tab or pane (`⌘⌫` or inline `×`) while keeping the switcher open.
+/// Closes an open tab/pane or archives a recent session (`⌘⌫` or preview button) while keeping the switcher open.
 pub fn closeEntry(a: *App, e: Entry) void {
     switch (e) {
         .open_tab => |ot| {
@@ -378,13 +443,23 @@ pub fn closeEntry(a: *App, e: Entry) void {
             a.closePanel();
             a.redraw();
         },
+        .chat => |id| {
+            const ch = a.findChat(id) orelse return;
+            if (ch.archived) return;
+            var buf: [256]u8 = undefined;
+            const own = buf[0..@min(id.len, buf.len)];
+            @memcpy(own, id[0..own.len]);
+            a.setArchived(own, true);
+            a.setNotice("Session archived");
+            a.redraw();
+        },
         else => {},
     }
 }
 
 /// The palette's keys, taken before anything else sees them: ↑↓ / Ctrl+N/P /
-/// Tab round the results, Return picks, ⌘D splits, ⌘⌫ closes open tabs/panes,
-/// Escape closes.
+/// Tab round the results, Return picks, ⌘D splits, ⌘R renames, ⇧⌘D duplicates,
+/// ⌘⌫ closes/archives, Escape closes.
 pub fn keys(c: *ui.Context, a: *App) void {
     const p = &a.view.palette;
     if (!p.open) return;
@@ -397,9 +472,11 @@ pub fn keys(c: *ui.Context, a: *App) void {
         c.shortcut(.{ .ctrl = true, .key = 'p' }) or
         (!history and c.shortcut(.{ .shift = true, .key = S.tab })));
     const enter = c.shortcut(.{ .key = S.enter });
-    const split_key = !history and c.shortcut(S.native(.{ .cmd = true, .key = 'd' }));
+    const dup_key = !history and c.shortcut(S.native(.{ .cmd = true, .shift = true, .key = 'd' }));
+    const split_key = !history and !dup_key and c.shortcut(S.native(.{ .cmd = true, .key = 'd' }));
+    const rename_key = !history and c.shortcut(S.native(.{ .cmd = true, .key = 'r' }));
     const close_key = !history and c.shortcut(S.native(.{ .cmd = true, .key = S.backspace }));
-    if (!down and !up and !enter and !split_key and !close_key) return;
+    if (!down and !up and !enter and !dup_key and !split_key and !rename_key and !close_key) return;
     const list = entries(a, c.alloc(), queryOf(c, a)) catch return;
     if (down or up) {
         if (list.len == 0) return;
@@ -409,6 +486,8 @@ pub fn keys(c: *ui.Context, a: *App) void {
     }
     if (list.len == 0) return;
     const active = list[@min(p.active, list.len - 1)];
+    if (dup_key) return duplicateEntry(a, active);
+    if (rename_key) return renameEntry(a, active);
     if (split_key) return splitEntry(a, active);
     if (close_key) {
         closeEntry(a, active);
@@ -553,13 +632,15 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     if (!history) {
         _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = hairline(k) }, .none, null);
-        const f = ui.div(c).row().wFull().h(32).px(16).gap(12).itemsCenter();
+        const f = ui.div(c).row().wFull().h(32).px(16).gap(10).itemsCenter();
         defer f.end();
         keyHint(c, k, "↑ ↓", "Navigate");
         keyHint(c, k, "↵", "Select");
         if (two_pane) {
             keyHint(c, k, "⌘D", "Split");
-            keyHint(c, k, "⌘Del", "Close tab");
+            keyHint(c, k, "⌘R", "Rename");
+            keyHint(c, k, "⇧⌘D", "New tab");
+            keyHint(c, k, "⌘Del", "Close");
         }
         keyHint(c, k, "Esc", "Close");
     }
@@ -573,6 +654,8 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
         .none => {},
         .activate => if (active_entry) |ae| activate(a, ae),
         .split => if (active_entry) |ae| splitEntry(a, ae),
+        .rename => if (active_entry) |ae| renameEntry(a, ae),
+        .duplicate => if (active_entry) |ae| duplicateEntry(a, ae),
         .close => if (active_entry) |ae| {
             closeEntry(a, ae);
             const after = entries(a, c.alloc(), queryOf(c, a)) catch &.{};
@@ -1100,7 +1183,9 @@ fn previewPane(c: *ui.Context, a: *const App, k: theme.Colors, maybe_entry: ?Ent
                     }
                 }
             }
-            previewActionsBar(c, k, action_label, e == .chat or e == .open_tab, closable, action);
+            const can_rename = ch != null;
+            const close_tip: ?[]const u8 = if (closable) "Close (\u{2318}Del)" else if (ch != null and !ch.?.archived) "Archive session (\u{2318}Del)" else null;
+            previewActionsBar(c, k, action_label, e == .chat or e == .open_tab, can_rename, true, close_tip, !closable, action);
         },
         .external => |i| {
             const x = a.view.palette.external.items[i];
@@ -1113,7 +1198,7 @@ fn previewPane(c: *ui.Context, a: *const App, k: theme.Colors, maybe_entry: ?Ent
                 if (x.folder().len > 0) previewChip(c, k, .folder, x.folder());
                 ui.text(c, c.print("Updated {s} · Imports into Graff", .{when}), .{ .size = 12, .line_height = 12 * phi, .color = k.muted });
             }
-            previewActionsBar(c, k, "Import & Open ↩", false, false, action);
+            previewActionsBar(c, k, "Import & Open ↩", false, false, false, null, false, action);
         },
         else => {
             var hint_buf: [32]u8 = undefined;
@@ -1142,7 +1227,7 @@ fn previewPane(c: *ui.Context, a: *const App, k: theme.Colors, maybe_entry: ?Ent
                 _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border.alpha(0.5) }, .none, null);
                 ui.text(c, if (e == .new_chat) "Opens a fresh session draft in a new tab." else "Runs immediately on the active workspace view.", .{ .size = 12, .line_height = 12 * phi, .color = k.muted });
             }
-            previewActionsBar(c, k, "Run Command ↩", e == .new_chat, false, action);
+            previewActionsBar(c, k, "Run Command ↩", e == .new_chat, false, false, null, false, action);
         },
     }
 }
@@ -1154,7 +1239,17 @@ fn previewChip(c: *ui.Context, k: theme.Colors, glyph: icons.Name, label: []cons
     kit.ellipsisText(c, label, .{ .size = 11, .line_height = 11 * phi, .color = k.muted }, 140);
 }
 
-fn previewActionsBar(c: *ui.Context, k: theme.Colors, primary_label: []const u8, can_split: bool, closable: bool, action: *PreviewAction) void {
+fn previewActionsBar(
+    c: *ui.Context,
+    k: theme.Colors,
+    primary_label: []const u8,
+    can_split: bool,
+    can_rename: bool,
+    can_duplicate: bool,
+    close_tip: ?[]const u8,
+    close_is_archive: bool,
+    action: *PreviewAction,
+) void {
     const row_ = ui.div(c).row().wFull().gap(8).itemsCenter();
     defer row_.end();
     {
@@ -1173,11 +1268,25 @@ fn previewActionsBar(c: *ui.Context, k: theme.Colors, primary_label: []const u8,
         if (b.clicked()) action.* = .split;
     }
     ui.spacer(c);
-    if (closable) {
-        ui.key(c, "palette-preview-close");
-        const b = @import("view_tooltip.zig").on(ui.div(c).size(28, 28).center().rounded(14).bg(k.ink(if (k.dark) 0.07 else 0.05)).border(k.border.alpha(0.7)).borderW(1).hover(k.hover), k, .{ .text = "Close (⌘Del)" });
+    if (can_rename) {
+        ui.key(c, "palette-preview-rename");
+        const b = @import("view_tooltip.zig").on(ui.div(c).size(28, 28).center().rounded(14).bg(k.ink(if (k.dark) 0.07 else 0.05)).border(k.border.alpha(0.7)).borderW(1).hover(k.hover).control(), k, .{ .text = "Rename session (\u{2318}R)" });
         defer b.end();
-        icons.icon(c, .@"trash-bin-minimalistic", 13, k.muted, 0);
+        icons.icon(c, .pen, 13, k.muted, 0);
+        if (b.clicked()) action.* = .rename;
+    }
+    if (can_duplicate) {
+        ui.key(c, "palette-preview-duplicate");
+        const b = @import("view_tooltip.zig").on(ui.div(c).size(28, 28).center().rounded(14).bg(k.ink(if (k.dark) 0.07 else 0.05)).border(k.border.alpha(0.7)).borderW(1).hover(k.hover).control(), k, .{ .text = "New tab in same project (\u{21e7}\u{2318}D)" });
+        defer b.end();
+        icons.icon(c, .copy, 13, k.muted, 0);
+        if (b.clicked()) action.* = .duplicate;
+    }
+    if (close_tip) |tip_text| {
+        ui.key(c, "palette-preview-close");
+        const b = @import("view_tooltip.zig").on(ui.div(c).size(28, 28).center().rounded(14).bg(k.ink(if (k.dark) 0.07 else 0.05)).border(k.border.alpha(0.7)).borderW(1).hover(k.hover).control(), k, .{ .text = tip_text });
+        defer b.end();
+        icons.icon(c, if (close_is_archive) .@"archive-minimalistic" else .@"trash-bin-minimalistic", 13, k.muted, 0);
         if (b.clicked()) action.* = .close;
     }
 }

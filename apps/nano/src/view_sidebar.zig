@@ -110,12 +110,25 @@ fn sidebarTitlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     const bar = ui.div(c).row().wFull().h(titlebar_h).pt(4).pl(lead_x).pr(right_margin).itemsCenter();
     defer bar.end();
     if (fs) {
+        const fs_chrome = @import("view_fullscreen_chrome.zig");
+        const peeking = a.view.fs_left_peek and !a.view.sidebar_open;
         ui.key(c, "fullscreen-sidebar-toggle");
-        if (kit.iconButton(c, bar_k, .@"sidebar-minimalistic-left", .{ .size = 24, .radius = 6, .icon = 16, .color = bar_k.muted, .tip = .{ .text = "Hide sidebar (\u{2318}B)", .delay = tip.quick } })) {
-            a.view.sidebar_open = false;
-            @import("view_sidebar_search.zig").close(a);
-            a.view.search.focus = false;
-            a.view.focus_composer = true;
+        if (kit.iconButton(c, bar_k, .@"sidebar-minimalistic-left", .{
+            .size = 24,
+            .radius = 6,
+            .icon = 16,
+            .color = bar_k.muted,
+            .tip = .{ .text = if (peeking) "Dock sidebar (\u{2318}B)" else "Hide sidebar (\u{2318}B)", .delay = tip.quick },
+        })) {
+            fs_chrome.clearLeftPeek(a);
+            if (peeking) {
+                a.view.sidebar_open = true;
+            } else {
+                a.view.sidebar_open = false;
+                @import("view_sidebar_search.zig").close(a);
+                a.view.search.focus = false;
+                a.view.focus_composer = true;
+            }
             a.redraw();
         }
         ui.div(c).w(6).end();

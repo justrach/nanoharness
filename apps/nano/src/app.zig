@@ -48,6 +48,12 @@ pub const View = struct {
     full_screen_native: bool = false,
     full_screen_restore_sidebar: bool = true,
     fs_top_peek: bool = false,
+    fs_left_peek: bool = false,
+    fs_left_peek_w: f32 = 0,
+    fs_left_peek_tween: ?SidebarTween = null,
+    fs_left_edge_at: ?f64 = null,
+    fs_left_leave_at: ?f64 = null,
+    fs_left_need_exit: bool = false,
     /// A prompt was just sent: position the new turn near the top, even
     /// when the reader was browsing older work.
     stick_end: bool = false,
@@ -1277,6 +1283,7 @@ pub const App = struct {
         a.view.split_reveal = null;
         a.view.strip.expanded = null;
         a.view.fs_top_peek = false;
+        @import("view_fullscreen_chrome.zig").clearLeftPeek(a);
         a.view.strip.menu = null;
         a.view.strip.pending_folder = null;
         const focus_pane = if (a.tabs.layout()) |s| s.focus else null;
@@ -2210,6 +2217,7 @@ pub const App = struct {
         if (a.view.full_screen == on) return;
         a.view.full_screen = on;
         a.view.fs_top_peek = false;
+        @import("view_fullscreen_chrome.zig").clearLeftPeek(a);
         if (on) {
             a.view.full_screen_restore_sidebar = a.view.sidebar_open;
             a.view.sidebar_open = false;

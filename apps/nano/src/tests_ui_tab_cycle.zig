@@ -149,3 +149,92 @@ test "fullscreen left-edge bezel handle opens aligned ⌘B sidebar when clicked"
     try testing.expect(h.a.view.sidebar_open);
     try testing.expectEqual(@as(usize, 2), countCardRects(&h, chrome.fs_top_inset, 780 - chrome.fs_top_inset - chrome.zen_gutter, ui.Color.white.alpha(0.095)));
 }
+
+test "fullscreen left-edge hover dwell reveals slide-over sidebar without reflowing canvas, docks on toggle, and hides after leave grace" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try seedTranscript(&h);
+    h.a.setFullScreen(true);
+    h.t.settle(1);
+    try testing.expect(!h.a.view.sidebar_open);
+    try testing.expectEqual(@as(f32, 0), h.a.view.sidebar_width);
+
+    // Dwelling along the left bezel (x <= 8) reveals the slide-over sidebar without reflowing the workspace canvas.
+    h.t.moveTo(4, 390);
+    h.t.advance(0.16);
+    h.t.settle(1);
+    try testing.expect(h.a.view.fs_left_peek);
+    try testing.expect(h.a.view.fs_left_peek_w > 200);
+    try testing.expectEqual(@as(f32, 0), h.a.view.sidebar_width);
+    try testing.expect(h.t.hasText("All projects"));
+    h.snap("fs-left-hover-peek");
+
+    // Moving into the workspace holds across short grace, then tucks back cleanly.
+    h.t.moveTo(600, 390);
+    h.t.advance(0.10);
+    try testing.expect(h.a.view.fs_left_peek);
+    h.t.advance(0.26);
+    h.t.settle(1);
+    try testing.expect(!h.a.view.fs_left_peek);
+    try testing.expectEqual(@as(f32, 0), h.a.view.fs_left_peek_w);
+
+    // Escape dismisses an active left-edge peek cleanly even while the pointer rests on the edge;
+    // leaving the edge and returning re-arms hover reveal.
+    h.t.moveTo(4, 390);
+    h.t.advance(0.16);
+    h.t.settle(1);
+    try testing.expect(h.a.view.fs_left_peek);
+    h.press(.{ .key = S.escape });
+    try testing.expect(!h.a.view.fs_left_peek);
+    h.t.moveTo(600, 390);
+    h.t.settle(1);
+    h.t.moveTo(4, 390);
+    h.t.advance(0.16);
+    h.t.settle(1);
+    try testing.expect(h.a.view.fs_left_peek);
+    // Clicking the sidebar toggle while peeking docks the sidebar permanently.
+    h.t.click(22, 23);
+    h.t.settle(1);
+    try testing.expect(h.a.view.sidebar_open);
+    try testing.expect(!h.a.view.fs_left_peek);
+}
+
+test "⌘K command switcher preview actions rename session (⌘R) and duplicate sibling tab (⇧⌘D)" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.openChatInTab("rowan");
+    h.a.openChatInTab("cedar");
+    h.t.settle(1);
+    try testing.expectEqualStrings("cedar", h.a.selected.?);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+
+    // Open ⌘K: active item is the inactive tab ("Rowan palette review" in harbor @ Build box).
+    h.press(.{ .key = 'k', .cmd = true });
+    try testing.expect(h.a.view.palette.open);
+    try testing.expect(h.t.hasText("Rowan palette review"));
+    try testing.expect(h.t.hasText("⌘R"));
+    try testing.expect(h.t.hasText("⇧⌘D"));
+    h.snap("cmdk-rich-actions");
+
+    // ⌘R opens the rename dialog pre-filled with the highlighted session title.
+    h.press(S.native(.{ .cmd = true, .key = 'r' }));
+    try testing.expect(!h.a.view.palette.open);
+    try testing.expect(h.a.view.dialogs.rename != null);
+    try testing.expectEqualStrings("rowan", h.a.view.dialogs.rename.?.items);
+    try testing.expect(h.t.hasText("Rename session"));
+    h.snap("cmdk-rename-dialog");
+    h.press(.{ .key = S.escape });
+    try testing.expect(h.a.view.dialogs.rename == null);
+
+    // ⇧⌘D opens a fresh sibling draft tab pre-targeted to the highlighted session's project & computer.
+    h.press(.{ .key = 'k', .cmd = true });
+    try testing.expect(h.a.view.palette.open);
+    h.press(S.native(.{ .cmd = true, .shift = true, .key = 'd' }));
+    try testing.expect(!h.a.view.palette.open);
+    try testing.expectEqual(@as(usize, 3), h.a.tabs.items.items.len);
+    try testing.expect(h.a.selected == null);
+    try testing.expectEqualStrings("harbor", h.a.space.?);
+    try testing.expectEqualStrings("builder", h.a.new_device.?);
+}

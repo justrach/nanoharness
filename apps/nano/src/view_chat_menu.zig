@@ -245,6 +245,10 @@ fn encode(c: *ui.Context, s: []const u8) []const u8 {
     return w.written();
 }
 
+pub fn renameChat(a: *App, ch: workspace.Chat) void {
+    startRename(a, ch);
+}
+
 fn startRename(a: *App, ch: workspace.Chat) void {
     close(a);
     var id: std.ArrayList(u8) = .empty;
