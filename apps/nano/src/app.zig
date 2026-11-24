@@ -1368,6 +1368,8 @@ pub const App = struct {
         const from = s.focus;
         const d = drafts.canvas(a) catch return;
         a.tabs.focusPane(ix);
+        // Programmatic pane switches must hand input to the selected chat too.
+        a.view.strip.focused = .{ .chat = ix };
         a.tabs.park(a.tabs.active, from, d);
         @import("app_navigation.zig").validateCurrent(a);
         const back = a.tabs.unpark(a.tabs.active, ix);

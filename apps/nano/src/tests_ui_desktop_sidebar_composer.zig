@@ -1392,19 +1392,25 @@ test "desktop 3-pane horizontal split contains tool rows, question chips, and se
     h.t.frame();
     h.snap("desktop-3pane-split-fixed");
 
-    // Verify no text node inside the center pane overflows into the right pane.
+    // The transcript chip stays in the center pane; the active question in
+    // this narrow split gets a separate window-bounded answer card.
     const q_label = h.t.findText("Question") orelse return error.MissingQuestionChip;
     const layout_s = h.a.tabs.layout() orelse return error.MissingSplitLayout;
     try testing.expectEqual(@as(usize, 3), layout_s.panes.items.len);
     const pane_each = h.a.view.chrome.chat_width / 3;
     const center_right = sidebar.widthOf(&h.a) + h.a.view.chrome.leading + pane_each * 2;
     try testing.expect(q_label.x + q_label.w < center_right);
+    try testing.expect(@import("view_question.zig").expanded(&h.t.ctx, &h.a));
+    try testing.expect(h.t.hasText("Cancel question"));
+    var question_text_found = false;
     for (h.t.ctx.nodes.items) |node| switch (node.content) {
         .text => |tx| if (std.mem.startsWith(u8, tx.str, "This worktree is now")) {
-            try testing.expect(node.rect.x + node.rect.w <= center_right + 1);
+            question_text_found = true;
+            try testing.expect(node.rect.x >= 0 and node.rect.x + node.rect.w <= h.t.ctx.size.w + 1);
         },
         else => {},
     };
+    try testing.expect(question_text_found);
 }
 
 test "session footer renders account usage ring alongside context ring, opens account switcher popover, and optimistically switches accounts" {
