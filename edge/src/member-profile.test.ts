@@ -193,4 +193,44 @@ describe("member profile", () => {
       { text: "DELETE FROM app.harness_members WHERE user_id = $1", values: ["42"] }
     ]);
   });
+
+  it("ignores undefined_table (42P01) during account purge when app.harness_members is absent", async () => {
+    const client: PgClient = {
+      async connect() {},
+      async query() {
+        throw Object.assign(new Error("relation app.harness_members does not exist"), {
+          code: "42P01"
+        });
+      },
+      async end() {}
+    };
+    await expect(
+      deleteHarnessMember(
+        {
+          HYPERDRIVE: { connectionString: "postgres://stub" } as Hyperdrive,
+          pgClientFactory: () => client
+        },
+        "42"
+      )
+    ).resolves.toBeUndefined();
+  });
+
+  it("rethrows unexpected database errors during account purge", async () => {
+    const client: PgClient = {
+      async connect() {},
+      async query() {
+        throw Object.assign(new Error("connection terminated"), { code: "57P01" });
+      },
+      async end() {}
+    };
+    await expect(
+      deleteHarnessMember(
+        {
+          HYPERDRIVE: { connectionString: "postgres://stub" } as Hyperdrive,
+          pgClientFactory: () => client
+        },
+        "42"
+      )
+    ).rejects.toThrow("connection terminated");
+  });
 });

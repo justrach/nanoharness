@@ -166,11 +166,15 @@ SELECT COALESCE(NULLIF(btrim(u.email), ''), NULLIF(btrim(au.email), '')) AS emai
   LEFT JOIN app.cg_auth_user au ON au.id = l.auth_user_id
  LIMIT 1`;
 
-const isUndefinedColumnError = (err: unknown): boolean =>
+const isPgErrorCode = (err: unknown, code: string): boolean =>
   typeof err === "object" &&
   err !== null &&
   "code" in err &&
-  (err as { code?: unknown }).code === "42703";
+  (err as { code?: unknown }).code === code;
+
+const isUndefinedColumnError = (err: unknown): boolean => isPgErrorCode(err, "42703");
+
+const isUndefinedTableError = (err: unknown): boolean => isPgErrorCode(err, "42P01");
 
 const extractCardTraits = (row: MemberQueryRow, memberNumber?: number): HarnessCardTraits | undefined => {
   const scene = toInt(row.card_scene);
@@ -245,5 +249,10 @@ export const ensureHarnessMemberProfile = async (
 /** Account purge: remove the user's Harness member card record. */
 export const deleteHarnessMember = (env: PgEnv, userId: string): Promise<void> =>
   withPg(env, async (pg) => {
-    await pg.query("DELETE FROM app.harness_members WHERE user_id = $1", [userId]);
+    try {
+      await pg.query("DELETE FROM app.harness_members WHERE user_id = $1", [userId]);
+    } catch (err) {
+      if (isUndefinedTableError(err)) return;
+      throw err;
+    }
   });
