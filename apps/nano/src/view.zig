@@ -921,7 +921,7 @@ fn keys(c: *ui.Context, a: *App) void {
         if (a.selected) |sel| a.setArchived(sel, true);
     }
     if (c.shortcut(.{ .key = 'j', .cmd = true, .shift = true })) strip.nextAttention(a);
-    if (c.shortcut(.{ .key = 'm', .cmd = true, .shift = true })) {
+    if (c.shortcut(@import("shortcuts.zig").cycle_ui_mode)) {
         const was_design = a.settings.uiMode() == .design;
         a.settings.toggleUiMode();
         if (was_design and a.settings.uiMode() != .design) @import("app_panels.zig").closeDesignCanvas(a);
@@ -960,7 +960,7 @@ fn keys(c: *ui.Context, a: *App) void {
             a.rememberTabs();
         }
     }
-    if (c.shortcut(.{ .key = 'd', .cmd = true, .alt = true })) {
+    if (c.shortcut(@import("shortcuts.zig").toggle_design_canvas)) {
         if (a.settings.uiMode() == .design) {
             a.settings.applyUiMode(.zen);
             @import("app_panels.zig").closeDesignCanvas(a);
@@ -1197,10 +1197,12 @@ fn titlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
         history.end();
         ui.div(c).w(4).end();
         const dev = a.settings.uiMode() == .developer;
+        const shortcuts = @import("shortcuts.zig");
+        var shortcut_buf: [64]u8 = undefined;
         ui.key(c, "titlebar-ui-mode-pill");
         if (kit.iconButton(c, k, if (dev) .terminal else .@"magic-stick-3", .{
             .on = dev,
-            .tip = .{ .text = "Toggle Zen / Developer mode (⇧⌘M)" },
+            .tip = .{ .text = c.print("Toggle Zen / Developer mode ({s})", .{shortcuts.chordBadge(&shortcut_buf, shortcuts.cycle_ui_mode)}) },
         })) {
             const was_design = a.settings.uiMode() == .design;
             a.settings.toggleUiMode();

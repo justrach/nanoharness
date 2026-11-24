@@ -283,7 +283,7 @@ fn file(c: *ui.Context, a: *App, k: theme.Colors, path: []const u8) void {
                     }
                 }
             }
-            if (fileButton(c, k, if (e.pending != null) "Saving…" else "Save file", e.editable and e.dirty() and e.pending == null and !e.conflict)) _ = e.save();
+            if (fileButton(c, k, if (e.pending != null) "Saving…" else "Save file", e.editable and !e.composing and e.dirty() and e.pending == null and !e.conflict)) _ = e.save();
             if (fileButton(c, k, "Reload file", e.pending == null and !e.loading)) @import("app_file_editor.zig").requestReload(a, e);
         }
     }
@@ -306,39 +306,54 @@ fn file(c: *ui.Context, a: *App, k: theme.Colors, path: []const u8) void {
                     c.focus = e.field;
                 }
             }
-            const lines: u16 = @intFromFloat(std.math.clamp((a.view.chrome.height - 100) / 19, 4, 200));
-            const result = ui.textField(c, &e.buffer, .{ .placeholder = "Edit file…", .width = .fill, .bare = true, .mono = true, .size = 12.5, .line_height = 19, .multiline = true, .max_lines = lines });
-            e.focused = result.focused;
-            if (result.focused and c.shortcut(.{ .key = 'a', .cmd = true })) {
-                if (c.edits.getPtr(e.field)) |edit| {
-                    edit.anchor = 0;
-                    edit.caret = e.buffer.text().len;
-                    c.selection.clear();
-                    c.changed = true;
-                }
+            if (c.focus == e.field and c.shortcut(.{ .key = 'a', .cmd = true })) {
+                e.buffer.want_selection = .{ 0, std.math.maxInt(usize) };
+                c.selection.clear();
+                c.changed = true;
             }
-            if (result.changed) e.changed();
-            if (result.submitted) {
-                _ = e.buffer.insert(result.caret, "\n");
-                e.buffer.want_caret = result.caret + 1;
+            const lines: u16 = @intFromFloat(std.math.clamp((a.view.chrome.height - 100) / 19, 4, 200));
+            const result = ui.textField(c, &e.buffer, .{
+                .placeholder = "Edit file…",
+                .width = .fill,
+                .bare = true,
+                .mono = true,
+                .size = 12.5,
+                .line_height = 19,
+                .multiline = true,
+                .word_wrap = a.settings.get(.files_word_wrap),
+                .reversible_preedit = true,
+                .max_lines = lines,
+            });
+            e.focused = result.focused;
+            const inserted_break = result.submitted and !result.composing and e.buffer.insert(result.caret, "\n") == 1;
+            if (inserted_break) e.buffer.want_caret = result.caret + 1;
+            if (result.changed or inserted_break) {
+                // A native event can confirm one edit and start a new mark.
+                // Arm for the confirmed edit; tick still pauses while marked.
+                e.composing = false;
                 e.changed();
+            }
+            e.composing = result.composing;
+            if (!e.composing and e.pending == null and a.panels.file_close.intent == null) {
+                if (e.autosave_at) |deadline| c.frameIn(@floatCast(@max(0, deadline - c.time)));
             }
             return;
         }
-        ui.scroll(c, .{ .grow = 1, .width = .fill, .padding = .{ .left = 16, .right = 16, .top = 12, .bottom = 24 } });
-        defer ui.end(c);
-        if (std.mem.endsWith(u8, path, ".md") or std.mem.endsWith(u8, path, ".markdown"))
-            return @import("view_markdown.zig").withLinks(c, k, e.buffer.text(), a, e.target.chatId);
-        return code(c, k, e.buffer.text(), langOf(path));
+        return previewFile(c, a, k, path, e.buffer.text(), e.target.chatId);
     }
     const f = a.panels.file;
     if (f.loading) return centered(c, k, "Loading…");
     const text = f.text orelse return centered(c, k, f.reason orelse "This file can't be shown.");
-    ui.scroll(c, .{ .grow = 1, .width = .fill, .padding = .{ .left = 16, .right = 16, .top = 12, .bottom = 24 } });
+    previewFile(c, a, k, path, text, a.selected);
+}
+
+fn previewFile(c: *ui.Context, a: *App, k: theme.Colors, path: []const u8, text: []const u8, owner: ?[]const u8) void {
+    const markdown = std.mem.endsWith(u8, path, ".md") or std.mem.endsWith(u8, path, ".markdown");
+    const wrap = a.settings.get(.files_word_wrap);
+    ui.scroll(c, .{ .grow = 1, .width = .fill, .scroll_x = !markdown and !wrap, .padding = .{ .left = 16, .right = 16, .top = 12, .bottom = 24 } });
     defer ui.end(c);
-    if (std.mem.endsWith(u8, path, ".md") or std.mem.endsWith(u8, path, ".markdown"))
-        return @import("view_markdown.zig").withLinks(c, k, text, a, a.selected);
-    code(c, k, text, langOf(path));
+    if (markdown) return @import("view_markdown.zig").withLinks(c, k, text, a, owner);
+    code(c, k, text, langOf(path), wrap);
 }
 
 fn fileButton(c: *ui.Context, k: theme.Colors, label: []const u8, enabled: bool) bool {
@@ -351,9 +366,10 @@ fn fileButton(c: *ui.Context, k: theme.Colors, label: []const u8, enabled: bool)
 }
 
 /// Code with its line numbers, coloured as the language reads.
-pub fn code(c: *ui.Context, k: theme.Colors, text: []const u8, lang: []const u8) void {
+fn code(c: *ui.Context, k: theme.Colors, text: []const u8, lang: []const u8, wrap: bool) void {
     const pal = k.syntax;
-    const st = kit.style(c, 12.5, 19, .{ .mono = true, .color = k.text });
+    var st = kit.style(c, 12.5, 19, .{ .mono = true, .color = k.text });
+    st.wrap = wrap;
     const num = kit.style(c, 11, 19, .{ .mono = true, .color = k.faint });
     var in_block: highlight.State = .{};
     var n: usize = 0;
@@ -361,7 +377,8 @@ pub fn code(c: *ui.Context, k: theme.Colors, text: []const u8, lang: []const u8)
     while (it.next()) |l| {
         n += 1;
         if (n > 4000) break;
-        const r = ui.div(c).row().gap(12);
+        var r = ui.div(c).row().gap(12);
+        if (wrap) r = r.wFull();
         defer r.end();
         {
             const g = ui.div(c).row().w(36).justifyEnd();

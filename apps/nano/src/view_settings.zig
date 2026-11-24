@@ -344,10 +344,14 @@ pub fn words(c: *ui.Context, k: theme.Colors, title: []const u8, meta: []const u
 
 /// `toggle_switch` in its 40-point target: true when clicked.
 pub fn toggle(c: *ui.Context, k: theme.Colors, on: bool, enabled: bool) bool {
-    const target = ui.div(c).row().size(40, 40).center();
+    var target = ui.div(c).row().size(40, 40).center();
+    if (!enabled) target = target.opacity(0.55);
     defer target.end();
-    _ = kit.toggleSwitch(c, k, on);
-    return enabled and target.clicked();
+    _ = kit.toggleSwitchTrack(c, k, on);
+    if (enabled) return target.clicked();
+    // An inactive switch still occupies its hit area, not the row's action.
+    _ = target.interaction();
+    return false;
 }
 
 /// A row: tile, title and line, and its switch.
@@ -442,7 +446,7 @@ fn files(c: *ui.Context, a: *App, k: theme.Colors) void {
     const cd = card(c, k);
     defer cd.end();
     bareSwitchRow(c, a, k, .files_autosave_enabled, .folder, "Autosave", "Save edited workspace files to disk automatically.", true);
-    bareSwitchRow(c, a, k, .files_word_wrap, .list, "Word wrap", "Wrap long lines in every workspace file.", false);
+    bareSwitchRow(c, a, k, .files_word_wrap, .list, "Word wrap", "Wrap long lines in the workspace file editor and plain-text previews.", false);
     bareSwitchRow(c, a, k, .files_show_all, .eye, "Show all files", "Include hidden and ignored files in every file tree.", false);
     const r = row(c, k, false, false);
     defer r.end();

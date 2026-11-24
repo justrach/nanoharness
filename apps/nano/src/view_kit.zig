@@ -138,6 +138,11 @@ pub fn activityText(c: *ui.Context, k: theme.Colors, text: []const u8, st: ui.Te
 }
 
 pub fn toggleSwitch(c: *ui.Context, k: theme.Colors, on: bool) bool {
+    return toggleSwitchTrack(c, k, on).clicked();
+}
+
+/// Paint the switch without taking clicks from a larger hit target.
+pub fn toggleSwitchTrack(c: *ui.Context, k: theme.Colors, on: bool) ui.Div {
     const track = ui.div(c).row().w(32).h(18).roundedFull()
         .bg(if (on) k.solid else k.ink(if (k.dark) 0.18 else 0.13))
         .border(if (on) k.solid else k.ink(0.10)).borderW(1)
@@ -149,7 +154,7 @@ pub fn toggleSwitch(c: *ui.Context, k: theme.Colors, on: bool) bool {
         .radius = 7,
         .background = if (on) k.on_solid else (if (k.dark) ui.Color.white.alpha(0.88) else ui.Color.white),
     }, .none, null);
-    return track.clicked();
+    return track;
 }
 
 /// Largest UTF-8 codepoint boundary in `s` whose shaped prefix width does not

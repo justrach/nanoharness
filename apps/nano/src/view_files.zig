@@ -44,7 +44,7 @@ fn toolbar(c: *ui.Context, a: *App, k: theme.Colors) void {
             const r = ui.textField(c, &a.panels.search, .{ .placeholder = "Search files", .width = .fill, .bare = true, .size = 11 });
             if (r.changed) files.search(a);
         }
-        const on = a.panels.show_all;
+        const on = a.settings.get(.files_show_all);
         if (kit.iconButton(c, k, if (on) .eye else .@"eye-closed", .{ .icon = 14, .on = on, .color = if (on) k.text else k.muted, .tip = .{
             .text = if (on) "Hide hidden and ignored files" else "Show all files (even hidden)",
             .delay = tip_quick,
@@ -57,14 +57,28 @@ fn toolbar(c: *ui.Context, a: *App, k: theme.Colors) void {
 
 fn level(c: *ui.Context, a: *App, k: theme.Colors, dir: []const u8, depth: u32) void {
     const listing = a.panels.listings.get(dir) orelse return status(c, k, "Loading…", depth);
-    if (listing.loading) return status(c, k, "Loading…", depth);
-    if (listing.err) |e| return status(c, k, c.print("{s} — Retry", .{e}), depth);
-    if (listing.entries.len == 0) return status(c, k, "Empty folder", depth);
-    for (listing.entries) |e| {
+    for (listing.entries.items) |e| {
         ui.key(c, c.print("f-{s}", .{e.path}));
         row(c, a, k, e, depth);
         if (e.dir and a.panels.expanded.contains(e.path)) level(c, a, k, e.path, depth + 1);
     }
+    if (listing.loading) return status(c, k, if (listing.entries.items.len == 0) "Loading…" else "Loading more…", depth);
+    if (listing.err) |e| {
+        pageButton(c, a, k, dir, depth, if (listing.next_cursor == null and listing.entries.items.len > 0) "Refresh folder" else "Retry");
+        return status(c, k, e, depth);
+    }
+    if (listing.next_cursor != null) return pageButton(c, a, k, dir, depth, "Load more");
+    if (listing.truncated) return status(c, k, "Directory limit reached", depth);
+    if (listing.entries.items.len == 0) status(c, k, "Empty folder", depth);
+}
+
+fn pageButton(c: *ui.Context, a: *App, k: theme.Colors, dir: []const u8, depth: u32, label: []const u8) void {
+    ui.key(c, c.print("folder-page-{s}", .{dir}));
+    const r = ui.div(c).row().wFull().h(27).pl(8 + @as(f32, @floatFromInt(depth + 1)) * 14).itemsCenter().hover(k.wash(0.055)).control();
+    defer r.end();
+    const name = if (dir.len == 0) label else c.print("{s} in {s}", .{ label, std.fs.path.basename(dir) });
+    if (@import("control_behavior.zig").activate(c, r, k, name, true, false)) files.loadMore(a, dir);
+    ui.text(c, label, .{ .size = 10.5, .color = k.accent });
 }
 
 fn row(c: *ui.Context, a: *App, k: theme.Colors, e: panels.Entry, depth: u32) void {

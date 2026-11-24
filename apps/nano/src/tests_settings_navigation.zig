@@ -56,6 +56,63 @@ test "settings navigation finds GitHub links and toggles the saved preference fr
     }
 }
 
+test "settings audit clicks the visible GitHub switch and its padded target" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.settings.setSection(.browsing);
+    view.open(&h.a);
+    h.t.settle(0.2);
+    const row = for (h.t.ctx.nodes.items) |node| {
+        const text = switch (node.content) {
+            .text => |v| v.str,
+            else => continue,
+        };
+        if (!std.mem.eql(u8, text, "Open GitHub links in Harness")) continue;
+        break h.t.ctx.nodes.items[h.t.ctx.nodes.items[node.parent].parent].rect;
+    } else return error.MissingGitHubLinksRow;
+    const x = row.x + row.w - 40;
+    const y = row.y + row.h / 2;
+    try testing.expect(h.a.settings.get(.open_github_links_in_harness));
+    h.t.click(x, y);
+    try testing.expect(!h.a.settings.get(.open_github_links_in_harness));
+    h.t.click(x, y - 14);
+    try testing.expect(h.a.settings.get(.open_github_links_in_harness));
+}
+
+test "settings audit fixed workspace mode keys reject capture and override stale custom bindings" {
+    const shortcuts = @import("shortcuts.zig");
+    const ui = @import("nanoui").ui;
+    const sidebar = for (shortcuts.all, 0..) |sc, ix| {
+        if (std.mem.eql(u8, sc.key, "toggleSidebar")) break ix;
+    } else return error.MissingToggleSidebarShortcut;
+
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    h.a.settings.setSection(.shortcuts);
+    view.open(&h.a);
+    h.t.settle(0.2);
+    const cycle: ui.Shortcut = .{ .key = 'm', .cmd = true, .shift = true };
+    const design: ui.Shortcut = .{ .key = 'd', .cmd = true, .alt = true };
+    for ([_]ui.Shortcut{ cycle, design }) |chord| {
+        h.a.view.recording = sidebar;
+        _ = h.t.shortcut(chord);
+        try testing.expectEqualStrings(shortcuts.all[sidebar].default, h.a.settings.combo(shortcuts.all[sidebar]));
+        try testing.expect(std.mem.indexOf(u8, h.a.view.shortcut_notice.items, "fixed window shortcut") != null);
+    }
+
+    // A profile saved by the previous build can already have the bad binding.
+    h.a.settings.setCombo(shortcuts.all[sidebar], "mod-shift-m");
+    view.close(&h.a);
+    h.t.settle(0.2);
+    const was_open = h.a.view.sidebar_open;
+    _ = h.t.shortcut(cycle);
+    try testing.expectEqual(was_open, h.a.view.sidebar_open);
+    try testing.expectEqual(.developer, h.a.settings.uiMode());
+}
+
 test "settings navigation keeps search and Back reachable on short windows and recovers from no matches" {
     var h: Harness = undefined;
     try h.init(false);

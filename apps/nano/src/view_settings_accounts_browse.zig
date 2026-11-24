@@ -103,10 +103,79 @@ test "a status reads its fields, and nothing from a non-object" {
     try std.testing.expect(!none.paired and none.pairing_code == null);
 }
 
+test "settings audit browse Disconnect reports failure while connected and clears it on retry" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    const Harness = @import("tests_ui_tab_strip.zig").Harness;
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.engine.scene = try json.parseFromSlice(json.Value, testing.allocator,
+        \\{"BrowseLinkStatus":{"$seq":[{"paired":true,"browseRunning":true},
+        \\  {"paired":true,"browseRunning":true},{"paired":false,"browseRunning":true}]},
+        \\ "BrowseLinkDisconnect":{"$seq":[{"$err":"Synthetic disconnect refused"},{"ok":true}]}}
+    , .{});
+    h.a.engine.state = .connected;
+    h.a.settings.section = .agents;
+    @import("view_settings.zig").open(&h.a);
+    h.t.advance(0.2);
+    try testing.expect(h.t.hasText("Connected"));
+
+    try h.t.clickText("Disconnect");
+    h.t.advance(0.2);
+    try testing.expect(h.t.hasText("Connected"));
+    const button = h.t.findText("Disconnect") orelse return error.MissingDisconnect;
+    const message = h.t.findText("Synthetic disconnect refused") orelse return error.MissingDisconnectError;
+    try testing.expect(message.y > button.y and message.y - button.y < 100);
+    try testing.expect(message.y + message.h <= h.t.size.h);
+    try testing.expectEqual(@as(usize, 2), h.a.engine.seq_used.get("BrowseLinkStatus").?);
+
+    try h.t.clickText("Disconnect");
+    // At click release the new action is pending; the prior error is gone,
+    // but the last confirmed status must still be connected.
+    try testing.expect(h.t.hasText("Connected"));
+    try testing.expect(!h.t.hasText("Synthetic disconnect refused"));
+    h.t.advance(0.2);
+    try testing.expect(h.t.hasText("Connect"));
+    try testing.expect(!h.t.hasText("Connected"));
+    try testing.expect(!h.t.hasText("Synthetic disconnect refused"));
+    try testing.expectEqual(@as(usize, 2), h.a.engine.seq_used.get("BrowseLinkDisconnect").?);
+}
+
+test "settings audit browse retries a failed status check without repeating Disconnect" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    const Harness = @import("tests_ui_tab_strip.zig").Harness;
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.engine.scene = try json.parseFromSlice(json.Value, testing.allocator,
+        \\{"BrowseLinkStatus":{"$seq":[{"paired":true,"browseRunning":true},
+        \\  {"$err":"Synthetic status unavailable"},{"paired":false,"browseRunning":true}]},
+        \\ "BrowseLinkDisconnect":{"$seq":[{"ok":true}]}}
+    , .{});
+    h.a.engine.state = .connected;
+    h.a.settings.section = .agents;
+    @import("view_settings.zig").open(&h.a);
+    h.t.advance(0.2);
+    try h.t.clickText("Disconnect");
+    h.t.advance(0.2);
+    try testing.expect(h.t.hasText("Connected"));
+    try testing.expect(h.t.hasText("Couldn't check browse status: Synthetic status unavailable"));
+    try h.t.clickText("Retry status check");
+    h.t.advance(0.2);
+    try testing.expect(h.t.hasText("Connect"));
+    try testing.expect(!h.t.hasText("Connected"));
+    try testing.expect(!h.t.hasText("Retry status check"));
+    try testing.expectEqual(@as(usize, 1), h.a.engine.seq_used.get("BrowseLinkDisconnect").?);
+    try testing.expectEqual(@as(usize, 3), h.a.engine.seq_used.get("BrowseLinkStatus").?);
+}
+
 pub const State = struct {
     status: ?Status = null,
     busy: bool = false,
     err: ?[]u8 = null,
+    status_err: ?[]u8 = null,
     started: bool = false,
     call: ?u64 = null,
     poll_at: ?f64 = null,
@@ -114,6 +183,7 @@ pub const State = struct {
     pub fn deinit(s: *State, gpa: Allocator) void {
         if (s.status) |*x| x.deinit(gpa);
         if (s.err) |x| gpa.free(x);
+        if (s.status_err) |x| gpa.free(x);
     }
 };
 
@@ -130,8 +200,14 @@ fn state(a: *App) *State {
 pub fn refresh(a: *App) void {
     const s = state(a);
     s.started = true;
-    if (!a.engine.up()) return;
-    s.call = a.engine.call("BrowseLinkStatus", .{}, .of(App, a, onStatus));
+    s.poll_at = null;
+    // Sends can report a transport error synchronously with id zero.
+    s.call = 0;
+    const call = a.engine.call("BrowseLinkStatus", rpc.empty, .of(App, a, onStatus));
+    if (s.call == 0) {
+        s.call = call;
+        if (call == null) statusFailed(a, "Could not send browse status check");
+    }
 }
 
 fn onStatus(a: *App, id: u64, r: rpc.Reply) void {
@@ -142,46 +218,46 @@ fn onStatus(a: *App, id: u64, r: rpc.Reply) void {
         .ok => |v| if (Status.parse(a.gpa, v)) |next| {
             if (s.status) |*old| old.deinit(a.gpa);
             s.status = next;
+            if (s.status_err) |old| a.gpa.free(old);
+            s.status_err = null;
             s.poll_at = if (next.pairing_code != null) a.now + poll_every_s else null;
-        } else |_| {},
-        // A failed status reads as no status, as GPUI's `.ok()`.
-        .err => s.poll_at = null,
+        } else |_| statusFailed(a, "Unexpected reply"),
+        .err => |e| statusFailed(a, e),
         else => {},
     }
     a.redraw();
 }
 
-fn connect(a: *App) void {
+fn statusFailed(a: *App, msg: []const u8) void {
     const s = state(a);
-    if (s.busy or !a.engine.up()) return;
-    s.busy = true;
-    setErr(a, null);
-    _ = a.engine.call("BrowseLinkPair", .{}, .of(App, a, onPaired));
+    if (s.status_err) |old| a.gpa.free(old);
+    s.status_err = a.gpa.dupe(u8, msg) catch null;
+    // A transient status error doesn't cancel a pairing already in progress.
+    s.poll_at = if (s.status) |prior| (if (prior.pairing_code != null) a.now + poll_every_s else null) else null;
+    a.redraw();
 }
 
-fn onPaired(a: *App, _: u64, r: rpc.Reply) void {
+fn act(a: *App, method: []const u8) void {
     const s = state(a);
+    if (s.busy) return;
+    s.busy = true;
+    setErr(a, null);
+    if (a.engine.call(method, rpc.empty, .of(App, a, onAction)) == null and s.busy) {
+        onAction(a, 0, .{ .err = "Could not send browse action" });
+    }
+}
+
+fn onAction(a: *App, _: u64, r: rpc.Reply) void {
     switch (r) {
-        .ok => {},
+        .ok => setErr(a, null),
         .err => |e| setErr(a, e),
         else => return,
     }
-    s.busy = false;
+    state(a).busy = false;
+    // Only status can tell whether browse is still paired. A successful
+    // status refresh must not erase the separate action error.
     refresh(a);
     a.redraw();
-}
-
-fn disconnect(a: *App) void {
-    if (!a.engine.up()) return;
-    setErr(a, null);
-    _ = a.engine.call("BrowseLinkDisconnect", .{}, .of(App, a, onDisconnected));
-}
-
-fn onDisconnected(a: *App, _: u64, r: rpc.Reply) void {
-    switch (r) {
-        .ok, .err => refresh(a),
-        else => {},
-    }
 }
 
 fn setErr(a: *App, e: ?[]const u8) void {
@@ -216,7 +292,7 @@ pub fn card(c: *ui.Context, a: *App, k: theme.Colors) void {
         var buf: [8]u8 = undefined;
         ui.text(c, c.print("{s}", .{spacedCode(&buf, code)}), rows.st(c, 26, .{ .weight = .semibold, .color = k.text }));
         note(c, k, "Check that browse shows the same code, then allow Harness there and choose what it may do.");
-        if (rows.ghost(c, k, .{ .label = "Cancel" })) disconnect(a);
+        if (rows.ghost(c, k, .{ .label = if (s.busy) "Cancelling\u{2026}" else "Cancel", .dim = s.busy })) act(a, "BrowseLinkDisconnect");
     } else if (status.paired) {
         {
             const badges = ui.div(c).row().gap(6).itemsCenter();
@@ -231,16 +307,24 @@ pub fn card(c: *ui.Context, a: *App, k: theme.Colors) void {
         else
             "browse isn't running with Connected apps on, so agents use Harness's own browser for now.");
         note(c, k, "Change what Harness may do, or revoke it, in browse \u{203a} Settings \u{203a} Agent \u{203a} Connected apps.");
-        if (rows.ghost(c, k, .{ .label = "Disconnect" })) disconnect(a);
+        if (rows.ghost(c, k, .{ .label = if (s.busy) "Disconnecting\u{2026}" else "Disconnect", .dim = s.busy })) act(a, "BrowseLinkDisconnect");
     } else if (status.browse_running) {
         note(c, k, "Let agents use browse, with your sign-ins. You'll confirm a code in browse and choose what Harness may do.");
-        if (rows.ghost(c, k, .{ .label = if (s.busy) "Connecting\u{2026}" else "Connect" }) and !s.busy) connect(a);
+        if (rows.ghost(c, k, .{ .label = if (s.busy) "Connecting\u{2026}" else "Connect", .dim = s.busy })) act(a, "BrowseLinkPair");
     } else {
         note(c, k, "Open browse and turn on Settings \u{203a} Agent \u{203a} Connected apps to let agents use it with your sign-ins.");
-        if (rows.ghost(c, k, .{ .label = "Check again" })) refresh(a);
+        if (s.status_err == null and rows.ghost(c, k, .{ .label = "Check again", .dim = s.call != null }) and s.call == null) {
+            setErr(a, null);
+            refresh(a);
+        }
     }
     const e = s.err orelse status.err;
     if (e) |msg| _ = rows.errorStrip(c, k, msg, false);
+    if (s.status_err) |msg| {
+        _ = rows.errorStrip(c, k, c.print("Couldn't check browse status: {s}", .{msg}), false);
+        const waiting = s.call != null or s.busy;
+        if (rows.ghost(c, k, .{ .label = if (waiting) "Checking status…" else "Retry status check", .dim = waiting }) and !waiting) refresh(a);
+    }
 }
 
 /// A muted line at 12 on 18 (`note`), wrapped to the card.

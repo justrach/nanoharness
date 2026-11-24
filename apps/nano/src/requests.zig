@@ -292,8 +292,15 @@ pub fn discard(chat_id: []const u8, checkout_id: []const u8, checksum: []const u
     return .{ .method = "DiscardWorkingTree", .params = .{ .chatId = chat_id, .checkoutId = checkout_id, .expectedChecksum = checksum, .targetDeviceId = host } };
 }
 
-pub fn listDirectory(chat_id: []const u8, dir: []const u8, include_ignored: bool, host: ?[]const u8) Request(struct { chatId: []const u8, directory: []const u8, includeIgnored: bool, targetDeviceId: ?[]const u8 }) {
-    return .{ .method = "ListWorkspaceDirectory", .params = .{ .chatId = chat_id, .directory = dir, .includeIgnored = include_ignored, .targetDeviceId = host } };
+const DirectoryListing = struct { chatId: []const u8, directory: []const u8, includeIgnored: bool, cursor: ?[]const u8, targetDeviceId: ?[]const u8 };
+
+pub fn listDirectory(chat_id: []const u8, dir: []const u8, include_ignored: bool, host: ?[]const u8) Request(DirectoryListing) {
+    return listDirectoryPage(chat_id, dir, include_ignored, null, host);
+}
+
+/// The engine's `nextCursor` is an opaque string, scoped to the directory and visibility mode.
+pub fn listDirectoryPage(chat_id: []const u8, dir: []const u8, include_ignored: bool, cursor: ?[]const u8, host: ?[]const u8) Request(DirectoryListing) {
+    return .{ .method = "ListWorkspaceDirectory", .params = .{ .chatId = chat_id, .directory = dir, .includeIgnored = include_ignored, .cursor = cursor, .targetDeviceId = host } };
 }
 
 pub fn searchFiles(chat_id: []const u8, query: []const u8, include_ignored: bool, host: ?[]const u8) Request(struct { chatId: []const u8, query: []const u8, includeIgnored: bool, limit: u16, targetDeviceId: ?[]const u8 }) {

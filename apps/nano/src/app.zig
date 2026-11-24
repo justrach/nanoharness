@@ -855,6 +855,7 @@ pub const App = struct {
         if (change_requests.tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("agent_updates.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("app_subagents.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
+        if (@import("app_panels.zig").tickFiles(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (a.window != null and !a.offscreen) if (a.browse_conn) |bc| {
             const ux_bc = @import("ux_rules.zig").BrowseConnect;
             const browser_vis = a.panels.host_open and if (a.panels.activeTab()) |tb|

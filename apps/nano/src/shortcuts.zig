@@ -79,7 +79,7 @@ fn jumps() [9]Shortcut {
 
 /// The read-only group under them: the window's own keys
 /// (`fixed_rows`, from the live keymap on macOS).
-pub const Fixed = struct { title: []const u8, keys: []const u8 };
+pub const Fixed = struct { title: []const u8, keys: []const u8 = "", chord: ?ui.Shortcut = null };
 pub const fixed_label = "Panes, tabs and the composer";
 pub const fixed = [_]Fixed{
     .{ .title = "Split the chat to the right", .keys = "Cmd+D" },
@@ -107,7 +107,8 @@ pub const fixed = [_]Fixed{
     .{ .title = "Command palette", .keys = "Cmd+K" },
     .{ .title = "Visual tab overview", .keys = "Cmd+Shift+\\" },
     .{ .title = "Enter or exit full screen", .keys = "Ctrl+Cmd+F" },
-    .{ .title = "Toggle Zen / Developer mode", .keys = "Cmd+Shift+M" },
+    .{ .title = "Toggle Zen / Developer mode", .chord = cycle_ui_mode },
+    .{ .title = "Toggle Design Canvas", .chord = toggle_design_canvas },
     .{ .title = "Search sessions", .keys = "Cmd+F" },
     .{ .title = "Settings", .keys = "Cmd+," },
     .{ .title = "Bigger text (zoom in)", .keys = "Cmd+=" },
@@ -291,9 +292,32 @@ test "key-caps as the GPUI app's badges on the Mac (`badge_combos_use_mac_glyphs
     try testing.expectEqualStrings("⌘K", badge(&buf, "mod-k"));
     try testing.expectEqualStrings("⌘J", platformBadgeFor(.macos, &buf, "mod-j"));
     try testing.expectEqualStrings("Ctrl+J", platformBadgeFor(.linux, &buf, "mod-j"));
-    try testing.expectEqualStrings("Ctrl+Alt+D", platformBadgeFor(.windows, &buf, "mod-alt-d"));
+    try testing.expectEqualStrings("Ctrl+Alt+D", chordBadgeFor(.windows, &buf, toggle_design_canvas));
+    try testing.expectEqualStrings("Ctrl+Shift+M", chordBadgeFor(.linux, &buf, cycle_ui_mode));
+    try testing.expectEqualStrings("⇧⌘M", chordBadgeFor(.macos, &buf, cycle_ui_mode));
 }
 
 /// The command palette's key: fixed, as the GPUI app binds it
 /// (`KeyBinding::new(&platform_combo("mod-k"), ToggleCommandPalette)`).
 pub const command_palette: ui.Shortcut = .{ .key = 'k', .cmd = true };
+
+const keymap_partition = @import("ux_rules.zig").KeymapPartition;
+pub const cycle_ui_mode = windowShortcut(keymap_partition.cycle_ui_mode);
+pub const toggle_design_canvas = windowShortcut(keymap_partition.toggle_design_canvas);
+
+fn windowShortcut(chord: keymap_partition.Chord) ui.Shortcut {
+    return .{ .key = chord.code, .cmd = chord.cmd, .ctrl = chord.ctrl, .alt = chord.alt, .shift = chord.shift };
+}
+
+fn chordBadgeFor(os: std.Target.Os.Tag, buf: []u8, chord: ui.Shortcut) []const u8 {
+    var combo_buf: [64]u8 = undefined;
+    return platformBadgeFor(os, buf, fromShortcut(&combo_buf, chord) orelse return "");
+}
+
+pub fn chordBadge(buf: []u8, chord: ui.Shortcut) []const u8 {
+    return chordBadgeFor(@import("builtin").os.tag, buf, chord);
+}
+
+pub fn isWorkspaceModeBinding(combo: []const u8) bool {
+    return matches(combo, cycle_ui_mode) or matches(combo, toggle_design_canvas);
+}

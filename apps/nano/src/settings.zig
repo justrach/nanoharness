@@ -506,7 +506,9 @@ pub const Store = struct {
     pub fn combo(s: *const Store, sc: shortcuts.Shortcut) []const u8 {
         var buf: [64]u8 = undefined;
         const k = if (sc.slot) |n| std.fmt.bufPrint(&buf, "{s}.{d}", .{ sc.key, n }) catch return sc.default else sc.key;
-        return s.keymap.get(k) orelse sc.default;
+        const saved = s.keymap.get(k) orelse return sc.default;
+        // Older builds allowed overrides to consume these fixed workspace keys.
+        return if (shortcuts.isWorkspaceModeBinding(saved)) sc.default else saved;
     }
 
     /// Rebinds `sc` (null: back to its default), and writes the keymap whole
