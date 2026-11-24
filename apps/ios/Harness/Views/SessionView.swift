@@ -68,6 +68,7 @@ struct SessionView: View {
     @State private var renameChatId: String?
     @State private var renameTitle = ""
     @State private var showingCheckoutChanges = false
+    @State private var githubLaunch: GitHubRepoLaunch?
     @State private var companionsSection: CompanionSection?
     @State private var activeSideChatId: String?
 
@@ -179,6 +180,12 @@ struct SessionView: View {
                         Label("Checkout Changes", systemImage: "arrow.left.arrow.right")
                     }
                     .accessibilityIdentifier("menu-checkout-changes")
+                    Button {
+                        githubLaunch = GitHubRepoLaunch(initialKind: .issues, initialState: .all, initialNumber: nil)
+                    } label: {
+                        Label("GitHub Issues & PRs", systemImage: "arrow.triangle.pull")
+                    }
+                    .accessibilityIdentifier("menu-github-repository")
                     Button {
                         companionsSection = .terminals
                     } label: {
@@ -420,6 +427,11 @@ struct SessionView: View {
                 CheckoutChangesSheet(chat: chat)
             }
         }
+        .sheet(item: $githubLaunch) { launch in
+            if let chat {
+                GitHubRepositorySheet(chat: chat, launch: launch)
+            }
+        }
         .sheet(item: $companionsSection) { section in
             if let chat {
                 SessionCompanionsSheet(chat: chat, initialSection: section) { openedId in
@@ -452,6 +464,9 @@ struct SessionView: View {
             // Screenshot rig: open on Inspect (the wide Duo swaps the list for it).
             if model.demo != nil, ProcessInfo.processInfo.arguments.contains("-duo-inspect") {
                 InspectState.of(chatId).open = true
+            }
+            if model.demo != nil, ProcessInfo.processInfo.arguments.contains("-github-dashboard"), githubLaunch == nil {
+                githubLaunch = GitHubRepoLaunch(initialKind: .issues, initialState: .all, initialNumber: nil)
             }
             #endif
         }
@@ -572,7 +587,14 @@ struct SessionView: View {
                     } else {
                         ComposerView(store: store, chat: chat, runLive: running,
                                      attachmentDraft: attachmentDraft,
-                                     questionClosedAtMs: questionClosedAtMs)
+                                     questionClosedAtMs: questionClosedAtMs,
+                                     onOpenPullRequest: { pr in
+                                         githubLaunch = GitHubRepoLaunch(
+                                             initialKind: .pulls,
+                                             initialState: .all,
+                                             initialNumber: UInt64(pr.number)
+                                         )
+                                     })
                             .id(chat.id)
                     }
                 }
@@ -714,7 +736,14 @@ struct SessionView: View {
                     } else {
                         ComposerView(store: store, chat: chat, runLive: status == .working,
                                      attachmentDraft: attachmentDraft,
-                                     questionClosedAtMs: questionClosedAtMs)
+                                     questionClosedAtMs: questionClosedAtMs,
+                                     onOpenPullRequest: { pr in
+                                         githubLaunch = GitHubRepoLaunch(
+                                             initialKind: .pulls,
+                                             initialState: .all,
+                                             initialNumber: UInt64(pr.number)
+                                         )
+                                     })
                             .id(chat.id)
                     }
                 }

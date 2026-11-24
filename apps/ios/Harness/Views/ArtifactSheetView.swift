@@ -72,9 +72,9 @@ struct ArtifactCardView: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
-            .background(Theme.surfaceRaised, in: RoundedRectangle(cornerRadius: 12))
+            .background(Theme.surfaceRaised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(Theme.border, lineWidth: 1)
             )
         }
