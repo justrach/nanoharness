@@ -56,9 +56,10 @@ pub struct SessionMessageEntry {
     pub status: Option<MessageStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation_of: Option<String>,
-    /// Wall-clock length of this assistant turn, stamped when the segment
-    /// finishes. Absent on user rows, live streams, and docs written before
-    /// the field existed.
+    /// Active awake duration of this assistant turn, stamped when the segment
+    /// finishes (monotonic clock where available, excluding system sleep, with
+    /// wall-clock fallback only when resumed without an explicit origin).
+    /// Absent on user rows, live streams, and docs written before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<i64>,
 }
@@ -1409,6 +1410,7 @@ pub struct SegmentWriter<'a> {
     /// Mirror of what we've written so far (part id → app part).
     written: Vec<MessagePart>,
     created_at: i64,
+    started_instant: Option<std::time::Instant>,
 }
 
 impl<'a> SegmentWriter<'a> {
@@ -1442,6 +1444,7 @@ impl<'a> SegmentWriter<'a> {
             entry_index,
             written: Vec::new(),
             created_at,
+            started_instant: Some(std::time::Instant::now()),
         })
     }
 
@@ -1464,6 +1467,7 @@ impl<'a> SegmentWriter<'a> {
             entry_index,
             written,
             created_at,
+            started_instant: None,
         }
     }
 
@@ -1575,9 +1579,21 @@ impl<'a> SegmentWriter<'a> {
     }
 
     /// Finish the stream: sync final parts, stamp a terminal status, and
-    /// record how long the turn ran (`now - createdAt`).
+    /// record how long the turn ran (preferring monotonic awake duration over
+    /// wall-clock `now - createdAt`).
     pub fn finish(self, folded: &[MessagePart], status: MessageStatus) -> Result<(), DocError> {
-        self.finish_slice(folded, status)
+        self.finish_slice(folded, status, None)
+    }
+
+    /// Finish the stream with an explicit awake duration in milliseconds
+    /// (used when the segment was resumed or its writer was created after turn start).
+    pub fn finish_with_duration(
+        self,
+        folded: &[MessagePart],
+        status: MessageStatus,
+        duration_ms: Option<i64>,
+    ) -> Result<(), DocError> {
+        self.finish_slice(folded, status, duration_ms)
     }
 
     pub fn finish_cows(
@@ -1585,23 +1601,44 @@ impl<'a> SegmentWriter<'a> {
         folded: &[std::borrow::Cow<'_, MessagePart>],
         status: MessageStatus,
     ) -> Result<(), DocError> {
-        self.finish_slice(folded, status)
+        self.finish_slice(folded, status, None)
+    }
+
+    pub fn finish_cows_with_duration(
+        self,
+        folded: &[std::borrow::Cow<'_, MessagePart>],
+        status: MessageStatus,
+        duration_ms: Option<i64>,
+    ) -> Result<(), DocError> {
+        self.finish_slice(folded, status, duration_ms)
     }
 
     fn finish_slice<P: std::borrow::Borrow<MessagePart>>(
         mut self,
         folded: &[P],
         status: MessageStatus,
+        duration_ms: Option<i64>,
     ) -> Result<(), DocError> {
         self.sync_slice(folded)?;
         let map = self.entry_map()?;
         map.insert("status", status_str(status))?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(self.created_at);
-        if self.created_at > 0 {
-            map.insert("durationMs", (now - self.created_at).max(0))?;
+        let elapsed = duration_ms
+            .map(|ms| ms.max(0))
+            .or_else(|| {
+                self.started_instant
+                    .map(|s| s.elapsed().as_millis().min(i64::MAX as u128) as i64)
+            })
+            .or_else(|| {
+                (self.created_at > 0).then(|| {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(self.created_at);
+                    (now - self.created_at).max(0)
+                })
+            });
+        if let Some(ms) = elapsed {
+            map.insert("durationMs", ms)?;
         }
         self.doc.doc.commit();
         Ok(())
@@ -2807,5 +2844,83 @@ mod context_usage_tests {
         assert_eq!(newest[0].parts.len(), 2);
         // Zero part budget reads no partial entries.
         assert!(doc.read_newest_entries(4, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn segment_writer_begin_uses_monotonic_duration_not_wall_clock_skew() {
+        let doc = SessionDoc::init("duration-monotonic").unwrap();
+        let skewed_created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            - 54 * 60 * 1000;
+        let w = SegmentWriter::begin(&doc, "e1", "dev", skewed_created_at).unwrap();
+        w.finish(
+            &[MessagePart::Text {
+                id: "p1".into(),
+                text: "done".into(),
+            }],
+            MessageStatus::Complete,
+        )
+        .unwrap();
+        let entries = doc.read_entries().unwrap();
+        let d = entries[0].duration_ms.expect("durationMs stamped");
+        assert!(
+            d < 5_000,
+            "expected monotonic duration < 5s despite 54m wall-clock skew, got {d}"
+        );
+    }
+
+    #[test]
+    fn segment_writer_resume_uses_explicit_duration_over_wall_clock() {
+        let doc = SessionDoc::init("duration-explicit").unwrap();
+        let skewed_created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            - 54 * 60 * 1000;
+        let w = SegmentWriter::begin(&doc, "e1", "dev", skewed_created_at).unwrap();
+        let (ix, written) = w.into_state();
+        let resumed = SegmentWriter::resume(&doc, ix, written);
+        resumed
+            .finish_with_duration(
+                &[MessagePart::Text {
+                    id: "p1".into(),
+                    text: "resumed".into(),
+                }],
+                MessageStatus::Complete,
+                Some(612_000),
+            )
+            .unwrap();
+        let entries = doc.read_entries().unwrap();
+        assert_eq!(entries[0].duration_ms, Some(612_000));
+    }
+
+    #[test]
+    fn segment_writer_resume_falls_back_to_wall_clock_when_no_duration_given() {
+        let doc = SessionDoc::init("duration-fallback").unwrap();
+        let past_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            - 10_000;
+        let w = SegmentWriter::begin(&doc, "e1", "dev", past_ms).unwrap();
+        let (ix, written) = w.into_state();
+        let resumed = SegmentWriter::resume(&doc, ix, written);
+        resumed
+            .finish(
+                &[MessagePart::Text {
+                    id: "p1".into(),
+                    text: "fallback".into(),
+                }],
+                MessageStatus::Complete,
+            )
+            .unwrap();
+        let entries = doc.read_entries().unwrap();
+        let d = entries[0].duration_ms.expect("durationMs stamped");
+        assert!(
+            d >= 9_000,
+            "resumed writer without explicit duration falls back to wall clock, got {d}"
+        );
     }
 }

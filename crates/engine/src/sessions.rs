@@ -2293,6 +2293,7 @@ struct SubagentSink {
     doc: crate::doc_host::DocWriter,
     entry_id: String,
     started_at: i64,
+    started_instant: std::time::Instant,
     entry_index: Option<usize>,
     written: Vec<MessagePart>,
     folded: Vec<MessagePart>,
@@ -2346,12 +2347,13 @@ impl SubagentSink {
     /// reads like any steered chat.
     fn push_user(&mut self, device_id: &str, text: &str) {
         let rendered = render_parts(&self.folded);
+        let elapsed_ms = self.started_instant.elapsed().as_millis().min(i64::MAX as u128) as i64;
         let closed = match self.entry_index.take() {
             Some(ix) => SegmentWriter::resume(&self.doc, ix, std::mem::take(&mut self.written))
-                .finish_cows(&rendered, MessageStatus::Complete),
+                .finish_cows_with_duration(&rendered, MessageStatus::Complete, Some(elapsed_ms)),
             None if !self.folded.is_empty() => {
                 match SegmentWriter::begin(&self.doc, &self.entry_id, device_id, self.started_at) {
-                    Ok(w) => w.finish_cows(&rendered, MessageStatus::Complete),
+                    Ok(w) => w.finish_cows_with_duration(&rendered, MessageStatus::Complete, Some(elapsed_ms)),
                     Err(e) => Err(e),
                 }
             }
@@ -2378,6 +2380,7 @@ impl SubagentSink {
         }
         self.entry_id = new_id();
         self.started_at = now_ms();
+        self.started_instant = std::time::Instant::now();
         self.written = Vec::new();
         self.folded = Vec::new();
         self.dirty = false;
@@ -2387,12 +2390,13 @@ impl SubagentSink {
     /// frozen blob (entries as the client renders them).
     fn finish(mut self, device_id: &str, status: MessageStatus) -> Option<String> {
         let rendered = render_parts(&self.folded);
+        let elapsed_ms = self.started_instant.elapsed().as_millis().min(i64::MAX as u128) as i64;
         let finished = match self.entry_index {
             Some(ix) => SegmentWriter::resume(&self.doc, ix, std::mem::take(&mut self.written))
-                .finish_cows(&rendered, status),
+                .finish_cows_with_duration(&rendered, status, Some(elapsed_ms)),
             None if !self.folded.is_empty() => {
                 match SegmentWriter::begin(&self.doc, &self.entry_id, device_id, self.started_at) {
-                    Ok(w) => w.finish_cows(&rendered, status),
+                    Ok(w) => w.finish_cows_with_duration(&rendered, status, Some(elapsed_ms)),
                     Err(e) => Err(e),
                 }
             }
@@ -2517,14 +2521,16 @@ fn finish_segment<'a>(
     entry_id: &str,
     device_id: &str,
     started_at: i64,
+    duration_ms: i64,
     folded: &[MessagePart],
     status: MessageStatus,
 ) -> Result<(), DocError> {
     let rendered = render_parts(folded);
     match writer {
-        Some(w) => w.finish_cows(&rendered, status),
+        Some(w) => w.finish_cows_with_duration(&rendered, status, Some(duration_ms)),
         None if !folded.is_empty() => {
-            SegmentWriter::begin(doc, entry_id, device_id, started_at)?.finish_cows(&rendered, status)
+            SegmentWriter::begin(doc, entry_id, device_id, started_at)?
+                .finish_cows_with_duration(&rendered, status, Some(duration_ms))
         }
         None => Ok(()),
     }
@@ -2959,6 +2965,7 @@ async fn drive_run(
     let mut pending_show_visuals: HashMap<String, PendingShowVisual> = HashMap::new();
     let mut entry_id = new_id();
     let mut segment_started = now_ms();
+    let mut segment_started_instant = std::time::Instant::now();
     let mut writer: Option<SegmentWriter<'_>> = None;
     let mut dirty = false;
     let mut flush_at = tokio::time::Instant::now();
@@ -3480,6 +3487,7 @@ async fn drive_run(
                             &entry_id,
                             &device_id,
                             segment_started,
+                            segment_started_instant.elapsed().as_millis().min(i64::MAX as u128) as i64,
                             &folded,
                             MessageStatus::Complete,
                         ) {
@@ -3491,6 +3499,7 @@ async fn drive_run(
                     dirty = false;
                     entry_id = new_id();
                     segment_started = now_ms();
+                    segment_started_instant = std::time::Instant::now();
                     let parked_at = tokio::time::Instant::now();
                     idle_since = Some(parked_at);
                     self_chain.pause(parked_at);
@@ -3717,6 +3726,7 @@ async fn drive_run(
                             doc: sub_doc,
                             entry_id: new_id(),
                             started_at: now_ms(),
+                            started_instant: std::time::Instant::now(),
                             entry_index: None,
                             written: Vec::new(),
                             folded: Vec::new(),
@@ -3951,6 +3961,7 @@ async fn drive_run(
                     // fall through — this event is the new segment's first part.
                     entry_id = new_id();
                     segment_started = now_ms();
+                    segment_started_instant = std::time::Instant::now();
                     inner.clear_tool_progress(&chat_id, Some(harness_proto::GRAFF_WAITING_TOOL_ID));
                     inner.set_status(&chat_id, SessionStatus::Working, true);
                 }
@@ -4210,6 +4221,7 @@ async fn drive_run(
                 &entry_id,
                 &device_id,
                 segment_started,
+                segment_started_instant.elapsed().as_millis().min(i64::MAX as u128) as i64,
                 &folded,
                 MessageStatus::Complete,
             ) {
@@ -4220,6 +4232,7 @@ async fn drive_run(
             dirty = false;
             entry_id = next_assistant_message_id.clone().unwrap_or_else(new_id);
             segment_started = now_ms();
+            segment_started_instant = std::time::Instant::now();
             // The elapsed timer is per user message, not per child process: a
             // steer boundary restarts it (matches the parked-resume path and
             // the composer's optimistic overlay, which already reads 0:00).
@@ -4432,6 +4445,7 @@ async fn drive_run(
                     &entry_id,
                     &device_id,
                     segment_started,
+                    segment_started_instant.elapsed().as_millis().min(i64::MAX as u128) as i64,
                     &folded,
                     message_status,
                 ) {
@@ -4482,6 +4496,7 @@ async fn drive_run(
                 dirty = false;
                 entry_id = new_id();
                 segment_started = now_ms();
+                segment_started_instant = std::time::Instant::now();
                 // Resume-retry is strictly a first-turn concern.
                 saw_session_started = true;
                 idle_since = Some(tokio::time::Instant::now());
@@ -5270,5 +5285,43 @@ mod tests {
         chain.reset();
         assert_eq!(chain.resumes(), 0);
         assert_eq!(chain.elapsed(t_after_idle), std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn finish_segment_records_awake_duration_even_with_skewed_started_at() {
+        let doc = harness_doc::SessionDoc::init("finish-segment-awake-duration").unwrap();
+        let skewed_started_at = super::now_ms() - 54 * 60 * 1000;
+        let writer = harness_doc::SegmentWriter::begin(&doc, "e-skew", "dev-1", skewed_started_at).unwrap();
+        let folded = vec![harness_doc::MessagePart::Text {
+            id: "t0".into(),
+            text: "finished".into(),
+        }];
+        super::finish_segment(
+            &doc,
+            Some(writer),
+            "e-skew",
+            "dev-1",
+            skewed_started_at,
+            12_345,
+            &folded,
+            harness_doc::MessageStatus::Complete,
+        )
+        .unwrap();
+        let entries = doc.read_entries().unwrap();
+        assert_eq!(entries[0].duration_ms, Some(12_345));
+
+        super::finish_segment(
+            &doc,
+            None,
+            "e-direct",
+            "dev-1",
+            skewed_started_at,
+            4_567,
+            &folded,
+            harness_doc::MessageStatus::Complete,
+        )
+        .unwrap();
+        let entries = doc.read_entries().unwrap();
+        assert_eq!(entries[1].duration_ms, Some(4_567));
     }
 }
