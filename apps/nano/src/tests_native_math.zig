@@ -141,6 +141,28 @@ fn geometry(source: []const u8, shot: ?[]const u8) !ui.Rect {
     return error.NativeEquationMissing;
 }
 
+test "native math UI renders all supported LaTeX regression rows in a table" {
+    theme.registerFonts();
+    var f = Fixture{ .source =
+        \\| Case | Formula |
+        \\|---|---|
+        \\| Boxed integral | \(\displaystyle\iint_T \boxed{u}\,g(u,v)\,du\,dv\) |
+        \\| Binary spacing | $a\,+b$ |
+        \\| Nested style | $\frac{\displaystyle\frac{u}{v}}{w}$ |
+        \\| Operator placement | $\int\limits_{u}^{v}$ and $\sum\nolimits_{i}^{n}$ |
+    };
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 760, .height = 425 });
+    defer t.deinit();
+    t.settle(3);
+    if (std.c.getenv("NANO_MATH_COVERAGE_SNAP")) |path| try t.screenshot(std.mem.span(path));
+    var equations: usize = 0;
+    for (t.ctx.nodes.items) |node| {
+        if (node.content == .image) equations += 1;
+    }
+    try testing.expectEqual(@as(usize, 5), equations);
+}
+
 test "native math UI paragraph links beside equations still activate their destination" {
     theme.registerFonts();
     var a: @import("app.zig").App = .init(testing.allocator, testing.io, 1);

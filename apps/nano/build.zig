@@ -35,6 +35,26 @@ pub fn build(b: *std.Build) void {
     math.addArgs(&.{ "--target", rust_target });
     math.addFileInput(b.path("native_math/Cargo.lock"));
     math.addFileInput(b.path("native_math/src/lib.rs"));
+    const math_vendor = "native_math/vendor/latex-rust";
+    math.addFileInput(b.path(math_vendor ++ "/Cargo.toml"));
+    for ([_][]const u8{ "/src", "/data", "/fonts" }) |subdir| {
+        const path = b.fmt("{s}{s}", .{ math_vendor, subdir });
+        const io = b.graph.io;
+        const dir = b.root.root_dir.handle.openDir(io, path, .{ .iterate = true }) catch @panic("missing native math vendor source");
+        defer dir.close(io);
+        var walker = dir.walk(b.allocator) catch @panic("OOM");
+        defer walker.deinit();
+        var inputs: std.ArrayList([]const u8) = .empty;
+        while (walker.next(io) catch @panic("cannot enumerate native math inputs")) |entry| {
+            if (entry.kind == .file) inputs.append(b.allocator, b.fmt("{s}/{s}", .{ path, entry.path })) catch @panic("OOM");
+        }
+        std.mem.sortUnstable([]const u8, inputs.items, {}, struct {
+            fn lessThan(_: void, a: []const u8, z: []const u8) bool {
+                return std.mem.lessThan(u8, a, z);
+            }
+        }.lessThan);
+        for (inputs.items) |input| math.addFileInput(b.path(input));
+    }
     const math_target = math.addPrefixedOutputDirectoryArg("--target-dir=", "native-math");
     const math_library = math_target.path(b, b.fmt("{s}/release/{s}", .{ rust_target, if (target.result.os.tag == .windows and target.result.abi == .msvc) "harness_native_math.lib" else "libharness_native_math.a" }));
     var linked_math = math_library;
