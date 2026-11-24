@@ -44,6 +44,24 @@ pub fn updatePeek(c: *ui.Context, a: *App) void {
     }
 }
 
+fn drawBezelPill(c: *ui.Context, dk: theme.Colors, key_str: []const u8, tip_text: []const u8, vertical: bool) bool {
+    ui.key(c, key_str);
+    const hit = tip.on(
+        ui.div(c).row().size(if (vertical) @as(f32, 10) else 96, if (vertical) @as(f32, 96) else chrome.fs_handle_h).center().control(),
+        dk,
+        .{ .text = tip_text, .look = .tab },
+    );
+    defer hit.end();
+    const hot = hit.hovered();
+    const long: f32 = if (hot) 58 else 44;
+    const short: f32 = if (hot) 3 else 2.5;
+    ui.div(c).size(if (vertical) short else long, if (vertical) long else short)
+        .rounded(if (hot) @as(f32, 1.5) else 1.25)
+        .bg(ui.Color.white.alpha(if (hot) 0.55 else 0.24))
+        .end();
+    return hit.clicked();
+}
+
 pub fn drawTopHandle(c: *ui.Context, a: *App) void {
     if (!a.view.full_screen or a.view.fs_top_peek) return;
     const x = a.view.sidebar_width;
@@ -53,20 +71,22 @@ pub fn drawTopHandle(c: *ui.Context, a: *App) void {
     ui.key(c, "fullscreen-top-handle-bar");
     const bar = ui.div(c).fixed().offset(x, 0).size(w, chrome.fs_handle_h).row().justifyCenter().itemsCenter().layer(3);
     defer bar.end();
-    ui.key(c, "fullscreen-top-handle");
-    const hit = tip.on(
-        ui.div(c).row().size(96, chrome.fs_handle_h).center().control(),
-        dk,
-        .{ .text = "Click or move to top edge for tabs & controls", .look = .tab },
-    );
-    defer hit.end();
-    const hot = hit.hovered();
-    ui.div(c).size(if (hot) @as(f32, 58) else 44, if (hot) @as(f32, 3) else 2.5)
-        .rounded(if (hot) @as(f32, 1.5) else 1.25)
-        .bg(ui.Color.white.alpha(if (hot) 0.55 else 0.24))
-        .end();
-    if (hit.clicked()) {
+    if (drawBezelPill(c, dk, "fullscreen-top-handle", "Click or move to top edge for tabs & controls", false)) {
         a.view.fs_top_peek = true;
+        a.redraw();
+    }
+}
+
+pub fn drawLeftHandle(c: *ui.Context, a: *App) void {
+    if (!a.view.full_screen or a.view.sidebar_open or a.view.fs_top_peek or a.view.palette.open or a.view.tab_overview.open) return;
+    if (c.size.h < 180) return;
+    const dk = theme.colors(true);
+    const y = @max(chrome.fs_top_inset, (c.size.h - 96) / 2);
+    ui.key(c, "fullscreen-left-handle-bar");
+    const bar = ui.div(c).fixed().offset(0, y).size(10, 96).row().itemsCenter().layer(3);
+    defer bar.end();
+    if (drawBezelPill(c, dk, "fullscreen-left-handle", "Click to show sidebar (\u{2318}B)", true)) {
+        a.view.sidebar_open = true;
         a.redraw();
     }
 }

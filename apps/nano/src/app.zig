@@ -204,6 +204,7 @@ pub const View = struct {
     gallery: @import("view_image_gallery.zig").State = .{},
     design: @import("design_canvas.zig").State = .{},
     tab_overview: @import("view_tab_overview.zig").State = .{},
+    tab_cycle: @import("view_tab_cycle.zig").State = .{},
     updates_popover: bool = false,
     updates_anchor: ?nanoui.ui.Rect = null,
     /// Sidebar `#star-banner` context menu state & last opened external URL.

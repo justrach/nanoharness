@@ -142,6 +142,8 @@ test {
     _ = @import("tests_ui_palette.zig");
     _ = @import("view_tab_overview.zig");
     _ = @import("tests_ui_tab_overview.zig");
+    _ = @import("view_tab_cycle.zig");
+    _ = @import("tests_ui_tab_cycle.zig");
     _ = @import("tests_ui_fullscreen.zig");
     _ = @import("view_fullscreen_chrome.zig");
     _ = @import("view_chat_header.zig");

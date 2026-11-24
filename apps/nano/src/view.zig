@@ -313,6 +313,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     } else {
         const fs_chrome = @import("view_fullscreen_chrome.zig");
         fs_chrome.drawTopHandle(c, a);
+        fs_chrome.drawLeftHandle(c, a);
         fs_chrome.drawTopPeek(c, a, strip_layout, &pane_widths);
     }
     if (c.input.released) a.view.sidebar_press_focus = false;
@@ -335,6 +336,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("view_updates.zig").overlayCard(c, a, popup);
     @import("view_updates.zig").updatesPopover(c, a, popup);
     // Over everything, as the GPUI app's deferred palette (priority 2).
+    @import("view_tab_cycle.zig").overlay(c, a, popup);
     @import("view_palette.zig").overlay(c, a, popup);
     @import("view_tab_overview.zig").overlay(c, a, popup);
     @import("view_custom_theme_studio.zig").overlay(c, a, popup);
@@ -757,6 +759,10 @@ fn keys(c: *ui.Context, a: *App) void {
     // Modal searches own the event even when it is not one of their editing
     // keys. Never navigate or open a second picker underneath them.
     if (palette_had_keys or a.view.palette.open or overview_had_keys or a.view.tab_overview.open or picker_had_keys or a.picker != .none) return;
+    if (@import("view_tab_cycle.zig").isOpen(a, c.time) and c.shortcut(.{ .key = S.escape })) {
+        @import("view_tab_cycle.zig").hide(a);
+        return;
+    }
     // A dialog has the keys; else an open header menu takes Escape, the
     // arrows and Return.
     const header_menus = @import("view_sidebar_menus.zig");
@@ -1036,12 +1042,14 @@ fn sessionNavigationKeys(c: *ui.Context, a: *App) bool {
             const count = group.count();
             if (count > 1) {
                 a.showPaneTab(if (next) (group.active + 1) % count else (group.active + count - 1) % count);
+                @import("view_tab_cycle.zig").show(a, c.time, true);
                 return true;
             }
         }
         const n = a.tabs.items.items.len;
         if (n >= 2) {
             a.showTab(if (next) (a.tabs.active + 1) % n else (a.tabs.active + n - 1) % n);
+            @import("view_tab_cycle.zig").show(a, c.time, false);
         } else {
             const visible = sidebar.visibleSessionIds(c, a);
             if (visible.len > 0) {
