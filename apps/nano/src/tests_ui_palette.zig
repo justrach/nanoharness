@@ -35,6 +35,7 @@ const Harness = struct {
     fn init(h: *Harness, chats: []const u8, open: []const u8) !void {
         @import("theme.zig").registerFonts();
         h.a = .init(testing.allocator, testing.io, 1);
+        h.a.offscreen = true;
         h.a.dark = true;
         var sp = try std.json.parseFromSlice(std.json.Value, testing.allocator, spaces, .{});
         defer sp.deinit();
@@ -82,6 +83,13 @@ const Harness = struct {
             else => {},
         };
         return n;
+    }
+
+    fn snap(h: *Harness, name: []const u8) !void {
+        const dir = std.c.getenv("NANO_SNAP_DIR") orelse return;
+        var buf: [1024]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, "{s}/{s}.png", .{ std.mem.span(dir), name });
+        try h.t.screenshot(path);
     }
 
     fn selected(h: *Harness) []const u8 {
@@ -319,6 +327,58 @@ test "/resume's palette replaces the current tab without switching or adding; ‚å
     try testing.expectEqual(@as(usize, 2), h.activeTab());
     try h.tabIs(0, "b");
     try testing.expectEqualStrings("a", h.selected());
+}
+
+test "session navigation parity makes /resume replace the focused split pane instead of activating its sibling" {
+    var h: Harness = undefined;
+    try h.init(two, "a");
+    defer h.deinit();
+    h.a.splitOpening(.horizontal, "b");
+    h.a.focusPane(0);
+    h.a.view.focus_composer = true;
+    h.t.settle(1);
+
+    h.typed("/resume");
+    h.t.key(.enter);
+    h.t.settle(1);
+    try testing.expect(h.a.view.palette.open);
+    try testing.expectEqual(palette.Navigation.replace_current, h.a.view.palette.navigation);
+    h.typed("beta");
+    h.press(.{ .key = S.enter });
+    try h.snap("resume-split");
+
+    const split = h.a.tabs.layout() orelse return error.MissingSplit;
+    try testing.expectEqualStrings("b", h.selected());
+    try testing.expectEqual(@as(usize, 0), split.focus);
+    try testing.expectEqual(@as(usize, 2), split.panes.items.len);
+    try testing.expectEqualStrings("b", split.panes.items[1].?);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.items.items.len);
+}
+
+test "session navigation parity keeps /new in the focused split pane unlike Cmd+T" {
+    var h: Harness = undefined;
+    try h.init(two, "a");
+    defer h.deinit();
+    h.a.splitOpening(.horizontal, "b");
+    h.a.focusPane(0);
+    h.a.view.focus_composer = true;
+    h.t.settle(1);
+    // With no provider discovery, the native command is namespaced.
+    h.typed("/harness:new");
+    const command = h.t.findText("Start a new session") orelse return error.MissingNewSessionCommand;
+    h.t.click(command.x + command.w / 2, command.y + command.h / 2);
+    h.t.settle(1);
+    try h.snap("new-split");
+
+    const split = h.a.tabs.layout() orelse return error.MissingSplit;
+    try testing.expect(h.a.selected == null);
+    try testing.expectEqual(@as(usize, 0), split.focus);
+    try testing.expectEqual(@as(usize, 2), split.panes.items.len);
+    try testing.expectEqualStrings("b", split.panes.items[1].?);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.items.items.len);
+
+    h.press(.{ .key = 't', .cmd = true });
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
 }
 
 test "other tools' conversations come after the chats, five until something's typed, with Import first among the actions" {
