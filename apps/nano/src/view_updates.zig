@@ -1613,7 +1613,7 @@ fn drawUnifiedRow(c: *ui.Context, a: *App, k: theme.Colors, row: UnifiedRow) voi
                     a.setNotice("Copied sudo xcodebuild -license");
                 }
             }
-            if (row.is_local) {
+            if (row.is_local and (builtin.os.tag == .macos or builtin.is_test)) {
                 ui.key(c, c.print("updates-open-term-{s}", .{row.id}));
                 const term_btn = ui.div(c).row().h(24).px(10).center().roundedFull()
                     .bg(k.ink(if (k.dark) 0.09 else 0.06)).border(k.border.alpha(0.75)).borderW(1)

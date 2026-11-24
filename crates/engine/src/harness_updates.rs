@@ -911,8 +911,7 @@ fn truncate_diagnostic(s: &str, max_chars: usize) -> String {
 
 fn contains_xcode_license_blocker(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    lower.contains("xcodebuild -license")
-        || (lower.contains("xcode") && lower.contains("license"))
+    lower.contains("xcodebuild -license") || (lower.contains("xcode") && lower.contains("license"))
 }
 
 fn is_meaningful_error_line(line: &str) -> bool {
@@ -954,7 +953,10 @@ fn summarize_installer_failure(stderr: &str, stdout: &str, status_desc: &str) ->
             .copied()
             .find(|line| contains_xcode_license_blocker(line))
         {
-            if license_line.to_ascii_lowercase().contains("xcodebuild -license") {
+            if license_line
+                .to_ascii_lowercase()
+                .contains("xcodebuild -license")
+            {
                 return truncate_diagnostic(license_line, 280);
             }
             return truncate_diagnostic(
