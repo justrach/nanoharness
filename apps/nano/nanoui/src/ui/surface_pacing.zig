@@ -14,6 +14,9 @@ extern "c" const NSRunLoopCommonModes: objc.Object;
 pub fn startLink(self: *Surface) void {
     if (self.display_link != null) return;
     const link = objc.msg(objc.Object, objc.alloc("CAMetalDisplayLink"), "initWithMetalLayer:", .{self.renderer.layer});
+    if (objc.msg(objc.BOOL, link, "respondsToSelector:", .{objc.sel("setPreferredFrameLatency:")})) {
+        objc.msg(void, link, "setPreferredFrameLatency:", .{@as(f32, 1.0)});
+    }
     objc.msg(void, link, "setDelegate:", .{self.nsview});
     objc.msg(void, link, "setPaused:", .{objc.YES});
     const loop = objc.msg(objc.Object, objc.class("NSRunLoop"), "mainRunLoop", .{});

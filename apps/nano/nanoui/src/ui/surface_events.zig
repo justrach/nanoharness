@@ -200,7 +200,8 @@ fn mouseMoved(obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) vo
     if (!cancelled and s.transparent and s.ctx.inStageHoleAt(s.ctx.input.mouse) and s.ctx.hot == 0) return;
     const before = s.ctx.hot;
     s.ctx.updateHot();
-    if (cancelled or s.ctx.hot != before or s.ctx.wants_moves) {
+    const over_strip = s.ctx.pointerOverOverlayStrip();
+    if (cancelled or s.ctx.hot != before or s.ctx.wants_moves or over_strip != s.ctx.over_overlay_strip) {
         if (s.visible()) s.requestFrame() else s.frame();
         return;
     }

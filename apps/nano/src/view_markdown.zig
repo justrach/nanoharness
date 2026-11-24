@@ -187,7 +187,10 @@ pub fn markdown(c: *ui.Context, colors: theme.Colors, src: []const u8, feedback:
     }
     if (active_veil) |v| {
         v.finishSeeding();
-        if (v.isFading()) c.frameIn(1.0 / 120.0);
+        if (v.isFading()) {
+            c.animationFrame();
+            c.frameIn(1.0 / 120.0);
+        }
     }
 }
 

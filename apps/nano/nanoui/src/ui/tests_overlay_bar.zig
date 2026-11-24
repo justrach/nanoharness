@@ -95,3 +95,28 @@ test "lighter text is drawn with thicker strokes, none with smoothing off" {
     atlas.smoothing_allowed = false;
     try testing.expectEqual(@as(u8, 0), atlas.dilationFor(1, 1, 1));
 }
+
+test "overlay scrollbar skips idle mouse moves inside body and detects strip edge entry" {
+    var s: Scene = .{};
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&s, Scene.view), .{ .width = 200, .height = 300 });
+    defer t.deinit();
+    t.scroll(100, 150, -120);
+    t.frame();
+    try testing.expect(!t.ctx.wants_moves);
+    try testing.expect(!t.ctx.over_overlay_strip);
+    try testing.expect(!t.ctx.pointerOverOverlayStrip());
+
+    // Moving within the scroll body does not arm wants_moves or strip hover.
+    t.moveTo(80, 150);
+    t.ctx.updateHot();
+    try testing.expect(!t.ctx.pointerOverOverlayStrip());
+
+    // Entering the 10px right-edge strip flips pointerOverOverlayStrip before repaint and widens thumb to 5px.
+    t.ctx.input.mouse = .{ .x = 195, .y = 150 };
+    try testing.expect(!t.ctx.over_overlay_strip);
+    try testing.expect(t.ctx.pointerOverOverlayStrip());
+    t.frame();
+    try testing.expect(t.ctx.over_overlay_strip);
+    try testing.expectApproxEqAbs(@as(f32, 5), (bar(&t) orelse return error.NoBar).rect[2], 0.01);
+}

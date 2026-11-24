@@ -529,6 +529,12 @@ pub const Renderer = struct {
             var comp_inst = instances[end_at];
             comp_inst.kind = Kind.layer_composite;
             const cenc = pass(cmd, texture, null);
+            objc.msg(void, cenc, "setScissorRect:", .{MTLScissorRect{
+                .x = sx0,
+                .y = sy0,
+                .width = sx1 - sx0,
+                .height = sy1 - sy0,
+            }});
             const viewport: [2]f32 = .{ size.w, size.h };
             objc.msg(void, cenc, "setRenderPipelineState:", .{self.pipeline});
             objc.msg(void, cenc, "setVertexBytes:length:atIndex:", .{ @as(*const anyopaque, &comp_inst), @as(objc.NSUInteger, @sizeOf(Instance)), @as(objc.NSUInteger, 0) });

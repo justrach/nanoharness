@@ -45,6 +45,13 @@ pub fn range(fps: f32, screen_max: f32) Range {
     return .{ .minimum = screen_max / 2, .maximum = screen_max, .preferred = screen_max };
 }
 
+/// Whether `frameIn` is due within ~1.5 display refreshes, so the display
+/// link stays active instead of pausing and paying cold-start latency.
+pub fn keepLinkForFrameIn(seconds: ?f32, refresh_s: f64) bool {
+    const s = seconds orelse return false;
+    return @as(f64, s) <= @max(refresh_s, 1.0 / 240.0) * 1.5;
+}
+
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 
 /// When each frame ran, one time in seconds a line, to the file
@@ -88,4 +95,13 @@ test "the link asks for the screen's fastest, or a steady pace" {
     try std.testing.expectEqual(Range{ .minimum = 60, .maximum = 120, .preferred = 120 }, range(0, 120));
     try std.testing.expectEqual(Range{ .minimum = 2, .maximum = 2, .preferred = 2 }, range(2, 120));
     try std.testing.expectEqual(Range{ .minimum = 0, .maximum = 0, .preferred = 0 }, range(0, 0));
+}
+
+test "keepLinkForFrameIn keeps link running for immediate frames and pauses for idle waits" {
+    try std.testing.expect(keepLinkForFrameIn(0, 1.0 / 120.0));
+    try std.testing.expect(keepLinkForFrameIn(1.0 / 120.0, 1.0 / 120.0));
+    try std.testing.expect(keepLinkForFrameIn(1.0 / 60.0, 1.0 / 60.0));
+    try std.testing.expect(!keepLinkForFrameIn(1.0 / 24.0, 1.0 / 120.0));
+    try std.testing.expect(!keepLinkForFrameIn(0.5, 1.0 / 120.0));
+    try std.testing.expect(!keepLinkForFrameIn(null, 1.0 / 120.0));
 }

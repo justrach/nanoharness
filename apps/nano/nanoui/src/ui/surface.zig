@@ -386,7 +386,9 @@ pub const Surface = struct {
 
     pub fn updatePacing(self: *Surface, now: f64, hot_changed: bool) void {
         const c = &self.ctx;
-        const more = self.resizeStepping() or c.animating or hot_changed or c.input.down or self.scroll.active(now);
+        const refresh = if (self.link_duration > 0) self.link_duration else 1.0 / @as(f64, @max(60.0, self.max_fps));
+        const due_soon = pacing.keepLinkForFrameIn(c.frame_in, refresh);
+        const more = self.resizeStepping() or c.animating or hot_changed or c.input.down or self.scroll.active(now) or due_soon;
         if (self.display_link != null) {
             if (more) {
                 self.setRate(null);
@@ -512,7 +514,8 @@ pub const Surface = struct {
     /// `seconds`.
     pub fn setRate(self: *Surface, seconds: ?f32) void {
         const link = self.display_link orelse return;
-        const fps: f32 = if (seconds) |s| (if (s < 0.009) 0 else std.math.clamp(1 / @max(s, 0.001), 1, 60)) else 0;
+        const max_rate = @max(@as(f32, 60.0), self.max_fps);
+        const fps: f32 = if (seconds) |s| (if (s <= 1.0 / max_rate * 1.1) 0 else std.math.clamp(1 / @max(s, 0.001), 1, max_rate)) else 0;
         if (fps == self.link_fps) return;
         const faster = (fps == 0 and self.link_fps > 0) or (fps > self.link_fps and self.link_fps > 0);
         if (fps == 0 and self.link_fps > 0) {

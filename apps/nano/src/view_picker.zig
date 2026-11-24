@@ -463,7 +463,7 @@ pub fn popover(c: *ui.Context, a: *App, k: theme.Colors) void {
     const animate_height = is_compact or p.can_return_compact;
     const wanted_h = if (animate_height) blk: {
         const height_sample = models.ScalarTransition.sample(&p.card_height, p.height, c.time, c.reduced_motion);
-        if (height_sample.moving) c.frameIn(1.0 / 120.0);
+        if (height_sample.moving) c.animationFrame();
         break :blk height_sample.value;
     } else blk: {
         p.card_height = null;
@@ -1238,7 +1238,7 @@ fn slider(c: *ui.Context, a: *App, k: theme.Colors, accent: ui.Color, n: usize, 
     const energy_sample = models.ScalarTransition.sample(&p.energy_anim, target_energy, c.time, c.reduced_motion);
     const intensity = energy_sample.value;
     if (effort_sample.moving or press_sample.moving or energy_sample.moving) {
-        c.frameIn(1.0 / 120.0);
+        c.animationFrame();
     }
     var breath: f32 = 0.0;
     if (intensity > 0.001 and !c.reduced_motion) {
@@ -1247,7 +1247,7 @@ fn slider(c: *ui.Context, a: *App, k: theme.Colors, accent: ui.Color, n: usize, 
         p.shimmer_phase = @mod(p.shimmer_phase + dt * (0.32 + 0.22 * intensity), 1.0);
         breath = 0.5 + 0.5 * @sin(std.math.tau * p.shimmer_phase);
         if (!effort_sample.moving and !press_sample.moving and !energy_sample.moving) {
-            c.frameIn(1.0 / 60.0);
+            c.animationFrame();
         }
     } else {
         p.shimmer_last = null;

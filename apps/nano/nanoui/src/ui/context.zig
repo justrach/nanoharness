@@ -244,6 +244,10 @@ pub const Context = struct {
     /// column under it, a crosshair): every move draws a frame while it is
     /// set, not only moves onto another box. Cleared each frame.
     wants_moves: bool = false,
+    /// Clipped 10px overlay scrollbar hover strips from the last paint pass,
+    /// plus whether the pointer was inside one during that paint.
+    overlay_strips: std.ArrayList(types.Rect) = .empty,
+    over_overlay_strip: bool = false,
     /// Set by a view that takes the wheel where nothing scrolls (a
     /// terminal's full-screen program): it then comes as `input.scroll`.
     wants_wheel: bool = false,
@@ -314,6 +318,7 @@ pub const Context = struct {
         c.helps.deinit(c.gpa);
         c.drop_targets.deinit(c.gpa);
         c.truncates.deinit(c.gpa);
+        c.overlay_strips.deinit(c.gpa);
         c.retain.deinit(c.gpa);
     }
 
@@ -372,6 +377,8 @@ pub const Context = struct {
         c.focused_password = false;
         c.wants_wheel = false;
         c.wants_moves = false;
+        c.overlay_strips.clearRetainingCapacity();
+        c.over_overlay_strip = false;
         c.retain.virtual_list = false;
         c.scroll_cap.clearRetainingCapacity();
         c.helps.clearRetainingCapacity();
@@ -554,6 +561,12 @@ pub const Context = struct {
     pub fn pointerOverText(c: *Context) bool {
         for (c.selection.lines.items) |r| if (r.contains(c.input.mouse)) return true;
         return c.selection.dragging;
+    }
+
+    /// Whether the pointer is inside any visible overlay scrollbar hover strip.
+    pub fn pointerOverOverlayStrip(c: *const Context) bool {
+        for (c.overlay_strips.items) |r| if (r.contains(c.input.mouse)) return true;
+        return false;
     }
 
     pub const capScroll = scroll_mod.capScroll;

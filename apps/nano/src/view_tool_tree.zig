@@ -72,12 +72,12 @@ pub fn group(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts
     const children = ui.div(c).column().wFull().pt(2);
     defer children.end();
     rememberHeight(c, a, fold_id, children.index);
-    if (is_animating) c.frameIn(1.0 / 30.0);
+    if (is_animating) c.animationFrame();
     for (arrivals, 0..) |arrival, i| {
         const p = &parts[parts.len - 1 - i];
         ui.key(c, c.print("tool-{s}", .{p.id}));
         rowImpl(c, a, k, e, p, parent, arrival);
-        if ((arrival.progress < 1 or arrival.connector < 1) and !c.reduced_motion) c.frameIn(1.0 / 30.0);
+        if ((arrival.progress < 1 or arrival.connector < 1) and !c.reduced_motion) c.animationFrame();
     }
     const footer = ui.div(c).row().wFull().h(rules.footer_height + rules.footer_gap).pt(rules.footer_gap).pl(56).gap(12).itemsCenter().control();
     defer footer.end();
@@ -244,7 +244,7 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
     const body = ui.div(c).column().wFull().pl(6).gap(4).pb(4);
     defer body.end();
     rememberHeight(c, a, fold_id, body.index);
-    if (is_animating) c.frameIn(1.0 / 30.0);
+    if (is_animating) c.animationFrame();
     if (p.kind == .reasoning) return transcript_view.streamMarkdown(c, a, k, e, p, parent);
     if (is_todo_list) {
         const checklist_w = if (c.rects.get(c.node(content.index).id)) |cr| @max(180, cr.w - 32) else 520;

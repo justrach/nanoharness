@@ -19,6 +19,30 @@ var last_passes: u32 = 0;
 var last_redraws: u32 = 0;
 var last_note_buf: [64]u8 = undefined;
 var last_note_len: usize = 0;
+var log_buf: [8192]u8 = undefined;
+var log_len: usize = 0;
+
+fn flush(io: std.Io) void {
+    if (log_len == 0) return;
+    const f = file orelse {
+        log_len = 0;
+        return;
+    };
+    f.writeStreamingAll(io, log_buf[0..log_len]) catch {};
+    log_len = 0;
+}
+
+fn writeBuffered(io: std.Io, bytes: []const u8, immediate: bool) void {
+    if (bytes.len >= log_buf.len) {
+        flush(io);
+        if (file) |f| f.writeStreamingAll(io, bytes) catch {};
+        return;
+    }
+    if (log_len + bytes.len > log_buf.len) flush(io);
+    @memcpy(log_buf[log_len..][0..bytes.len], bytes);
+    log_len += bytes.len;
+    if (immediate) flush(io);
+}
 
 pub fn start(a: *App) void {
     if (a.env) |env| {
@@ -59,7 +83,7 @@ pub fn note(a: *App, what: []const u8) void {
     const n = @min(what.len, last_note_buf.len);
     @memcpy(last_note_buf[0..n], what[0..n]);
     last_note_len = n;
-    const f = file orelse return;
+    if (file == null) return;
     const pane: usize = if (a.tabs.layout()) |s| s.focus else 0;
     var buf: [240]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, "{d:.3} event={s} tab={d} pane={d}\n", .{
@@ -68,7 +92,7 @@ pub fn note(a: *App, what: []const u8) void {
         a.tabs.active,
         pane,
     }) catch return;
-    f.writeStreamingAll(a.io, line) catch {};
+    writeBuffered(a.io, line, true);
 }
 
 pub fn frame(a: *App, c: *const @import("nanoui").ui.Context) void {
@@ -101,6 +125,7 @@ pub fn frame(a: *App, c: *const @import("nanoui").ui.Context) void {
     const scroll_n = c.scroll_moved.count();
     if (!watching and total < 4.0 and pass_count <= 1 and !c.animating and scroll_n == 0) {
         last_ms = total;
+        if (log_len > 0) flush(a.io);
         return;
     }
     last_ms = total;
@@ -133,8 +158,11 @@ pub fn frame(a: *App, c: *const @import("nanoui").ui.Context) void {
             act,
         },
     ) catch return;
-    const f = file orelse return;
-    f.writeStreamingAll(a.io, line) catch {};
+    if (file == null) return;
+    // Avoid blocking active 120Hz interaction frames on synchronous disk write();
+    // flush only on genuine jank spikes or once the gesture settles.
+    const urgent = total >= 16.0 or (!c.animating and scroll_n == 0 and !watching);
+    writeBuffered(a.io, line, urgent);
     if (builtin.os.tag == .macos and total >= 8) {
         _ = kdebug_signpost(1, @intFromFloat(s.build_ms * 10), @intFromFloat(s.layout_ms * 10), @intFromFloat(s.paint_ms * 10), s.nodes);
     }

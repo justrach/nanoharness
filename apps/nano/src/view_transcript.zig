@@ -282,7 +282,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
                 const cap = ui.spring(c, drawn.box, 0x7363_6361, max_s, .{ .response = 0.20, .damping = 1.0 });
                 c.scroll_cap.put(c.gpa, drawn.box, @max(0, cap)) catch {};
                 if (@abs(cap - max_s) > 0.25 or c.time < a.view.stream_glide_until) {
-                    c.frameIn(1.0 / 120.0);
+                    c.animationFrame();
                 }
             } else {
                 ui.jump(c, drawn.box, 0x7363_6361, c.scroll.get(drawn.box) orelse 0);
@@ -1053,7 +1053,7 @@ fn workLine(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: 
     const body = ui.div(c).column().wFull().pt(8).gap(12);
     defer body.end();
     @import("view_tool_tree.zig").rememberHeight(c, a, fold_id, body.index);
-    if (is_animating) c.frameIn(1.0 / 30.0);
+    if (is_animating) c.animationFrame();
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
     workRows(c, a, k, e, work, at);
 }
