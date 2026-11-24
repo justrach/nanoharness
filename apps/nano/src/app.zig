@@ -203,6 +203,7 @@ pub const View = struct {
     before_after: @import("view_before_after.zig").State = .{},
     gallery: @import("view_image_gallery.zig").State = .{},
     design: @import("design_canvas.zig").State = .{},
+    tab_overview: @import("view_tab_overview.zig").State = .{},
     updates_popover: bool = false,
     updates_anchor: ?nanoui.ui.Rect = null,
     /// Sidebar `#star-banner` context menu state & last opened external URL.
@@ -263,6 +264,7 @@ pub const View = struct {
         v.project_setup.deinit();
         v.open_chooser.deinit();
         v.design.deinit();
+        v.tab_overview.deinit();
         @import("text_buffer.zig").deinit(&v.custom_theme_prompt);
         if (v.custom_theme_req_id) |id| gpa.free(id);
         v.custom_theme_error.deinit(gpa);

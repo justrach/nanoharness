@@ -336,6 +336,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("view_updates.zig").updatesPopover(c, a, popup);
     // Over everything, as the GPUI app's deferred palette (priority 2).
     @import("view_palette.zig").overlay(c, a, popup);
+    @import("view_tab_overview.zig").overlay(c, a, popup);
     @import("view_custom_theme_studio.zig").overlay(c, a, popup);
     @import("view_project_setup.zig").overlay(c, a, popup);
     @import("view_open_chooser.zig").overlay(c, a, popup);
@@ -363,7 +364,7 @@ pub fn view(a: *App, c: *ui.Context) void {
 pub fn menuKeepsKeys(a: *const App) bool {
     const v = &a.view;
     return v.setup != null or v.project_setup.open or v.open_chooser.open or v.strip.menu != null or v.more_menu or v.filter_menu or v.space_menu or v.checkout_menu or v.ref_menu or v.chat_menu.open or v.link_menu.open or
-        v.updates_popover or v.star_menu or v.account_menu or v.theme_menu != null or v.account_usage.open or v.agent_work.pinned or v.context.pinned or v.menus.ctx_at != null or v.palette.open or v.custom_theme_open or v.theme_import != null or v.dialogs.rename != null or v.dialogs.delete != null or v.search.focus or a.picker != .none or a.actions.menu or a.actions.editor != null or a.actions.command_review != null;
+        v.updates_popover or v.star_menu or v.account_menu or v.theme_menu != null or v.account_usage.open or v.agent_work.pinned or v.context.pinned or v.menus.ctx_at != null or v.palette.open or v.tab_overview.open or v.custom_theme_open or v.theme_import != null or v.dialogs.rename != null or v.dialogs.delete != null or v.search.focus or a.picker != .none or a.actions.menu or a.actions.editor != null or a.actions.command_review != null;
 }
 
 /// Enforces `Nano.OverlayMutex`: clears all Tier-1 popovers before opening a
@@ -621,36 +622,75 @@ pub fn revealSpan(total: f32, across: bool, r: @import("app.zig").SplitReveal, i
 /// the room differently, double-click to make them even
 /// (`render_split_divider`).
 fn divider(c: *ui.Context, a: *App, k: theme.Colors, ix: usize, across: bool, total: f32, across_gap: f32) void {
-    const dragging = if (a.pane_drag) |d| d.divider == ix else false;
-    const gap = if (across) across_gap else chrome.tab_top;
-    var line = ui.div(c);
-    if (dragging) line = line.bg(k.accent.alpha(0.2));
-    line = if (across) line.w(gap).hFull() else line.h(gap).wFull();
-    defer line.end();
-    var grip = ui.div(c).absolute();
-    grip = if (across) grip.offset((gap - 9) / 2, 0).w(9).hFull() else grip.offset(0, (gap - 9) / 2).h(9).wFull();
-    defer grip.end();
-    const it = grip.interaction();
-    if (it.hovered or it.pressed) c.cursor = if (across) .resize_left_right else .resize_up_down;
-    const at = if (across) c.input.mouse.x else c.input.mouse.y;
-    if (it.double_clicked) {
-        a.pane_drag = null;
-        a.tabs.equalize();
-        a.rememberTabs();
-        return;
-    }
-    if (it.pressed) {
-        if (a.pane_drag == null) {
-            var d: tabs.Drag = .{ .divider = ix, .origin = at, .start = @splat(0) };
-            const sh = a.tabs.layout().?.shares.items;
-            @memcpy(d.start[0..sh.len], sh);
-            a.pane_drag = d;
+    var dragging_now = false;
+    {
+        const dragging = if (a.pane_drag) |d| d.divider == ix else false;
+        const gap = if (across) across_gap else chrome.tab_top;
+        var line = ui.div(c).center();
+        if (dragging) line = line.bg(k.accent.alpha(0.2));
+        line = if (across) line.w(gap).hFull() else line.h(gap).wFull();
+        defer line.end();
+        var show_pill = dragging;
+        {
+            var grip = ui.div(c).absolute();
+            grip = if (across) grip.offset((gap - 9) / 2, 0).w(9).hFull() else grip.offset(0, (gap - 9) / 2).h(9).wFull();
+            defer grip.end();
+            const it = grip.interaction();
+            if (it.hovered or it.pressed) c.cursor = if (across) .resize_left_right else .resize_up_down;
+            if (it.hovered) show_pill = true;
+            const at = if (across) c.input.mouse.x else c.input.mouse.y;
+            if (it.double_clicked) {
+                a.pane_drag = null;
+                a.tabs.equalize();
+                a.rememberTabs();
+                return;
+            }
+            if (it.pressed) {
+                if (a.pane_drag == null) {
+                    var d: tabs.Drag = .{ .divider = ix, .origin = at, .start = @splat(0) };
+                    const sh = a.tabs.layout().?.shares.items;
+                    @memcpy(d.start[0..sh.len], sh);
+                    a.pane_drag = d;
+                }
+                if (a.pane_drag) |d| if (d.divider == ix) {
+                    a.tabs.dragDivider(d, (at - d.origin) / @max(total, 1));
+                    c.frameIn(0);
+                };
+                dragging_now = true;
+            } else if (dragging) {
+                a.tabs.snapDivider(ix);
+                a.pane_drag = null;
+                a.rememberTabs();
+            }
         }
-        if (a.pane_drag) |d| if (d.divider == ix) a.tabs.dragDivider(d, (at - d.origin) / @max(total, 1));
-    } else if (dragging) {
-        a.pane_drag = null;
-        a.rememberTabs();
+        if (show_pill) {
+            const pill_c = if (dragging_now or dragging) k.accent.alpha(0.9) else if (a.view.full_screen) ui.Color.white.alpha(0.38) else k.muted.alpha(0.42);
+            ui.div(c).size(if (across) @as(f32, 3) else 32, if (across) @as(f32, 32) else 3).rounded(1.5).bg(pill_c).end();
+        }
     }
+    if (dragging_now) if (a.tabs.layout()) |s| if (ix > 0 and ix < s.shares.items.len) {
+        const sh = s.shares.items;
+        const gap = if (across) across_gap else chrome.tab_top;
+        var span_before: f32 = 0;
+        for (0..ix) |p_i| {
+            span_before += chrome.paneSpanIn(total, sh[p_i], sh.len, across, gap);
+            if (p_i > 0) span_before += gap;
+        }
+        const center_x = if (across) a.view.chrome.x + span_before + gap / 2 else a.view.chrome.x + a.view.chrome.chat_width / 2;
+        const center_y = if (across) a.view.chrome.y + a.view.chrome.height / 2 else a.view.chrome.y + span_before + gap / 2;
+        const left_pct: u32 = if (sh.len == 2) @intFromFloat(@round(sh[0] * 100.0)) else @intFromFloat(@round(sh[ix - 1] * 100.0));
+        const right_pct: u32 = if (sh.len == 2) 100 -| left_pct else @intFromFloat(@round(sh[ix] * 100.0));
+        const label = c.print("{d}% \u{00b7} {d}%", .{ left_pct, right_pct });
+        const st: ui.TextStyle = .{ .size = 11, .line_height = 14, .weight = theme.ui_medium_weight, .color = if (a.view.full_screen) ui.Color.white.alpha(0.92) else k.text };
+        const pill_w = @max(62, @ceil(c.text.width(label, st)) + 16);
+        const px_x = std.math.clamp(center_x - pill_w / 2, 8, @max(8, c.size.w - pill_w - 8));
+        const px_y = std.math.clamp(center_y - 11, 8, @max(8, c.size.h - 30));
+        const pill_bg: ui.Color = if (k.dark or a.view.full_screen) .{ .r = 0.11, .g = 0.11, .b = 0.12, .a = 0.94 } else k.composer.alpha(0.96);
+        ui.key(c, c.print("split-ratio-pill-{d}", .{ix}));
+        const pill = ui.div(c).fixed().offset(px_x, px_y).h(22).w(pill_w).center().rounded(11).bg(pill_bg).border(k.border).borderW(1).layer(5);
+        defer pill.end();
+        ui.text(c, label, st);
+    };
 }
 
 /// A pane other than the focused one (`render_peer_chat_pane`): its title
@@ -697,22 +737,26 @@ fn keys(c: *ui.Context, a: *App) void {
     if (@import("view_setup.zig").keys(c, a)) return;
     if (@import("view_project_setup.zig").keys(c, a)) return;
     if (@import("view_open_chooser.zig").keys(c, a)) return;
-    // ⌘K, the command palette (fixed, as the GPUI app binds it); open, it
-    // takes ↑↓, Return and Escape before anything else.
+    // ⌘K command palette & ⇧⌘\ visual tab overview (fixed, as the GPUI/browse
+    // bindings); open, they take navigation, split, close and Escape before anything else.
     const palette = @import("view_palette.zig");
+    const tab_overview = @import("view_tab_overview.zig");
     if (c.shortcut(@import("shortcuts.zig").command_palette)) palette.toggle(a, .preserve_tabs);
+    if (c.shortcut(S.native(.{ .cmd = true, .shift = true, .key = '\\' }))) tab_overview.toggle(a);
     const chat_menu = @import("view_chat_menu.zig");
     if (chat_menu.anyDialog(a)) {
         if (c.shortcut(.{ .key = S.escape })) chat_menu.dismiss(a);
         return;
     }
     const palette_had_keys = a.view.palette.open;
+    const overview_had_keys = a.view.tab_overview.open;
     const picker_had_keys = a.picker != .none;
     palette.keys(c, a);
+    tab_overview.keys(c, a);
     if (a.picker != .none) @import("view_picker.zig").keys(c, a);
     // Modal searches own the event even when it is not one of their editing
     // keys. Never navigate or open a second picker underneath them.
-    if (palette_had_keys or a.view.palette.open or picker_had_keys or a.picker != .none) return;
+    if (palette_had_keys or a.view.palette.open or overview_had_keys or a.view.tab_overview.open or picker_had_keys or a.picker != .none) return;
     // A dialog has the keys; else an open header menu takes Escape, the
     // arrows and Return.
     const header_menus = @import("view_sidebar_menus.zig");

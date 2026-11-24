@@ -63,7 +63,8 @@ pub const State = struct {
 pub fn toggle(a: *App, navigation: Navigation) void {
     const p = &a.view.palette;
     if (p.open and p.navigation == navigation) return close(a);
-    // The session search and the header's menus give way.
+    // The session search, overview grid and the header's menus give way.
+    a.view.tab_overview.open = false;
     @import("view_sidebar_search.zig").close(a);
     @import("view_sidebar_menus.zig").close(a);
     p.open = true;
@@ -101,7 +102,7 @@ fn paneLabel(a: *const App, ix: usize) struct { title: []const u8, project: []co
     return .{ .title = title, .project = if (a.findSpace(ch.space_id)) |sp| sp.name else "" };
 }
 
-fn firstLine(s: []const u8) []const u8 {
+pub fn firstLine(s: []const u8) []const u8 {
     return s[0 .. std.mem.indexOfScalar(u8, s, '\n') orelse s.len];
 }
 
@@ -204,7 +205,7 @@ fn appendUniqueId(gpa: std.mem.Allocator, list: *std.ArrayList([]const u8), id: 
     try list.append(gpa, id);
 }
 
-fn deviceOrEmpty(a: *const App, id: ?[]const u8) []const u8 {
+pub fn deviceOrEmpty(a: *const App, id: ?[]const u8) []const u8 {
     const want = id orelse return "";
     for (a.devices.items) |d| if (std.mem.eql(u8, d.id, want)) return d.name;
     return "";
@@ -240,6 +241,7 @@ pub fn activate(a: *App, e: Entry) void {
         .split_right => @import("view_tab_strip.zig").splitChoosingFolder(a, .horizontal),
         .split_down => @import("view_tab_strip.zig").splitChoosingFolder(a, .vertical),
         .close_tab => a.closeByShortcut(),
+        .tab_overview => @import("view_tab_overview.zig").open(a),
         .toggle_side_panel => @import("app_panels.zig").toggleHost(a),
         .toggle_files => @import("app_files.zig").toggle(a),
         .toggle_terminal => {
@@ -738,6 +740,20 @@ fn header(c: *ui.Context, a: *App, k: theme.Colors, w: f32, result_count: usize)
             defer badge.end();
             ui.text(c, badge_text, .{ .size = 11, .line_height = 11 * phi, .weight = theme.ui_medium_weight, .color = k.muted });
         }
+        {
+            ui.key(c, "command-palette-overview");
+            const ob = @import("view_tooltip.zig").on(
+                ui.div(c).size(22, 22).center().rounded(6).hover(k.hover).control(),
+                k,
+                .{ .text = "Visual tab overview (⇧⌘\\)" },
+            );
+            defer ob.end();
+            icons.icon(c, .widget, 13, k.muted, 0);
+            if (ob.clicked()) {
+                close(a);
+                @import("view_tab_overview.zig").open(a);
+            }
+        }
         var buf: [32]u8 = undefined;
         kit.kbdHint(c, k, shortcuts.badge(&buf, "mod-k"));
     }
@@ -895,6 +911,7 @@ fn entryIcon(k: theme.Colors, e: Entry) icons.Name {
         .split_right => .@"split-columns",
         .split_down => .@"fold-vertical",
         .close_tab => .close,
+        .tab_overview => .widget,
         .toggle_side_panel => .@"sidebar-minimalistic",
         .toggle_files => .folder,
         .toggle_terminal => .terminal,
@@ -924,6 +941,7 @@ fn commandHint(a: *const App, e: Entry, buf: []u8) ?[]const u8 {
             break :blk if (c_down.len > 0) shortcuts.badge(buf, c_down) else null;
         },
         .close_tab => shortcuts.badge(buf, "mod-w"),
+        .tab_overview => shortcuts.badge(buf, "mod-shift-\\"),
         .toggle_side_panel => shortcuts.badge(buf, comboFor(a, "toggleChanges")),
         .toggle_files => shortcuts.badge(buf, comboFor(a, "toggleFiles")),
         .toggle_terminal => shortcuts.badge(buf, comboFor(a, "toggleTerminal")),
@@ -933,7 +951,7 @@ fn commandHint(a: *const App, e: Entry, buf: []u8) ?[]const u8 {
     };
 }
 
-fn transcriptForChat(a: *const App, chat_id: []const u8) ?*const @import("transcript.zig").Transcript {
+pub fn transcriptForChat(a: *const App, chat_id: []const u8) ?*const @import("transcript.zig").Transcript {
     if (a.selected) |sel| if (std.mem.eql(u8, sel, chat_id)) return &a.transcript;
     for (a.peers.items) |*peer_item| {
         if (std.mem.eql(u8, peer_item.id, chat_id)) return &peer_item.transcript;
@@ -941,7 +959,7 @@ fn transcriptForChat(a: *const App, chat_id: []const u8) ?*const @import("transc
     return null;
 }
 
-fn firstTextPart(entry: *const @import("transcript.zig").Entry) ?[]const u8 {
+pub fn firstTextPart(entry: *const @import("transcript.zig").Entry) ?[]const u8 {
     for (entry.parts.items) |*part| {
         if (part.kind == .text) {
             const trimmed = std.mem.trim(u8, part.text.items, " \t\n\r");

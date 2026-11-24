@@ -167,7 +167,7 @@ pub fn chatHeader(
         const device_name: ?[]const u8 = if (is_remote or pane_w >= 620) knownDevice(a, dev_id) else null;
         const title: []const u8 = if (chat) |ch| sidebar.chatLabel(ch) else "Conversation";
 
-        const trailing_w: f32 = if (is_split) 74 else 104;
+        const trailing_w: f32 = if (is_split) 74 else 128;
         const proj_style: ui.TextStyle = .{ .size = 11, .line_height = 14, .weight = .medium };
         const meta_style: ui.TextStyle = .{ .size = 10.5, .line_height = 14 };
         const show_proj = proj_name != null and pane_w >= 240;
@@ -244,7 +244,7 @@ pub fn chatHeader(
         const proj = strip.folder(a, target);
         const proj_name = if (proj) |f| f.name else "No project";
         const computer = strip.deviceLabel(a, strip.device(a, target));
-        const trailing_w: f32 = if (is_split) 74 else 104;
+        const trailing_w: f32 = if (is_split) 74 else 128;
         const avail = @max(80, pane_w - 16 - trailing_w - (if (focused) @as(f32, 11) else 0));
         const chip_cap = @max(42, (avail - 64) / 2);
 
@@ -380,6 +380,10 @@ fn trailingControls(
         defer btn.end();
         ui.text(c, kbd, .{ .size = 11, .line_height = 11 * phi, .weight = .medium, .color = ui.Color.white.alpha(0.80) });
         if (btn.clicked()) palette_view.toggle(a, .preserve_tabs);
+    }
+    ui.key(c, "fullscreen-header-overview");
+    if (darkIconButton(c, dk, .widget, 22, 11.5, "Tab overview (\u{21e7}\u{2318}\\)", false)) {
+        @import("view_tab_overview.zig").toggle(a);
     }
     ui.key(c, "fullscreen-header-split");
     if (darkIconButton(c, dk, .@"split-columns", 22, 11.5, "Split pane right (\u{2318}D)", false)) {

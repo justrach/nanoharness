@@ -854,6 +854,31 @@ pub const Tabs = struct {
         s.zoomed = false;
     }
 
+    /// Magnetic share stops when releasing a dragged split divider (`Split.stops`).
+    pub const snap_stops = [_]f32{ 1.0 / 3.0, 0.5, 2.0 / 3.0 };
+    pub const snap_tolerance: f32 = 0.03;
+
+    pub fn snapFraction(fraction: f32) f32 {
+        for (snap_stops) |stop| {
+            if (@abs(fraction - stop) <= snap_tolerance) return stop;
+        }
+        return fraction;
+    }
+
+    /// Snaps divider `divider_ix` onto nearby thirds/halves when within `snap_tolerance`.
+    pub fn snapDivider(t: *Tabs, divider_ix: usize) void {
+        const s = t.layout() orelse return;
+        const sh = s.shares.items;
+        if (divider_ix == 0 or divider_ix >= sh.len) return;
+        const total = sh[divider_ix - 1] + sh[divider_ix];
+        if (total <= 0) return;
+        const snapped = snapFraction(sh[divider_ix - 1] / total);
+        const min = @min(s.minShare(), total / 2);
+        const first = std.math.clamp(snapped * total, min, total - min);
+        sh[divider_ix - 1] = first;
+        sh[divider_ix] = total - first;
+    }
+
     /// ⌃⌘=.
     pub fn equalize(t: *Tabs) void {
         if (t.layout()) |s| {
@@ -993,4 +1018,29 @@ test "a dragged chat moves into its new pane, out of every other place" {
     const found = t.find("a").?;
     try testing.expectEqual(@as(usize, 1), found.tab);
     try testing.expect(found.pane == null and found.panel_tab == null);
+}
+
+test "split divider snapFraction and snapDivider snap near 1/3, 1/2, and 2/3 stops" {
+    try testing.expectApproxEqAbs(@as(f32, 0.5), Tabs.snapFraction(0.48), 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), Tabs.snapFraction(0.525), 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 1.0 / 3.0), Tabs.snapFraction(0.35), 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 2.0 / 3.0), Tabs.snapFraction(0.65), 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.42), Tabs.snapFraction(0.42), 1e-6);
+
+    var t: Tabs = .init(testing.allocator);
+    defer t.deinit();
+    t.show("a");
+    _ = try t.split(.horizontal);
+    var d: Drag = .{ .divider = 1, .origin = 0, .start = @splat(0) };
+    @memcpy(d.start[0..2], t.layout().?.shares.items);
+    t.dragDivider(d, -0.02);
+    t.snapDivider(1);
+    const sh = t.layout().?.shares.items;
+    try testing.expectApproxEqAbs(@as(f32, 0.5), sh[0], 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), sh[1], 1e-6);
+
+    t.dragDivider(d, -0.155);
+    t.snapDivider(1);
+    try testing.expectApproxEqAbs(@as(f32, 1.0 / 3.0), t.layout().?.shares.items[0], 1e-5);
+    try testing.expectApproxEqAbs(@as(f32, 2.0 / 3.0), t.layout().?.shares.items[1], 1e-5);
 }
