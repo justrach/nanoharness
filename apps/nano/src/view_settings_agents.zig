@@ -106,9 +106,10 @@ pub const Page = struct {
     /// Screen Recording's Allow was used: System Settings and the restart
     /// instead (macOS asks once).
     screen_requested: bool = false,
-    /// Native Flint managed local server (macOS Apple Silicon only).
+    /// NanoAttention managed local server (Flint INT4 & Inkling 2 Mini, macOS Apple Silicon only).
     flint: Phase = .idle,
     flint_status: @import("native_flint.zig").Status = .{},
+    flint_model: ?@import("native_flint.zig").ModelKind = null,
     flint_context: ?u32 = null,
     flint_custom_dir: std.ArrayList(u8) = .empty,
     flint_busy: bool = false,
@@ -525,16 +526,19 @@ pub fn startFlint(a: *App) void {
     if (!live(a) or p.flint_busy) return;
     p.flint_busy = true;
     p.flint_err.clearRetainingCapacity();
+    const model = flint.effectiveModel(&p.flint_status, p.flint_model);
     const ctx = flint.effectiveContext(&p.flint_status, p.flint_context);
+    const preset_dir = flint.checkpointDirFor(&p.flint_status, model);
     const dir: ?[]const u8 = if (p.flint_custom_dir.items.len > 0)
         p.flint_custom_dir.items
-    else if (p.flint_status.checkpoint_dir.items.len > 0)
-        p.flint_status.checkpoint_dir.items
+    else if (preset_dir.len > 0)
+        preset_dir
     else
         null;
     send(a, &p.flint_call, "StartNativeFlint", .{
         .checkpointDir = dir,
         .context = ctx,
+        .modelKind = model.wire(),
         .targetDeviceId = p.target,
     }, .of(App, a, onFlintToggle));
     a.redraw();
@@ -550,10 +554,12 @@ pub fn stopFlint(a: *App) void {
 }
 
 pub fn pickFlintFolder(a: *App) void {
+    const flint = @import("native_flint.zig");
     const p = &a.view.agents;
     if (p.flint_busy or p.flint_status.state == .running) return;
+    const model = flint.effectiveModel(&p.flint_status, p.flint_model);
     const paths = (nanoui.dialog.open(a.gpa, .{
-        .title = "Choose Flint INT4 weights folder",
+        .title = model.dialogTitle(),
         .button = "Choose",
         .files = false,
         .directories = true,
@@ -565,7 +571,7 @@ pub fn pickFlintFolder(a: *App) void {
     a.redraw();
 }
 
-/// Inject a Native Flint status snapshot (tests and visual fixtures).
+/// Inject a Native Flint / Inkling status snapshot (tests and visual fixtures).
 pub fn setFlintStatus(a: *App, v: json.Value) void {
     const p = &a.view.agents;
     p.flint_status.replaceFromJson(a.gpa, v) catch {
@@ -574,6 +580,7 @@ pub fn setFlintStatus(a: *App, v: json.Value) void {
         return;
     };
     p.flint = .ready;
+    if (p.flint_model == null or p.flint_status.state == .running) p.flint_model = p.flint_status.model_kind;
     if (p.flint_context == null and p.flint_status.context > 0) p.flint_context = p.flint_status.context;
     p.flint_err.clearRetainingCapacity();
 }
@@ -730,6 +737,7 @@ pub fn setTarget(a: *App, target: ?[]const u8) void {
     p.flint = .idle;
     p.flint_busy = false;
     p.flint_call = null;
+    p.flint_model = null;
     p.flint_context = null;
     p.flint_custom_dir.clearRetainingCapacity();
     p.flint_err.clearRetainingCapacity();

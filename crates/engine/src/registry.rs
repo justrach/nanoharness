@@ -134,6 +134,12 @@ struct HarnessPrefsFile {
     /// Native Flint checkpoint directory preference (macOS Apple Silicon).
     #[serde(skip_serializing_if = "Option::is_none")]
     native_flint_checkpoint_dir: Option<String>,
+    /// Native Inkling 2 Mini checkpoint directory preference (macOS Apple Silicon).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_inkling_checkpoint_dir: Option<String>,
+    /// Selected NanoAttention local model kind (`flint` or `inkling`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_model_kind: Option<String>,
     /// Native Flint context window preference (macOS Apple Silicon).
     #[serde(skip_serializing_if = "Option::is_none")]
     native_flint_context: Option<u32>,
@@ -455,21 +461,53 @@ impl HarnessRegistry {
         self.prefs().native_flint_checkpoint_dir.clone()
     }
 
+    pub fn native_inkling_checkpoint_dir(&self) -> Option<String> {
+        self.prefs().native_inkling_checkpoint_dir.clone()
+    }
+
+    pub fn native_model_kind(&self) -> Option<crate::flint_policy::NativeModelKind> {
+        self.prefs()
+            .native_model_kind
+            .as_deref()
+            .and_then(crate::flint_policy::NativeModelKind::parse)
+    }
+
     pub fn native_flint_context(&self) -> Option<u32> {
         self.prefs().native_flint_context
     }
 
-    pub fn set_native_flint_prefs(&self, checkpoint_dir: Option<String>, context: Option<u32>) {
+    pub fn set_native_model_prefs(
+        &self,
+        kind: crate::flint_policy::NativeModelKind,
+        checkpoint_dir: Option<String>,
+        context: Option<u32>,
+    ) {
         {
             let mut prefs = self.prefs();
+            prefs.native_model_kind = Some(kind.as_str().to_string());
             if let Some(dir) = checkpoint_dir {
-                prefs.native_flint_checkpoint_dir = Some(dir);
+                match kind {
+                    crate::flint_policy::NativeModelKind::Flint => {
+                        prefs.native_flint_checkpoint_dir = Some(dir);
+                    }
+                    crate::flint_policy::NativeModelKind::Inkling => {
+                        prefs.native_inkling_checkpoint_dir = Some(dir);
+                    }
+                }
             }
             if let Some(ctx) = context {
                 prefs.native_flint_context = Some(ctx);
             }
         }
         self.persist_prefs();
+    }
+
+    pub fn set_native_flint_prefs(&self, checkpoint_dir: Option<String>, context: Option<u32>) {
+        self.set_native_model_prefs(
+            crate::flint_policy::NativeModelKind::Flint,
+            checkpoint_dir,
+            context,
+        );
     }
 
     pub fn set_graff_native_flint(&self, env: Option<harness_adapters::NativeFlintEnv>) {

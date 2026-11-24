@@ -30,7 +30,7 @@ fn keywords(section: Section) []const u8 {
         .shortcuts => "keys hotkey enter return slash commands suggestions stop escape",
         .files => "hidden ignored directory starting folder editor save wrap",
         .browsing => "browser native internal external GitHub pull request PR issue transcript URL link opening",
-        .harnesses => "models context compaction titles installed agent",
+        .harnesses => "models context compaction titles installed agent nanoattention flint inkling local metal",
         .agents => "login authentication credentials account token subscription billing",
         .mcp => "integration tools protocol server",
         .extensions => "plugins extensions native panels controls callbacks github runners workers",

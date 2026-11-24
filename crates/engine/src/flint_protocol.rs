@@ -4,13 +4,16 @@
 //! `<tool_call>` XML protocol parser, KV-prefix reuse bookkeeping, 65,536-token
 //! JSONL framing, and OpenAI JSON / SSE response builders.
 
+use crate::flint_policy::NativeModelKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const MODEL_ID: &str = "flint";
+pub const INKLING_MODEL_ID: &str = "inkling-2-mini";
+pub const DEFAULT_INKLING_EFFORT: &str = "low";
 pub const NATIVE_CHUNK: usize = 65_536;
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4_096;
 
@@ -213,6 +216,172 @@ pub fn render_chat_template(
     out
 }
 
+fn inkling_text(t: &str) -> String {
+    let mut out = t.replace('\0', "");
+    for tok in [
+        "<|endoftext|>",
+        "<|message_user|>",
+        "<|message_model|>",
+        "<|message_system|>",
+        "<|message_tool|>",
+        "<|content_text|>",
+        "<|content_image|>",
+        "<|content_model_end_sampling|>",
+        "<|content_thinking|>",
+        "<|end_message|>",
+        "<|content_tool_error|>",
+        "<|content_xml|>",
+        "<|begin_of_text|>",
+        "<|content_invoke_tool_json|>",
+        "<|content_invoke_tool_text|>",
+    ] {
+        if let Some(inner) = tok.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+            out = out.replace(tok, &format!("&lt;{inner}&gt;"));
+        }
+    }
+    out
+}
+
+fn canonical_json_value(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(canonical_json_value).collect()),
+        Value::Object(map) => {
+            let sorted: BTreeMap<&String, Value> = map
+                .iter()
+                .map(|(k, v)| (k, canonical_json_value(v)))
+                .collect();
+            let mut out = Map::with_capacity(sorted.len());
+            for (k, v) in sorted {
+                out.insert(k.clone(), v);
+            }
+            Value::Object(out)
+        }
+        other => other.clone(),
+    }
+}
+
+fn to_compact_sorted_json(value: &Value) -> String {
+    serde_json::to_string(&canonical_json_value(value)).unwrap_or_else(|_| "{}".into())
+}
+
+fn inkling_effort_number(effort: &str) -> &'static str {
+    match effort.trim() {
+        "none" => "0",
+        "minimal" => "0.1",
+        "low" => "0.2",
+        "medium" => "0.7",
+        "high" => "0.9",
+        "xhigh" | "max" => "0.99",
+        _ => "0.2",
+    }
+}
+
+fn push_inkling_effort(out: &mut String, effort: &str) {
+    out.push_str("<|message_system|><|content_text|>Thinking effort level: ");
+    out.push_str(inkling_effort_number(effort));
+    out.push_str("<|end_message|>");
+}
+
+/// Faithful port of Inkling 2 Mini's `chat_template.jinja`.
+pub fn render_inkling_chat_template(
+    messages: &[NormalizedMessage],
+    tools: &[Value],
+    reasoning_effort: &str,
+) -> String {
+    let mut out = String::new();
+    if !tools.is_empty() {
+        let mut specs = Vec::with_capacity(tools.len());
+        for tool in tools {
+            let func = tool.get("function").unwrap_or(tool);
+            let spec = json!({
+                "description": func.get("description").and_then(Value::as_str).unwrap_or(""),
+                "name": func.get("name").and_then(Value::as_str).unwrap_or(""),
+                "parameters": func.get("parameters").cloned().unwrap_or_else(|| json!({})),
+                "type": tool.get("type").and_then(Value::as_str).unwrap_or("function"),
+            });
+            specs.push(canonical_json_value(&spec));
+        }
+        out.push_str("<|message_system|>tool_declare<|content_xml|>");
+        out.push_str(&serde_json::to_string(&Value::Array(specs)).unwrap_or_else(|_| "[]".into()));
+        out.push_str("<|end_message|>");
+    }
+
+    let mut call_names: HashMap<&str, &str> = HashMap::new();
+    let mut effort_emitted = false;
+
+    for m in messages {
+        if !effort_emitted && !matches!(m.role.as_str(), "system" | "developer") {
+            push_inkling_effort(&mut out, reasoning_effort);
+            effort_emitted = true;
+        }
+        match m.role.as_str() {
+            "system" | "developer" => {
+                out.push_str("<|message_system|><|content_text|>");
+                out.push_str(&inkling_text(&m.content));
+                out.push_str("<|end_message|>");
+            }
+            "user" => {
+                out.push_str("<|message_user|><|content_text|>");
+                out.push_str(&inkling_text(&m.content));
+                out.push_str("<|end_message|>");
+            }
+            "tool" => {
+                out.push_str("<|message_tool|>");
+                if let Some(id) = m.tool_call_id.as_deref()
+                    && let Some(fn_name) = call_names.get(id)
+                {
+                    out.push_str(fn_name);
+                }
+                out.push_str("<|content_text|>");
+                out.push_str(&inkling_text(&m.content));
+                out.push_str("<|end_message|>");
+            }
+            "assistant" => {
+                for tc in &m.tool_calls {
+                    call_names.insert(tc.id.as_str(), tc.name.as_str());
+                }
+                if let Some(raw) = &m.raw_assistant {
+                    out.push_str(raw);
+                    continue;
+                }
+                if let Some(reasoning) = &m.reasoning_content
+                    && !reasoning.is_empty()
+                {
+                    out.push_str("<|message_model|><|content_thinking|>");
+                    out.push_str(reasoning);
+                    out.push_str("<|end_message|>");
+                }
+                if !m.content.is_empty()
+                    || (m.tool_calls.is_empty()
+                        && m.reasoning_content.as_deref().unwrap_or("").is_empty())
+                {
+                    out.push_str("<|message_model|><|content_text|>");
+                    out.push_str(&m.content);
+                    out.push_str("<|end_message|>");
+                }
+                for tc in &m.tool_calls {
+                    let args_json = to_compact_sorted_json(&Value::Object(tc.arguments.clone()));
+                    let name_json =
+                        serde_json::to_string(&tc.name).unwrap_or_else(|_| "\"\"".into());
+                    out.push_str("<|message_model|>");
+                    out.push_str(&tc.name);
+                    out.push_str("<|content_invoke_tool_json|>{\"name\":");
+                    out.push_str(&name_json);
+                    out.push_str(",\"args\":");
+                    out.push_str(&args_json);
+                    out.push_str("}<|end_message|>");
+                }
+                out.push_str("<|content_model_end_sampling|>");
+            }
+            _ => {}
+        }
+    }
+    if !effort_emitted {
+        push_inkling_effort(&mut out, reasoning_effort);
+    }
+    out
+}
+
 fn find_next_marker(text: &str, from: usize) -> Option<(usize, usize, &str)> {
     const TAGS: [&str; 8] = [
         "<think>",
@@ -403,6 +572,168 @@ fn parse_tool_call(
             "arguments": serialized,
         }
     }))
+}
+
+fn validate_json_tool_args(
+    name: &str,
+    raw_args: &Map<String, Value>,
+    schemas: &HashMap<String, Value>,
+    index: usize,
+) -> Result<Value, AdapterError> {
+    let schema = schemas
+        .get(name)
+        .ok_or_else(|| AdapterError::new(502, format!("unknown function call: {name}")))?;
+    let properties = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let additional = schema
+        .get("additionalProperties")
+        .cloned()
+        .unwrap_or(Value::Bool(true));
+
+    for (key, val) in raw_args {
+        let arg_schema = properties.get(key).unwrap_or(&additional);
+        if arg_schema == &Value::Bool(false) {
+            return Err(AdapterError::new(
+                502,
+                format!("unexpected argument {key} for {name}"),
+            ));
+        }
+        let hints = schema_type_hints(arg_schema);
+        if !hints.is_empty() && !hints.iter().any(|k| matches_type(val, k)) {
+            return Err(AdapterError::new(
+                502,
+                format!("tool argument {key} does not match schema type"),
+            ));
+        }
+    }
+
+    if let Some(required) = schema.get("required").and_then(Value::as_array) {
+        for req in required {
+            if let Some(req_key) = req.as_str()
+                && !raw_args.contains_key(req_key)
+            {
+                return Err(AdapterError::new(
+                    502,
+                    format!("missing required argument {req_key} for {name}"),
+                ));
+            }
+        }
+    }
+
+    let serialized = serde_json::to_string(&Value::Object(raw_args.clone()))
+        .map_err(|e| AdapterError::new(502, format!("could not encode tool arguments: {e}")))?;
+    Ok(json!({
+        "id": format!("call_{index}"),
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": serialized,
+        }
+    }))
+}
+
+fn tool_schemas_map(tools: &[Value]) -> HashMap<String, Value> {
+    let mut schemas = HashMap::new();
+    for tool in tools {
+        let Some(func) = tool.get("function").and_then(Value::as_object) else {
+            continue;
+        };
+        if let Some(name) = func.get("name").and_then(Value::as_str) {
+            let params = func
+                .get("parameters")
+                .cloned()
+                .unwrap_or_else(|| json!({"type": "object"}));
+            schemas.insert(name.to_string(), params);
+        }
+    }
+    schemas
+}
+
+/// Port of `tools/inkling_tool_protocol.parse_completion`.
+pub fn parse_inkling_completion(
+    text: &str,
+    tools: &[Value],
+    stopped: bool,
+) -> Result<ParsedCompletion, AdapterError> {
+    const MESSAGE: &str = "<|message_model|>";
+    const END: &str = "<|end_message|>";
+    const THINKING: &str = "<|content_thinking|>";
+    const TEXT: &str = "<|content_text|>";
+    const INVOKE: &str = "<|content_invoke_tool_json|>";
+    const SAMPLING_END: &str = "<|content_model_end_sampling|>";
+
+    let cleaned = text.replace(SAMPLING_END, "");
+    if !stopped {
+        return Ok(ParsedCompletion {
+            content: cleaned,
+            reasoning_content: String::new(),
+            tool_calls: Vec::new(),
+            finish_reason: "length",
+        });
+    }
+
+    let schemas = tool_schemas_map(tools);
+    let mut visible = String::new();
+    let mut reasoning = String::new();
+    let mut calls = Vec::new();
+    let mut had_invalid = false;
+
+    for part in cleaned.split(MESSAGE) {
+        if part.trim().is_empty() {
+            continue;
+        }
+        let Some(body) = part.strip_suffix(END) else {
+            had_invalid = true;
+            visible.push_str(part);
+            continue;
+        };
+        if let Some(thought) = body.strip_prefix(THINKING) {
+            reasoning.push_str(thought);
+        } else if let Some(msg) = body.strip_prefix(TEXT) {
+            visible.push_str(msg);
+        } else if let Some((name, raw)) = body.split_once(INVOKE) {
+            let parsed_call = serde_json::from_str::<Value>(raw)
+                .ok()
+                .and_then(|v| v.as_object().cloned())
+                .filter(|obj| {
+                    obj.len() == 2
+                        && obj.get("name").and_then(Value::as_str) == Some(name)
+                        && obj.get("args").is_some_and(Value::is_object)
+                })
+                .and_then(|obj| {
+                    obj.get("args").and_then(Value::as_object).and_then(|args| {
+                        validate_json_tool_args(name, args, &schemas, calls.len()).ok()
+                    })
+                });
+            if let Some(call) = parsed_call {
+                calls.push(call);
+            } else {
+                had_invalid = true;
+                visible.push_str(body);
+            }
+        } else {
+            had_invalid = true;
+            visible.push_str(body);
+        }
+    }
+
+    if had_invalid {
+        calls.clear();
+    }
+    let finish_reason = if calls.is_empty() {
+        "stop"
+    } else {
+        "tool_calls"
+    };
+    Ok(ParsedCompletion {
+        content: visible,
+        reasoning_content: reasoning,
+        tool_calls: calls,
+        finish_reason,
+    })
 }
 
 /// Port of `flint_tool_protocol.parse_completion`.
@@ -657,19 +988,61 @@ pub struct ValidatedRequest {
     pub include_usage: bool,
     pub require_tool: bool,
     pub parallel_tool_calls: bool,
+    pub reasoning_effort: Option<String>,
 }
 
 pub fn validate_request(
     payload: &Value,
     max_output: u32,
 ) -> Result<ValidatedRequest, AdapterError> {
+    validate_request_for_model(payload, max_output, NativeModelKind::Flint)
+}
+
+pub fn validate_request_for_model(
+    payload: &Value,
+    max_output: u32,
+    kind: NativeModelKind,
+) -> Result<ValidatedRequest, AdapterError> {
     let Some(obj) = payload.as_object() else {
         return Err(AdapterError::bad_request("request body must be an object"));
     };
-    let model = obj.get("model").and_then(Value::as_str).unwrap_or(MODEL_ID);
-    if model != MODEL_ID {
-        return Err(AdapterError::bad_request("unknown model; use flint"));
+    let model = obj
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(match kind {
+            NativeModelKind::Flint => MODEL_ID,
+            NativeModelKind::Inkling => INKLING_MODEL_ID,
+        });
+    match kind {
+        NativeModelKind::Flint => {
+            if model != MODEL_ID {
+                return Err(AdapterError::bad_request("unknown model; use flint"));
+            }
+        }
+        NativeModelKind::Inkling => {
+            if model != INKLING_MODEL_ID && model != MODEL_ID {
+                return Err(AdapterError::bad_request(
+                    "unknown model; use inkling-2-mini or flint",
+                ));
+            }
+        }
     }
+    let reasoning_effort = match obj.get("reasoning_effort") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => {
+            let trimmed = s.trim();
+            if !matches!(
+                trimmed,
+                "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+            ) {
+                return Err(AdapterError::bad_request(
+                    "unsupported reasoning_effort for local model",
+                ));
+            }
+            Some(trimmed.to_string())
+        }
+        _ => return Err(AdapterError::bad_request("reasoning_effort must be text")),
+    };
     if let Some(n) = obj.get("n")
         && n.as_u64() != Some(1)
     {
@@ -828,6 +1201,7 @@ pub fn validate_request(
         include_usage,
         require_tool,
         parallel_tool_calls,
+        reasoning_effort,
     })
 }
 
@@ -888,6 +1262,7 @@ pub struct FlintBackend<T: FlintTokenizer, W: FlintWorker> {
     tokenizer: T,
     worker_factory: Box<dyn Fn() -> Result<W, String> + Send>,
     worker: Option<W>,
+    model_kind: NativeModelKind,
     context: u32,
     eos: HashSet<u32>,
     vocab_size: usize,
@@ -905,10 +1280,29 @@ impl<T: FlintTokenizer, W: FlintWorker> FlintBackend<T, W> {
         eos_ids: Vec<u32>,
         vocab_size: usize,
     ) -> Self {
+        Self::new_for_model(
+            tokenizer,
+            worker_factory,
+            NativeModelKind::Flint,
+            context,
+            eos_ids,
+            vocab_size,
+        )
+    }
+
+    pub fn new_for_model(
+        tokenizer: T,
+        worker_factory: Box<dyn Fn() -> Result<W, String> + Send>,
+        model_kind: NativeModelKind,
+        context: u32,
+        eos_ids: Vec<u32>,
+        vocab_size: usize,
+    ) -> Self {
         Self {
             tokenizer,
             worker_factory,
             worker: None,
+            model_kind,
             context,
             eos: eos_ids.into_iter().collect(),
             vocab_size,
@@ -917,6 +1311,14 @@ impl<T: FlintTokenizer, W: FlintWorker> FlintBackend<T, W> {
             needs_reset: true,
             sequence: 0,
         }
+    }
+
+    pub fn model_kind(&self) -> NativeModelKind {
+        self.model_kind
+    }
+
+    pub fn model_id(&self) -> &'static str {
+        self.model_kind.model_id()
     }
 
     pub fn context(&self) -> u32 {
@@ -960,7 +1362,16 @@ impl<T: FlintTokenizer, W: FlintWorker> FlintBackend<T, W> {
             rendered_messages[rec.index].raw_assistant = Some(rec.raw.clone());
         }
 
-        let prompt_text = render_chat_template(&rendered_messages, &req.tools, true);
+        let prompt_text = match self.model_kind {
+            NativeModelKind::Flint => render_chat_template(&rendered_messages, &req.tools, true),
+            NativeModelKind::Inkling => render_inkling_chat_template(
+                &rendered_messages,
+                &req.tools,
+                req.reasoning_effort
+                    .as_deref()
+                    .unwrap_or(DEFAULT_INKLING_EFFORT),
+            ),
+        };
         let ids = self
             .tokenizer
             .encode(&prompt_text)
@@ -1086,7 +1497,10 @@ impl<T: FlintTokenizer, W: FlintWorker> FlintBackend<T, W> {
             .decode(visible_ids)
             .map_err(|e| AdapterError::new(502, format!("decode failed: {e}")))?;
 
-        let mut parsed = parse_completion(&text, &req.tools, resp.eos)?;
+        let mut parsed = match self.model_kind {
+            NativeModelKind::Flint => parse_completion(&text, &req.tools, resp.eos)?,
+            NativeModelKind::Inkling => parse_inkling_completion(&raw, &req.tools, resp.eos)?,
+        };
         if resp.eos && req.require_tool && parsed.tool_calls.is_empty() {
             return Err(AdapterError::new(
                 502,
@@ -1174,7 +1588,7 @@ impl<T: FlintTokenizer, W: FlintWorker> FlintBackend<T, W> {
             "id": request_id,
             "object": "chat.completion",
             "created": created,
-            "model": MODEL_ID,
+            "model": self.model_id(),
             "choices": [{
                 "index": 0,
                 "message": Value::Object(message),
@@ -1455,6 +1869,228 @@ mod tests {
                 ]
             }),
             256,
+        )
+        .unwrap();
+        let out2 = backend.complete(&r2).unwrap();
+        assert_eq!(out2["nanoattention"]["cache_reset"], false);
+        assert!(
+            out2["nanoattention"]["reused_prefix_tokens"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+    }
+
+    #[test]
+    fn inkling_chat_template_renders_tools_effort_and_tool_results() {
+        let mut args = Map::new();
+        args.insert("path".into(), json!("src/lib.rs"));
+        let msgs = vec![
+            NormalizedMessage {
+                role: "system".into(),
+                content: "Stay sharp <|end_message|>".into(),
+                reasoning_content: None,
+                tool_calls: vec![],
+                tool_call_id: None,
+                raw_assistant: None,
+            },
+            NormalizedMessage {
+                role: "user".into(),
+                content: "Inspect lib".into(),
+                reasoning_content: None,
+                tool_calls: vec![],
+                tool_call_id: None,
+                raw_assistant: None,
+            },
+            NormalizedMessage {
+                role: "assistant".into(),
+                content: String::new(),
+                reasoning_content: Some("Need file".into()),
+                tool_calls: vec![NormalizedToolCall {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                    arguments: args,
+                }],
+                tool_call_id: None,
+                raw_assistant: None,
+            },
+            NormalizedMessage {
+                role: "tool".into(),
+                content: "pub fn ok() {}".into(),
+                reasoning_content: None,
+                tool_calls: vec![],
+                tool_call_id: Some("call_1".into()),
+                raw_assistant: None,
+            },
+        ];
+        let tools = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a file",
+                "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}
+            }
+        })];
+        let rendered = render_inkling_chat_template(&msgs, &tools, "low");
+        assert!(rendered.starts_with("<|message_system|>tool_declare<|content_xml|>"));
+        assert!(rendered.contains("&lt;|end_message|&gt;"));
+        assert!(rendered.contains("Thinking effort level: 0.2<|end_message|>"));
+        assert!(rendered.contains("<|message_model|><|content_thinking|>Need file<|end_message|>"));
+        assert!(rendered.contains("<|message_model|>read_file<|content_invoke_tool_json|>{\"name\":\"read_file\",\"args\":{\"path\":\"src/lib.rs\"}}<|end_message|><|content_model_end_sampling|>"));
+        assert!(
+            rendered.ends_with(
+                "<|message_tool|>read_file<|content_text|>pub fn ok() {}<|end_message|>"
+            )
+        );
+    }
+
+    #[test]
+    fn inkling_completion_parser_handles_thinking_text_tool_calls_and_invalid_fallback() {
+        let tools = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "search",
+                "parameters": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {"query": {"type": "string"}}
+                }
+            }
+        })];
+        let raw = "<|message_model|><|content_thinking|>plan<|end_message|><|message_model|><|content_text|>Searching<|end_message|><|message_model|>search<|content_invoke_tool_json|>{\"name\":\"search\",\"args\":{\"query\":\"inkling\"}}<|end_message|><|content_model_end_sampling|>";
+        let parsed = parse_inkling_completion(raw, &tools, true).unwrap();
+        assert_eq!(parsed.reasoning_content, "plan");
+        assert_eq!(parsed.content, "Searching");
+        assert_eq!(parsed.finish_reason, "tool_calls");
+        assert_eq!(parsed.tool_calls.len(), 1);
+        assert_eq!(parsed.tool_calls[0]["function"]["name"], "search");
+
+        // An unwhitelisted function invalidates calls and falls back to plain stop text.
+        let bad = "<|message_model|>unknown_fn<|content_invoke_tool_json|>{\"name\":\"unknown_fn\",\"args\":{}}<|end_message|><|content_model_end_sampling|>";
+        let invalid = parse_inkling_completion(bad, &tools, true).unwrap();
+        assert_eq!(invalid.finish_reason, "stop");
+        assert!(invalid.tool_calls.is_empty());
+        assert!(invalid.content.contains("unknown_fn"));
+
+        // Truncated output leaves tool calls unexecuted with finish_reason length.
+        let cut = parse_inkling_completion(raw, &tools, false).unwrap();
+        assert_eq!(cut.finish_reason, "length");
+        assert!(cut.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn inkling_backend_reuses_kv_prefix_across_turns() {
+        struct InklingMockTokenizer;
+        impl FlintTokenizer for InklingMockTokenizer {
+            fn encode(&self, text: &str) -> Result<Vec<u32>, String> {
+                let mut out = Vec::new();
+                let mut rest = text;
+                while !rest.is_empty() {
+                    if let Some(after) = rest.strip_prefix("<|content_model_end_sampling|>") {
+                        out.push(299);
+                        rest = after;
+                    } else {
+                        out.push(rest.as_bytes()[0] as u32);
+                        rest = &rest[1..];
+                    }
+                }
+                Ok(out)
+            }
+            fn decode(&self, ids: &[u32]) -> Result<String, String> {
+                let mut out = String::new();
+                let mut buf = Vec::new();
+                for &id in ids {
+                    if id == 299 {
+                        out.push_str(
+                            &String::from_utf8(std::mem::take(&mut buf))
+                                .map_err(|e| e.to_string())?,
+                        );
+                        out.push_str("<|content_model_end_sampling|>");
+                    } else {
+                        buf.push(id as u8);
+                    }
+                }
+                out.push_str(&String::from_utf8(buf).map_err(|e| e.to_string())?);
+                Ok(out)
+            }
+        }
+        struct InklingWorker {
+            cache_len: u32,
+            reply: Vec<u32>,
+        }
+        impl FlintWorker for InklingWorker {
+            fn request(&mut self, req: &WorkerRequest) -> Result<WorkerResponse, String> {
+                if req.reset {
+                    self.cache_len = 0;
+                }
+                let before = self.cache_len;
+                let tokens = if req.max_tokens > 0 {
+                    self.reply.clone()
+                } else {
+                    vec![]
+                };
+                self.cache_len = before + (req.tokens.len() as u32) + (tokens.len() as u32);
+                Ok(WorkerResponse {
+                    id: req.id,
+                    eos: tokens.last() == Some(&299),
+                    tokens,
+                    cache_before: before,
+                    cache_after: self.cache_len,
+                    prefill_tokens: req.tokens.len(),
+                    decode_forward_tokens: if req.max_tokens > 0 {
+                        self.reply.len()
+                    } else {
+                        0
+                    },
+                    reused_prefix_tokens: before,
+                    prefill_seconds: 0.01,
+                    decode_seconds: 0.02,
+                    kv_allocated_bytes: 1024,
+                    kv_valid_bytes: 512,
+                    kv_storage: "bf16".into(),
+                })
+            }
+            fn close(&mut self, _graceful: bool) {}
+        }
+
+        let raw_reply = "<|message_model|><|content_text|>Hi there!<|end_message|><|content_model_end_sampling|>";
+        let reply = InklingMockTokenizer.encode(raw_reply).unwrap();
+        let mut backend = FlintBackend::new_for_model(
+            InklingMockTokenizer,
+            Box::new(move || {
+                Ok(InklingWorker {
+                    cache_len: 0,
+                    reply: reply.clone(),
+                })
+            }),
+            NativeModelKind::Inkling,
+            8192,
+            vec![299],
+            300,
+        );
+
+        let r1 = validate_request_for_model(
+            &json!({"model": "inkling-2-mini", "messages": [{"role": "user", "content": "hi"}]}),
+            256,
+            NativeModelKind::Inkling,
+        )
+        .unwrap();
+        let out1 = backend.complete(&r1).unwrap();
+        assert_eq!(out1["model"], "inkling-2-mini");
+        assert_eq!(out1["choices"][0]["message"]["content"], "Hi there!");
+        assert_eq!(out1["nanoattention"]["cache_reset"], true);
+
+        let r2 = validate_request_for_model(
+            &json!({
+                "model": "inkling-2-mini",
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "Hi there!"},
+                    {"role": "user", "content": "more"}
+                ]
+            }),
+            256,
+            NativeModelKind::Inkling,
         )
         .unwrap();
         let out2 = backend.complete(&r2).unwrap();

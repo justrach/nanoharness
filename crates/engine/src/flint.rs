@@ -25,13 +25,14 @@ use tokio_util::sync::CancellationToken;
 use harness_adapters::NativeFlintEnv;
 
 use crate::flint_policy::{
-    FlintHardware, FlintRamAssessment, RamTier, assess_hardware, clamp_context_for_assessment,
-    discover_default_checkpoint, estimated_footprint_gb, probe_host_hardware, resolve_flint_binary,
+    FlintHardware, FlintRamAssessment, NativeModelKind, RamTier, assess_hardware,
+    clamp_context_for_assessment, discover_default_checkpoint_for, estimated_footprint_gb_for,
+    probe_host_hardware, resolve_flint_binary, resolve_nano_binary, resolve_runtime_binary,
     validate_checkpoint_dir, validate_context_for_assessment,
 };
 use crate::flint_protocol::{
-    AdapterError, DEFAULT_MAX_OUTPUT_TOKENS, FlintBackend, FlintTokenizer, FlintWorker, MODEL_ID,
-    WorkerRequest, WorkerResponse, sse_events, validate_request,
+    AdapterError, DEFAULT_MAX_OUTPUT_TOKENS, FlintBackend, FlintTokenizer, FlintWorker,
+    WorkerRequest, WorkerResponse, sse_events, validate_request_for_model,
 };
 use crate::registry::HarnessRegistry;
 
@@ -47,6 +48,60 @@ pub enum NativeFlintState {
     Error,
 }
 
+pub const INKLING_KNOBS: &[&str] = &[
+    "batch=4096",
+    "expert_simd=true",
+    "expert_wide_dot=true",
+    "expert_gate_pair=true",
+    "expert_prefill=true",
+    "expert_wide_k=true",
+    "expert_bf16_tiles=true",
+    "expert_mlx_scale=true",
+    "bf16_linear_tile=true",
+    "bf16_prefill_tile=8",
+    "bf16_prefill_matrix=true",
+    "bf16_decode_vec=true",
+    "fuse_bf16_cast=true",
+    "concurrent_scratch=true",
+    "relative_split=true",
+    "relative_split_4=true",
+    "relative_tile_prefill=true",
+    "relative_stripes=true",
+    "scratch_reuse=true",
+    "expert_tile_rows=4096",
+    "bf16_matrix_small=true",
+    "tail_trim=512",
+    "relative_bias16=true",
+    "relative_bias_d8=true",
+    "conv_ring=true",
+    "expert_lists_split=true",
+    "fuse_add_norm=true",
+    "d2_gate=true",
+    "decode_argmax=1",
+    "fuse_controller_merge=true",
+    "fuse_bf16_projections=true",
+    "bf16_decode_splitk=true",
+    "bf16_decode_wide=true",
+    "fuse_head_softcap=true",
+    "depth_attention_fast=true",
+    "fuse_depth_norm=true",
+    "rmsnorm_fast=true",
+    "store_pack_bf16=true",
+    "fuse_inkling_conv=true",
+    "relative_bias_decode=true",
+    "expert_nvfp4_fast=true",
+    "relative_long_fast=true",
+    "fuse_relative_gate=true",
+    "relative_prefill_fast=true",
+    "expert_block_m64n64=true",
+    "expert_fp_lut=true",
+    "expert_compact_tiles=true",
+    "expert_bf16_io=true",
+    "fuse_qkvr_prep=true",
+    "relative_inline_bias=true",
+    "fuse_merge_norm=true",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeFlintStatus {
@@ -58,11 +113,21 @@ pub struct NativeFlintStatus {
     pub recommended_context: u32,
     pub max_context: u32,
     pub estimated_footprint_gb: u32,
+    pub model_kind: NativeModelKind,
+    pub model_id: String,
     pub binary_available: bool,
     pub binary_path: Option<String>,
+    pub flint_binary_available: bool,
+    pub nano_binary_available: bool,
     pub checkpoint_dir: String,
     pub checkpoint_valid: bool,
     pub checkpoint_hint: Option<String>,
+    pub flint_checkpoint_dir: String,
+    pub flint_checkpoint_valid: bool,
+    pub flint_checkpoint_hint: Option<String>,
+    pub inkling_checkpoint_dir: String,
+    pub inkling_checkpoint_valid: bool,
+    pub inkling_checkpoint_hint: Option<String>,
     pub state: NativeFlintState,
     pub context: u32,
     pub endpoint_url: Option<String>,
@@ -76,10 +141,14 @@ pub struct StartNativeFlintParams {
     pub checkpoint_dir: Option<String>,
     #[serde(default)]
     pub context: Option<u32>,
+    #[serde(default)]
+    pub model_kind: Option<NativeModelKind>,
 }
 
 /// Type-erased backend so the HTTP server stays monomorphized once.
 trait DynBackend: Send {
+    fn model_kind(&self) -> NativeModelKind;
+    fn model_id(&self) -> &'static str;
     fn context(&self) -> u32;
     fn complete(
         &mut self,
@@ -89,6 +158,12 @@ trait DynBackend: Send {
 }
 
 impl<T: FlintTokenizer, W: FlintWorker> DynBackend for FlintBackend<T, W> {
+    fn model_kind(&self) -> NativeModelKind {
+        FlintBackend::model_kind(self)
+    }
+    fn model_id(&self) -> &'static str {
+        FlintBackend::model_id(self)
+    }
     fn context(&self) -> u32 {
         FlintBackend::context(self)
     }
@@ -107,6 +182,7 @@ struct RunningServer {
     addr: SocketAddr,
     #[allow(dead_code)]
     api_key: String,
+    model_kind: NativeModelKind,
     context: u32,
     checkpoint_dir: PathBuf,
     cancel: CancellationToken,
@@ -135,6 +211,21 @@ pub struct FlintManager {
     inner: Mutex<Inner>,
 }
 
+fn validate_expected_checkpoint(dir: &Path, expected: NativeModelKind) -> (bool, Option<String>) {
+    match validate_checkpoint_dir(dir) {
+        Ok(cfg) if cfg.model_kind == expected => (true, None),
+        Ok(cfg) => (
+            false,
+            Some(format!(
+                "Checkpoint is {}; choose {} weights or switch model.",
+                cfg.model_kind.model_id(),
+                expected.model_id()
+            )),
+        ),
+        Err(hint) => (false, Some(hint)),
+    }
+}
+
 impl FlintManager {
     pub fn new(data_dir: PathBuf, registry: Arc<HarnessRegistry>) -> Self {
         Self::with_hardware(data_dir, registry, probe_host_hardware())
@@ -159,40 +250,82 @@ impl FlintManager {
 
     pub fn status(&self) -> NativeFlintStatus {
         let assessment = assess_hardware(self.hardware);
-        let saved_dir = self.registry.native_flint_checkpoint_dir();
+        let saved_flint_dir = self.registry.native_flint_checkpoint_dir();
+        let saved_inkling_dir = self.registry.native_inkling_checkpoint_dir();
+        let saved_kind = self
+            .registry
+            .native_model_kind()
+            .unwrap_or(NativeModelKind::Flint);
         let saved_ctx = self.registry.native_flint_context();
-        let binary = resolve_flint_binary(&self.data_dir);
+        let flint_binary = resolve_flint_binary(&self.data_dir);
+        let nano_binary = resolve_nano_binary(&self.data_dir);
 
         let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let (state, active_ctx, active_dir, endpoint_url, error) = match &guard.server {
+        let (state, active_kind, active_ctx, running_dir, endpoint_url, error) = match &guard.server
+        {
             Some(srv) => (
                 NativeFlintState::Running,
+                srv.model_kind,
                 srv.context,
-                srv.checkpoint_dir.clone(),
+                Some(srv.checkpoint_dir.clone()),
                 Some(format!("http://{}/v1/chat/completions", srv.addr)),
                 None,
             ),
             None => (
                 guard.state,
+                saved_kind,
                 clamp_context_for_assessment(&assessment, saved_ctx),
-                discover_default_checkpoint(saved_dir.as_deref(), &self.data_dir),
+                None,
                 None,
                 guard.last_error.clone(),
             ),
         };
         drop(guard);
 
-        let (checkpoint_valid, checkpoint_hint) = match validate_checkpoint_dir(&active_dir) {
-            Ok(_) => (true, None),
-            Err(hint) => (false, Some(hint)),
+        let flint_dir = match (&running_dir, active_kind) {
+            (Some(dir), NativeModelKind::Flint) => dir.clone(),
+            _ => discover_default_checkpoint_for(
+                NativeModelKind::Flint,
+                saved_flint_dir.as_deref(),
+                &self.data_dir,
+            ),
         };
-        let footprint = if active_ctx > 0 {
-            estimated_footprint_gb(active_ctx)
+        let inkling_dir = match (&running_dir, active_kind) {
+            (Some(dir), NativeModelKind::Inkling) => dir.clone(),
+            _ => discover_default_checkpoint_for(
+                NativeModelKind::Inkling,
+                saved_inkling_dir.as_deref(),
+                &self.data_dir,
+            ),
+        };
+
+        let (flint_checkpoint_valid, flint_checkpoint_hint) =
+            validate_expected_checkpoint(&flint_dir, NativeModelKind::Flint);
+        let (inkling_checkpoint_valid, inkling_checkpoint_hint) =
+            validate_expected_checkpoint(&inkling_dir, NativeModelKind::Inkling);
+
+        let (binary, active_dir, checkpoint_valid, checkpoint_hint) = match active_kind {
+            NativeModelKind::Flint => (
+                flint_binary.clone(),
+                flint_dir.clone(),
+                flint_checkpoint_valid,
+                flint_checkpoint_hint.clone(),
+            ),
+            NativeModelKind::Inkling => (
+                nano_binary.clone(),
+                inkling_dir.clone(),
+                inkling_checkpoint_valid,
+                inkling_checkpoint_hint.clone(),
+            ),
+        };
+        let footprint_ctx = if active_ctx > 0 {
+            active_ctx
         } else if assessment.recommended_context > 0 {
-            estimated_footprint_gb(assessment.recommended_context)
+            assessment.recommended_context
         } else {
-            estimated_footprint_gb(8_192)
+            8_192
         };
+        let footprint = estimated_footprint_gb_for(active_kind, footprint_ctx);
 
         NativeFlintStatus {
             platform_supported: assessment.platform_supported,
@@ -203,11 +336,21 @@ impl FlintManager {
             recommended_context: assessment.recommended_context,
             max_context: assessment.max_context,
             estimated_footprint_gb: footprint,
+            model_kind: active_kind,
+            model_id: active_kind.model_id().to_string(),
             binary_available: binary.is_some(),
             binary_path: binary.map(|p| p.display().to_string()),
+            flint_binary_available: flint_binary.is_some(),
+            nano_binary_available: nano_binary.is_some(),
             checkpoint_dir: active_dir.display().to_string(),
             checkpoint_valid,
             checkpoint_hint,
+            flint_checkpoint_dir: flint_dir.display().to_string(),
+            flint_checkpoint_valid,
+            flint_checkpoint_hint,
+            inkling_checkpoint_dir: inkling_dir.display().to_string(),
+            inkling_checkpoint_valid,
+            inkling_checkpoint_hint,
             state,
             context: active_ctx,
             endpoint_url,
@@ -223,6 +366,15 @@ impl FlintManager {
             .unwrap_or(assessment.recommended_context);
         let context = validate_context_for_assessment(&assessment, requested_ctx)?;
 
+        let requested_kind = params
+            .model_kind
+            .or_else(|| self.registry.native_model_kind())
+            .unwrap_or(NativeModelKind::Flint);
+        let saved_dir = match requested_kind {
+            NativeModelKind::Flint => self.registry.native_flint_checkpoint_dir(),
+            NativeModelKind::Inkling => self.registry.native_inkling_checkpoint_dir(),
+        };
+
         let checkpoint_dir = match params
             .checkpoint_dir
             .as_deref()
@@ -230,12 +382,24 @@ impl FlintManager {
             .filter(|s| !s.is_empty())
         {
             Some(dir) => crate::flint_policy::expand_tilde(dir),
-            None => discover_default_checkpoint(
-                self.registry.native_flint_checkpoint_dir().as_deref(),
+            None => discover_default_checkpoint_for(
+                requested_kind,
+                saved_dir.as_deref(),
                 &self.data_dir,
             ),
         };
         let checkpoint_cfg = validate_checkpoint_dir(&checkpoint_dir)?;
+        if let Some(explicit) = params.model_kind
+            && explicit != checkpoint_cfg.model_kind
+        {
+            return Err(format!(
+                "Selected {} runtime, but {} is a {} checkpoint.",
+                explicit.model_id(),
+                checkpoint_dir.display(),
+                checkpoint_cfg.model_kind.model_id()
+            ));
+        }
+        let effective_kind = checkpoint_cfg.model_kind;
         if context > checkpoint_cfg.max_position_embeddings {
             return Err(format!(
                 "Requested context {context} exceeds checkpoint max_position_embeddings ({}).",
@@ -243,12 +407,22 @@ impl FlintManager {
             ));
         }
 
-        let binary = resolve_flint_binary(&self.data_dir).ok_or_else(|| {
-            "Native Flint runtime (`flint`) was not found in this app bundle or PATH.".to_string()
+        let binary = resolve_runtime_binary(effective_kind, &self.data_dir).ok_or_else(|| {
+            match effective_kind {
+                NativeModelKind::Flint => {
+                    "Native Flint runtime (`flint`) was not found in this app bundle or PATH (set FLINT_BINARY).".to_string()
+                }
+                NativeModelKind::Inkling => {
+                    "Native Inkling runtime (`nano`) was not found in this app bundle or beside `flint` (set NANO_BINARY).".to_string()
+                }
+            }
         })?;
 
-        self.registry
-            .set_native_flint_prefs(Some(checkpoint_dir.display().to_string()), Some(context));
+        self.registry.set_native_model_prefs(
+            effective_kind,
+            Some(checkpoint_dir.display().to_string()),
+            Some(context),
+        );
 
         // Stop any existing server before starting a fresh one.
         let previous = {
@@ -272,6 +446,7 @@ impl FlintManager {
                     guard.server = Some(RunningServer {
                         addr,
                         api_key: api_key.clone(),
+                        model_kind: effective_kind,
                         context,
                         checkpoint_dir,
                         cancel,
@@ -359,17 +534,31 @@ struct ChildFlintWorker {
 }
 
 impl ChildFlintWorker {
-    fn spawn(binary: &Path, checkpoint_dir: &Path, context: u32) -> Result<Self, String> {
+    fn spawn(
+        binary: &Path,
+        checkpoint_dir: &Path,
+        context: u32,
+        model_kind: NativeModelKind,
+    ) -> Result<Self, String> {
         let mut cmd = Command::new(binary);
         cmd.arg("session")
             .arg(checkpoint_dir)
             .arg("--context")
-            .arg(context.to_string())
-            .arg("--mlx-attention")
-            .arg("1")
-            .arg("--staged-row-tile")
-            .arg("2")
-            .stdin(Stdio::piped())
+            .arg(context.to_string());
+        match model_kind {
+            NativeModelKind::Flint => {
+                cmd.arg("--mlx-attention")
+                    .arg("1")
+                    .arg("--staged-row-tile")
+                    .arg("2");
+            }
+            NativeModelKind::Inkling => {
+                for knob in INKLING_KNOBS {
+                    cmd.arg("--knob").arg(knob);
+                }
+            }
+        }
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         let mut child = cmd
@@ -463,9 +652,11 @@ async fn start_native_backend(
 
     let worker_binary = binary.clone();
     let worker_dir = checkpoint_dir.clone();
-    let backend: Box<dyn DynBackend> = Box::new(FlintBackend::new(
+    let model_kind = cfg.model_kind;
+    let backend: Box<dyn DynBackend> = Box::new(FlintBackend::new_for_model(
         tokenizer,
-        Box::new(move || ChildFlintWorker::spawn(&worker_binary, &worker_dir, context)),
+        Box::new(move || ChildFlintWorker::spawn(&worker_binary, &worker_dir, context, model_kind)),
+        model_kind,
         context,
         cfg.eos_token_ids,
         cfg.vocab_size,
@@ -632,14 +823,17 @@ async fn handle_connection(
     }
 
     if method == "GET" {
-        let context = backend.lock().unwrap_or_else(|p| p.into_inner()).context();
+        let (model_id, context) = {
+            let guard = backend.lock().unwrap_or_else(|p| p.into_inner());
+            (guard.model_id(), guard.context())
+        };
         let mut s = reader.into_inner();
         return match path {
             "/health" => {
                 write_json(
                     &mut s,
                     200,
-                    &json!({"status": "listening", "model": MODEL_ID, "context_length": context}),
+                    &json!({"status": "listening", "model": model_id, "context_length": context}),
                 )
                 .await
             }
@@ -653,7 +847,7 @@ async fn handle_connection(
                         &json!({
                             "object": "list",
                             "data": [{
-                                "id": MODEL_ID,
+                                "id": model_id,
                                 "object": "model",
                                 "owned_by": "nanoattention",
                                 "context_length": context,
@@ -743,9 +937,12 @@ async fn handle_connection(
         .await;
     };
 
-    let context = backend.lock().unwrap_or_else(|p| p.into_inner()).context();
+    let (model_kind, context) = {
+        let guard = backend.lock().unwrap_or_else(|p| p.into_inner());
+        (guard.model_kind(), guard.context())
+    };
     let max_output = DEFAULT_MAX_OUTPUT_TOKENS.min(context.saturating_sub(1).max(1));
-    let validated = match validate_request(&payload, max_output) {
+    let validated = match validate_request_for_model(&payload, max_output, model_kind) {
         Ok(v) => v,
         Err(err) => {
             return write_json(
@@ -1016,5 +1213,114 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("32 GB"));
+    }
+
+    #[tokio::test]
+    async fn loopback_http_serves_inkling_model_id_and_completion() {
+        struct InklingByteTok;
+        impl FlintTokenizer for InklingByteTok {
+            fn encode(&self, text: &str) -> Result<Vec<u32>, String> {
+                let mut out = Vec::new();
+                let mut rest = text;
+                while !rest.is_empty() {
+                    if let Some(after) = rest.strip_prefix("<|content_model_end_sampling|>") {
+                        out.push(254);
+                        rest = after;
+                    } else {
+                        out.push(rest.as_bytes()[0] as u32);
+                        rest = &rest[1..];
+                    }
+                }
+                Ok(out)
+            }
+            fn decode(&self, ids: &[u32]) -> Result<String, String> {
+                let mut out = String::new();
+                let mut buf = Vec::new();
+                for &id in ids {
+                    if id == 254 {
+                        out.push_str(
+                            &String::from_utf8(std::mem::take(&mut buf))
+                                .map_err(|e| e.to_string())?,
+                        );
+                        out.push_str("<|content_model_end_sampling|>");
+                    } else {
+                        buf.push(id as u8);
+                    }
+                }
+                out.push_str(&String::from_utf8(buf).map_err(|e| e.to_string())?);
+                Ok(out)
+            }
+        }
+        struct InklingMockWorker {
+            cache_len: u32,
+        }
+        impl FlintWorker for InklingMockWorker {
+            fn request(&mut self, req: &WorkerRequest) -> Result<WorkerResponse, String> {
+                if req.reset {
+                    self.cache_len = 0;
+                }
+                let before = self.cache_len;
+                let msg = "<|message_model|><|content_text|>inkling ok<|end_message|>";
+                let mut reply: Vec<u32> = msg.bytes().map(|b| b as u32).collect();
+                reply.push(254);
+                self.cache_len = before + (req.tokens.len() as u32) + (reply.len() as u32);
+                Ok(WorkerResponse {
+                    id: req.id,
+                    eos: true,
+                    tokens: reply.clone(),
+                    cache_before: before,
+                    cache_after: self.cache_len,
+                    prefill_tokens: req.tokens.len(),
+                    decode_forward_tokens: reply.len(),
+                    reused_prefix_tokens: before,
+                    prefill_seconds: 0.01,
+                    decode_seconds: 0.01,
+                    kv_allocated_bytes: 1024,
+                    kv_valid_bytes: 256,
+                    kv_storage: "bf16".into(),
+                })
+            }
+            fn close(&mut self, _graceful: bool) {}
+        }
+
+        let backend: Box<dyn DynBackend> = Box::new(FlintBackend::new_for_model(
+            InklingByteTok,
+            Box::new(|| Ok(InklingMockWorker { cache_len: 0 })),
+            NativeModelKind::Inkling,
+            32_768,
+            vec![254],
+            300,
+        ));
+        let (addr, api_key, cancel, _shared) = spawn_http_server(backend).await.unwrap();
+        let client = reqwest::Client::new();
+
+        let models: Value = client
+            .get(format!("http://{addr}/v1/models"))
+            .bearer_auth(&api_key)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(models["data"][0]["id"], "inkling-2-mini");
+
+        let http_resp = client
+            .post(format!("http://{addr}/v1/chat/completions"))
+            .bearer_auth(&api_key)
+            .json(&json!({
+                "model": "inkling-2-mini",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": false
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(http_resp.status(), 200);
+        let resp: Value = http_resp.json().await.unwrap();
+        assert_eq!(resp["model"], "inkling-2-mini");
+        assert_eq!(resp["choices"][0]["message"]["content"], "inkling ok");
+
+        cancel.cancel();
     }
 }

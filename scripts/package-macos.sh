@@ -110,28 +110,36 @@ else
   rm -rf "$CODEDB_TMP"
 fi
 echo "bundled $("$APP/Contents/Resources/bin/codedb" --version | head -1)"
-# flint (justrach/nanoattention) ships inside Apple Silicon macOS bundles only
-# (Contents/Resources/bin/flint) for managed Native Flint local inference.
-# FLINT_BINARY overrides; otherwise the latest nanoattention release, checked
-# against its checksums.sha256.
+# flint and nano (justrach/nanoattention) ship inside Apple Silicon macOS bundles
+# only (Contents/Resources/bin/{flint,nano}) for managed local inference.
+# FLINT_BINARY / NANO_BINARY override; otherwise the latest nanoattention release,
+# checked against its checksums.sha256.
 if [[ "$ARCH" == "arm64" ]]; then
-  if [[ -n "${FLINT_BINARY:-}" ]]; then
-    [[ -x "$FLINT_BINARY" ]] || { echo "FLINT_BINARY is not executable" >&2; exit 1; }
-    install -m 755 "$FLINT_BINARY" "$APP/Contents/Resources/bin/flint"
-  else
-    FLINT_ASSET="flint-aarch64-macos.tar.gz"
-    FLINT_URL="${FLINT_RELEASES_URL:-https://github.com/justrach/nanoattention/releases/latest/download}"
-    FLINT_TMP="$(mktemp -d)"
-    curl -fsSL "$FLINT_URL/$FLINT_ASSET" -o "$FLINT_TMP/$FLINT_ASSET"
-    curl -fsSL "$FLINT_URL/checksums.sha256" -o "$FLINT_TMP/checksums.sha256"
-    (cd "$FLINT_TMP" && grep " $FLINT_ASSET\$" checksums.sha256 | shasum -a 256 -c -)
-    tar -xzf "$FLINT_TMP/$FLINT_ASSET" -C "$FLINT_TMP"
-    FLINT_SRC="$FLINT_TMP/flint-aarch64-macos/flint"
-    [[ -f "$FLINT_SRC" ]] || FLINT_SRC="$FLINT_TMP/flint"
-    install -m 755 "$FLINT_SRC" "$APP/Contents/Resources/bin/flint"
-    rm -rf "$FLINT_TMP"
-  fi
+  FLINT_URL="${FLINT_RELEASES_URL:-https://github.com/justrach/nanoattention/releases/latest/download}"
+  install_nanoattention_bin() {
+    local name="$1"
+    local override="$2"
+    if [[ -n "$override" ]]; then
+      [[ -x "$override" ]] || { echo "$name override is not executable: $override" >&2; exit 1; }
+      install -m 755 "$override" "$APP/Contents/Resources/bin/$name"
+      return
+    fi
+    local asset="${name}-aarch64-macos.tar.gz"
+    local tmp
+    tmp="$(mktemp -d)"
+    curl -fsSL "$FLINT_URL/$asset" -o "$tmp/$asset"
+    curl -fsSL "$FLINT_URL/checksums.sha256" -o "$tmp/checksums.sha256"
+    (cd "$tmp" && grep " $asset\$" checksums.sha256 | shasum -a 256 -c -)
+    tar -xzf "$tmp/$asset" -C "$tmp"
+    local src="$tmp/${name}-aarch64-macos/${name}"
+    [[ -f "$src" ]] || src="$tmp/${name}"
+    install -m 755 "$src" "$APP/Contents/Resources/bin/$name"
+    rm -rf "$tmp"
+  }
+  install_nanoattention_bin flint "${FLINT_BINARY:-}"
   echo "bundled flint ($APP/Contents/Resources/bin/flint)"
+  install_nanoattention_bin nano "${NANO_BINARY:-}"
+  echo "bundled nano ($APP/Contents/Resources/bin/nano)"
 fi
 
 # Guard against host-stamped macOS deployment targets (e.g. building on a
@@ -166,6 +174,9 @@ check_macho_minos "$APP/Contents/Resources/bin/graff" "15.0"
 check_macho_minos "$APP/Contents/Resources/bin/codedb" "15.0"
 if [[ -f "$APP/Contents/Resources/bin/flint" ]]; then
   check_macho_minos "$APP/Contents/Resources/bin/flint" "15.0"
+fi
+if [[ -f "$APP/Contents/Resources/bin/nano" ]]; then
+  check_macho_minos "$APP/Contents/Resources/bin/nano" "15.0"
 fi
 
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
@@ -214,6 +225,11 @@ if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
     codesign --verify --strict "$APP/Contents/Resources/bin/flint" 2>/dev/null &&
       codesign -dv "$APP/Contents/Resources/bin/flint" 2>&1 | grep -q "Authority=Developer ID Application" ||
       codesign --force --options runtime --timestamp ${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"} --sign "$CODESIGN_IDENTITY" "$APP/Contents/Resources/bin/flint"
+  fi
+  if [[ -f "$APP/Contents/Resources/bin/nano" ]]; then
+    codesign --verify --strict "$APP/Contents/Resources/bin/nano" 2>/dev/null &&
+      codesign -dv "$APP/Contents/Resources/bin/nano" 2>&1 | grep -q "Authority=Developer ID Application" ||
+      codesign --force --options runtime --timestamp ${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"} --sign "$CODESIGN_IDENTITY" "$APP/Contents/Resources/bin/nano"
   fi
   # The entitlements let dictation reach the microphone, and dropped or
   # picked files from any folder stay readable, under the hardened runtime

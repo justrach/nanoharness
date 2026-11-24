@@ -41,27 +41,82 @@ pub struct FlintRamAssessment {
     pub max_context: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeModelKind {
+    #[default]
+    Flint,
+    Inkling,
+}
+
+impl NativeModelKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Flint => "flint",
+            Self::Inkling => "inkling",
+        }
+    }
+
+    pub const fn model_id(self) -> &'static str {
+        match self {
+            Self::Flint => "flint",
+            Self::Inkling => "inkling-2-mini",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "flint" => Some(Self::Flint),
+            "inkling" | "inkling-2-mini" | "inkling2_loop" => Some(Self::Inkling),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointConfig {
+    pub model_kind: NativeModelKind,
     pub vocab_size: usize,
     pub max_position_embeddings: u32,
     pub eos_token_ids: Vec<u32>,
 }
 
 /// Estimated Apple Silicon unified memory footprint (GiB) for Flint INT4
-/// (~22.6 GiB resident weights + FP32 KV cache + runtime buffers).
-pub fn estimated_footprint_gb(context: u32) -> u32 {
-    if context <= 8_192 {
-        25
-    } else if context <= 16_384 {
-        27
-    } else if context <= 32_768 {
-        31
-    } else if context <= 65_536 {
-        37
-    } else {
-        49
+/// (~22.6 GiB resident weights + FP32 KV cache + runtime buffers) or
+/// Inkling 2 Mini (~19.5 GiB NVFP4/MXFP8/BF16 weights + ring/KV buffers).
+pub fn estimated_footprint_gb_for(kind: NativeModelKind, context: u32) -> u32 {
+    match kind {
+        NativeModelKind::Flint => {
+            if context <= 8_192 {
+                25
+            } else if context <= 16_384 {
+                27
+            } else if context <= 32_768 {
+                31
+            } else if context <= 65_536 {
+                37
+            } else {
+                49
+            }
+        }
+        NativeModelKind::Inkling => {
+            if context <= 8_192 {
+                24
+            } else if context <= 16_384 {
+                25
+            } else if context <= 32_768 {
+                27
+            } else if context <= 65_536 {
+                31
+            } else {
+                39
+            }
+        }
     }
+}
+
+pub fn estimated_footprint_gb(context: u32) -> u32 {
+    estimated_footprint_gb_for(NativeModelKind::Flint, context)
 }
 
 pub fn round_ram_gb(bytes: u64) -> u32 {
@@ -224,34 +279,14 @@ pub fn expand_tilde(raw: &str) -> PathBuf {
     PathBuf::from(trimmed)
 }
 
-pub fn validate_checkpoint_dir(dir: &Path) -> Result<CheckpointConfig, String> {
-    if !dir.is_dir() {
-        return Err(format!("Checkpoint folder not found: {}", dir.display()));
-    }
-    let config_path = dir.join("config.json");
-    let config_raw = std::fs::read_to_string(&config_path)
-        .map_err(|_| format!("Missing config.json in {}", dir.display()))?;
-    let config: serde_json::Value = serde_json::from_str(&config_raw)
-        .map_err(|e| format!("Invalid config.json in {}: {e}", dir.display()))?;
-    let vocab_size = config
-        .get("vocab_size")
-        .and_then(|v| v.as_u64())
-        .and_then(|v| usize::try_from(v).ok())
-        .filter(|&v| v > 0)
-        .ok_or_else(|| "config.json is missing a positive vocab_size".to_string())?;
-    let max_position_embeddings = config
-        .get("max_position_embeddings")
-        .and_then(|v| v.as_u64())
-        .and_then(|v| u32::try_from(v).ok())
-        .filter(|&v| v > 0)
-        .ok_or_else(|| "config.json is missing a positive max_position_embeddings".to_string())?;
-    let eos_token_ids = match config.get("eos_token_id") {
+fn parse_eos_token_ids(config: &serde_json::Value) -> Result<Vec<u32>, String> {
+    match config.get("eos_token_id") {
         Some(serde_json::Value::Number(n)) => {
             let id = n
                 .as_u64()
                 .and_then(|v| u32::try_from(v).ok())
                 .ok_or_else(|| "config.json has an invalid eos_token_id".to_string())?;
-            vec![id]
+            Ok(vec![id])
         }
         Some(serde_json::Value::Array(arr)) => {
             let mut ids = Vec::with_capacity(arr.len());
@@ -265,10 +300,67 @@ pub fn validate_checkpoint_dir(dir: &Path) -> Result<CheckpointConfig, String> {
             if ids.is_empty() {
                 return Err("config.json has an empty eos_token_id list".into());
             }
-            ids
+            Ok(ids)
         }
-        _ => return Err("config.json is missing eos_token_id".into()),
+        _ => Err("config.json is missing eos_token_id".into()),
+    }
+}
+
+pub fn validate_checkpoint_dir(dir: &Path) -> Result<CheckpointConfig, String> {
+    if !dir.is_dir() {
+        return Err(format!("Checkpoint folder not found: {}", dir.display()));
+    }
+    let config_path = dir.join("config.json");
+    let config_raw = std::fs::read_to_string(&config_path)
+        .map_err(|_| format!("Missing config.json in {}", dir.display()))?;
+    let config: serde_json::Value = serde_json::from_str(&config_raw)
+        .map_err(|e| format!("Invalid config.json in {}: {e}", dir.display()))?;
+    let is_inkling =
+        config.get("model_type").and_then(serde_json::Value::as_str) == Some("inkling2_loop");
+    let (model_kind, vocab_size, max_position_embeddings) = if is_inkling {
+        let text = config
+            .get("text_config")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| "Inkling config.json is missing text_config".to_string())?;
+        let vocab_size = text
+            .get("unpadded_vocab_size")
+            .or_else(|| text.get("vocab_size"))
+            .and_then(|v| v.as_u64())
+            .and_then(|v| usize::try_from(v).ok())
+            .filter(|&v| v > 0)
+            .ok_or_else(|| "Inkling text_config is missing a positive vocab_size".to_string())?;
+        let max_position_embeddings = text
+            .get("model_max_length")
+            .or_else(|| text.get("max_position_embeddings"))
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|&v| v > 0)
+            .ok_or_else(|| {
+                "Inkling text_config is missing a positive model_max_length".to_string()
+            })?;
+        (
+            NativeModelKind::Inkling,
+            vocab_size,
+            max_position_embeddings,
+        )
+    } else {
+        let vocab_size = config
+            .get("vocab_size")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| usize::try_from(v).ok())
+            .filter(|&v| v > 0)
+            .ok_or_else(|| "config.json is missing a positive vocab_size".to_string())?;
+        let max_position_embeddings = config
+            .get("max_position_embeddings")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|&v| v > 0)
+            .ok_or_else(|| {
+                "config.json is missing a positive max_position_embeddings".to_string()
+            })?;
+        (NativeModelKind::Flint, vocab_size, max_position_embeddings)
     };
+    let eos_token_ids = parse_eos_token_ids(&config)?;
     if !dir.join("tokenizer.json").is_file() {
         return Err(format!("Missing tokenizer.json in {}", dir.display()));
     }
@@ -289,29 +381,67 @@ pub fn validate_checkpoint_dir(dir: &Path) -> Result<CheckpointConfig, String> {
         ));
     }
     Ok(CheckpointConfig {
+        model_kind,
         vocab_size,
         max_position_embeddings,
         eos_token_ids,
     })
 }
 
-pub fn discover_default_checkpoint(saved: Option<&str>, data_dir: &Path) -> PathBuf {
+fn first_valid_candidate(
+    kind: NativeModelKind,
+    candidates: Vec<PathBuf>,
+    fallback: PathBuf,
+) -> PathBuf {
+    for candidate in candidates {
+        if validate_checkpoint_dir(&candidate).is_ok_and(|cfg| cfg.model_kind == kind) {
+            return candidate;
+        }
+    }
+    fallback
+}
+
+pub fn discover_default_checkpoint_for(
+    kind: NativeModelKind,
+    saved: Option<&str>,
+    data_dir: &Path,
+) -> PathBuf {
     if let Some(saved) = saved.map(str::trim).filter(|s| !s.is_empty()) {
         return expand_tilde(saved);
     }
     let mut candidates = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        candidates.push(home.join("newflint").join("models").join("flint-int4"));
-        candidates.push(home.join(".harness").join("models").join("flint-int4"));
-    }
-    candidates.push(data_dir.join("models").join("flint-int4"));
-    for candidate in &candidates {
-        if validate_checkpoint_dir(candidate).is_ok() {
-            return candidate.clone();
+    match kind {
+        NativeModelKind::Flint => {
+            if let Some(home) = std::env::var_os("HOME") {
+                let home = PathBuf::from(home);
+                candidates.push(home.join("newflint").join("models").join("flint-int4"));
+                candidates.push(home.join(".harness").join("models").join("flint-int4"));
+            }
+            let fallback = data_dir.join("models").join("flint-int4");
+            candidates.push(fallback.clone());
+            first_valid_candidate(kind, candidates, fallback)
+        }
+        NativeModelKind::Inkling => {
+            if let Some(home) = std::env::var_os("HOME") {
+                let home = PathBuf::from(home);
+                candidates.push(home.join(".harness").join("models").join("inkling-2-mini"));
+                candidates.push(
+                    home.join(".harness")
+                        .join("models")
+                        .join("thinkingmachines--Inkling-2-Mini"),
+                );
+                candidates.push(home.join("models").join("inkling-2-mini"));
+                candidates.push(home.join("models").join("thinkingmachines--Inkling-2-Mini"));
+            }
+            let fallback = data_dir.join("models").join("inkling-2-mini");
+            candidates.push(fallback.clone());
+            first_valid_candidate(kind, candidates, fallback)
         }
     }
-    data_dir.join("models").join("flint-int4")
+}
+
+pub fn discover_default_checkpoint(saved: Option<&str>, data_dir: &Path) -> PathBuf {
+    discover_default_checkpoint_for(NativeModelKind::Flint, saved, data_dir)
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -331,6 +461,30 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
+fn probe_bundled_or_managed_binary(bin_name: &str, data_dir: &Path) -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(macos_dir) = exe.parent()
+    {
+        let bundled = macos_dir
+            .parent()
+            .map(|contents| contents.join("Resources").join("bin").join(bin_name));
+        if let Some(path) = bundled
+            && is_executable(&path)
+        {
+            return Some(path);
+        }
+        let sibling = macos_dir.join(bin_name);
+        if is_executable(&sibling) {
+            return Some(sibling);
+        }
+    }
+    let managed = data_dir.join("bin").join(bin_name);
+    if is_executable(&managed) {
+        return Some(managed);
+    }
+    None
+}
+
 pub fn resolve_flint_binary(data_dir: &Path) -> Option<PathBuf> {
     if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         return None;
@@ -341,25 +495,8 @@ pub fn resolve_flint_binary(data_dir: &Path) -> Option<PathBuf> {
             return Some(p);
         }
     }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(macos_dir) = exe.parent()
-    {
-        let bundled = macos_dir
-            .parent()
-            .map(|contents| contents.join("Resources").join("bin").join("flint"));
-        if let Some(path) = bundled
-            && is_executable(&path)
-        {
-            return Some(path);
-        }
-        let sibling = macos_dir.join("flint");
-        if is_executable(&sibling) {
-            return Some(sibling);
-        }
-    }
-    let managed = data_dir.join("bin").join("flint");
-    if is_executable(&managed) {
-        return Some(managed);
+    if let Some(found) = probe_bundled_or_managed_binary("flint", data_dir) {
+        return Some(found);
     }
     if let Some(paths) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&paths) {
@@ -370,6 +507,65 @@ pub fn resolve_flint_binary(data_dir: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Pure resolver for `nano` (excluding `PATH` lookup so `/usr/bin/nano`, the
+/// macOS text editor, is never picked). Checks explicit override, app bundle/managed
+/// bin dirs, and sibling of a resolved `flint` binary.
+fn resolve_nano_in(
+    explicit: Option<&Path>,
+    exe_dir: Option<&Path>,
+    data_dir: &Path,
+    flint_binary: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(p) = explicit
+        && is_executable(p)
+    {
+        return Some(p.to_path_buf());
+    }
+    if let Some(macos_dir) = exe_dir {
+        let bundled = macos_dir
+            .parent()
+            .map(|contents| contents.join("Resources").join("bin").join("nano"));
+        if let Some(path) = bundled
+            && is_executable(&path)
+        {
+            return Some(path);
+        }
+        let sibling = macos_dir.join("nano");
+        if is_executable(&sibling) {
+            return Some(sibling);
+        }
+    }
+    let managed = data_dir.join("bin").join("nano");
+    if is_executable(&managed) {
+        return Some(managed);
+    }
+    if let Some(flint_dir) = flint_binary.and_then(Path::parent) {
+        let sibling = flint_dir.join("nano");
+        if is_executable(&sibling) {
+            return Some(sibling);
+        }
+    }
+    None
+}
+
+pub fn resolve_nano_binary(data_dir: &Path) -> Option<PathBuf> {
+    if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        return None;
+    }
+    let explicit = std::env::var_os("NANO_BINARY").map(PathBuf::from);
+    let exe = std::env::current_exe().ok();
+    let exe_dir = exe.as_deref().and_then(Path::parent);
+    let flint_bin = resolve_flint_binary(data_dir);
+    resolve_nano_in(explicit.as_deref(), exe_dir, data_dir, flint_bin.as_deref())
+}
+
+pub fn resolve_runtime_binary(kind: NativeModelKind, data_dir: &Path) -> Option<PathBuf> {
+    match kind {
+        NativeModelKind::Flint => resolve_flint_binary(data_dir),
+        NativeModelKind::Inkling => resolve_nano_binary(data_dir),
+    }
 }
 
 #[cfg(test)]
@@ -462,8 +658,82 @@ mod tests {
 
         std::fs::write(dir.path().join("model-00001.safetensors"), b"").unwrap();
         let cfg = validate_checkpoint_dir(dir.path()).unwrap();
+        assert_eq!(cfg.model_kind, NativeModelKind::Flint);
         assert_eq!(cfg.vocab_size, 150_144);
         assert_eq!(cfg.max_position_embeddings, 131_072);
         assert_eq!(cfg.eos_token_ids, vec![150_001, 150_003]);
+    }
+
+    #[test]
+    fn inkling_validation_and_footprint_tables_match_spec() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"model_type":"inkling2_loop","eos_token_id":200006,"text_config":{"unpadded_vocab_size":200058,"vocab_size":201024,"model_max_length":1048576}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("tokenizer.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("model-00001-of-00001.safetensors"), b"").unwrap();
+
+        let cfg = validate_checkpoint_dir(dir.path()).unwrap();
+        assert_eq!(cfg.model_kind, NativeModelKind::Inkling);
+        assert_eq!(cfg.vocab_size, 200_058);
+        assert_eq!(cfg.max_position_embeddings, 1_048_576);
+        assert_eq!(cfg.eos_token_ids, vec![200_006]);
+
+        assert_eq!(
+            estimated_footprint_gb_for(NativeModelKind::Flint, 32_768),
+            31
+        );
+        assert_eq!(
+            estimated_footprint_gb_for(NativeModelKind::Inkling, 8_192),
+            24
+        );
+        assert_eq!(
+            estimated_footprint_gb_for(NativeModelKind::Inkling, 16_384),
+            25
+        );
+        assert_eq!(
+            estimated_footprint_gb_for(NativeModelKind::Inkling, 32_768),
+            27
+        );
+        assert_eq!(
+            estimated_footprint_gb_for(NativeModelKind::Inkling, 65_536),
+            31
+        );
+        assert_eq!(
+            estimated_footprint_gb_for(NativeModelKind::Inkling, 131_072),
+            39
+        );
+    }
+
+    #[test]
+    fn resolve_nano_skips_generic_path_and_prefers_bundle_or_flint_sibling() {
+        let root = tempfile::tempdir().unwrap();
+        let data_dir = root.path().join("data");
+        // With nothing bundled/managed, resolve_nano_in returns None even though
+        // /usr/bin/nano exists on macOS PATH.
+        assert_eq!(resolve_nano_in(None, None, &data_dir, None), None);
+
+        // Sibling next to a resolved `flint` binary is discovered automatically.
+        let flint_dir = root.path().join("nanoattention-bin");
+        std::fs::create_dir_all(&flint_dir).unwrap();
+        let flint_bin = flint_dir.join("flint");
+        let nano_bin = flint_dir.join("nano");
+        std::fs::write(&flint_bin, b"#!/bin/sh\n").unwrap();
+        std::fs::write(&nano_bin, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for p in [&flint_bin, &nano_bin] {
+                let mut perms = std::fs::metadata(p).unwrap().permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(p, perms).unwrap();
+            }
+        }
+        assert_eq!(
+            resolve_nano_in(None, None, &data_dir, Some(&flint_bin)),
+            Some(nano_bin)
+        );
     }
 }
