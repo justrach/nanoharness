@@ -652,55 +652,10 @@ fn resolveOpenRoute(gpa: Allocator, arena: Allocator, io: Io, env: *const Map, o
     return try std.fmt.allocPrint(arena, "harness://open/folder?path={s}", .{enc});
 }
 
-fn macAppBundleAncestors(exe_path: []const u8) ?[]const u8 {
-    var cur: ?[]const u8 = std.fs.path.dirname(exe_path);
-    while (cur) |dir| {
-        if (std.mem.endsWith(u8, dir, ".app")) return dir;
-        cur = std.fs.path.dirname(dir);
-    }
-    return null;
-}
-
 fn macBundleExists(io: Io, arena: Allocator, bundle_path: []const u8) bool {
     const nano = std.fs.path.join(arena, &.{ bundle_path, "Contents", "MacOS", "harness-nano" }) catch return false;
     _ = Io.Dir.cwd().statFile(io, nano, .{}) catch return false;
     return true;
-}
-
-fn backgroundMacSetup(gpa: Allocator, io: Io, bundle: []const u8, self_exe: []const u8, home: []const u8) void {
-    const bundled_graff = std.fs.path.join(gpa, &.{ bundle, "Contents", "Resources", "bin", "graff" }) catch return;
-    defer gpa.free(bundled_graff);
-    if (Io.Dir.cwd().statFile(io, bundled_graff, .{})) |_| {
-        const bin_dir = std.fs.path.join(gpa, &.{ home, ".harness", "bin" }) catch return;
-        defer gpa.free(bin_dir);
-        const managed_graff = std.fs.path.join(gpa, &.{ bin_dir, "graff" }) catch return;
-        defer gpa.free(managed_graff);
-        if (Io.Dir.cwd().statFile(io, managed_graff, .{})) |_| {} else |_| {
-            Io.Dir.cwd().createDirPath(io, bin_dir) catch {};
-            if (Io.Dir.cwd().readFileAlloc(io, bundled_graff, gpa, .limited(256 << 20))) |bytes| {
-                defer gpa.free(bytes);
-                const tmp_graff = std.fs.path.join(gpa, &.{ bin_dir, ".graff.tmp" }) catch return;
-                defer gpa.free(tmp_graff);
-                if (Io.Dir.cwd().createFile(io, tmp_graff, .{ .truncate = true, .permissions = .fromMode(0o755) })) |f| {
-                    f.writeStreamingAll(io, bytes) catch {};
-                    f.close(io);
-                    Io.Dir.rename(std.Io.Dir.cwd(), tmp_graff, std.Io.Dir.cwd(), managed_graff, io) catch {};
-                } else |_| {}
-            } else |_| {}
-        }
-    } else |_| {}
-
-    const local_bin = std.fs.path.join(gpa, &.{ home, ".local", "bin" }) catch return;
-    defer gpa.free(local_bin);
-    if (Io.Dir.cwd().openDir(io, local_bin, .{})) |d| {
-        var dir = d;
-        dir.close(io);
-        const shim = std.fs.path.join(gpa, &.{ local_bin, "harness" }) catch return;
-        defer gpa.free(shim);
-        if (Io.Dir.cwd().statFile(io, shim, .{})) |_| {} else |_| {
-            Io.Dir.cwd().symLink(io, self_exe, shim, .{}) catch {};
-        }
-    } else |_| {}
 }
 
 fn runHeaded(
@@ -723,11 +678,12 @@ fn runHeaded(
     if (comptime builtin.os.tag == .macos) {
         const no_handoff = if (env.get("HARNESS_NO_BUNDLE_HANDOFF")) |v| v.len > 0 else false;
         const explicit_nano = if (env.get("HARNESS_NANO_BIN")) |v| std.mem.trim(u8, v, " \t\r\n").len > 0 else false;
-        const self_bundle = if (self_exe) |p| macAppBundleAncestors(p) else null;
-
         if (!no_handoff and !explicit_nano) {
-            var handoff_bundle: ?[]const u8 = if (self_bundle != null and from_term) self_bundle else null;
-            if (handoff_bundle == null and self_bundle == null and from_term) {
+            // The bundle launches harness-nano directly. A CLI invocation,
+            // including from a script without a TTY, must reopen that same app
+            // through LaunchServices rather than spawning a second Dock app.
+            var handoff_bundle = if (self_exe) |p| @import("mac_bundle.zig").ancestor(p) else null;
+            if (handoff_bundle == null) {
                 if (macBundleExists(io, arena, "/Applications/Harness.app")) {
                     handoff_bundle = "/Applications/Harness.app";
                 } else if (env.get("HOME")) |home| {
@@ -749,15 +705,10 @@ fn runHeaded(
                     .stderr = .inherit,
                 });
                 const term = try open_child.wait(io);
-                if (term == .exited and term.exited == 0) return 0;
-            }
-        }
-
-        if (self_bundle) |bundle| {
-            if (self_exe) |exe| {
-                if (env.get("HOME")) |home| {
-                    if (home.len > 0) backgroundMacSetup(gpa, io, bundle, exe, home);
-                }
+                return switch (term) {
+                    .exited => |code| code,
+                    else => 1,
+                };
             }
         }
     }

@@ -7,7 +7,7 @@
     <key>CFBundleDisplayName</key>
     <string>Harness Dev</string>
     <key>CFBundleExecutable</key>
-    <string>harness</string>
+    <string>harness-nano</string>
     <key>CFBundleIconFile</key>
     <string>harness.icns</string>
     <!-- Its own identifier, not the release's harness.codegraff.app: macOS

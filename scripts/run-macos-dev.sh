@@ -17,7 +17,7 @@ CONTENTS="$APP/Contents"
 DATA_DIR="${HARNESS_DEV_DATA_DIR:-$DEV_ROOT/data}"
 IPC_PORT="${HARNESS_DEV_IPC_PORT:-49777}"
 
-if pgrep -f -x "$CONTENTS/MacOS/harness" >/dev/null 2>&1; then
+if pgrep -f -x "$CONTENTS/MacOS/harness-nano" >/dev/null 2>&1; then
   echo "Harness is already running. Quit it before rebuilding the signed bundle." >&2
   exit 1
 fi
@@ -81,7 +81,7 @@ LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchSe
 "$LSREGISTER" -f "$APP"
 
 echo "running Harness Dev (bundle $BUNDLE_ID, data $DATA_DIR, IPC $IPC_PORT)" >&2
-# LaunchServices must own the process. Launching Contents/MacOS/harness directly
+# LaunchServices must own the process. Launching Contents/MacOS/harness-nano directly
 # makes TCC attribute Screen Recording to the terminal (Warp, Terminal, etc.).
 # -W keeps the script attached until the app exits. Runtime logs remain in the
 # isolated data directory (`target/macos-dev/data/logs/harness-headed.log`).
