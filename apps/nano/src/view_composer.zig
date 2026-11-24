@@ -17,6 +17,13 @@ const transcript_view = @import("view_transcript.zig");
 const footer_view = @import("view_session_footer.zig");
 const App = @import("app.zig").App;
 
+fn completionWashes(ctx: ?*anyopaque, allocator: std.mem.Allocator, text: []const u8, changed: bool, undo_restored: bool) []const ui.TextFieldRangeWash {
+    const a: *App = @ptrCast(@alignCast(ctx orelse return &.{}));
+    const completion = @import("composer_completion.zig");
+    completion.afterEdit(a, changed, undo_restored);
+    return completion.rangeWashes(a, allocator, text);
+}
+
 test {
     _ = @import("tests_composer_completion.zig");
 }
@@ -229,7 +236,8 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, corn
             ui.key(c, "composer-text-inner");
             const base = ui.div(c).column().grow().w(0);
             // Preserve GPUI's expanded baseline and bare-field padding.
-            const inner = if (shape == .compact) base else base.px(if (w < 160) 10 else 16).pt(16 - 1.5).pb(4 + 1.5 - 4);
+            const text_gutter: f32 = if (w < 160) 10 else 16;
+            const inner = if (shape == .compact) base else base.px(text_gutter - ui.TextFieldRangeWash.side_padding).pt(16 - 1.5).pb(4 + 1.5 - 4);
             defer inner.end();
             input(c, a, k, shape);
         }
@@ -347,7 +355,7 @@ fn noticeBanner(c: *ui.Context, a: *App, k: theme.Colors, w: f32, has_gap: bool)
 
 fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
     // Compact, GPUI's line sits half a point lower than nano's centred one.
-    const box = if (shape == .compact) ui.div(c).row().wFull().px(8).pt(1).itemsCenter() else ui.div(c).column().wFull();
+    const box = if (shape == .compact) ui.div(c).row().wFull().px(8 - ui.TextFieldRangeWash.side_padding).pt(1).itemsCenter() else ui.div(c).column().wFull();
     defer box.end();
     const placeholder = if (a.engine.state != .connected)
         @import("engine_start.zig").waiting(a)
@@ -381,6 +389,8 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
         .max_lines = if (shape == .compact) 1 else max_lines,
         .caret = message_caret,
         .caret_color = k.accent,
+        .range_wash_context = a,
+        .range_wash_provider = completionWashes,
     });
     c.node(field_index).style.scroll_bar = false;
     _ = c.scrollbars.remove(field_id);
@@ -401,7 +411,6 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
     // "Send messages with" (Settings › Shortcuts): Enter sends, or starts a
     // new line and ⌘↩ sends (`composerSendBehavior`).
     a.view.composer_caret = r.caret;
-    @import("composer_completion.zig").afterEdit(a, c, r.changed);
     const on_enter = @import("view_settings_shortcuts.zig").sendsOnEnter(a);
     if (r.submitted) {
         // Shift-Return is always a newline. The field owns this translation,

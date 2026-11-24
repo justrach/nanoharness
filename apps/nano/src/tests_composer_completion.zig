@@ -87,6 +87,81 @@ test "completion slash menu inactive rows retain the theme surface in both schem
     try testing.expect(valid);
 }
 
+test "completion paints only explicitly accepted command chips across undo and redo" {
+    const completion = @import("composer_completion.zig");
+    for ([_]bool{ false, true }) |dark| {
+        var h: Harness = undefined;
+        try h.initTheme(dark);
+        defer h.deinit();
+        h.t.resize(490, 540);
+        h.draft("Synthetic prompt\n/goal", "Synthetic prompt\n/goal".len);
+        const plain = try completion.prompt(&h.a);
+        if (plain) |value| testing.allocator.free(value);
+        try testing.expect(plain == null);
+        try expectCommandChip(&h, dark, false);
+        try testing.expect(h.t.hasText("Synthetic goal command"));
+        _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
+        h.draw();
+        try testing.expect(std.mem.startsWith(u8, h.a.composer.text(), "Synthetic prompt\n/goal"));
+        const invocation = (try completion.prompt(&h.a)) orelse return error.MissingSelectedCommand;
+        defer testing.allocator.free(invocation);
+        try testing.expect(std.mem.indexOf(u8, invocation, "harness-invoke:") != null);
+        if (std.c.getenv("NANO_COMPLETION_CHIP_SNAP_DIR")) |path| {
+            var buf: [1024]u8 = undefined;
+            try h.t.screenshot(try std.fmt.bufPrint(&buf, "{s}/accepted-{s}.png", .{ std.mem.span(path), if (dark) "dark" else "light" }));
+        }
+        try expectCommandChip(&h, dark, true);
+
+        _ = h.t.shortcut(.{ .key = 'z', .cmd = true });
+        h.draw();
+        try expectCommandChip(&h, dark, false);
+        _ = h.t.shortcut(.{ .key = 'z', .cmd = true, .shift = true });
+        h.draw();
+        try expectCommandChip(&h, dark, true);
+
+        const command_start = "Synthetic prompt\n".len;
+        const command_end = h.a.composer.text().len;
+        h.t.textOps(&.{
+            .{ .select = .{ .anchor = command_start, .caret = command_end } },
+            .{ .insert = "/goal " },
+        });
+        h.draw();
+        const pasted = try completion.prompt(&h.a);
+        if (pasted) |value| testing.allocator.free(value);
+        try testing.expect(pasted == null);
+        try expectCommandChip(&h, dark, false);
+    }
+}
+
+fn expectCommandChip(h: *Harness, dark: bool, expected: bool) !void {
+    const field = h.t.ctx.rects.get(h.a.view.composer_id) orelse return error.MissingComposerField;
+    const accent_wash = @import("theme.zig").colors(dark).accent_wash;
+    var chips: usize = 0;
+    var chip: ?ui.Rect = null;
+    for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (node.style.radius != 6 or !std.meta.eql(node.style.background, accent_wash)) continue;
+        if (r.x < field.x or r.x + r.w > field.x + field.w or r.y < field.y or r.y + r.h > field.y + field.h) continue;
+        chips += 1;
+        chip = r;
+    }
+    try testing.expectEqual(@as(usize, @intFromBool(expected)), chips);
+    if (chip) |r| {
+        try testing.expect(r.y >= field.y + 20);
+        for (h.t.ctx.nodes.items) |node| {
+            if (node.content != .text or !std.mem.eql(u8, node.content.text.str, "/goal")) continue;
+            if (node.rect.y < field.y or node.rect.y >= field.y + field.h) continue;
+            const width = h.t.ctx.text.width("/goal", node.content.text.style);
+            // The wash must surround the label, especially at a line start.
+            try testing.expect(node.rect.x - r.x >= 5.5);
+            try testing.expect(r.x + r.w - (node.rect.x + width) >= 5.5);
+            try testing.expect(r.h >= 21 and r.h <= 22.75);
+            return;
+        }
+        return error.MissingCommandLabel;
+    }
+}
+
 test "completion restores original issue575 Tab path without deleting adjacent prompt" {
     var h: Harness = undefined;
     try h.init();

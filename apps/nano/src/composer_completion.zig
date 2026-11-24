@@ -342,6 +342,8 @@ pub fn accept(a: *App, c: *ui.Context, tok: rules.Token, entry: Entry) void {
         if (display) |v| a.gpa.free(v);
         if (link) |v| a.gpa.free(v);
     };
+    var undo_before = captureUndoState(a, text) catch null;
+    defer if (undo_before) |blob| a.gpa.free(blob);
     // The pinned toolkit intentionally omits >1KiB snapshots. Preserve this
     // formerly shipped one-step completion transaction without changing its
     // general editor history or copying/truncating a long draft.
@@ -387,10 +389,11 @@ pub fn accept(a: *App, c: *ui.Context, tok: rules.Token, entry: Entry) void {
         keep = true;
     }
     s.dismissed = true;
-    if (capture(a, a.composer.text()) catch null) |blob| {
-        if (s.undo_refs.items.len >= 12) a.gpa.free(s.undo_refs.orderedRemove(0));
-        s.undo_refs.append(a.gpa, blob) catch a.gpa.free(blob);
+    if (undo_before) |blob| {
+        rememberUndoState(a, blob);
+        undo_before = null;
     }
+    if (captureUndoState(a, a.composer.text()) catch null) |blob| rememberUndoState(a, blob);
     if (long_edit) |*x| {
         x.after_refs = capture(a, a.composer.text()) catch null;
         if (s.long_edit) |*old| old.deinit(a.gpa);
@@ -643,10 +646,28 @@ pub fn beforeEdit(a: *App, c: *ui.Context) void {
     }
 }
 
-pub fn afterEdit(a: *App, c: *ui.Context, changed: bool) void {
-    const e = c.edits.get(a.view.composer_id) orelse return;
-    if (changed and e.undo.restored) {
-        for (a.completion.undo_refs.items) |blob| {
+fn captureUndoState(a: *App, text: []const u8) !?[]u8 {
+    const s = &a.completion;
+    const key = try scopeKey(a, a.gpa);
+    defer a.gpa.free(key);
+    if (s.scope == null or !std.mem.eql(u8, s.scope.?, key)) return null;
+    if (std.mem.eql(u8, text, a.composer.text())) try s.sync(a.gpa, text);
+    if (!std.mem.eql(u8, s.snapshot.items, text)) return null;
+    return try std.json.Stringify.valueAlloc(a.gpa, Saved{ .scope = key, .text = text, .references = s.selected.items }, .{});
+}
+
+fn rememberUndoState(a: *App, blob: []u8) void {
+    const refs = &a.completion.undo_refs;
+    if (refs.items.len >= 24) a.gpa.free(refs.orderedRemove(0));
+    refs.append(a.gpa, blob) catch a.gpa.free(blob);
+}
+
+pub fn afterEdit(a: *App, changed: bool, undo_restored: bool) void {
+    if (changed and undo_restored) {
+        var ix = a.completion.undo_refs.items.len;
+        while (ix > 0) {
+            ix -= 1;
+            const blob = a.completion.undo_refs.items[ix];
             var parsed = std.json.parseFromSlice(Saved, a.gpa, blob, .{}) catch continue;
             defer parsed.deinit();
             if (std.mem.eql(u8, parsed.value.text, a.composer.text())) {
@@ -656,6 +677,24 @@ pub fn afterEdit(a: *App, c: *ui.Context, changed: bool) void {
         }
     }
     a.completion.sync(a.gpa, a.composer.text()) catch {};
+}
+
+/// Frame-owned washes for the exact draft, only where explicit selection
+/// provenance still matches its visible source text.
+pub fn rangeWashes(a: *App, allocator: Allocator, text: []const u8) []const ui.TextFieldRangeWash {
+    const s = &a.completion;
+    if (!std.mem.eql(u8, s.snapshot.items, text)) return &.{};
+    var washes: std.ArrayList(ui.TextFieldRangeWash) = .empty;
+    for (s.selected.items) |selected| {
+        if (selected.start >= selected.end or selected.end > text.len) continue;
+        if (!std.mem.eql(u8, text[selected.start..selected.end], selected.display)) continue;
+        washes.append(allocator, .{
+            .start = selected.start,
+            .end = selected.end,
+            .color = @import("theme.zig").colors(a.dark orelse false).accent_wash,
+        }) catch return &.{};
+    }
+    return washes.toOwnedSlice(allocator) catch &.{};
 }
 
 test {

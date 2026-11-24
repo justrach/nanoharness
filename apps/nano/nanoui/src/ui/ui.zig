@@ -209,6 +209,7 @@ pub const badge = widgets.badge;
 pub const kbd = widgets.kbd;
 pub const textField = textfield.textField;
 pub const TextFieldOptions = textfield.Options;
+pub const TextFieldRangeWash = textfield.RangeWash;
 pub const TextBuffer = textfield.TextBuffer;
 pub const TextFieldResult = textfield.Result;
 pub const TextFieldCaret = textfield.Caret;
