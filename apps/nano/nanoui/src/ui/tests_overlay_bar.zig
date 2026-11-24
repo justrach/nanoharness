@@ -49,6 +49,39 @@ test "an overlay bar shows while its box scrolls, then fades out" {
     try testing.expectApproxEqAbs(@as(f32, 5), (bar(&t) orelse return error.NoBar).rect[2], 0.01);
 }
 
+test "the overlay scrollbar thumb drags while held outside the track" {
+    var s: Scene = .{};
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&s, Scene.view), .{ .width = 200, .height = 300 });
+    defer t.deinit();
+    t.scroll(100, 150, -120);
+    t.frame();
+    const thumb = bar(&t) orelse return error.NoBar;
+    const x = thumb.rect[0] + thumb.rect[2] * 0.5;
+    const y = thumb.rect[1] + thumb.rect[3] * 0.5;
+    const id = for (t.ctx.nodes.items) |node| {
+        if (node.style.scrollbar == .overlay) break node.id;
+    } else return error.NoScrollBox;
+
+    t.down(x, y);
+    t.move(150, y + 40);
+    const moved = t.ctx.scroll.get(id) orelse 0;
+    try testing.expectApproxEqAbs(@as(f32, 120 + 40 * 1200.0 / 292.0), moved, 0.01);
+    // The thumb stays fully visible after a stationary hold off the strip.
+    t.advance(2);
+    const held = bar(&t) orelse return error.NoBarDuringDrag;
+    try testing.expectApproxEqAbs(thumb.rect[1] + 40, held.rect[1], 0.01);
+
+    t.move(150, 400);
+    try testing.expectApproxEqAbs(@as(f32, 900), t.ctx.scroll.get(id) orelse 0, 0.01);
+    t.up();
+    t.moveTo(150, y);
+    try testing.expect(t.ctx.scrollbar_drag == null);
+    try testing.expectApproxEqAbs(@as(f32, 900), t.ctx.scroll.get(id) orelse 0, 0.01);
+    t.advance(2);
+    try testing.expect(bar(&t) == null);
+}
+
 test "lighter text is drawn with thicker strokes, none with smoothing off" {
     const atlas = @import("atlas.zig");
     const was = atlas.smoothing_allowed;
