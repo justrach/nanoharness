@@ -61,7 +61,10 @@ fn detailText(c: *ui.Context, st: updates.Status) []const u8 {
         .installing => "Installing…",
         .verifying => "Verifying installation…",
         .updated => if (st.installed_version) |ver| c.print("Updated to {s}", .{ver}) else "Updated",
-        .failed => st.error_message orelse if (st.error_kind == .install) "Update failed" else "Couldn’t check for updates",
+        .failed => if (@import("view_updates.zig").isXcodeLicenseBlocker(st.error_message))
+            c.print("Homebrew can\u{2019}t update {s} until you accept the Xcode license.", .{updates.agentName(st.harness)})
+        else
+            (st.error_message orelse if (st.error_kind == .install) "Update failed" else "Couldn’t check for updates"),
         else => "Checking for updates…",
     };
 }

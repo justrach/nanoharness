@@ -81,6 +81,7 @@ pub const State = struct {
     app_updated: [32]u8 = undefined,
     app_updated_len: usize = 0,
     app_updated_until: f64 = 0,
+    test_opened_terminal_count: u32 = 0,
 
     pub fn setAppInstalled(s: *State, version: []const u8) void {
         s.app_installed_len = 0;
@@ -751,6 +752,50 @@ pub fn openExternalUrl(url: []const u8) void {
     _ = nanoui.shell.openUrl(url);
 }
 
+pub const xcode_license_cmd = "sudo xcodebuild -license";
+
+fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (haystack.len < needle.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        var matched = true;
+        for (0..needle.len) |j| {
+            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(needle[j])) {
+                matched = false;
+                break;
+            }
+        }
+        if (matched) return true;
+    }
+    return false;
+}
+
+pub fn isXcodeLicenseBlocker(msg: ?[]const u8) bool {
+    const text = msg orelse return false;
+    return containsAsciiIgnoreCase(text, "xcodebuild -license") or
+        (containsAsciiIgnoreCase(text, "xcode") and containsAsciiIgnoreCase(text, "license"));
+}
+
+fn openTerminalApp(a: *App) void {
+    if (builtin.is_test or a.offscreen) {
+        a.updates.test_opened_terminal_count += 1;
+        return;
+    }
+    if (builtin.os.tag == .macos) {
+        // Open Terminal.app only; never execute `sudo` or auto-accept a license.
+        if (std.process.spawn(a.io, .{
+            .argv = &.{ "/usr/bin/open", "-a", "Terminal" },
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+        })) |child| {
+            var ch = child;
+            _ = &ch;
+        } else |_| {}
+    }
+}
+
 /// Height contributed to the sidebar footer by any active update pills.
 pub fn sidebarFooterExtraHeight(a: *const App) f32 {
     if (a.settings.uiMode() == .zen) return 0;
@@ -961,6 +1006,11 @@ pub const UnifiedRow = struct {
     busy: bool = false,
     updated: bool = false,
     failed: bool = false,
+    version_delta: ?[]const u8 = null,
+    failure_headline: ?[]const u8 = null,
+    failure_note: ?[]const u8 = null,
+    xcode_license: bool = false,
+    is_local: bool = false,
     skippable: bool = true,
     enabled: bool = true,
     action_label: ?[]const u8 = null,
@@ -1088,6 +1138,7 @@ pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const Unifi
     for (a.agent_updates.devices.items) |w| {
         const connected = w.online and w.connected;
         const dev_name = deviceLabel(a, w.device_id);
+        const is_local = if (a.device_id) |me| std.mem.eql(u8, me, w.device_id) else false;
         for (w.statuses) |st| {
             if (!agentUpdateActionable(st)) continue;
             const row_id = std.fmt.allocPrint(alloc, "agent:{s}:{s}", .{ w.device_id, st.harness }) catch continue;
@@ -1095,19 +1146,42 @@ pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const Unifi
             const active = st.phase.isActive();
             if (!active and a.settings.isUpdateSkipped(row_id, tok)) continue;
 
-            const base_detail: []const u8 = if (st.installed_version != null and st.latest_version != null and !std.mem.eql(u8, st.installed_version.?, st.latest_version.?))
-                (std.fmt.allocPrint(alloc, "{s} \u{2192} {s}", .{ st.installed_version.?, st.latest_version.? }) catch "Update available")
+            const agent_title = agent_updates.agentName(st.harness);
+            const version_delta: ?[]const u8 = if (st.installed_version != null and st.latest_version != null and !std.mem.eql(u8, st.installed_version.?, st.latest_version.?))
+                (std.fmt.allocPrint(alloc, "{s} \u{2192} {s}", .{ st.installed_version.?, st.latest_version.? }) catch null)
+            else
+                null;
+            const xcode_blocker = st.phase == .failed and isXcodeLicenseBlocker(st.error_message);
+            const failure_headline: ?[]const u8 = if (xcode_blocker)
+                (std.fmt.allocPrint(alloc, "Homebrew can\u{2019}t update {s} until you accept the Xcode license.", .{agent_title}) catch "Homebrew can\u{2019}t update until you accept the Xcode license.")
+            else
+                null;
+            const failure_note: ?[]const u8 = if (st.phase != .failed)
+                null
+            else if (xcode_blocker)
+                (if (is_local)
+                    "Open Terminal, run sudo xcodebuild -license, review and accept the license, then retry."
+                else
+                    (std.fmt.allocPrint(alloc, "Run sudo xcodebuild -license on {s}, review and accept the license, then retry.", .{dev_name}) catch "Run sudo xcodebuild -license on that device, review and accept the license, then retry."))
+            else
+                st.error_message;
+
+            const base_detail: []const u8 = if (st.phase == .failed) blk: {
+                if (version_delta) |vd| break :blk vd;
+                if (xcode_blocker) break :blk "Blocked by Xcode license";
+                break :blk if (st.error_kind == .install) "Update failed" else "Couldn't check for updates";
+            } else if (version_delta) |vd|
+                vd
             else switch (st.phase) {
                 .updated => if (st.latest_version orelse st.installed_version) |ver|
-                    (std.fmt.allocPrint(alloc, "{s} · Updated", .{ver}) catch "Updated")
+                    (std.fmt.allocPrint(alloc, "{s} \u{00b7} Updated", .{ver}) catch "Updated")
                 else
                     "Updated",
-                .failed => st.error_message orelse if (st.error_kind == .install) "Update failed" else "Couldn't check for updates",
                 .waiting_for_idle => "Waiting for current run",
-                .preparing => "Preparing update…",
-                .downloading => st.progress_message orelse "Downloading…",
-                .installing => "Installing…",
-                .verifying => "Verifying…",
+                .preparing => "Preparing update\u{2026}",
+                .downloading => st.progress_message orelse "Downloading\u{2026}",
+                .installing => "Installing\u{2026}",
+                .verifying => "Verifying\u{2026}",
                 .manual_action_required => "Check and update",
                 else => if (st.latest_version) |lat|
                     (std.fmt.allocPrint(alloc, "v{s} available", .{lat}) catch "Update available")
@@ -1116,7 +1190,7 @@ pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const Unifi
             };
 
             const detail = if (dev_with_notices > 1)
-                (std.fmt.allocPrint(alloc, "{s} · {s}", .{ base_detail, dev_name }) catch base_detail)
+                (std.fmt.allocPrint(alloc, "{s} \u{00b7} {s}", .{ base_detail, dev_name }) catch base_detail)
             else
                 base_detail;
 
@@ -1162,12 +1236,17 @@ pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const Unifi
                 .kind = .agent,
                 .id = row_id,
                 .token = tok,
-                .title = agent_updates.agentName(st.harness),
+                .title = agent_title,
                 .detail = detail,
                 .mark_id = st.harness,
                 .busy = active,
                 .updated = st.phase == .updated,
                 .failed = st.phase == .failed,
+                .version_delta = version_delta,
+                .failure_headline = failure_headline,
+                .failure_note = failure_note,
+                .xcode_license = xcode_blocker,
+                .is_local = is_local,
                 .skippable = !active and st.phase != .updated,
                 .enabled = can_act,
                 .action_label = action_label,
@@ -1399,9 +1478,13 @@ pub fn updatesPopover(c: *ui.Context, a: *App, k: theme.Colors) void {
         }
     }
 
+    var any_failed = false;
+    for (rows) |row| {
+        if (row.failed) any_failed = true;
+    }
     if (rows.len > 3) {
         ui.key(c, "updates-popover-list");
-        const list = ui.div(c).column().wFull().maxH(164).gap(8).scrollY()
+        const list = ui.div(c).column().wFull().maxH(if (any_failed) 260 else 164).gap(8).scrollY()
             .scrollbar(.{ .overlay = k.faint.alpha(0.5) });
         c.node(list.index).style.scroll_edge_fade = 18;
         defer list.end();
@@ -1413,67 +1496,150 @@ pub fn updatesPopover(c: *ui.Context, a: *App, k: theme.Colors) void {
 
 fn drawUnifiedRow(c: *ui.Context, a: *App, k: theme.Colors, row: UnifiedRow) void {
     ui.key(c, c.print("updates-row-{s}", .{row.id}));
-    const line = ui.div(c).row().wFull().py(4).gap(10).itemsCenter();
-    defer line.end();
+    const outer = ui.div(c).column().wFull().py(4).gap(6);
+    defer outer.end();
 
     {
-        const plate = ui.div(c).row().size(32, 32).center().rounded(8)
-            .bg(ui.Color.white).border(ui.Color.black.alpha(0.08)).borderW(1);
-        defer plate.end();
-        const mark = icons.harnessMark(row.mark_id);
-        icons.icon(c, mark.name, 18, mark.brand orelse ui.Color.hex(0x18181b), 0);
-    }
+        const line = ui.div(c).row().wFull().gap(10).itemsCenter();
+        defer line.end();
 
-    {
-        const info = ui.div(c).column().grow().w(0).gap(2);
-        defer info.end();
-        kit.ellipsisText(c, row.title, .{
-            .size = 13,
-            .line_height = 17,
-            .weight = .medium,
-            .color = k.text,
-        }, 136);
-        kit.ellipsisText(c, row.detail, .{
-            .size = 11.5,
-            .line_height = 15,
-            .color = if (row.failed) k.danger else k.muted,
-        }, 152);
-    }
-
-    const ctrl = ui.div(c).row().gap(8).itemsCenter();
-    defer ctrl.end();
-    if (row.skippable) {
-        ui.key(c, c.print("updates-skip-{s}", .{row.id}));
-        const skip_btn = ui.div(c).row().h(26).px(6).center().roundedFull().hover(k.hover).control();
-        const skip_hot = skip_btn.hovered();
-        const skip_clicked = skip_btn.clicked();
         {
-            defer skip_btn.end();
-            ui.text(c, "Skip", .{
-                .size = 11.5,
-                .line_height = 15,
-                .color = if (skip_hot) k.text else k.muted,
-            });
+            const plate = ui.div(c).row().size(32, 32).center().rounded(8)
+                .bg(ui.Color.white).border(ui.Color.black.alpha(0.08)).borderW(1);
+            defer plate.end();
+            const mark = icons.harnessMark(row.mark_id);
+            icons.icon(c, mark.name, 18, mark.brand orelse ui.Color.hex(0x18181b), 0);
         }
-        if (skip_clicked) skipUnifiedRow(a, row);
-    }
 
-    if (row.action_label) |lbl| {
-        ui.key(c, c.print("updates-act-{s}", .{row.id}));
-        var act_btn = ui.div(c).row().h(26).px(12).center().roundedFull()
-            .bg(k.ink(if (k.dark) 0.08 else 0.06)).border(k.border.alpha(0.7)).borderW(1);
-        act_btn = if (row.enabled) act_btn.hover(k.hover).control() else act_btn.opacity(0.45);
-        const act_clicked = row.enabled and act_btn.clicked();
         {
-            defer act_btn.end();
-            ui.text(c, lbl, .{
-                .size = 11.5,
-                .line_height = 15,
+            const info = ui.div(c).column().grow().w(0).gap(2);
+            defer info.end();
+            kit.ellipsisText(c, row.title, .{
+                .size = 13,
+                .line_height = 17,
                 .weight = .medium,
                 .color = k.text,
+            }, 136);
+            kit.ellipsisText(c, row.detail, .{
+                .size = 11.5,
+                .line_height = 15,
+                .color = if (row.failed) k.danger else k.muted,
+            }, 152);
+        }
+
+        const ctrl = ui.div(c).row().gap(8).itemsCenter();
+        defer ctrl.end();
+        if (row.skippable) {
+            ui.key(c, c.print("updates-skip-{s}", .{row.id}));
+            const skip_btn = ui.div(c).row().h(26).px(6).center().roundedFull().hover(k.hover).control();
+            const skip_hot = skip_btn.hovered();
+            const skip_clicked = skip_btn.clicked();
+            {
+                defer skip_btn.end();
+                ui.text(c, "Skip", .{
+                    .size = 11.5,
+                    .line_height = 15,
+                    .color = if (skip_hot) k.text else k.muted,
+                });
+            }
+            if (skip_clicked) skipUnifiedRow(a, row);
+        }
+
+        if (row.action_label) |lbl| {
+            ui.key(c, c.print("updates-act-{s}", .{row.id}));
+            var act_btn = ui.div(c).row().h(26).px(12).center().roundedFull()
+                .bg(k.ink(if (k.dark) 0.08 else 0.06)).border(k.border.alpha(0.7)).borderW(1);
+            act_btn = if (row.enabled) act_btn.hover(k.hover).control() else act_btn.opacity(0.45);
+            const act_clicked = row.enabled and act_btn.clicked();
+            {
+                defer act_btn.end();
+                ui.text(c, lbl, .{
+                    .size = 11.5,
+                    .line_height = 15,
+                    .weight = .medium,
+                    .color = k.text,
+                });
+            }
+            if (act_clicked) triggerUnifiedAction(a, row);
+        }
+    }
+
+    if (row.failed and (row.xcode_license or row.failure_note != null)) {
+        const card = ui.div(c).column().wFull().p(8).gap(4).rounded(8)
+            .bg(k.danger.alpha(if (k.dark) 0.14 else 0.07))
+            .border(k.danger.alpha(if (k.dark) 0.30 else 0.20)).borderW(1);
+        defer card.end();
+        if (row.xcode_license) {
+            if (row.failure_headline) |headline| {
+                const hcol = ui.div(c).column().w(298);
+                defer hcol.end();
+                ui.text(c, headline, .{
+                    .size = 11.5,
+                    .line_height = 15,
+                    .weight = .medium,
+                    .color = k.danger,
+                    .wrap = true,
+                });
+            }
+            if (row.failure_note) |note| {
+                const ncol = ui.div(c).column().w(298);
+                defer ncol.end();
+                ui.text(c, note, .{
+                    .size = 11,
+                    .line_height = 15,
+                    .color = k.muted,
+                    .wrap = true,
+                });
+            }
+            const acts = ui.div(c).row().wFull().gap(6).pt(2).itemsCenter();
+            defer acts.end();
+            {
+                ui.key(c, c.print("updates-copy-cmd-{s}", .{row.id}));
+                const copy_btn = ui.div(c).row().h(24).px(10).center().roundedFull()
+                    .bg(k.ink(if (k.dark) 0.09 else 0.06)).border(k.border.alpha(0.75)).borderW(1)
+                    .hover(k.hover).control();
+                const copy_clicked = copy_btn.clicked();
+                {
+                    defer copy_btn.end();
+                    ui.text(c, "Copy command", .{
+                        .size = 11,
+                        .line_height = 14,
+                        .weight = .medium,
+                        .color = k.text,
+                    });
+                }
+                if (copy_clicked) {
+                    c.clipboard.write(c.clipboard.ctx, xcode_license_cmd);
+                    a.setNotice("Copied sudo xcodebuild -license");
+                }
+            }
+            if (row.is_local) {
+                ui.key(c, c.print("updates-open-term-{s}", .{row.id}));
+                const term_btn = ui.div(c).row().h(24).px(10).center().roundedFull()
+                    .bg(k.ink(if (k.dark) 0.09 else 0.06)).border(k.border.alpha(0.75)).borderW(1)
+                    .hover(k.hover).control();
+                const term_clicked = term_btn.clicked();
+                {
+                    defer term_btn.end();
+                    ui.text(c, "Open Terminal", .{
+                        .size = 11,
+                        .line_height = 14,
+                        .weight = .medium,
+                        .color = k.text,
+                    });
+                }
+                if (term_clicked) openTerminalApp(a);
+            }
+        } else if (row.failure_note) |msg| {
+            const ecol = ui.div(c).column().w(298);
+            defer ecol.end();
+            ui.text(c, msg, .{
+                .size = 11.5,
+                .line_height = 15,
+                .color = k.danger,
+                .wrap = true,
             });
         }
-        if (act_clicked) triggerUnifiedAction(a, row);
     }
 }
 

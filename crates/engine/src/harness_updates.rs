@@ -896,6 +896,88 @@ async fn run_capture(
     Ok(combined)
 }
 
+fn truncate_diagnostic(s: &str, max_chars: usize) -> String {
+    let trimmed = s.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let mut out = String::new();
+    for ch in trimmed.chars().take(max_chars.saturating_sub(1)) {
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
+fn contains_xcode_license_blocker(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("xcodebuild -license")
+        || (lower.contains("xcode") && lower.contains("license"))
+}
+
+fn is_meaningful_error_line(line: &str) -> bool {
+    let lower = line.trim_start().to_ascii_lowercase();
+    lower.starts_with("error:")
+        || lower.starts_with("error ")
+        || lower.starts_with("fatal:")
+        || lower.starts_with("npm error")
+        || lower.starts_with("npm err!")
+        || lower.starts_with("err!")
+}
+
+fn summarize_installer_failure(stderr: &str, stdout: &str, status_desc: &str) -> String {
+    let mut combined = String::new();
+    let stderr_t = stderr.trim();
+    let stdout_t = stdout.trim();
+    if !stderr_t.is_empty() {
+        combined.push_str(stderr_t);
+    }
+    if !stdout_t.is_empty() {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(stdout_t);
+    }
+    if combined.is_empty() {
+        return format!("updater exited with {status_desc}");
+    }
+
+    let lines: Vec<&str> = combined
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    if contains_xcode_license_blocker(&combined) {
+        if let Some(license_line) = lines
+            .iter()
+            .copied()
+            .find(|line| contains_xcode_license_blocker(line))
+        {
+            if license_line.to_ascii_lowercase().contains("xcodebuild -license") {
+                return truncate_diagnostic(license_line, 280);
+            }
+            return truncate_diagnostic(
+                &format!("{license_line} Run `sudo xcodebuild -license` and retry."),
+                280,
+            );
+        }
+        return "Xcode license agreement required. Run `sudo xcodebuild -license` and retry."
+            .to_string();
+    }
+
+    if let Some(err_line) = lines
+        .iter()
+        .copied()
+        .rev()
+        .find(|line| is_meaningful_error_line(line))
+    {
+        return truncate_diagnostic(err_line, 280);
+    }
+
+    truncate_diagnostic(lines.last().copied().unwrap_or(combined.as_str()), 280)
+}
+
 async fn execute_plan(plan: &UpdatePlan, cancel: &CancellationToken) -> Result<(), String> {
     let mut cmd = match plan {
         UpdatePlan::Homebrew { brew, cask, token } => {
@@ -946,17 +1028,11 @@ async fn execute_plan(plan: &UpdatePlan, cancel: &CancellationToken) -> Result<(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let detail = stderr.trim();
-        let msg = if !detail.is_empty() {
-            detail
-        } else {
-            stdout.trim()
-        };
-        return Err(if msg.is_empty() {
-            format!("updater exited with {}", output.status)
-        } else {
-            msg.lines().last().unwrap_or(msg).to_string()
-        });
+        return Err(summarize_installer_failure(
+            &stderr,
+            &stdout,
+            &output.status.to_string(),
+        ));
     }
     Ok(())
 }
@@ -1174,5 +1250,35 @@ mod tests {
             .unwrap();
         assert_eq!(final_row.phase, HarnessUpdatePhase::Updated);
         assert_eq!(final_row.installed_version.as_deref(), Some("1.3.1"));
+    }
+
+    #[test]
+    fn summarize_installer_failure_preserves_xcode_license_blocker_and_error_lines() {
+        let brew_stderr = "\
+==> Upgrading 1 outdated package:
+codex 0.171.0 -> 0.172.0
+Error: Agreeing to the Xcode/iOS license requires admin privileges, please run “sudo xcodebuild -license” and then retry this command.
+Error: Failure while executing; `brew upgrade --cask codex` exited with 69.";
+        let msg = summarize_installer_failure(brew_stderr, "", "exit status: 1");
+        assert!(msg.contains("Xcode/iOS license"));
+        assert!(msg.contains("sudo xcodebuild -license"));
+
+        let multi_stderr = "\
+Warning: No available formula with the name
+Error: SHA256 mismatch for downloaded codex archive
+Please check your network or Homebrew tap.";
+        assert_eq!(
+            summarize_installer_failure(multi_stderr, "", "exit status: 1"),
+            "Error: SHA256 mismatch for downloaded codex archive"
+        );
+
+        assert_eq!(
+            summarize_installer_failure("", "stdout failure line", "exit status: 1"),
+            "stdout failure line"
+        );
+        assert_eq!(
+            summarize_installer_failure("", "   ", "exit status: 42"),
+            "updater exited with exit status: 42"
+        );
     }
 }
