@@ -63,6 +63,9 @@ pub fn keys(c: *ui.Context, a: *App) bool {
         const active = @min(a.completion.active, list.len - 1);
         if (!c.rects.contains(choice.id) or choice.key != choiceKey(a, tok, list[active], active)) return false;
     }
+    // Clearing the event is not enough: the platform uses this flag to
+    // decide whether to deliver the same key again as a native text action.
+    if (c.input.shortcut != null) c.shortcut_taken = true;
     c.input.shortcut = null;
     c.input.ops = &.{};
     c.input.key = null;
