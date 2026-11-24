@@ -117,6 +117,9 @@ const textedit = @import("textedit.zig");
 const prevWord = textedit.prevWord;
 const nextWord = textedit.nextWord;
 
+pub const RangeWash = lines_mod.RangeWash;
+pub const RangeWashProvider = *const fn (?*anyopaque, std.mem.Allocator, []const u8, bool, bool) []const RangeWash;
+
 pub const Options = struct {
     placeholder: []const u8 = "",
     width: types.Length = .{ .px = 240 },
@@ -164,6 +167,9 @@ pub const Options = struct {
     /// leaves the selection alone; a dropped composition is still taken
     /// out. A timecode field's digits, a number field's.
     filter: ?*const fn (cp: u21) ?u21 = null,
+    /// Provenance-backed backgrounds for byte ranges in a multiline field.
+    range_wash_context: ?*anyopaque = null,
+    range_wash_provider: ?RangeWashProvider = null,
 };
 
 /// `t` through `filter`, into `out` (truncated to it).
@@ -396,10 +402,11 @@ const bullets = "•••••••••••••••••••••
 pub fn textField(c: *Context, buffer: *TextBuffer, opts: Options) Result {
     const th = c.theme;
     const style: types.TextStyle = .{ .size = opts.size, .weight = opts.weight, .line_height = opts.line_height, .mono = opts.mono };
-    const pad_x: f32 = if (opts.bare) 0 else 10;
-    const pad_y: f32 = if (opts.bare) 2 else 7;
     const multi = opts.multiline and !opts.password;
     const sideways = multi and !opts.word_wrap;
+    // A wash can extend past the first or last glyph without hitting our clip.
+    const pad_x: f32 = if (!opts.bare) 10 else if (multi and opts.range_wash_provider != null) RangeWash.side_padding else 0;
+    const pad_y: f32 = if (opts.bare) 2 else 7;
     const i = c.open(.{
         .direction = if (multi) .column else .row,
         .width = opts.width,
@@ -580,7 +587,11 @@ pub fn textField(c: *Context, buffer: *TextBuffer, opts: Options) Result {
         // Past its most lines it scrolls: the wheel's, and a scrollbar.
         c.node(i).style.scroll = lines.len > opts.max_lines;
         const follow = requested or result.changed or result.preedit_changed or e.caret != caret_before[0] or e.anchor != caret_before[1] or s.len != caret_before[2] or (sideways and old_x == null);
-        const d = lines_mod.draw(c, s, e, style, lines, view_h, if (sideways) view_w else null, focused, follow, result.vim_normal, caret_shown, opts.placeholder, opts.placeholder_color orelse th.muted, opts.suggestion, opts.caret, opts.caret_color orelse th.accent);
+        const washes = if (!opts.password) if (opts.range_wash_provider) |provider|
+            provider(opts.range_wash_context, c.alloc(), s, result.changed, e.undo.restored)
+        else
+            &.{} else &.{};
+        const d = lines_mod.draw(c, s, e, style, lines, view_h, if (sideways) view_w else null, focused, follow, result.vim_normal, caret_shown, opts.placeholder, opts.placeholder_color orelse th.muted, opts.suggestion, opts.caret, opts.caret_color orelse th.accent, washes);
         c.scroll.put(c.gpa, it.id, e.scroll_y) catch {};
         if (sideways and it.rect != null) @import("scroll_x.zig").setScroll(c, it.id, .x, e.scroll_x);
         result.line = d.line;

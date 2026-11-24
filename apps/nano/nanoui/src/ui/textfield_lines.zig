@@ -113,6 +113,28 @@ pub fn byteOfCodepoint(s: []const u8, n: usize) usize {
     return @min(i, s.len);
 }
 
+/// A background wash over a byte range of the field's UTF-8 text.
+pub const RangeWash = struct {
+    start: usize,
+    end: usize,
+    color: types.Color,
+
+    pub const side_padding: f32 = 6;
+};
+
+/// Use the field's gutters at line edges; inside a line, share the available
+/// separator so the chip doesn't paint behind adjacent prose or another chip.
+fn washEdges(c: *Context, s: []const u8, style: types.TextStyle, l: Line, start: usize, end: usize, x0: f32, x1: f32) [2]f32 {
+    const pad = RangeWash.side_padding;
+    var before = start;
+    while (before > l.start and (s[before - 1] == ' ' or s[before - 1] == '\t')) before -= 1;
+    var after = end;
+    while (after < l.end and (s[after] == ' ' or s[after] == '\t')) after += 1;
+    const left = if (before == l.start) pad else @min(pad, @max(0, (x0 - caretX(c, s, style, l, before)) / 2));
+    const right = if (after == l.end) pad else @min(pad, @max(0, (caretX(c, s, style, l, after) - x1) / 2));
+    return .{ x0 - left, x1 + right };
+}
+
 pub const Drawn = struct {
     /// The caret's place in the field's content, scrolled.
     caret: types.Point,
@@ -125,7 +147,7 @@ pub const Drawn = struct {
 /// over a spacer as tall as the lines): selection, text, composition and
 /// caret. When `follow` (the caret moved, the text changed), scrolled to
 /// keep the caret in view within `view_h`; else where the wheel left it.
-pub fn draw(c: *Context, s: []const u8, e: *EditState, style: types.TextStyle, lines: []const Line, view_h: f32, sideways_w: ?f32, focused: bool, follow: bool, block: bool, caret_shown: bool, placeholder: []const u8, placeholder_color: types.Color, suggestion: []const u8, caret: Caret, caret_color: types.Color) Drawn {
+pub fn draw(c: *Context, s: []const u8, e: *EditState, style: types.TextStyle, lines: []const Line, view_h: f32, sideways_w: ?f32, focused: bool, follow: bool, block: bool, caret_shown: bool, placeholder: []const u8, placeholder_color: types.Color, suggestion: []const u8, caret: Caret, caret_color: types.Color, washes: []const RangeWash) Drawn {
     const th = c.theme;
     const lh = c.text.lineHeight(style);
     const k = lineOf(lines, e.caret);
@@ -158,6 +180,24 @@ pub fn draw(c: *Context, s: []const u8, e: *EditState, style: types.TextStyle, l
     for (lines, 0..) |l, row| {
         const y = @as(f32, @floatFromInt(row)) * lh;
         if (y + lh < e.scroll_y or y > e.scroll_y + view_h) continue;
+        for (washes) |wash| {
+            const start = @max(wash.start, l.start);
+            const end = @min(wash.end, l.end);
+            if (start >= end) continue;
+            const x0 = caretX(c, s, style, l, start);
+            const x1 = caretX(c, s, style, l, end);
+            if (x1 <= x0) continue;
+            const left, const right = washEdges(c, s, style, l, start, end, x0, x1);
+            const inset = @min(0.5, lh / 2);
+            _ = c.leaf(.{
+                .absolute = true,
+                .width = .{ .px = right - left },
+                .height = .{ .px = @max(1, lh - 2 * inset) },
+                .radius = 6,
+                .background = wash.color,
+                .offset = .{ .x = left, .y = y + inset },
+            }, .none, null);
+        }
         if (focused and hi > lo and hi >= l.start and lo <= l.stop) {
             const x0 = caretX(c, s, style, l, @max(lo, l.start));
             // A selection across the line's end covers a space's width past it.

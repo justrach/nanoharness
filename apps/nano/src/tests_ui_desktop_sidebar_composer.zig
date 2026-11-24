@@ -185,9 +185,12 @@ test "desktop parity composer alignment matches the reference and compact width 
     h.t.resize(607, 440);
     h.t.settle(1);
     const pill = h.a.view.composer_anchor orelse return error.NoComposer;
-    const field = h.t.ctx.rects.get(h.a.view.composer_id) orelse return error.NoComposerField;
+    const field = for (h.t.ctx.nodes.items) |node| {
+        if (node.id == h.a.view.composer_id) break node.rect.inset(node.style.padding);
+    } else return error.NoComposerField;
     try testing.expectApproxEqAbs(@as(f32, 340), pill.w, 0.01);
     try testing.expectApproxEqAbs(@as(f32, 49), pill.h, 0.01);
+    // Measure the writing area, not the outer hitbox that includes the chip gutters.
     try testing.expectApproxEqAbs(@as(f32, 75), field.x - pill.x, 0.01);
     try testing.expectApproxEqAbs(@as(f32, 212), field.w, 0.01);
     var controls: [3]ui.Rect = undefined;
