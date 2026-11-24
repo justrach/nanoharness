@@ -31,7 +31,7 @@ fi
 rm -rf "$STAGE" "$TARBALL"
 mkdir -p "$STAGE"
 install -m 755 "$ENGINE_BIN" "$STAGE/harness-engine"
-(cd "$ROOT/apps/nano" && "$ROOT/scripts/heavy-build.sh" zig build -Doptimize=ReleaseSafe)
+(cd "$ROOT/apps/nano" && "$ROOT/scripts/heavy-build.sh" zig build -Doptimize=ReleaseSafe -Dcpu=baseline)
 install -m 755 "$ROOT/apps/nano/zig-out/bin/harness" "$STAGE/harness"
 install -m 755 "$ROOT/apps/nano/zig-out/bin/harness-nano" "$STAGE/harness-nano"
 install -m 644 "$ROOT/dist/harness.desktop" "$STAGE/harness.desktop"

@@ -15,6 +15,10 @@ const CLOSE_TAG: &str = "</SYSTEM_MESSAGE>";
 // only wakeup-shaped blocks are stripped, so a reply that merely mentions the
 // tag (e.g. explaining it inside backticks) streams through untouched.
 const WAKEUP_MARKER: &str = "[Message]";
+const WAKEUP_PREAMBLE: &str = "The following is a <SYSTEM_MESSAGE> not actually sent by the user. \
+    It is provided by the system as important information to pay attention to.";
+const PREAMBLE_HEAD: &str = "The following is a ";
+const USER_PREFIX: &str = "User:";
 
 /// streaming stripper for one delta channel: blocks and their tags can be split
 /// across arbitrary chunk boundaries, so a possible tag prefix is held back
@@ -44,20 +48,53 @@ impl EchoStrip {
                 }
                 continue;
             }
-            let Some(start) = self.pending.find(OPEN_TAG) else {
-                let keep = partial_tag_suffix(&self.pending, OPEN_TAG);
+            let next_trigger = [OPEN_TAG, USER_PREFIX, PREAMBLE_HEAD]
+                .into_iter()
+                .filter_map(|tag| self.pending.find(tag))
+                .min();
+            let Some(start) = next_trigger else {
+                let keep = [OPEN_TAG, USER_PREFIX, PREAMBLE_HEAD]
+                    .into_iter()
+                    .map(|tag| partial_tag_suffix(&self.pending, tag))
+                    .max()
+                    .unwrap_or(0);
                 visible.extend(self.pending.drain(..self.pending.len() - keep));
                 return visible;
             };
             visible.extend(self.pending.drain(..start));
-            let body = self.pending[OPEN_TAG.len()..].trim_start();
-            if body.starts_with(WAKEUP_MARKER) {
-                self.inside_block = true;
-                self.pending.drain(..OPEN_TAG.len());
-            } else if WAKEUP_MARKER.starts_with(body) {
-                return visible;
+            if self.pending.starts_with(USER_PREFIX) {
+                let after = &self.pending[USER_PREFIX.len()..];
+                let ws = after
+                    .bytes()
+                    .take_while(|&b| b == b' ' || b == b'\t')
+                    .count();
+                let rest = &after[ws..];
+                if rest.starts_with(WAKEUP_PREAMBLE) {
+                    self.pending
+                        .drain(..USER_PREFIX.len() + ws + WAKEUP_PREAMBLE.len());
+                } else if WAKEUP_PREAMBLE.starts_with(rest) {
+                    return visible;
+                } else {
+                    visible.extend(self.pending.drain(..USER_PREFIX.len()));
+                }
+            } else if self.pending.starts_with(PREAMBLE_HEAD) {
+                if self.pending.starts_with(WAKEUP_PREAMBLE) {
+                    self.pending.drain(..WAKEUP_PREAMBLE.len());
+                } else if WAKEUP_PREAMBLE.starts_with(&self.pending) {
+                    return visible;
+                } else {
+                    visible.extend(self.pending.drain(..PREAMBLE_HEAD.len()));
+                }
             } else {
-                visible.extend(self.pending.drain(..OPEN_TAG.len()));
+                let body = self.pending[OPEN_TAG.len()..].trim_start();
+                if body.starts_with(WAKEUP_MARKER) {
+                    self.inside_block = true;
+                    self.pending.drain(..OPEN_TAG.len());
+                } else if WAKEUP_MARKER.starts_with(body) {
+                    return visible;
+                } else {
+                    visible.extend(self.pending.drain(..OPEN_TAG.len()));
+                }
             }
         }
     }
@@ -209,6 +246,60 @@ mod tests {
             "the environment sends a wakeup (`<SYSTEM_MESSAGE>`) and then `</SYSTEM_MESSAGE>`";
         for (head, tail) in every_split(reply) {
             assert_eq!(stream_text(&[head, tail]), reply, "split at {head:?}");
+        }
+    }
+
+    #[test]
+    fn strips_wakeup_preamble_with_user_prefix_and_block() {
+        let screenshot_reply = format!(
+            "Still waiting on task-1641 for the final 3 checks (engine and adapters). \
+             User: {WAKEUP_PREAMBLE}"
+        );
+        for (head, tail) in every_split(&screenshot_reply) {
+            assert_eq!(
+                stream_text(&[head, tail]),
+                "Still waiting on task-1641 for the final 3 checks (engine and adapters). ",
+                "split at {head:?}"
+            );
+        }
+
+        let paired = format!("before User: {WAKEUP_PREAMBLE}\n\n{WAKEUP}\n\nafter");
+        let chars: Vec<String> = paired.chars().map(String::from).collect();
+        let chunks: Vec<&str> = chars.iter().map(String::as_str).collect();
+        assert_eq!(stream_text(&chunks), "before \n\n\n\nafter");
+        for (head, tail) in every_split(&paired) {
+            assert_eq!(
+                stream_text(&[head, tail]),
+                "before \n\n\n\nafter",
+                "split at {head:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn strips_bare_wakeup_preamble_without_user_prefix() {
+        let reply = format!("before {WAKEUP_PREAMBLE} after");
+        for (head, tail) in every_split(&reply) {
+            assert_eq!(
+                stream_text(&[head, tail]),
+                "before  after",
+                "split at {head:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_normal_user_colon_and_preamble_prefix_prose() {
+        for reply in [
+            "User: hello world",
+            "The following is a summary of changes.",
+            "User: The following is a guide to debugging.",
+            "Ending with User:",
+            "Ending with The following is a",
+        ] {
+            for (head, tail) in every_split(reply) {
+                assert_eq!(stream_text(&[head, tail]), reply, "split at {head:?}");
+            }
         }
     }
 

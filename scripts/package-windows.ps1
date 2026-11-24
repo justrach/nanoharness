@@ -28,7 +28,7 @@ try {
     }
     Push-Location (Join-Path $root 'apps/nano')
     try {
-        zig build -Dtarget=x86_64-windows-msvc -Doptimize=ReleaseSafe "-Dwebview2-loader=$loader"
+        zig build -Dtarget=x86_64-windows-msvc -Dcpu=baseline -Doptimize=ReleaseSafe "-Dwebview2-loader=$loader"
         if ($LASTEXITCODE -ne 0) { throw 'harness-nano Windows build failed' }
     } finally { Pop-Location }
     # Explicit pipes also work for the GUI-subsystem executable in CI. A
