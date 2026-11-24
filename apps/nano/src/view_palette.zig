@@ -121,7 +121,7 @@ pub fn entries(a: *const App, gpa: std.mem.Allocator, query: []const u8) ![]Entr
     var in_panes: std.ArrayList([]const u8) = .empty;
     defer in_panes.deinit(gpa);
     const history = a.view.palette.navigation == .chat_history;
-    if (!history and !a.view.settings_open) if (a.tabs.layout()) |s| for (s.panes.items, 0..) |pane, ix| {
+    if (a.view.palette.navigation == .preserve_tabs and !a.view.settings_open) if (a.tabs.layout()) |s| for (s.panes.items, 0..) |pane, ix| {
         if (ix == s.focus) continue;
         if (pane) |id| try in_panes.append(gpa, id);
         const l = paneLabel(a, ix);

@@ -406,7 +406,7 @@ pub fn accept(a: *App, c: *ui.Context, tok: rules.Token, entry: Entry) void {
 pub fn activate(a: *App, action: Action) void {
     switch (action) {
         .model => a.togglePicker(),
-        .new => a.newTab(),
+        .new => a.replaceCurrent(null),
         .resume_chat => @import("view_palette.zig").toggle(a, .replace_current),
         .settings => @import("view_settings.zig").open(a),
         .help => {
