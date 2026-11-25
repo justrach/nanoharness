@@ -317,8 +317,15 @@ pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         }
         if (proj_l) |pl| {
             var row2_space: ?ui.Rect = null;
-            if (footerChipAt(c, k, "picker-project", .folder, pl, proj_slot, &row2_space)) {
-                if (row2_space) |r| a.view.space_anchor = r;
+            const state = &a.view.strip;
+            const hit = footerChipAt(c, k, "picker-project", .folder, pl, proj_slot, &row2_space);
+            // The first row's chip is the keyboard's, unless it had no room.
+            const opened = state.menu == .folder and state.footer_folder and state.footer_second;
+            if (row2_space) |r| if (hit or opened or a.view.space_anchor == null) {
+                a.view.space_anchor = r;
+            };
+            if (hit) {
+                state.footer_second = true;
                 toggleSpaceMenu(a);
             }
         }
@@ -344,6 +351,7 @@ fn toggleSpaceMenu(a: *App) void {
 /// mutation.
 fn projectChip(c: *ui.Context, a: *App, k: theme.Colors, label: []const u8, slot: rules.FooterSlot) void {
     if (footerChipAt(c, k, "picker-project", .folder, label, slot, &a.view.space_anchor)) {
+        a.view.strip.footer_second = false;
         toggleSpaceMenu(a);
     }
 }

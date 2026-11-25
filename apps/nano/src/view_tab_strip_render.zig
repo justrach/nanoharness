@@ -440,6 +440,10 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
     if (strip.same(strip.pickerPanel(a), target)) {
         if (c.rects.get(c.node(box.index).id)) |r| a.view.strip.active_tab_anchor = r;
     }
+    // A picker open on this tab follows it; its folder chip, below, wins.
+    if (a.view.strip.menu == .folder and !a.view.strip.footer_folder and strip.same(a.view.strip.target, target)) {
+        if (c.rects.get(c.node(box.index).id)) |r| a.view.strip.anchor = r;
+    }
     const hot = box.hovered() or group_hot;
     const vis = tabStyle(k, on, hot);
     const show_controls = hot or c.focus == c.node(box.index).id;

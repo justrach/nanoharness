@@ -40,6 +40,9 @@ pub const State = struct {
     /// Composer project picker shares search state, but uses desktop's
     /// wider card and New project → No project action ordering.
     footer_folder: bool = false,
+    /// A narrow draft's footer has two project chips: the second row's
+    /// opened this one, so that is the one it stays above.
+    footer_second: bool = false,
     anchor: ?ui.Rect = null,
     /// Active pane's top-strip folder control and tab rect from the previous frame,
     /// so keyboard project-picker invocation stays anchored to the active tab.
@@ -343,6 +346,7 @@ pub fn toggleProjectPicker(a: *App) void {
     if (a.view.space_anchor) |anchor| {
         open(a, .folder, target, anchor);
         state.footer_folder = true;
+        state.footer_second = false;
         return;
     }
     open(a, .folder, target, state.pane_header_anchor orelse state.active_tab_anchor);

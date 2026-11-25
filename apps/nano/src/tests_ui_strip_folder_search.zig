@@ -446,9 +446,9 @@ fn fsHeader(h: *Harness, pane: usize) !ui.Rect {
 }
 
 /// The project's name in a full-screen pane header.
-fn headerProject(h: *Harness, header: ui.Rect) !ui.Rect {
+fn headerProject(h: *Harness, header: ui.Rect, name: []const u8) !ui.Rect {
     for (h.t.ctx.nodes.items) |node| switch (node.content) {
-        .text => |text| if (std.mem.eql(u8, text.str, "remote-project") and node.rect.y >= header.y and node.rect.y + node.rect.h <= header.y + header.h and node.rect.x >= header.x and node.rect.x < header.x + header.w) return node.rect,
+        .text => |text| if (std.mem.eql(u8, text.str, name) and node.rect.y >= header.y and node.rect.y + node.rect.h <= header.y + header.h and node.rect.x >= header.x and node.rect.x < header.x + header.w) return node.rect,
         else => {},
     };
     return error.MissingHeaderProject;
@@ -597,6 +597,21 @@ test "project picker #15: a pane whose tab has no folder chip opens beside its o
             try expectBeside(&h, try slotRect(&h, pane));
             h.press(.{ .key = ui.Shortcut.escape });
         }
+        // An open picker follows its tab, and a full-screen header.
+        strip.focus(&h.a, .{ .chat = n - 1 });
+        h.t.settle(2);
+        h.press(picker_chord);
+        errdefer std.debug.print("axis={t} n={d}\n", .{ axis, n });
+        for ([_]f32{ 1800, 1000 }) |w| {
+            h.t.resize(w, 720);
+            h.t.settle(2);
+            try expectBeside(&h, try slotRect(&h, n - 1));
+        }
+        h.press(.{ .key = ui.Shortcut.escape });
+        h.a.setFullScreen(true);
+        h.t.settle(2);
+        h.press(picker_chord);
+        try expectBeside(&h, try fsHeader(&h, n - 1));
     };
 }
 
@@ -726,11 +741,11 @@ test "project picker #15: full screen existing chat, the keyboard picker opens b
         if (!zoomed and axis == .horizontal and n == 2) snap(&h, "picker-full-screen-chat");
         const header = try fsHeader(&h, if (zoomed) 0 else n - 1);
         try testing.expect(strip.same(h.a.view.strip.target, .{ .chat = n - 1 }));
-        try expectBeside(&h, try headerProject(&h, header));
+        try expectBeside(&h, try headerProject(&h, header, "remote-project"));
         // An open picker follows its chip.
         h.t.resize(1500, 700);
         h.t.settle(2);
-        try expectBeside(&h, try headerProject(&h, try fsHeader(&h, if (zoomed) 0 else n - 1)));
+        try expectBeside(&h, try headerProject(&h, try fsHeader(&h, if (zoomed) 0 else n - 1), "remote-project"));
         // The header is not a toggle: pressing it closes the picker.
         const resized = try fsHeader(&h, if (zoomed) 0 else n - 1);
         h.t.click(resized.x + 40, resized.y + resized.h / 2);
@@ -743,4 +758,124 @@ test "project picker #15: full screen existing chat, the keyboard picker opens b
         h.press(picker_chord);
         try expectBeside(&h, try slotFolderChip(&h, n - 1));
     };
+}
+
+test "project picker #15: full screen, beside the pane it changes while Files is active" {
+    for ([_]bool{ false, true }) |draft| for ([_]usize{ 1, 2 }) |n| {
+        var h: Harness = undefined;
+        try h.init(true);
+        defer h.deinit();
+        h.t.resize(1700, 780);
+        if (draft) h.a.newTab();
+        splitInto(&h, .horizontal, n);
+        h.a.panels.files_open = true;
+        h.a.setFullScreen(true);
+        strip.focus(&h.a, .{ .chat = n - 1 });
+        if (n == 2 and !draft) h.a.openChat("b", null);
+        strip.focus(&h.a, .files);
+        h.t.frame();
+        h.t.settle(2);
+        try testing.expect(strip.active(&h.a) == .files);
+        h.press(picker_chord);
+        errdefer std.debug.print("draft={} n={d}\n", .{ draft, n });
+        const header = try fsHeader(&h, n - 1);
+        try expectBeside(&h, if (draft) ui.Rect{ .x = header.x, .y = header.y, .w = 90, .h = header.h } else try headerProject(&h, header, if (n == 2) "remote-project" else "fieldnotes"));
+        try testing.expect(strip.same(h.a.view.strip.target, .{ .chat = n - 1 }));
+    };
+}
+
+test "project picker #15: zoomed Files tab, the keyboard picker opens beside the focused chat's chip" {
+    for ([_]usize{ 1, 2, 3 }) |n| {
+        var h: Harness = undefined;
+        try h.init(true);
+        defer h.deinit();
+        splitInto(&h, .horizontal, n);
+        h.a.panels.files_open = true;
+        strip.focus(&h.a, .{ .chat = n - 1 });
+        strip.queue(&h.a, .{ .zoom = .files });
+        h.t.frame();
+        h.t.settle(2);
+        try testing.expect(strip.same(h.a.view.strip.expanded.?, .files));
+        h.press(picker_chord);
+        errdefer std.debug.print("n={d}\n", .{n});
+        try expectBeside(&h, try slotFolderChip(&h, n - 1));
+        try testing.expect(strip.same(h.a.view.strip.target, .{ .chat = n - 1 }));
+    }
+}
+
+test "project picker #15: after Cmd+W closes a Files tab it opens for the focused pane, not the first" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.t.resize(1700, 780);
+    splitInto(&h, .horizontal, 3);
+    h.a.panels.files_open = true;
+    strip.focus(&h.a, .{ .chat = 2 });
+    strip.focus(&h.a, .files);
+    h.t.frame();
+    h.t.settle(2);
+    h.press(.{ .key = 'w', .cmd = true });
+    try testing.expect(!h.a.panels.files_open);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.focus);
+    h.press(picker_chord);
+    try expectBeside(&h, try slotFolderChip(&h, 2));
+    try testing.expect(strip.same(h.a.view.strip.target, .{ .chat = 2 }));
+}
+
+/// The project chips in a narrow draft's footer, top row first.
+fn footerProjects(h: *Harness, out: *[2]ui.Rect) []ui.Rect {
+    var n: usize = 0;
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |text| if (n < 2 and std.mem.eql(u8, text.str, "fieldnotes") and node.rect.x >= h.a.view.sidebar_width and node.rect.y > h.t.ctx.size.h - 75) {
+            out[n] = node.rect;
+            n += 1;
+        },
+        else => {},
+    };
+    return out[0..n];
+}
+
+test "project picker #15: a narrow draft has the picker above the project chip that opened it, also after a resize" {
+    const Via = enum { keyboard, first_row, second_row };
+    var seen: std.EnumArray(Via, usize) = .initFill(0);
+    for ([_]@import("motion_rules.zig").UiMode{ .zen, .developer }) |mode| for ([_]usize{ 1, 2, 3 }) |n| for (std.enums.values(Via)) |via| {
+        var h: Harness = undefined;
+        try h.init(true);
+        defer h.deinit();
+        h.a.settings.applyUiMode(mode);
+        // The narrowest window there is.
+        const width: f32 = if (n == 3) 1000 else 760;
+        h.a.view.sidebar_open = n == 1;
+        h.a.newTab();
+        splitInto(&h, .horizontal, n);
+        strip.focus(&h.a, .{ .chat = 0 });
+        h.t.resize(width, 780);
+        h.t.settle(2);
+        errdefer std.debug.print("mode={t} n={d} via={t}\n", .{ mode, n, via });
+        var buf: [2]ui.Rect = undefined;
+        const before = footerProjects(&h, &buf);
+        // In a split, the keyboard's picker is the strip's.
+        if (via == .keyboard and n > 1) continue;
+        if (before.len < @as(usize, if (via == .keyboard) 1 else 2)) continue;
+        seen.getPtr(via).* += 1;
+        switch (via) {
+            .keyboard => h.press(picker_chord),
+            .first_row => clickRect(&h, before[0]),
+            .second_row => clickRect(&h, before[1]),
+        }
+        try testing.expect(h.a.view.strip.footer_folder);
+        for ([_]f32{ 780, 660, 900 }) |height| {
+            h.t.resize(width, height);
+            h.t.settle(2);
+            if (mode == .zen and n == 2 and via == .second_row and height == 660) snap(&h, "picker-narrow-draft");
+            const now = footerProjects(&h, &buf);
+            if (now.len != before.len) return error.FooterChanged;
+            const chip = now[@intFromBool(via == .second_row)];
+            const card = try pickerCard(&h);
+            errdefer std.debug.print("height={d}: card y={d:.0} h={d:.0}, chip y={d:.0}\n", .{ height, card.y, card.h, chip.y });
+            try expectBeside(&h, chip);
+            try testing.expect(card.y + card.h <= chip.y);
+        }
+    };
+    for (seen.values) |cases| try testing.expect(cases > 0);
 }
