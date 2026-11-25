@@ -654,3 +654,36 @@ test "quote selection shows its chips on the Write page, whose click goes back t
     try h.expectHighlighted(option_b);
     try testing.expectEqualStrings(draft, h.a.composer.text());
 }
+
+test "quote selection keeps a command picked from the completion menu at the message's start" {
+    const completion = @import("composer_completion.zig");
+    const cases = [_]struct { name: []const u8, path: ?[]const u8, text: []const u8, at: usize, first: bool }{
+        .{ .name = "goal", .path = null, .text = "/goal write tests", .at = 0, .first = true },
+        // A provider runs a skill as its command only from the start, too.
+        .{ .name = "review", .path = "/synthetic/skills/review.md", .text = "$review this", .at = 0, .first = true },
+        .{ .name = "review", .path = "/synthetic/skills/review.md", .text = "Compare $review", .at = 8, .first = false },
+    };
+    for (cases) |case| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        try h.quote(option_b);
+        h.a.composer.set(case.text);
+        completion.restore(&h.a, null);
+        const stop = case.at + 1 + case.name.len;
+        const link = try completion.canonical(testing.allocator, .{ .name = case.name, .description = "", .path = case.path });
+        try h.a.completion.selected.append(testing.allocator, .{
+            .start = case.at,
+            .end = stop,
+            .display = try testing.allocator.dupe(u8, case.text[case.at..stop]),
+            .link = link,
+        });
+        const typed = try std.mem.concat(testing.allocator, u8, &.{ case.text[0..case.at], link, case.text[stop..] });
+        defer testing.allocator.free(typed);
+        const parts: [2][]const u8 = if (case.first) .{ typed, "> " ++ option_b } else .{ "> " ++ option_b, typed };
+        const expected = try std.mem.join(testing.allocator, "\n\n", &parts);
+        defer testing.allocator.free(expected);
+        h.a.send();
+        try testing.expectEqualStrings(expected, try h.sentText());
+    }
+}

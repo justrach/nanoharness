@@ -175,8 +175,13 @@ fn blockquote(gpa: Allocator, out: *std.ArrayList(u8), text: []const u8) !void {
 }
 
 /// Whether `text` starts with a slash command (`/compact`,
-/// `/plugin:review fix`), not with a path (`/usr/share`).
+/// `/plugin:review fix`), not with a path (`/usr/share`); or with a command
+/// or skill picked from the completion menu, which is sent as its link.
 pub fn isCommand(text: []const u8) bool {
+    if (std.mem.startsWith(u8, text, "[/") or std.mem.startsWith(u8, text, "[$")) {
+        const label = std.mem.indexOf(u8, text, "](") orelse return false;
+        return std.mem.startsWith(u8, text[label + 2 ..], "harness-invoke:");
+    }
     if (text.len < 2 or text[0] != '/' or !std.ascii.isAlphabetic(text[1])) return false;
     for (text[1..]) |ch| switch (ch) {
         ' ', '\t', '\r', '\n' => return true,
@@ -189,8 +194,8 @@ pub fn isCommand(text: []const u8) bool {
 const testing = std.testing;
 
 test "quote selection tells a slash command from a path" {
-    for ([_][]const u8{ "/compact", "/review the last change", "/plugin:run", "/fix_it\nnow" }) |s| try testing.expect(isCommand(s));
-    for ([_][]const u8{ "", "/", "/ no", "/usr/share is full", "plain", "//comment", "/50%", "see /compact" }) |s| try testing.expect(!isCommand(s));
+    for ([_][]const u8{ "/compact", "/review the last change", "/plugin:run", "/fix_it\nnow", "[/goal](harness-invoke:00) now", "[$a](harness-invoke:00)" }) |s| try testing.expect(isCommand(s));
+    for ([_][]const u8{ "", "/", "/ no", "/usr/share is full", "plain", "//comment", "/50%", "see /compact", "[/tmp](https://example.test)", "[a](harness-invoke:00)", "[/x" }) |s| try testing.expect(!isCommand(s));
 }
 
 test "quote selection blockquotes every line, blank ones included" {
