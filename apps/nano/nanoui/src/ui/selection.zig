@@ -124,8 +124,13 @@ pub fn line(c: anytype, out: *std.ArrayList(gpu.Instance), id: u64, index: u32, 
         // and character dragging must not scan paragraph boundaries.
         const prose = c.nodes.items[index].content.text.style.prose_selection;
         if (c.input.click_count == 2) {
-            const word_at = start + text_selection.glyphClusterAt(lay.glyphs, lay.width, m.x - x);
-            s.hit_word = text_selection.proseRange(str, word_at, c.input.click_count);
+            const local_x = m.x - x;
+            const word_at = start + text_selection.glyphClusterAt(lay.glyphs, lay.width, local_x);
+            const visual_line: ?[2]usize = if (prose and s.pressed and !s.touch and local_x >= 0 and local_x < lay.width)
+                .{ start, end }
+            else
+                null;
+            s.hit_word = text_selection.proseWordRange(str, word_at, visual_line);
         }
         s.hit_line = if (prose and c.input.click_count >= 3) text_selection.proseRange(str, at, c.input.click_count) else .{ start, end };
         s.hit_str = str;

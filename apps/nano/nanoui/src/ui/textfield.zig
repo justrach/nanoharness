@@ -480,19 +480,21 @@ pub fn textField(c: *Context, buffer: *TextBuffer, opts: Options) Result {
             const local_y = c.input.mouse.y - r.y - pad_y + e.scroll_y;
             if (multi and (pointer_select or (e.selecting and c.input.down))) {
                 const lines = lines_mod.layout(c, buffer.text(), style, wrap_w);
-                const at = if (opts.selection_mode == .prompt and c.input.click_count >= 2)
+                const cluster = if (opts.selection_mode == .prompt and c.input.click_count >= 2)
                     lines_mod.clusterAtPoint(c, buffer.text(), style, lines, local_x, local_y, lh_)
                 else
-                    lines_mod.indexAtPoint(c, buffer.text(), style, lines, local_x, local_y, lh_);
+                    null;
+                const at = if (cluster) |hit| hit.at else lines_mod.indexAtPoint(c, buffer.text(), style, lines, local_x, local_y, lh_);
                 if (c.input.pressed) {
-                    textedit.pointerSelect(c, e, buffer.text(), at, true, opts.selection_mode);
+                    const visual_line = if (cluster) |hit| hit.visual_line else null;
+                    textedit.pointerSelect(c, e, buffer.text(), at, true, opts.selection_mode, visual_line);
                 } else {
                     textedit.pointerDrag(c, e, buffer.text(), at, true);
                 }
             } else if (pointer_select) {
                 const idx = c.text.indexAt(shownOf(buffer.text(), opts.password, bullets), style, local_x);
                 const at = if (opts.password) lines_mod.byteOfCodepoint(buffer.text(), idx / 3) else idx;
-                textedit.pointerSelect(c, e, buffer.text(), at, false, opts.selection_mode);
+                textedit.pointerSelect(c, e, buffer.text(), at, false, opts.selection_mode, null);
             } else if (e.selecting and c.input.down) {
                 const idx = c.text.indexAt(shownOf(buffer.text(), opts.password, bullets), style, local_x);
                 const at = if (opts.password) lines_mod.byteOfCodepoint(buffer.text(), idx / 3) else idx;

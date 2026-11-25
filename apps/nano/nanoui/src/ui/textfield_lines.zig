@@ -87,11 +87,16 @@ pub fn indexAtPoint(c: *Context, s: []const u8, style: types.TextStyle, lines: [
 /// Multi-clicks own the glyph under the pointer, not the nearest caret.
 /// This keeps the right half of a word's last glyph (or an emoji) in that
 /// same word/cluster, matching selectable output text.
-pub fn clusterAtPoint(c: *Context, s: []const u8, style: types.TextStyle, lines: []const Line, x: f32, y: f32, lh: f32) usize {
-    const row: usize = @intFromFloat(@max(0, @min(@as(f32, @floatFromInt(lines.len - 1)), @floor(y / lh))));
+pub fn clusterAtPoint(c: *Context, s: []const u8, style: types.TextStyle, lines: []const Line, x: f32, y: f32, lh: f32) struct { at: usize, visual_line: ?[2]usize } {
+    const row_at = @floor(y / lh);
+    const row_count: f32 = @floatFromInt(lines.len);
+    const row: usize = @intFromFloat(@max(0, @min(row_count - 1, row_at)));
     const l = lines[row];
     const lay = c.text.layout(s[l.start..l.end], style);
-    return l.start + @import("text_selection.zig").glyphClusterAt(lay.glyphs, lay.width, x);
+    return .{
+        .at = l.start + @import("text_selection.zig").glyphClusterAt(lay.glyphs, lay.width, x),
+        .visual_line = if (row_at >= 0 and row_at < row_count and x >= 0 and x < lay.width) .{ l.start, l.end } else null,
+    };
 }
 
 /// The selection's ends, for a field whose lines start at (x, y): the text's

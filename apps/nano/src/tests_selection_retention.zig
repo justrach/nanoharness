@@ -292,6 +292,32 @@ test "retention selection double click selects the word under the pointer" {
     try testing.expectEqualStrings("pointer", h.t.clipboard.items);
 }
 
+test "retention selection double click on a prose gap copies both words" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const text = "Try amber maple today.";
+    try Harness.apply(&h.a.transcript,
+        \\{"reset":[{"id":"gap","role":"assistant","parts":[{"id":"p","kind":"text","text":"Try amber **maple** today."}]}]}
+    );
+    h.t.settle(0.2);
+    const n = textNode(&h.t.ctx, text) orelse return error.TextNodeMissing;
+    const node = h.t.ctx.nodes.items[n];
+    const style = node.content.text.style;
+    const x = node.rect.x + h.t.ctx.text.width("Try amber", style) + h.t.ctx.text.width(" ", style) / 2;
+    const y = node.rect.y + h.t.ctx.text.lineHeight(style) / 2;
+    h.t.moveTo(x, y);
+    h.t.ctx.input.click_count = 2;
+    h.t.ctx.pointerDown();
+    h.t.frame();
+    h.t.advance(0.2);
+    h.t.up();
+    h.t.settle(0.1);
+    try h.snap("output-double-click-gap");
+    copy(&h);
+    try testing.expectEqualStrings("amber maple", h.t.clipboard.items);
+}
+
 test "retention selection triple click selects the complete wrapped sentence" {
     var h: Harness = undefined;
     try h.init();
