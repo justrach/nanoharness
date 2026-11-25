@@ -11,6 +11,23 @@ emit() { printf '%s\n' "$1"; }
 rid() { printf '%s' "$1" | sed 's/.*"id":\([0-9]*\).*/\1/'; }
 has() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
 
+# Headless paste-code: `agy acp --login`. Records the URL through $BROWSER
+# (agy 1.5.17) and waits for a code on stdin.
+if [ "$1" = acp ] && [ "$2" = --login ]; then
+  url='https://accounts.google.com/o/oauth2/auth?client_id=fake-login'
+  if [ -n "$BROWSER" ]; then
+    "$BROWSER" "$url"
+  else
+    printf 'Sign in here: %s\n' "$url" >&2
+  fi
+  IFS= read -r code || exit 1
+  [ -n "$code" ] || exit 1
+  dest="${GEMINI_HOME:-${HOME:-/tmp}/.gemini}/antigravity-cli"
+  mkdir -p "$dest"
+  printf '{"token":"%s"}\n' "$code" > "$dest/oauth_creds.json"
+  exit 0
+fi
+
 OPTIONS='[{"id":"model","name":"Model","category":"model","type":"select","currentValue":"gemini-3.7-flash-high","options":[{"value":"gemini-3.7-flash-high","name":"Gemini 3.7 Flash (High)","description":"Gemini 3.7 Flash model with high thinking level"},{"value":"gemini-3.7-flash-medium","name":"Gemini 3.7 Flash (Medium)"},{"value":"gemini-3.7-flash-low","name":"Gemini 3.7 Flash (Low)"},{"value":"gemini-pro-agent","name":"Gemini 3.1 Pro (High)"},{"value":"gemini-3.1-pro-low","name":"Gemini 3.1 Pro (Low)"}]},{"id":"mode","name":"Session Mode","category":"mode","type":"select","currentValue":"default","options":[{"value":"default","name":"Default"},{"value":"auto_edit","name":"Auto Edit"},{"value":"yolo","name":"YOLO"}]}]'
 
 AUTHED=0

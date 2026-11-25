@@ -43,6 +43,7 @@ pub const usage =
     \\
     \\Commands:
     \\  headless   Run the engine without a UI (the default)
+    \\             `--opt-in AGENT` and HARNESS_OPTED_IN enable off-by-default agents
     \\  login      Sign in and enable sync on the next engine start
     \\  logout     Remove the saved session; the next start is local-only
     \\  status     Show workspace mode, optional auth, and engine status
@@ -1076,6 +1077,31 @@ test "data folder: override, then ~/.harness before the legacy name" {
         }
         try testing.expectEqual(@as(usize, 1), got.len);
         try testing.expectEqualStrings("/tmp/synthetic-data", got[0]);
+    }
+}
+
+test "data folder: DATA_DIR is the older override when HARNESS_DATA_DIR is unset" {
+    var env = Map.init(testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/home/synthetic");
+    try env.put("DATA_DIR", "/tmp/legacy-data");
+    {
+        const got = try dataDirCandidates(testing.allocator, &env, false);
+        defer {
+            for (got) |p| testing.allocator.free(p);
+            testing.allocator.free(got);
+        }
+        try testing.expectEqual(@as(usize, 1), got.len);
+        try testing.expectEqualStrings("/tmp/legacy-data", got[0]);
+    }
+    try env.put("HARNESS_DATA_DIR", "/tmp/harness-data");
+    {
+        const got = try dataDirCandidates(testing.allocator, &env, false);
+        defer {
+            for (got) |p| testing.allocator.free(p);
+            testing.allocator.free(got);
+        }
+        try testing.expectEqualStrings("/tmp/harness-data", got[0]);
     }
 }
 

@@ -166,15 +166,103 @@ struct HarnessPrefsFile {
 /// Agent ids this build knows, skipping the rest: a prefs file written by a
 /// newer build (an agent added since) must not fail as a whole, which reset
 /// every opt-out and opt-in to the defaults.
+///
+/// Headless installs often hand-edit this field. A JSON string, a
+/// comma-separated string, or a non-array value must not discard the rest of
+/// `harness-prefs.json` (including `remoteControl`).
 fn known_harnesses<'de, D>(deserializer: D) -> Result<Vec<HarnessId>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
-    Ok(raw
-        .into_iter()
-        .filter_map(|value| serde_json::from_value(value).ok())
-        .collect())
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    Ok(harness_ids_from_json(&raw))
+}
+
+/// Parse agent ids from a prefs `optedIn` / `disabled` JSON value.
+pub fn harness_ids_from_json(value: &serde_json::Value) -> Vec<HarnessId> {
+    match value {
+        serde_json::Value::String(raw) => parse_opted_in_list(raw),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|item| match item {
+                serde_json::Value::String(raw) => parse_harness_id(raw),
+                _ => None,
+            })
+            .collect(),
+        // Headless edits sometimes write `{"antigravity": true}` instead of
+        // an array. Truthy entries opt in; the rest of the file still loads.
+        serde_json::Value::Object(map) => map
+            .iter()
+            .filter(|(key, value)| json_truthy(value) && parse_harness_id(key).is_some())
+            .filter_map(|(key, _)| parse_harness_id(key))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn json_truthy(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Bool(on) => *on,
+        serde_json::Value::Number(n) => n.as_i64() == Some(1) || n.as_u64() == Some(1),
+        serde_json::Value::String(raw) => {
+            let raw = raw.trim();
+            raw == "1" || raw.eq_ignore_ascii_case("true") || raw.eq_ignore_ascii_case("on")
+        }
+        _ => false,
+    }
+}
+
+/// Parse kebab-case (or case-insensitive) agent ids from a comma/whitespace
+/// list. Unknown names are skipped.
+pub fn parse_opted_in_list(raw: &str) -> Vec<HarnessId> {
+    raw.split(|c: char| c == ',' || c.is_ascii_whitespace())
+        .filter_map(parse_harness_id)
+        .collect()
+}
+
+/// One agent id, accepting the wire kebab-case name and a case-insensitive
+/// spelling (`Antigravity` → `antigravity`).
+pub fn parse_harness_id(raw: &str) -> Option<HarnessId> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    serde_json::from_value(serde_json::Value::String(trimmed.to_string()))
+        .ok()
+        .or_else(|| {
+            serde_json::from_value(serde_json::Value::String(trimmed.to_ascii_lowercase())).ok()
+        })
+}
+
+/// Extra opt-ins from the process environment. `HARNESS_OPTED_IN` is the
+/// explicit list; `HARNESS_PROVIDER` also opts in an off-by-default agent so
+/// `HARNESS_PROVIDER=antigravity` can actually run on a headless host.
+pub fn env_opted_in() -> Vec<HarnessId> {
+    env_opted_in_from(|key| std::env::var(key).ok())
+}
+
+fn env_opted_in_from(mut env: impl FnMut(&str) -> Option<String>) -> Vec<HarnessId> {
+    let mut ids = env("HARNESS_OPTED_IN")
+        .map(|raw| parse_opted_in_list(&raw))
+        .unwrap_or_default();
+    if let Some(raw) = env("HARNESS_PROVIDER")
+        && let Some(id) = parse_harness_id(raw.trim())
+        && auto_enabled(id)
+        && !default_on(id)
+        && !ids.contains(&id)
+    {
+        ids.push(id);
+    }
+    ids
+}
+
+fn merge_opted_in_lists(mut existing: Vec<HarnessId>, extra: Vec<HarnessId>) -> Vec<HarnessId> {
+    for id in extra {
+        if auto_enabled(id) && !existing.contains(&id) {
+            existing.push(id);
+        }
+    }
+    existing
 }
 
 fn known_harnesses_opt<'de, D>(deserializer: D) -> Result<Option<Vec<HarnessId>>, D::Error>
@@ -281,19 +369,59 @@ impl HarnessRegistry {
 
     /// Load `harness-prefs.json` from the engine data dir and remember the
     /// path for writes. Corrupt/missing files fall back to the default set.
+    /// Call [`Self::apply_env_opt_ins`] afterwards on a real engine so
+    /// `HARNESS_OPTED_IN` / `HARNESS_PROVIDER` overlay the file in memory
+    /// without rewriting it.
     pub fn load_prefs(&self, data_dir: &Path) {
+        self.load_prefs_with_opt_ins(data_dir, Vec::new());
+    }
+
+    /// Overlay `HARNESS_OPTED_IN` and an off-by-default `HARNESS_PROVIDER`
+    /// onto the loaded prefs. Not persisted.
+    pub fn apply_env_opt_ins(&self) {
+        self.merge_opted_in(env_opted_in());
+    }
+
+    fn merge_opted_in(&self, extra: Vec<HarnessId>) {
+        if extra.is_empty() {
+            return;
+        }
+        let mut prefs = self.prefs();
+        prefs.opted_in = merge_opted_in_lists(prefs.opted_in.clone(), extra);
+    }
+
+    fn load_prefs_with_opt_ins(&self, data_dir: &Path, extra_opt_ins: Vec<HarnessId>) {
         let path = data_dir.join("harness-prefs.json");
         let existed = path.is_file();
-        let mut loaded = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<HarnessPrefsFile>(&text).ok())
-            .unwrap_or_default();
+        let mut loaded = match std::fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str::<HarnessPrefsFile>(&text) {
+                Ok(file) => file,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        path = %path.display(),
+                        "harness-prefs parse failed; using defaults"
+                    );
+                    HarnessPrefsFile::default()
+                }
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => HarnessPrefsFile::default(),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %path.display(),
+                    "harness-prefs read failed; using defaults"
+                );
+                HarnessPrefsFile::default()
+            }
+        };
         if !existed && loaded.autonomy.is_none() {
             // Brand-new data dir: Workspace, not FullAccess. Existing files
             // without the key keep FullAccess via `autonomy()`.
             loaded.autonomy = Some(Autonomy::Workspace);
             loaded.autonomy_is_default = true;
         }
+        loaded.opted_in = merge_opted_in_lists(loaded.opted_in, extra_opt_ins);
         self.graff_draft_subagents
             .store(loaded.graff_draft_subagents, Ordering::Relaxed);
         let compact_at = loaded.graff_compact_at.filter(|pct| valid_compact_at(*pct));
@@ -319,15 +447,22 @@ impl HarnessRegistry {
     /// off; an off-by-default harness listed in it was a deliberate "yes", so
     /// it becomes an opt-in. Rewrites the file once, which is what lets later
     /// installs of default-on agents auto-enable.
+    ///
+    /// A hand-edited `optedIn` that coexists with the leftover `enabled` key
+    /// is kept: overwriting it is why adding `optedIn` on a Linux host with
+    /// an older prefs file appeared to do nothing.
     fn migrate_legacy_prefs(&self) {
-        let legacy = { self.prefs().enabled.take() };
+        let (legacy, existing_opted_in) = {
+            let mut prefs = self.prefs();
+            (prefs.enabled.take(), prefs.opted_in.clone())
+        };
         let Some(legacy) = legacy else { return };
         let registered: Vec<HarnessId> = self.order().iter().copied().collect();
         let disabled: Vec<HarnessId> = registered
             .into_iter()
             .filter(|id| default_on(*id) && !legacy.contains(id))
             .collect();
-        let mut opted_in: Vec<HarnessId> = Vec::new();
+        let mut opted_in = existing_opted_in;
         for id in legacy {
             if auto_enabled(id) && !default_on(id) && !opted_in.contains(&id) {
                 opted_in.push(id);
@@ -1401,6 +1536,170 @@ mod tests {
         assert!(empty.disabled.is_empty() && empty.enabled.is_none());
     }
 
+    /// A hand-edited prefs file is the headless Settings → Agents equivalent.
+    /// This is the shape a Linux host writes; it must enable Antigravity when
+    /// the CLI is present. Fails on main if load_prefs ignores `optedIn`.
+    #[test]
+    fn hand_edited_opted_in_enables_installed_antigravity() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("harness-prefs.json"),
+            r#"{"optedIn":["antigravity"]}"#,
+        )
+        .unwrap();
+        let registry = HarnessRegistry::new();
+        test_slot(&registry, HarnessId::ClaudeCode, true);
+        test_slot(&registry, HarnessId::Antigravity, true);
+        registry.load_prefs_with_opt_ins(dir.path(), Vec::new());
+        assert!(
+            registry.enabled_set().contains(&HarnessId::Antigravity),
+            "{:?}",
+            registry.enabled_set()
+        );
+    }
+
+    /// `"optedIn": "antigravity"` (a string, not an array) used to fail the
+    /// whole file as invalid JSON-for-this-schema, so a headless host's edit
+    /// silently fell back to defaults. Keep the rest of the file, including
+    /// `remoteControl`.
+    #[test]
+    fn string_opted_in_and_boolean_opted_in_do_not_discard_the_prefs_file() {
+        let string: HarnessPrefsFile =
+            serde_json::from_str(r#"{"optedIn":"antigravity","remoteControl":true}"#).unwrap();
+        assert_eq!(string.opted_in, vec![HarnessId::Antigravity]);
+        assert!(string.remote_control);
+
+        let mixed: HarnessPrefsFile =
+            serde_json::from_str(r#"{"optedIn":"Antigravity, cursor","remoteControl":true}"#)
+                .unwrap();
+        assert_eq!(
+            mixed.opted_in,
+            vec![HarnessId::Antigravity, HarnessId::Cursor]
+        );
+        assert!(mixed.remote_control);
+
+        let boolean: HarnessPrefsFile =
+            serde_json::from_str(r#"{"optedIn":true,"remoteControl":true,"disabled":["codex"]}"#)
+                .unwrap();
+        assert!(boolean.opted_in.is_empty());
+        assert!(boolean.remote_control);
+        assert_eq!(boolean.disabled, vec![HarnessId::Codex]);
+
+        let map: HarnessPrefsFile = serde_json::from_str(
+            r#"{"optedIn":{"antigravity":true,"cursor":false,"grok":"on"},"remoteControl":true}"#,
+        )
+        .unwrap();
+        assert_eq!(map.opted_in, vec![HarnessId::Antigravity, HarnessId::Grok]);
+        assert!(map.remote_control);
+    }
+
+    #[test]
+    fn parse_opted_in_list_accepts_commas_whitespace_and_case() {
+        assert_eq!(
+            parse_opted_in_list("antigravity, Cursor  grok"),
+            vec![HarnessId::Antigravity, HarnessId::Cursor, HarnessId::Grok]
+        );
+        assert_eq!(
+            parse_harness_id("Antigravity"),
+            Some(HarnessId::Antigravity)
+        );
+        assert_eq!(parse_harness_id("not-an-agent"), None);
+        assert_eq!(
+            env_opted_in_from(|key| match key {
+                "HARNESS_OPTED_IN" => Some("cursor".into()),
+                "HARNESS_PROVIDER" => Some("antigravity".into()),
+                _ => None,
+            }),
+            vec![HarnessId::Cursor, HarnessId::Antigravity]
+        );
+        // A default-on provider is already offered; it is not an opt-in.
+        assert!(
+            env_opted_in_from(|key| (key == "HARNESS_PROVIDER").then(|| "graff".into())).is_empty()
+        );
+    }
+
+    /// `HARNESS_OPTED_IN` / `HARNESS_PROVIDER` overlay the file without
+    /// rewriting it, so a headless host can enable Antigravity without the GUI.
+    #[test]
+    fn env_opted_in_overlays_the_prefs_file_without_rewriting_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("harness-prefs.json"), r#"{"disabled":[]}"#).unwrap();
+        let registry = HarnessRegistry::new();
+        test_slot(&registry, HarnessId::ClaudeCode, true);
+        test_slot(&registry, HarnessId::Antigravity, true);
+        registry.load_prefs_with_opt_ins(dir.path(), vec![HarnessId::Antigravity]);
+        assert!(registry.enabled_set().contains(&HarnessId::Antigravity));
+        let text = std::fs::read_to_string(dir.path().join("harness-prefs.json")).unwrap();
+        assert!(
+            !text.contains("antigravity"),
+            "env/CLI opt-ins must not rewrite the file: {text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_env_opt_ins_reads_harness_opted_in() {
+        if std::env::var_os("HARNESS_TEST_APPLY_ENV_OPTED_IN").is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "registry::tests::apply_env_opt_ins_reads_harness_opted_in",
+                    "--nocapture",
+                ])
+                .env("HARNESS_TEST_APPLY_ENV_OPTED_IN", "1")
+                .env("HARNESS_OPTED_IN", "antigravity")
+                .env_remove("HARNESS_PROVIDER")
+                .env("HARNESS_DATA_DIR", dir.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "stdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        test_slot(&registry, HarnessId::ClaudeCode, true);
+        test_slot(&registry, HarnessId::Antigravity, true);
+        registry.load_prefs(dir.path());
+        assert!(
+            !registry.enabled_set().contains(&HarnessId::Antigravity),
+            "file defaults must leave Antigravity off"
+        );
+        registry.apply_env_opt_ins();
+        assert!(
+            registry.enabled_set().contains(&HarnessId::Antigravity),
+            "{:?}",
+            registry.enabled_set()
+        );
+    }
+
+    #[test]
+    fn hand_edited_remote_control_stays_off_until_the_file_says_on() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("harness-prefs.json"),
+            r#"{"optedIn":["antigravity"],"remoteControl":true}"#,
+        )
+        .unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs_with_opt_ins(dir.path(), Vec::new());
+        assert!(registry.remote_control());
+        let off = tempfile::tempdir().unwrap();
+        std::fs::write(
+            off.path().join("harness-prefs.json"),
+            r#"{"optedIn":["antigravity"]}"#,
+        )
+        .unwrap();
+        let fresh = HarnessRegistry::new();
+        fresh.load_prefs_with_opt_ins(off.path(), Vec::new());
+        assert!(!fresh.remote_control());
+    }
+
     /// `descriptors()` stamps the per-device enabled flag; `set_enabled`
     /// guards the gate (no enabling missing CLIs, no disabling the last one)
     /// and persists across a reload.
@@ -1740,6 +2039,33 @@ mod tests {
             registry.enabled_set(),
             vec![HarnessId::ClaudeCode, HarnessId::Grok, HarnessId::Graff]
         );
+    }
+
+    /// A leftover `enabled` key must not wipe a hand-edited `optedIn`.
+    #[test]
+    fn legacy_enabled_key_merges_existing_opted_in_instead_of_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("harness-prefs.json"),
+            r#"{"enabled":["claude-code"],"optedIn":["antigravity"]}"#,
+        )
+        .unwrap();
+        let registry = HarnessRegistry::new();
+        test_slot(&registry, HarnessId::ClaudeCode, true);
+        test_slot(&registry, HarnessId::Codex, true);
+        test_slot(&registry, HarnessId::Antigravity, true);
+        registry.load_prefs(dir.path());
+        assert!(
+            registry.enabled_set().contains(&HarnessId::Antigravity),
+            "{:?}",
+            registry.enabled_set()
+        );
+        let file: HarnessPrefsFile = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("harness-prefs.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(file.opted_in.contains(&HarnessId::Antigravity));
+        assert!(!file.enabled.as_ref().is_some_and(|ids| !ids.is_empty()));
     }
 
     /// The fresh-machine shape (#128): no CLIs installed at all. Enablement is

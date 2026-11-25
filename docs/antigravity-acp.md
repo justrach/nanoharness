@@ -6,11 +6,58 @@ Harness uses Antigravity's native `agy acp` entry point when the `agy` CLI is in
 
 1. Install or update the Antigravity CLI using its original installation method.
 2. Confirm `agy acp --help` works. Native ACP was verified with CLI 1.5.7; older CLIs without this subcommand need updating.
-3. Enable Antigravity in Settings → Agents, then use Sign in if required.
+3. Enable Antigravity in **Settings → Agents**, or on a headless host by editing prefs / setting `HARNESS_OPTED_IN` (below), then use Sign in if required.
 
 Explicit `ANTIGRAVITY_ACP_EXECUTABLE` overrides take precedence. Point it to the executable, not a command string. Native executables named `agy` / `agy.exe` receive the `acp` subcommand. Custom legacy ACP servers receive the existing server arguments. Without an override, native `agy` takes precedence over a legacy `agy_acp_server` on PATH or a previously installed managed archive. Detection does not log in, start a session, or download an adapter.
 
 Settings' Install action remains available for the pinned legacy ACP archive on supported platforms. Existing legacy installations and custom server overrides continue working. Harness does not automatically install a replacement CLI or enable permission-skipping flags.
+
+## Headless Linux
+
+Antigravity is **off by default**. A desktop turns it on in Settings → Agents. A Linux server with no desktop does the same by writing the prefs file, or by an env / CLI overlay that is **not** persisted.
+
+### Prefs path and key
+
+| | |
+| --- | --- |
+| File | `{data_dir}/harness-prefs.json` |
+| Default data dir (Linux / macOS) | `~/.harness` (legacy `~/.harnesser` only if it already exists) |
+| Override | `HARNESS_DATA_DIR`, then the older `DATA_DIR` |
+| Windows default | `%LOCALAPPDATA%\Harness` |
+| Key | `optedIn` — JSON array of kebab-case agent ids |
+| Remote control | `remoteControl` (boolean, **off** unless the file says `true`; not an env flag) |
+
+Example that enables Antigravity when `agy` is installed, without turning on remote control:
+
+```json
+{"optedIn":["antigravity"]}
+```
+
+A string (`"optedIn": "antigravity"`) or a comma-separated string is accepted. A boolean `true` is ignored for this key and does **not** discard the rest of the file.
+
+### Env and CLI (not persisted)
+
+```sh
+# one-shot
+harness headless --opt-in antigravity
+
+# or, for a systemd user unit (EnvironmentFile already points here):
+echo 'HARNESS_OPTED_IN=antigravity' >> ~/.harness/env
+```
+
+`HARNESS_PROVIDER=antigravity` also opts Antigravity in for that process (it already selected it as the default harness). Repeat `--opt-in` or comma-separate `HARNESS_OPTED_IN`. `harness daemon install` captures `HARNESS_OPTED_IN` into the unit when it is set.
+
+### Finding `agy` with no desktop
+
+Detection looks on `PATH`, the login shell's `PATH`, and well-known bins that a systemd unit's minimal `PATH` otherwise misses: `~/.local/bin`, `~/.antigravity/bin`, `/usr/local/bin`, `/opt/homebrew/bin`, `/opt/Antigravity/bin`. Override with `ANTIGRAVITY_ACP_EXECUTABLE` if the binary lives elsewhere. There is no GUI or display requirement.
+
+`harness daemon install` captures `ANTIGRAVITY_ACP_EXECUTABLE`, `GEMINI_HOME` and `GEMINI_API_KEY` when they are set. You can also put them in `~/.harness/env` (the systemd unit already loads that file).
+
+### Sign-in on a host with no browser
+
+agy 1.5.17 sends the Google OAuth URL to `$BROWSER` rather than stdout. Headless login uses a recording shim so `PollAgentLogin` can show the URL, and `CompleteAgentLogin` pastes the code into `agy acp --login` — the CLI's `127.0.0.1` callback is not reachable from another machine.
+
+Settings live in `$GEMINI_HOME/antigravity-cli/settings.json` (agy 1.5.17) with `$GEMINI_HOME/antigravity-acp/settings.json` as the older ACP path (`GEMINI_HOME` defaults to `~/.gemini`).
 
 ## Update checklist
 

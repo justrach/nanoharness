@@ -40,6 +40,7 @@ Download the latest signed release from **[Releases](https://github.com/justrach
 | **macOS (Apple Silicon)** | `Harness-macos-arm64.dmg` | Developer ID signed &amp; notarized; auto-updates in-app |
 | **Windows (x64)** | `Harness-windows-x86_64.zip` | Portable `harness.exe`; keep `harness-update.json` beside it for in-app updates |
 | **Arch Linux** | `harness-VERSION-linux-x86_64.pkg.tar.zst` (or `-aarch64`) | Install via `sudo pacman -U ./harness-*.pkg.tar.zst` (Vulkan driver required; updates via pacman) |
+| **Linux (headless / other distros)** | `harness-VERSION-linux-x86_64.tar.gz` (or `-aarch64`) | Unpack and run `./install.sh` (installs to `~/.local/bin`). Or `curl -fsSL https://edge.codegraff.com/install.sh \| sh`. |
 
 ### Download with curl
 
@@ -136,6 +137,14 @@ The CodeGraff images are credited in [third-party notices](THIRD_PARTY_NOTICES.m
 ## Devices and accounts
 
 Each desktop device runs an engine and stores its local sessions. The GUI connects to an engine on the local IPC port or starts one in the app process. `harness headless` runs the engine without a window.
+
+Off-by-default agents (Antigravity, Cursor, and the others that are not Graff / Codex / Claude Code) are enabled on a desktop in **Settings → Agents**. On a headless Linux host, write the same setting to `{data_dir}/harness-prefs.json` under the `optedIn` key (default data dir `~/.harness`, override with `HARNESS_DATA_DIR`):
+
+```json
+{"optedIn":["antigravity"]}
+```
+
+Or pass `--opt-in antigravity` / set `HARNESS_OPTED_IN=antigravity` (not persisted; a systemd user unit also reads `~/.harness/env`). Remote control stays off unless that same file sets `"remoteControl": true`. See [Antigravity over ACP](docs/antigravity-acp.md#headless-linux) for the full path table and `agy` search paths.
 
 In the desktop app, open the account menu and choose **Enable sync**. Sign in with your CodeGraff account, then choose whether to bring existing local work into the synced workspace or start fresh. Harness does not upload existing local sessions until you choose **Bring my work**. New work in the synced workspace is stored at `edge.codegraff.com` and appears on your other signed-in devices, including the SwiftUI iOS companion. Running commands, terminals or file writes from another device also needs **Settings → Devices → Allow remote control** on the computer that would execute them (off by default), and the first of those actions from a given device still asks for a local approval. New installs default agent autonomy to Workspace; existing preferences are left alone.
 

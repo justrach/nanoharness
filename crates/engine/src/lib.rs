@@ -79,7 +79,10 @@ pub use doc_host::{ChatDocHandle, DocHost, DocHostConfig, EdgeConfig};
 pub use instance_lock::InstanceLock;
 pub use profile::EngineProfile;
 pub use project_actions::ProjectActionsStore;
-pub use registry::{HarnessDescriptor, HarnessRegistry, default_registry};
+pub use registry::{
+    HarnessDescriptor, HarnessRegistry, default_registry, env_opted_in, parse_harness_id,
+    parse_opted_in_list,
+};
 pub use repos::{CheckoutIdentity, Repos, is_own_branch, worktree_branch_from_title};
 pub use rpc::{EngineRpc, RelayRpc};
 pub use run_journal::{JournalError, RunJournal};
@@ -260,7 +263,10 @@ impl EngineCore {
         let device_id = load_or_create_device_id(data_dir)?;
         // This device's harness enablement (Settings → Agents) rides the
         // engine data dir — per-device, like the CLI installs it gates.
+        // Headless hosts overlay HARNESS_OPTED_IN / HARNESS_PROVIDER in
+        // memory so a prefs-file or env opt-in works without the GUI.
         registry.load_prefs(data_dir);
+        registry.apply_env_opt_ins();
         let store = Arc::new(DocsStore::open(profile.store_root())?);
         let store_for_import = store.clone();
         let journal = Arc::new(RunJournal::open(profile.store_root().join("journals"))?);

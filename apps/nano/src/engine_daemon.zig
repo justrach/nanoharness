@@ -32,7 +32,11 @@ pub const captured_env = [_][]const u8{
     "HARNESS_IPC_PORT",
     "HARNESS_CALLBACK_PORT",
     "HARNESS_PROVIDER",
+    "HARNESS_OPTED_IN",
     "HARNESS_DEVICE_NAME",
+    "ANTIGRAVITY_ACP_EXECUTABLE",
+    "GEMINI_HOME",
+    "GEMINI_API_KEY",
     "HARNESS_AUTH_DISABLED",
     "GRAFF_EXECUTABLE",
 };
@@ -433,6 +437,21 @@ test "launchd plist: label, headless argv, escaped values, restart on failure on
     try testing.expect(std.mem.indexOf(u8, plist, "<key>HARNESS_EDGE_URL</key><string>https://e?a=1&amp;b=2</string>") != null);
     try testing.expect(std.mem.indexOf(u8, plist, "<key>SuccessfulExit</key><false/>") != null);
     try testing.expect(std.mem.indexOf(u8, plist, "<key>StandardOutPath</key><string>/Users/x/.harness/daemon.log</string>") != null);
+}
+
+test "daemon capture includes HARNESS_OPTED_IN so a headless install keeps the env opt-in" {
+    for ([_][]const u8{
+        "HARNESS_OPTED_IN",
+        "ANTIGRAVITY_ACP_EXECUTABLE",
+        "GEMINI_HOME",
+        "GEMINI_API_KEY",
+    }) |want| {
+        var found = false;
+        for (captured_env) |key| {
+            if (std.mem.eql(u8, key, want)) found = true;
+        }
+        try testing.expect(found);
+    }
 }
 
 test "systemd unit: headless ExecStart, quoted environment, start limits" {

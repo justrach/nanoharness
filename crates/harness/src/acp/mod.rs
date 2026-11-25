@@ -803,6 +803,47 @@ struct AntigravityAuthSettings {
     method: Option<String>,
 }
 
+/// agy 1.5.17 reads `antigravity-cli/settings.json`; older ACP servers used
+/// `antigravity-acp/settings.json`. Prefer the CLI path when both exist.
+fn antigravity_settings_files(home: &Path) -> [PathBuf; 2] {
+    [
+        home.join("antigravity-cli").join("settings.json"),
+        home.join("antigravity-acp").join("settings.json"),
+    ]
+}
+
+fn configured_auth_method(home: &Path) -> Result<Option<ConfiguredAuthMethod>, HarnessError> {
+    let mut last_err = None;
+    for path in antigravity_settings_files(home) {
+        match configured_auth_method_in(&path) {
+            Ok(Some(method)) => return Ok(Some(method)),
+            Ok(None) => {}
+            Err(err) => last_err = Some(err),
+        }
+    }
+    match last_err {
+        Some(err) => Err(err),
+        None => Ok(None),
+    }
+}
+
+fn antigravity_auth_files(home: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for dir in ["antigravity-cli", "antigravity-acp"] {
+        let root = home.join(dir);
+        for name in [
+            "settings.json",
+            "oauth_creds.json",
+            "google_accounts.json",
+            "credentials.json",
+            "auth.json",
+        ] {
+            files.push(root.join(name));
+        }
+    }
+    files
+}
+
 fn configured_auth_method_in(path: &Path) -> Result<Option<ConfiguredAuthMethod>, HarnessError> {
     let settings = match std::fs::read_to_string(path) {
         Ok(settings) => settings,
@@ -930,6 +971,46 @@ fn first_sentence(text: &str) -> String {
 /// root-started server running as the invoking user.
 const ANTIGRAVITY_LINUX_ARGS: &[&str] = &["--uid="];
 
+/// Native `agy` / `antigravity` CLIs. Headless Linux systemd units often have
+/// a minimal PATH, so we look in the same well-known bins as the other agents
+/// instead of PATH alone.
+fn antigravity_cli_paths() -> Vec<PathBuf> {
+    antigravity_named_paths(&["agy", "antigravity"])
+}
+
+/// Legacy ACP server names used when the native CLI is absent.
+fn antigravity_server_paths() -> Vec<PathBuf> {
+    antigravity_named_paths(&["agy_acp_server", "agy_acp_server.par", "agy_acp_server.exe"])
+}
+
+/// Native CLI plus legacy server, so `extra_paths` / `cli_extra_paths` find
+/// `~/.local/bin/agy` on a systemd unit whose PATH is `/usr/bin`.
+fn antigravity_all_extra_paths() -> Vec<PathBuf> {
+    let mut paths = antigravity_cli_paths();
+    paths.extend(antigravity_server_paths());
+    paths
+}
+
+fn antigravity_named_paths(names: &[&str]) -> Vec<PathBuf> {
+    antigravity_named_paths_in(crate::executable::home_dir().as_deref(), names)
+}
+
+fn antigravity_named_paths_in(home: Option<&Path>, names: &[&str]) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = home {
+        for name in names {
+            dirs.push(home.join(".local").join("bin").join(name));
+            dirs.push(home.join(".antigravity").join("bin").join(name));
+        }
+    }
+    for name in names {
+        dirs.push(PathBuf::from("/opt/homebrew/bin").join(name));
+        dirs.push(PathBuf::from("/usr/local/bin").join(name));
+        dirs.push(PathBuf::from("/opt/Antigravity/bin").join(name));
+    }
+    dirs
+}
+
 fn antigravity_spec() -> AcpAgentSpec {
     AcpAgentSpec {
         id: HarnessId::Antigravity,
@@ -943,10 +1024,10 @@ fn antigravity_spec() -> AcpAgentSpec {
         },
         npm_package: None,
         archive: antigravity_archive(),
-        extra_paths: Vec::new,
+        extra_paths: antigravity_all_extra_paths,
         cli_executable: "agy_acp_server",
-        cli_extra_paths: Vec::new,
-        install_hint: "Antigravity is not installed: install the agy CLI with ACP support, install the legacy ACP server from Settings, or set ANTIGRAVITY_ACP_EXECUTABLE to either executable",
+        cli_extra_paths: antigravity_all_extra_paths,
+        install_hint: "Antigravity is not installed: install the agy CLI with ACP support (searched PATH, the login shell's PATH, ~/.local/bin, ~/.antigravity/bin, /opt/homebrew/bin, /usr/local/bin, /opt/Antigravity/bin), install the legacy ACP server from Settings, or set ANTIGRAVITY_ACP_EXECUTABLE to either executable",
         models: || {
             use ReasoningLevel::{High, Low, Medium};
             vec![
@@ -1004,6 +1085,13 @@ pub enum SignInProgress {
     /// the server is being downloaded before sign-in can start.
     /// the agent is waiting on the user at this sign-in url.
     OpenBrowser(String),
+}
+
+/// File a recording `$BROWSER` shim writes the authorize URL into (`$0.url`).
+pub fn browser_recorded_url_path(browser: &Path) -> PathBuf {
+    let mut path = browser.as_os_str().to_os_string();
+    path.push(".url");
+    PathBuf::from(path)
 }
 
 fn sign_in_url(line: &str) -> Option<String> {
@@ -1278,9 +1366,7 @@ impl AcpHarness {
             .transpose()?;
         let configured_method = gemini_home
             .as_ref()
-            .map(|home| {
-                configured_auth_method_in(&home.join("antigravity-acp").join("settings.json"))
-            })
+            .map(|home| configured_auth_method(home))
             .transpose()?
             .flatten();
         let mut cmd = Command::new(&exe);
@@ -1294,7 +1380,7 @@ impl AcpHarness {
         if let Some(home) = gemini_home {
             cmd.env("GEMINI_HOME", home);
         }
-        if let Some(browser) = browser {
+        if let Some(browser) = &browser {
             cmd.env("BROWSER", browser);
         }
         let scratch = self.adapter_scratch()?;
@@ -1314,6 +1400,24 @@ impl AcpHarness {
         })?;
         let on_progress = std::sync::Arc::new(on_progress);
         let announced = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if let Some(browser) = &browser {
+            let url_path = browser_recorded_url_path(browser);
+            let on_progress = on_progress.clone();
+            let announced = announced.clone();
+            tokio::spawn(async move {
+                let deadline = std::time::Instant::now() + SIGN_IN_TIMEOUT;
+                while std::time::Instant::now() < deadline {
+                    if let Ok(text) = tokio::fs::read_to_string(&url_path).await
+                        && let Some(url) = sign_in_url(text.trim())
+                        && !announced.swap(true, std::sync::atomic::Ordering::AcqRel)
+                    {
+                        on_progress(SignInProgress::OpenBrowser(url));
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            });
+        }
         if let Some(stderr) = child.stderr.take() {
             let on_progress = on_progress.clone();
             let announced = announced.clone();
@@ -1372,6 +1476,42 @@ impl AcpHarness {
                 SIGN_IN_TIMEOUT.as_secs() / 60
             ))),
         }
+    }
+
+    /// `agy acp --login`: paste-code sign-in for hosts that cannot reach the
+    /// ACP server's 127.0.0.1 OAuth callback (headless / remote).
+    pub async fn login_command(&self) -> Result<crate::process::Command, HarnessError> {
+        let (exe, _) = self.resolve_program(false).await?;
+        let args = self.login_args(&exe);
+        if self.spec.id == HarnessId::Antigravity
+            && args.first().map(String::as_str) != Some("acp")
+        {
+            return Err(HarnessError::Protocol(
+                "Antigravity paste-code login needs the native agy CLI (`agy acp --login`)"
+                    .into(),
+            ));
+        }
+        let mut cmd = crate::process::Command::new(&exe);
+        crate::apply_run_environment(&mut cmd, None);
+        cmd.args(args);
+        crate::compose_child_path(&mut cmd, &exe);
+        self.configure_adapter_environment(&mut cmd, &exe);
+        if let Some(home) = std::env::var_os("HOME") {
+            cmd.current_dir(home);
+        }
+        if self.spec.id == HarnessId::Antigravity {
+            cmd.env("GEMINI_HOME", antigravity_paths::home()?);
+        }
+        Ok(cmd)
+    }
+
+    fn login_args(&self, program: &Path) -> Vec<String> {
+        let mut args = self.launch_args(program);
+        if self.spec.id == HarnessId::Antigravity && args.first().map(String::as_str) == Some("acp")
+        {
+            args.push("--login".into());
+        }
+        args
     }
 
     /// Use a fixed agent binary instead of PATH/known-location resolution.
@@ -1435,7 +1575,7 @@ impl AcpHarness {
         if self.spec.id == HarnessId::Antigravity
             && let Some(cli) = ["agy", "antigravity"]
                 .into_iter()
-                .find_map(|name| find_on_paths(name, Vec::new()))
+                .find_map(|name| find_on_paths(name, antigravity_cli_paths()))
         {
             return Some(cli);
         }
@@ -2213,14 +2353,7 @@ impl Harness for AcpHarness {
                 .unwrap_or_else(|| PathBuf::from(format!("{}@{}", pin.name, pin.version))),
         };
         let extra = if self.id() == HarnessId::Antigravity {
-            let root = antigravity_paths::home()?.join("antigravity-acp");
-            vec![
-                root.join("settings.json"),
-                root.join("oauth_creds.json"),
-                root.join("google_accounts.json"),
-                root.join("credentials.json"),
-                root.join("auth.json"),
-            ]
+            antigravity_auth_files(&antigravity_paths::home()?)
         } else {
             vec![]
         };
@@ -5941,6 +6074,77 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_search_paths_include_linux_local_bin_without_a_desktop() {
+        let home = Path::new("/home/carsten");
+        let cli = antigravity_named_paths_in(Some(home), &["agy", "antigravity"]);
+        assert!(cli.contains(&home.join(".local").join("bin").join("agy")));
+        assert!(cli.contains(&home.join(".local").join("bin").join("antigravity")));
+        assert!(cli.contains(&home.join(".antigravity").join("bin").join("agy")));
+        assert!(cli.contains(&PathBuf::from("/usr/local/bin/agy")));
+        assert!(cli.contains(&PathBuf::from("/opt/Antigravity/bin/agy")));
+        let server = antigravity_named_paths_in(Some(home), &["agy_acp_server"]);
+        assert!(server.contains(&home.join(".local").join("bin").join("agy_acp_server")));
+        let extra = antigravity_named_paths_in(Some(home), &["agy"]);
+        // extra_paths on the spec must include the native CLI, not only the
+        // legacy ACP server — otherwise enabled_set() stays empty on systemd.
+        assert!(extra.contains(&home.join(".local").join("bin").join("agy")));
+        assert_eq!(
+            AcpHarness::antigravity().login_args(Path::new("/home/u/.local/bin/agy")),
+            vec!["acp".to_string(), "--login".to_string()]
+        );
+        assert!(
+            AcpHarness::antigravity()
+                .login_args(Path::new("/usr/bin/agy_acp_server"))
+                .first()
+                .map(String::as_str)
+                != Some("acp")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_detects_agy_in_local_bin_when_path_is_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join(".local").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let cli = bin.join("agy");
+        std::fs::write(&cli, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "acp::tests::antigravity_local_bin_detection_subprocess",
+                "--nocapture",
+            ])
+            .env("HOME", home.path())
+            .env("PATH", "/usr/bin")
+            .env_remove("ANTIGRAVITY_ACP_EXECUTABLE")
+            .env("HARNESS_NO_LOGIN_SHELL", "1")
+            .env("HARNESS_TEST_AGY_LOCAL_BIN", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_local_bin_detection_subprocess() {
+        if std::env::var_os("HARNESS_TEST_AGY_LOCAL_BIN").is_none() {
+            return;
+        }
+        let harness = AcpHarness::antigravity();
+        assert!(
+            harness.installed(),
+            "agy in ~/.local/bin must count as installed on a headless host"
+        );
+    }
+
+    #[test]
     fn antigravity_home_expands_a_home_relative_gemini_home() {
         let home = tempfile::tempdir().unwrap();
         let expanded =
@@ -5976,12 +6180,42 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(method.canonical, "oauth-business");
+        assert_eq!(
+            configured_auth_method(&gemini_home)
+                .unwrap()
+                .unwrap()
+                .canonical,
+            "oauth-business"
+        );
+    }
+
+    #[test]
+    fn antigravity_cli_settings_win_over_legacy_acp_settings() {
+        let home = tempfile::tempdir().unwrap();
+        let gemini = home.path();
+        std::fs::create_dir_all(gemini.join("antigravity-acp")).unwrap();
+        std::fs::create_dir_all(gemini.join("antigravity-cli")).unwrap();
+        std::fs::write(
+            gemini.join("antigravity-acp").join("settings.json"),
+            r#"{"auth":{"type":"oauth-personal"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            gemini.join("antigravity-cli").join("settings.json"),
+            r#"{"auth":{"type":"oauth-business"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            configured_auth_method(gemini).unwrap().unwrap().canonical,
+            "oauth-business"
+        );
+        let files = antigravity_auth_files(gemini);
+        assert!(files.contains(&gemini.join("antigravity-cli").join("settings.json")));
+        assert!(files.contains(&gemini.join("antigravity-acp").join("oauth_creds.json")));
     }
 
     fn selected_auth_in_home(gemini_home: &Path) -> String {
-        let configured =
-            configured_auth_method_in(&gemini_home.join("antigravity-acp").join("settings.json"))
-                .unwrap();
+        let configured = configured_auth_method(gemini_home).unwrap();
         sign_in_auth_method(
             &all_antigravity_auth_methods(),
             "oauth-personal",

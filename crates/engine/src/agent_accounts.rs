@@ -285,6 +285,7 @@ struct TaskLoginState {
     url: Option<String>,
     message: Option<String>,
     outcome: Option<Result<(), String>>,
+    stdin: Option<harness_adapters::process::ChildStdin>,
 }
 
 impl LoginFlow {
@@ -981,10 +982,11 @@ impl AgentAccounts {
         }
     }
 
-    /// antigravity: the acp server's own google sign-in, run when the agent is
-    /// turned on rather than mid-chat. the start replies at once because a
-    /// first sign-in downloads a large server; polls carry the browser url
-    /// once the server prints it.
+    /// antigravity: `agy acp --login` when the native CLI is present, else the
+    /// ACP `authenticate` flow. A recording `$BROWSER` shim captures the
+    /// authorize URL (agy 1.5.17 sends it to `$BROWSER`, not stdout). The
+    /// start replies at once; polls carry the URL; `CompleteAgentLogin` pastes
+    /// the code because a remote host cannot reach the CLI's 127.0.0.1 callback.
     fn start_antigravity_login(&self) -> AgentLoginStart {
         self.reap_spawned_flows(HarnessId::Antigravity);
         let login_id = new_id();
@@ -994,25 +996,14 @@ impl AgentAccounts {
             let root = self.inner.config.root_dir();
             std::fs::create_dir_all(&root)
                 .ok()
-                .and_then(|()| ensure_noop_browser(&root))
+                .and_then(|()| ensure_recording_browser(&root))
         };
         #[cfg(not(unix))]
         let browser = None;
         let task_state = state.clone();
         let handle = tokio::spawn(async move {
-            let progress_state = task_state.clone();
-            let outcome = harness_adapters::AcpHarness::antigravity()
-                .sign_in(browser, move |progress| {
-                    let mut state = lock(&progress_state);
-                    match progress {
-                        harness_adapters::acp::SignInProgress::OpenBrowser(url) => {
-                            state.message = Some("Finish signing in in your browser.".into());
-                            state.url = Some(url);
-                        }
-                    }
-                })
-                .await;
-            lock(&task_state).outcome = Some(outcome.map_err(|e| e.to_string()));
+            let outcome = run_antigravity_login(browser, task_state.clone()).await;
+            lock(&task_state).outcome = Some(outcome);
         });
         lock(&self.inner.flows).insert(
             login_id.clone(),
@@ -1026,9 +1017,56 @@ impl AgentAccounts {
         AgentLoginStart {
             login_id,
             url: String::new(),
-            mode: AgentLoginMode::Browser,
+            mode: AgentLoginMode::PasteCode,
             code: None,
         }
+    }
+
+    /// Hand a pasted OAuth code to `agy acp --login`. None when `login_id`
+    /// is not an Antigravity paste-code sign-in.
+    async fn complete_antigravity_paste(
+        &self,
+        login_id: &str,
+        code: &str,
+    ) -> Option<Result<(), EngineError>> {
+        let (stdin, state) = match lock(&self.inner.flows).get(login_id) {
+            Some(LoginFlow::Task {
+                harness: HarnessId::Antigravity,
+                state,
+                ..
+            }) => (lock(state).stdin.take(), state.clone()),
+            _ => return None,
+        };
+        let code = code.trim();
+        if code.is_empty() {
+            return Some(Err(EngineError::Other(
+                "That code looks empty — paste the whole code.".into(),
+            )));
+        }
+        let Some(mut pipe) = stdin else {
+            return Some(Err(EngineError::Other(
+                "This Antigravity sign-in has no paste-code prompt — open the URL from PollAgentLogin if you can reach this host, or update agy so `agy acp --login` is available.".into(),
+            )));
+        };
+        use tokio::io::AsyncWriteExt;
+        if let Err(err) = pipe.write_all(format!("{code}\n").as_bytes()).await {
+            return Some(Err(EngineError::Other(format!(
+                "Could not hand the code to Antigravity: {err}"
+            ))));
+        }
+        let _ = pipe.flush().await;
+        drop(pipe);
+        let deadline = Instant::now() + Duration::from_secs(45);
+        while lock(&state).outcome.is_none() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        Some(match lock(&state).outcome.clone() {
+            Some(Ok(())) => Ok(()),
+            Some(Err(message)) => Err(EngineError::Other(message)),
+            None => Err(EngineError::Other(
+                "Antigravity did not finish signing in after the code was pasted.".into(),
+            )),
+        })
     }
 
     /// Cursor: the SDK's own PKCE browser flow, driven through the harness shim
@@ -1095,10 +1133,7 @@ impl AgentAccounts {
     }
 
     /// graff's sign-in providers with account identity and cached/live usage windows.
-    pub async fn list_graff_logins_with_usage(
-        &self,
-        force_usage: bool,
-    ) -> Vec<GraffLoginProvider> {
+    pub async fn list_graff_logins_with_usage(&self, force_usage: bool) -> Vec<GraffLoginProvider> {
         crate::graff_usage::list_with_usage(self, force_usage).await
     }
 
@@ -1642,6 +1677,10 @@ impl AgentAccounts {
             done?;
             return self.list(false).await;
         }
+        if let Some(done) = self.complete_antigravity_paste(login_id, code).await {
+            done?;
+            return self.list(false).await;
+        }
         let (verifier, then_graff) = match lock(&self.inner.flows).get(login_id) {
             Some(LoginFlow::Claude {
                 verifier,
@@ -1822,7 +1861,9 @@ impl AgentAccounts {
         command.env("HOME", &self.inner.config.graff_home);
         let output = tokio::time::timeout(Duration::from_secs(30), command.output())
             .await
-            .map_err(|_| EngineError::Other("graff did not finish the Claude Agent sign-in.".into()))?
+            .map_err(|_| {
+                EngineError::Other("graff did not finish the Claude Agent sign-in.".into())
+            })?
             .map_err(|err| EngineError::Other(format!("Could not run graff login: {err}")))?;
         let text = format!(
             "{}{}",
@@ -2903,7 +2944,11 @@ pub(crate) fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnap
         ("fable", "Fable"),
         ("seven_day_fable", "Fable"),
     ] {
-        if label == "Fable" && windows.iter().any(|w: &AgentUsageWindow| w.label == "Fable") {
+        if label == "Fable"
+            && windows
+                .iter()
+                .any(|w: &AgentUsageWindow| w.label == "Fable")
+        {
             continue;
         }
         if let Some(w) = body.get(key)
@@ -2970,14 +3015,122 @@ fn scan_openai_url(output: &str) -> Option<String> {
 /// on unix; elsewhere the CLI's own open is left as-is.
 #[cfg(unix)]
 fn ensure_noop_browser(root: &Path) -> Option<PathBuf> {
-    const SCRIPT: &str = "#!/bin/sh\nexit 0\n";
-    let path = root.join(".noop-browser");
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(SCRIPT) {
-        std::fs::write(&path, SCRIPT).ok()?;
+    write_unix_script(root.join(".noop-browser"), "#!/bin/sh\nexit 0\n")
+}
+
+/// agy 1.5.17 (and Python's webbrowser) send the OAuth URL to `$BROWSER`
+/// rather than stdout. Record `$1` next to the script so PollAgentLogin can
+/// surface it on a host with no desktop.
+#[cfg(unix)]
+fn ensure_recording_browser(root: &Path) -> Option<PathBuf> {
+    write_unix_script(
+        root.join(".record-browser"),
+        "#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$0.url\"\nexit 0\n",
+    )
+}
+
+#[cfg(unix)]
+fn write_unix_script(path: PathBuf, script: &str) -> Option<PathBuf> {
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(script) {
+        std::fs::write(&path, script).ok()?;
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).ok()?;
     }
     Some(path)
+}
+
+fn scan_login_url(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let start = [line.find("https://"), line.find("http://")]
+            .into_iter()
+            .flatten()
+            .min()?;
+        let url = line[start..]
+            .split_whitespace()
+            .next()?
+            .trim_end_matches(['.', ',', ';', ')', ']', '}']);
+        reqwest::Url::parse(url).ok().map(|url| url.to_string())
+    })
+}
+
+async fn run_antigravity_login(
+    browser: Option<PathBuf>,
+    state: Arc<Mutex<TaskLoginState>>,
+) -> Result<(), String> {
+    let harness = harness_adapters::AcpHarness::antigravity();
+    match harness.login_command().await {
+        Ok(mut cmd) => {
+            #[cfg(unix)]
+            if let Some(browser) = &browser {
+                cmd.env("BROWSER", browser);
+            }
+            cmd.stdin(harness_adapters::process::Stdio::piped())
+                .stdout(harness_adapters::process::Stdio::piped())
+                .stderr(harness_adapters::process::Stdio::piped());
+            let mut child = cmd
+                .spawn()
+                .map_err(|err| format!("Could not start Antigravity login: {err}"))?;
+            lock(&state).stdin = child.stdin.take();
+            let url_file = browser
+                .as_ref()
+                .map(|path| harness_adapters::acp::browser_recorded_url_path(path));
+            let (child, output, exit) = wire_login_child(child);
+            let deadline = Instant::now() + Duration::from_secs(330);
+            loop {
+                if lock(&state).url.is_none() {
+                    let from_output = scan_login_url(&lock(&output));
+                    let from_file = url_file.as_ref().and_then(|path| {
+                        std::fs::read_to_string(path)
+                            .ok()
+                            .as_deref()
+                            .and_then(scan_login_url)
+                    });
+                    if let Some(url) = from_output.or(from_file) {
+                        let mut state = lock(&state);
+                        state.url = Some(url);
+                        state.message =
+                            Some("Finish signing in in your browser, then paste the code.".into());
+                    }
+                }
+                if let Some(code) = *lock(&exit) {
+                    drop(child);
+                    return if code == Some(0) {
+                        Ok(())
+                    } else {
+                        let output = lock(&output);
+                        Err(output
+                            .trim()
+                            .lines()
+                            .last()
+                            .unwrap_or("Antigravity sign-in failed")
+                            .to_string())
+                    };
+                }
+                if Instant::now() > deadline {
+                    if let Some(child) = lock(&child).as_mut() {
+                        let _ = child.start_kill();
+                    }
+                    return Err("Antigravity sign-in did not finish within 5 minutes".into());
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+        Err(_) => {
+            let progress_state = state;
+            harness
+                .sign_in(browser, move |progress| {
+                    let mut state = lock(&progress_state);
+                    match progress {
+                        harness_adapters::acp::SignInProgress::OpenBrowser(url) => {
+                            state.message = Some("Finish signing in in your browser.".into());
+                            state.url = Some(url);
+                        }
+                    }
+                })
+                .await
+                .map_err(|err| err.to_string())
+        }
+    }
 }
 
 /// First JSONL frame with the given `ev` in a cursor-shim output accumulator.
@@ -3418,7 +3571,10 @@ mod tests {
         // Stands in for `graff login anthropic`: reads the code `ant` asks for.
         let mut command = harness_adapters::process::Command::new("/bin/sh");
         command
-            .args(["-c", "read code; echo \"✓ graff will use your Anthropic Console sign-in ($code)\""])
+            .args([
+                "-c",
+                "read code; echo \"✓ graff will use your Anthropic Console sign-in ($code)\"",
+            ])
             .stdin(harness_adapters::process::Stdio::piped())
             .stdout(harness_adapters::process::Stdio::piped())
             .stderr(harness_adapters::process::Stdio::piped());
@@ -3447,7 +3603,13 @@ mod tests {
             .unwrap();
         assert!(lock(&output).contains("(pasted-code#state)"));
         // The code went in once; a second paste has nothing to write to.
-        assert!(accounts.complete_graff_paste("fixture", "again").await.unwrap().is_err());
+        assert!(
+            accounts
+                .complete_graff_paste("fixture", "again")
+                .await
+                .unwrap()
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -3732,6 +3894,37 @@ mod tests {
         }
         // A second ensure is idempotent (same path, same content).
         assert_eq!(ensure_noop_browser(root.path()), Some(path));
+    }
+
+    #[test]
+    fn scan_login_url_picks_the_authorize_link_from_browser_or_stdout() {
+        assert_eq!(
+            scan_login_url(
+                "Sign in here: https://accounts.google.com/o/oauth2/auth?client_id=fake\n"
+            )
+            .as_deref(),
+            Some("https://accounts.google.com/o/oauth2/auth?client_id=fake")
+        );
+        assert_eq!(scan_login_url("waiting\n"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recording_browser_writes_the_url_beside_the_script() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = ensure_recording_browser(root.path()).expect("script");
+        let status = std::process::Command::new(&path)
+            .arg("https://accounts.google.com/o/oauth2/auth?client_id=headless")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let recorded =
+            std::fs::read_to_string(harness_adapters::acp::browser_recorded_url_path(&path))
+                .unwrap();
+        assert_eq!(
+            recorded.trim(),
+            "https://accounts.google.com/o/oauth2/auth?client_id=headless"
+        );
     }
 
     #[test]

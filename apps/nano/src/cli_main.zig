@@ -28,6 +28,7 @@ pub const usage =
     \\
     \\Commands:
     \\  headless         Run the engine without a UI
+    \\                   (--opt-in AGENT, repeatable; also HARNESS_OPTED_IN)
     \\  login            Sign in and enable sync on the next engine start
     \\  logout           Remove the saved session and return to local-only
     \\  status           Show workspace mode, optional auth, and engine status
@@ -761,6 +762,12 @@ test "cli_main parses subcommands, flags, and unexpected arguments" {
 
     const headed = parseArgs(&.{"/tmp/proj"}).ok;
     try testing.expectEqualStrings("/tmp/proj", headed.headed.open_arg.?);
+
+    const headless_opt_in = parseArgs(&.{ "headless", "--opt-in", "antigravity" }).ok;
+    try testing.expectEqualStrings("headless", headless_opt_in.engine.subcmd);
+    try testing.expectEqual(@as(usize, 2), headless_opt_in.engine.rest.len);
+    try testing.expectEqualStrings("--opt-in", headless_opt_in.engine.rest[0]);
+    try testing.expectEqualStrings("antigravity", headless_opt_in.engine.rest[1]);
 }
 
 test "cli_main packUnixSunPath enforces null-terminated 108-byte AF_UNIX bound" {
