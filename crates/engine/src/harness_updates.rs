@@ -1283,4 +1283,163 @@ Please check your network or Homebrew tap.";
             "updater exited with exit status: 42"
         );
     }
+
+    // npm ends every failure with the path of its debug log (#125).
+    #[test]
+    fn summarize_installer_failure_shows_npm_reason_not_its_log_path() {
+        let eacces = "\
+npm error code EACCES
+npm error syscall mkdir
+npm error path /synthetic/prefix/lib
+npm error errno -13
+npm error Error: EACCES: permission denied, mkdir '/synthetic/prefix/lib'
+npm error     at async mkdir (node:internal/fs/promises:861:10) {
+npm error   errno: -13,
+npm error   code: 'EACCES'
+npm error }
+npm error
+npm error The operation was rejected by your operating system.
+npm error A complete log of this run can be found in: /synthetic/.npm/_logs/debug-0.log";
+        assert_eq!(
+            summarize_installer_failure(eacces, "", "exit status: 243"),
+            "npm error Error: EACCES: permission denied, mkdir '/synthetic/prefix/lib'"
+        );
+
+        let script = "\
+npm error code 1
+npm error path /synthetic/prefix/lib/node_modules/demo-cli
+npm error command failed
+npm error command sh -c node install.js
+npm error gyp: No Xcode or CLT version detected!
+npm error A complete log of this run can be found in: /synthetic/.npm/_logs/debug-0.log";
+        assert_eq!(
+            summarize_installer_failure(script, "", "exit status: 1"),
+            "npm error gyp: No Xcode or CLT version detected!"
+        );
+
+        let old_npm = "\
+npm ERR! code ETARGET
+npm ERR! notarget No matching version found for demo-cli@latest.
+npm ERR! A complete log of this run can be found in:
+npm ERR!     /synthetic/.npm/_logs/debug-0.log";
+        assert_eq!(
+            summarize_installer_failure(old_npm, "", "exit status: 1"),
+            "npm ERR! notarget No matching version found for demo-cli@latest."
+        );
+
+        // A script that says nothing: the command, rather than the log path.
+        let silent = "\
+npm error code 1
+npm error path /synthetic/prefix/lib/node_modules/demo-cli
+npm error command failed
+npm error command sh -c exit 1
+npm error A complete log of this run can be found in: /synthetic/.npm/_logs/debug-0.log";
+        assert_eq!(
+            summarize_installer_failure(silent, "", "exit status: 1"),
+            "npm error command sh -c exit 1"
+        );
+    }
+
+    // Homebrew wraps a failed command after saying what went wrong (#125).
+    #[test]
+    fn summarize_installer_failure_prefers_the_reason_over_homebrews_wrapper() {
+        let stderr = "\
+Error: SHA256 mismatch for downloaded codex archive
+Error: Failure while executing; `brew upgrade --cask codex` exited with 1.";
+        assert_eq!(
+            summarize_installer_failure(stderr, "", "exit status: 1"),
+            "Error: SHA256 mismatch for downloaded codex archive"
+        );
+
+        let wrapped = "\
+Error: Failure while executing; `/usr/bin/curl --fail` exited with 22. Here's the output:
+curl: (22) The requested URL returned error: 404";
+        assert_eq!(
+            summarize_installer_failure(wrapped, "", "exit status: 1"),
+            "curl: (22) The requested URL returned error: 404"
+        );
+
+        let only = "Error: Failure while executing; `brew upgrade --cask codex` exited with 1.";
+        assert_eq!(
+            summarize_installer_failure(only, "", "exit status: 1"),
+            only
+        );
+    }
+
+    // The words "Xcode" and "license" apart don't make it the license (#125).
+    #[test]
+    fn summarize_installer_failure_ignores_unrelated_xcode_and_license_words() {
+        let separate_lines = "\
+npm warn deprecated demo-dep@1.0.0: license changed, see the homepage
+npm error gyp: No Xcode or CLT version detected!";
+        assert_eq!(
+            summarize_installer_failure(separate_lines, "", "exit status: 1"),
+            "npm error gyp: No Xcode or CLT version detected!"
+        );
+
+        // `xcode` is an npm package, and a package has a LICENSE file.
+        let path =
+            "npm error EACCES: permission denied, unlink '/synthetic/node_modules/xcode/LICENSE'";
+        assert_eq!(
+            summarize_installer_failure(path, "", "exit status: 1"),
+            path
+        );
+    }
+
+    #[test]
+    fn summarize_installer_failure_recognizes_every_xcode_license_wording() {
+        for stderr in [
+            // Homebrew's own check.
+            "Error: You have not agreed to the Xcode license.\nAgree to the license by opening Xcode.app or running:\n  sudo xcodebuild -license",
+            // xcrun and git shims.
+            "You have not agreed to the Xcode license agreements. Please run 'sudo xcodebuild -license' from within a Terminal window to review and agree to the Xcode and Apple SDKs license.",
+            "Agreeing to the Xcode/iOS license requires admin privileges, please run “sudo xcodebuild -license” and then retry this command.",
+            // Only the command survives.
+            "Error: Failure while executing; `brew upgrade` exited with 1. Here's the output:\n  sudo xcodebuild -license accept",
+        ] {
+            let msg = summarize_installer_failure(stderr, "", "exit status: 1");
+            assert!(msg.contains("sudo xcodebuild -license"), "{msg}");
+        }
+    }
+
+    // The message the Updates popover shows is the installer's own, kept
+    // through `apply` with the retry still available (#125).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_apply_keeps_the_xcode_license_reason_and_stays_retryable() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cli = dir.path().join("grok");
+        std::fs::write(
+            &cli,
+            "#!/bin/sh\nif [ \"$1\" = \"version\" ]; then echo 1.2.0; exit 0; fi\nif [ \"$2\" = \"--check\" ]; then echo 1.3.1; exit 0; fi\necho 'Error: You have not agreed to the Xcode license.' >&2\necho '  sudo xcodebuild -license' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let registry = Arc::new(crate::default_registry());
+        registry.load_prefs(dir.path());
+        let coord = HarnessUpdateCoordinator::with_resolver(
+            dir.path(),
+            registry,
+            Arc::new(move |id| (id == HarnessId::Grok).then(|| cli.clone())),
+        );
+        coord.check_one(HarnessId::Grok).await.unwrap();
+        coord.apply(HarnessId::Grok).await.unwrap_err();
+        let row = coord
+            .snapshot()
+            .into_iter()
+            .find(|s| s.harness == HarnessId::Grok)
+            .unwrap();
+        assert_eq!(row.phase, HarnessUpdatePhase::Failed);
+        assert!(row.can_apply);
+        let error = row.error.unwrap();
+        assert_eq!(error.kind, HarnessUpdateFailureKind::Install);
+        assert!(error.message.contains("Xcode license"), "{}", error.message);
+        assert!(
+            error.message.contains("sudo xcodebuild -license"),
+            "{}",
+            error.message
+        );
+    }
 }
