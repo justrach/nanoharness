@@ -63,7 +63,102 @@ pub fn checkedNext(depth: u32) ?u32 {
     return depth + 1;
 }
 
+fn skipJsonWs(s: []const u8, idx: usize) usize {
+    var i = idx;
+    while (i < s.len) : (i += 1) {
+        switch (s[i]) {
+            ' ', '\t', '\r', '\n' => {},
+            else => break,
+        }
+    }
+    return i;
+}
+
+fn skipJsonString(s: []const u8, start: usize) ?usize {
+    if (start >= s.len or s[start] != '"') return null;
+    var i = start + 1;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == '\\') {
+            i += 1;
+            continue;
+        }
+        if (s[i] == '"') return i + 1;
+    }
+    return null;
+}
+
+fn skipJsonValue(s: []const u8, start: usize) ?usize {
+    var i = skipJsonWs(s, start);
+    if (i >= s.len) return null;
+    switch (s[i]) {
+        '"' => return skipJsonString(s, i),
+        '{', '[' => {
+            var depth: usize = 0;
+            while (i < s.len) {
+                if (s[i] == '"') {
+                    i = skipJsonString(s, i) orelse return null;
+                    continue;
+                }
+                if (s[i] == '{' or s[i] == '[') depth += 1 else if (s[i] == '}' or s[i] == ']') {
+                    depth -= 1;
+                    if (depth == 0) return i + 1;
+                }
+                i += 1;
+            }
+            return null;
+        },
+        else => {
+            while (i < s.len) : (i += 1) {
+                switch (s[i]) {
+                    ',', '}', ']', ' ', '\t', '\r', '\n' => return i,
+                    else => {},
+                }
+            }
+            return i;
+        },
+    }
+}
+
+fn roomDeliveryHop(text: []const u8) ?u32 {
+    const open = "<!--harness-room ";
+    const close = " -->";
+    if (!std.mem.startsWith(u8, text, open)) return null;
+    const rest = text[open.len..];
+    const end = std.mem.indexOf(u8, rest, close) orelse return null;
+    const tag = rest[0..end];
+    var i = skipJsonWs(tag, 0);
+    if (i >= tag.len or tag[i] != '{') return null;
+    i += 1;
+    var saw_hop: ?u32 = null;
+    var from_user: ?bool = null;
+    while (true) {
+        i = skipJsonWs(tag, i);
+        if (i >= tag.len or tag[i] == '}') break;
+        if (tag[i] == ',') {
+            i += 1;
+            continue;
+        }
+        const key_end = skipJsonString(tag, i) orelse return null;
+        const key = tag[i + 1 .. key_end - 1];
+        i = skipJsonWs(tag, key_end);
+        if (i >= tag.len or tag[i] != ':') return null;
+        i = skipJsonWs(tag, i + 1);
+        const val_end = skipJsonValue(tag, i) orelse return null;
+        const raw_val = std.mem.trim(u8, tag[i..val_end], " \t\r\n");
+        if (std.mem.eql(u8, key, "hop")) {
+            saw_hop = std.fmt.parseInt(u32, raw_val, 10) catch null;
+        } else if (std.mem.eql(u8, key, "from_user")) {
+            if (std.mem.eql(u8, raw_val, "true")) from_user = true else if (std.mem.eql(u8, raw_val, "false")) from_user = false;
+        }
+        i = val_end;
+    }
+    if (saw_hop) |h| return h;
+    if (from_user) |u_flag| return if (u_flag) 0 else 1;
+    return null;
+}
+
 pub fn relayDepth(text: []const u8) u32 {
+    if (roomDeliveryHop(text)) |h| return h;
     if (!std.mem.startsWith(u8, text, prefix)) return 0;
     const header = firstLine(text);
     const depth = if (currentMetadata(header)) |m|
@@ -517,7 +612,7 @@ test "mcp peer: a room delivery with a long room name is not a person's prompt a
     const a = arena.allocator();
     const long_name = try a.alloc(u8, 6000);
     @memset(long_name, 'r');
-    const text = try @import("rooms.zig").deliveryText(a, "room_0123456789abcdef01234567", long_name, 4, "alpha", "status");
+    const text = try @import("rooms.zig").deliveryText(a, "room_0123456789abcdef01234567", long_name, 4, "alpha", 1, "status");
     try testing.expect(isRoomDelivery(a, text));
     try testing.expect(!isHumanPrompt(a, text));
     // A ledger entry, then that delivery arriving later: the chain stands.

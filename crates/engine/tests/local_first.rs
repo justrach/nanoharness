@@ -11,8 +11,10 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::handshake::server::{
     Request as WsRequest, Response as WsResponse,
 };
-use harness_engine::{AuthState, Engine, EngineConfig, EngineInfo, HarnessId, WorkspaceScope};
-use harness_rpc::{connect_ws, memory_client, methods};
+use harness_engine::{
+    AuthState, Engine, EngineConfig, EngineInfo, HarnessId, WorkspaceScope, ipc_token_path,
+};
+use harness_rpc::{connect_ws, connect_ws_with_bearer, memory_client, methods};
 
 fn config(
     data_dir: &std::path::Path,
@@ -543,9 +545,31 @@ async fn headless_stop_rpc_drains_the_daemon_and_releases_ipc() {
     engine_config.ipc_port = port;
     let daemon = tokio::spawn(Engine::new(engine_config).run());
 
+    let token_path = ipc_token_path(dir.path(), port);
+    let token = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Ok(raw) = std::fs::read_to_string(&token_path) {
+                let t = raw.trim().to_string();
+                if !t.is_empty() {
+                    break t;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("headless IPC token file was not written");
+
+    assert!(
+        connect_ws(&format!("ws://127.0.0.1:{port}")).await.is_err(),
+        "unauthenticated IPC dial must be rejected"
+    );
+
     let client = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if let Ok(client) = connect_ws(&format!("ws://127.0.0.1:{port}")).await {
+            if let Ok(client) =
+                connect_ws_with_bearer(&format!("ws://127.0.0.1:{port}"), Some(&token)).await
+            {
                 break client;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -589,9 +613,26 @@ async fn headless_sign_out_closes_joined_edge_rooms_and_stops_daemon() {
     engine_config.ipc_port = port;
     let daemon = tokio::spawn(Engine::new(engine_config).run());
 
+    let token_path = ipc_token_path(dir.path(), port);
+    let token = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Ok(raw) = std::fs::read_to_string(&token_path) {
+                let t = raw.trim().to_string();
+                if !t.is_empty() {
+                    break t;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("headless IPC token file was not written");
+
     let client = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if let Ok(client) = connect_ws(&format!("ws://127.0.0.1:{port}")).await {
+            if let Ok(client) =
+                connect_ws_with_bearer(&format!("ws://127.0.0.1:{port}"), Some(&token)).await
+            {
                 break client;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;

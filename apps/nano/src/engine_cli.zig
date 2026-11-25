@@ -440,6 +440,10 @@ pub const Reply = union(enum) {
 /// Calls `method` on the engine at `127.0.0.1:port` and waits at most
 /// `timeout_ms` for its reply. `error.NoEngine` when nothing answers.
 pub fn rpcCall(gpa: Allocator, io: Io, port: u16, method: []const u8, params_json: []const u8, timeout_ms: u32) !Reply {
+    return rpcCallWithBearer(gpa, io, port, null, method, params_json, timeout_ms);
+}
+
+pub fn rpcCallWithBearer(gpa: Allocator, io: Io, port: u16, bearer: ?[]const u8, method: []const u8, params_json: []const u8, timeout_ms: u32) !Reply {
     // A loopback connect is answered at once (accepted or refused); the
     // handshake runs under the call's deadline, so an engine that accepts
     // and never upgrades can't hang the command.
@@ -447,7 +451,7 @@ pub fn rpcCall(gpa: Allocator, io: Io, port: u16, method: []const u8, params_jso
     const stream = addr.connect(io, .{ .mode = .stream }) catch return error.NoEngine;
     var hs_dog: auth_host.SocketWatchdog = .{ .io = io, .handle = stream.socket.handle, .ms = timeout_ms };
     hs_dog.arm();
-    const upgraded = ws.Client.upgrade(gpa, io, stream, port, "/");
+    const upgraded = ws.Client.upgradeWithBearer(gpa, io, stream, port, "/", bearer);
     if (hs_dog.disarm()) {
         if (upgraded) |c| c.deinit(gpa) else |_| {}
         return error.Timeout;
@@ -634,10 +638,13 @@ pub fn status(c: Context) !u8 {
     defer c.gpa.free(data_dir);
     const cfg = AuthEnv.from(c.env);
 
+    const ipc_token = ws.resolveIpcToken(c.gpa, c.io, c.env.get("HARNESS_IPC_TOKEN"), data_dir, c.port, false);
+    defer if (ipc_token) |t| c.gpa.free(t);
+
     // A running engine's scope and auth state are authoritative over local session files
     // (critical on sandboxes and Cloud Computers where auth comes from a lease token).
     var live_scope: ?Scope = null;
-    if (rpcCall(c.gpa, c.io, c.port, "EngineInfo", "{}", 1500)) |reply| {
+    if (rpcCallWithBearer(c.gpa, c.io, c.port, ipc_token, "EngineInfo", "{}", 1500)) |reply| {
         defer reply.deinit(c.gpa);
         if (reply == .ok) if (json.parseFromSlice(json.Value, c.gpa, reply.ok, .{})) |parsed| {
             defer parsed.deinit();
@@ -651,7 +658,7 @@ pub fn status(c: Context) !u8 {
 
     var live_auth: ?LiveAuth = null;
     defer if (live_auth) |*la| la.deinit(c.gpa);
-    if (rpcCall(c.gpa, c.io, c.port, "AuthStatus", "{}", 1500)) |reply| {
+    if (rpcCallWithBearer(c.gpa, c.io, c.port, ipc_token, "AuthStatus", "{}", 1500)) |reply| {
         defer reply.deinit(c.gpa);
         if (reply == .ok) if (json.parseFromSlice(json.Value, c.gpa, reply.ok, .{})) |parsed| {
             defer parsed.deinit();
@@ -717,7 +724,11 @@ pub fn status(c: Context) !u8 {
 
 /// `harness-engine sync`: the running engine's per-room sync state.
 pub fn sync(c: Context) !u8 {
-    const reply = rpcCall(c.gpa, c.io, c.port, "SyncStatus", "{}", 5000) catch |err| {
+    const data_dir = resolveDataDir(c.gpa, c.io, c.env) catch null;
+    defer if (data_dir) |d| c.gpa.free(d);
+    const ipc_token = ws.resolveIpcToken(c.gpa, c.io, c.env.get("HARNESS_IPC_TOKEN"), data_dir, c.port, false);
+    defer if (ipc_token) |t| c.gpa.free(t);
+    const reply = rpcCallWithBearer(c.gpa, c.io, c.port, ipc_token, "SyncStatus", "{}", 5000) catch |err| {
         try c.out.print("harness-engine: no engine listening on 127.0.0.1:{d} ({t}) — is Harness running?\n", .{ c.port, err });
         try c.out.flush();
         return 1;

@@ -1226,10 +1226,47 @@ fn dismissInput(c: *Ctx, args: Value) !Value {
     return r.value();
 }
 
+fn isHumanApprovalQuestion(q: Value) bool {
+    if (u.boolean(q, "requiresHumanUi") orelse false) return true;
+    const id = u.str(q, "id") orelse "";
+    if (std.mem.startsWith(u8, id, "permission:")) return true;
+    const hdr = std.mem.trim(u8, u.str(q, "header") orelse "", " \t\r\n");
+    const eq = std.ascii.eqlIgnoreCase;
+    return eq(hdr, "approve tool") or eq(hdr, "approve command") or
+        eq(hdr, "approve file change") or eq(hdr, "permission") or
+        eq(hdr, "approve");
+}
+
+fn findPendingInput(c: *Ctx, chat_id: []const u8, wanted_id: ?[]const u8) !?Value {
+    const rendered = try transcript.render(c.a, try c.transcriptOf(chat_id), .{});
+    if (wanted_id) |want_id| {
+        var k = rendered.len;
+        while (k > 0) {
+            k -= 1;
+            if (rendered[k].pending_input) |p| {
+                if (std.mem.eql(u8, u.str(p, "requestId") orelse "", want_id)) return p;
+            }
+        }
+        return null;
+    }
+    return transcript.lastPendingInput(rendered);
+}
+
 fn respondToInput(c: *Ctx, args: Value) !Value {
     try decode(c, args, "RespondArgs", &respond_fields, false);
     const chat = try c.resolveChat(argStr(args, "chat").?);
-    const request_id = try pendingRequestId(c, chat, args);
+    const chat_id = u.str(chat, "id") orelse "";
+    const given_id = given(args, "request_id");
+    const pending = try findPendingInput(c, chat_id, given_id);
+    const request_id = given_id orelse (if (pending) |p| u.str(p, "requestId") else null) orelse
+        return c.fail("chat {s} has no pending question", .{u.short(chat_id)});
+    if (pending) |p| {
+        for (u.array(p, "questions") orelse u.none) |q| {
+            if (isHumanApprovalQuestion(q)) {
+                return c.failMsg("this prompt requires human approval in the Harness UI");
+            }
+        }
+    }
     const given_answers = u.array(args, "answers") orelse u.none;
     if (given_answers.len == 0) return c.failMsg("answers is empty");
     var answers = u.arr(c.a);
@@ -1243,7 +1280,8 @@ fn respondToInput(c: *Ctx, args: Value) !Value {
     try cmd.put("kind", u.s("respondInput"));
     try cmd.put("requestId", u.s(request_id));
     try cmd.put("answers", .{ .array = answers });
-    const command_id = try c.queueCommand(u.str(chat, "id") orelse "", cmd.value());
+    try cmd.put("fromAgent", u.b(true));
+    const command_id = try c.queueCommand(chat_id, cmd.value());
     var r = u.obj(c.a);
     try r.put("chatId", u.field(chat, "id"));
     try r.put("requestId", u.s(request_id));

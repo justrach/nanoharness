@@ -71,3 +71,13 @@ export const AUTH_USER_HEADER = "x-harness-auth-user";
  * Worker; the SessionRoom DO sees this and skips its per-chat
  * claim-on-first-join ownership discipline for the room. */
 export const ROOM_KIND_HEADER = "x-harness-room-kind";
+
+/** Verified caller trust tier stamped by the Worker ("personal" | "sandbox"). */
+export const AUTH_TRUST_TIER_HEADER = "x-harness-auth-tier";
+
+/** Verified caller sandbox id when `AUTH_TRUST_TIER_HEADER` is "sandbox". */
+export const AUTH_SANDBOX_ID_HEADER = "x-harness-auth-sandbox-id";
+
+/** Stamped by the Worker on `/chat2/:chatId/*` when RegistryRoom confirms the
+ * chat is hosted on the caller's own sandbox device. */
+export const CHAT_HOST_SANDBOX_HEADER = "x-harness-chat-host-sandbox";

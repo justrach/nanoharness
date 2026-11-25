@@ -28,7 +28,11 @@ describe("sandbox sign-in", () => {
     const out = await sandboxExchange(env, TOKEN, g.impl);
     expect(out.user).toEqual({ id: "42", email: "a@b.test" });
     expect(out.orgId).toBe("user-42");
-    expect(await verifyToken(env, out.accessToken)).toEqual({ userId: "42", orgId: "user-42" });
+    const claims = JSON.parse(atob(out.accessToken.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+    expect(claims.trust_tier).toBe("sandbox");
+    expect(claims.sandbox_id).toBe("cnd_x");
+    expect(claims.exp - claims.iat).toBe(5 * 60);
+    expect(await verifyToken(env, out.accessToken)).toMatchObject({ userId: "42", orgId: "user-42" });
     expect(g.calls).toEqual([{ url: "https://gateway.codegraff.com/v1/harness/identity", auth: `Bearer ${TOKEN}` }]);
   });
 
@@ -90,7 +94,11 @@ describe("sandbox sign-in", () => {
     expect(res?.status).toBe(200);
     const body = (await res!.json()) as { accessToken: string; refreshToken: string };
     expect(body.refreshToken).toBe(TOKEN);
-    expect(await verifyToken(env, body.accessToken)).toEqual({ userId: "7", orgId: "user-7" });
+    expect(await verifyToken(env, body.accessToken)).toEqual({
+      userId: "7",
+      orgId: "user-7",
+      trustTier: "sandbox"
+    });
     vi.stubGlobal("fetch", gateway(() => new Response("no", { status: 401 })).impl);
     const gone = await handleAuthRoute(
       new Request("https://edge.codegraff.com/auth/refresh", {

@@ -17,7 +17,12 @@
 import { ensureNudges, enqueueNudge, pendingNudges, acknowledgeNudge, NUDGE_PAGE } from "./device-nudges";
 import { BytesReader, BytesWriter } from "loro-protocol";
 import { createBlobStore, getJsonBlob, putJsonBlob, type BlobStore } from "./blobs";
-import { AUTH_USER_HEADER, type Env } from "./env";
+import {
+  AUTH_SANDBOX_ID_HEADER,
+  AUTH_TRUST_TIER_HEADER,
+  AUTH_USER_HEADER,
+  type Env
+} from "./env";
 import { readJsonCapped } from "./body";
 import { isPurge, wipeObject } from "./purge";
 
@@ -155,22 +160,45 @@ export class DeviceRoom implements DurableObject {
     const url = new URL(request.url);
     const userId = request.headers.get(AUTH_USER_HEADER);
     if (!userId) return new Response("unauthenticated", { status: 401 });
+    const trustTier = request.headers.get(AUTH_TRUST_TIER_HEADER) === "sandbox" ? "sandbox" : "personal";
+    const sandboxId = request.headers.get(AUTH_SANDBOX_ID_HEADER) ?? "";
     const owner = this.getMeta("owner");
 
     // Account deletion (purge.ts): only the owner's device room is wiped.
     if (isPurge(request, url)) {
+      if (trustTier === "sandbox") return json({ error: "trust_tier_denied" }, 403);
       if (owner !== userId) return json({ purged: false });
       await wipeObject(this.ctx, () => this.schema());
       return json({ purged: true });
     }
 
+    const sandboxAllowed = (): boolean => {
+      if (trustTier !== "sandbox") return true;
+      if (!owner || owner !== userId) return false;
+      const tier = this.getMeta("tier") ?? "personal";
+      const roomSandbox = this.getMeta("sandbox_id") ?? "";
+      return tier === "sandbox" && (roomSandbox === "" || roomSandbox === sandboxId);
+    };
+
     if (url.pathname === "/ws") {
       const role = url.searchParams.get("role") === "host" ? "host" : "client";
+      if (trustTier === "sandbox" && role !== "host") {
+        return json({ error: "trust_tier_denied" }, 403);
+      }
       if (role === "host") {
-        // The device's own backend claims the room; the claim is the identity
-        // anchor every later client join is checked against.
-        if (!owner) this.setMeta("owner", userId);
-        else if (owner !== userId) return new Response("forbidden", { status: 403 });
+        // The device's own backend claims the room and its trust tier.
+        if (!owner) {
+          this.setMeta("owner", userId);
+          this.setMeta("tier", trustTier);
+          if (trustTier === "sandbox" && sandboxId) this.setMeta("sandbox_id", sandboxId);
+        } else if (owner !== userId) {
+          return new Response("forbidden", { status: 403 });
+        } else if (trustTier === "sandbox") {
+          if (!sandboxAllowed()) return json({ error: "trust_tier_denied" }, 403);
+          if ((this.getMeta("sandbox_id") ?? "") === "" && sandboxId) {
+            this.setMeta("sandbox_id", sandboxId);
+          }
+        }
       } else {
         if (!owner || owner !== userId) return new Response("forbidden", { status: 403 });
       }
@@ -200,6 +228,7 @@ export class DeviceRoom implements DurableObject {
     const sidecar = url.pathname.match(/^\/sidecar\/([a-z0-9-]{1,64})$/);
     if (sidecar) {
       const name = sidecar[1]!;
+      if (trustTier === "sandbox" && !sandboxAllowed()) return json({ error: "trust_tier_denied" }, 403);
       if (!owner || owner !== userId) return json({ error: "forbidden" }, owner ? 403 : 404);
       if (request.method === "GET") {
         const value = getJsonBlob<unknown>(this.blobs, `sidecar:${name}`);
@@ -214,6 +243,7 @@ export class DeviceRoom implements DurableObject {
     }
 
     if (url.pathname === "/status" && request.method === "GET") {
+      if (trustTier === "sandbox" && !sandboxAllowed()) return json({ error: "trust_tier_denied" }, 403);
       if (!owner || owner !== userId) return json({ error: "forbidden" }, owner ? 403 : 404);
       // `hostSockets` counts corpses too — the gap between it and
       // `hostConnected` is the only externally visible signal that a device's
@@ -228,6 +258,7 @@ export class DeviceRoom implements DurableObject {
     // nudge; the payload is only a chat id — the host validates against its
     // own doc before executing anything.
     if (url.pathname === "/nudge" && request.method === "POST") {
+      if (trustTier === "sandbox" && !sandboxAllowed()) return json({ error: "trust_tier_denied" }, 403);
       if (!owner || owner !== userId) return json({ error: "forbidden" }, owner ? 403 : 404);
       const body = (await request.json().catch(() => null)) as { chatId?: string } | null;
       const chatId = body?.chatId;

@@ -466,9 +466,30 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Dial a WebSocket RPC server (`ws://127.0.0.1:{ipc_port}`).
 pub async fn connect_ws(url: &str) -> Result<RpcClient, RpcError> {
+    connect_ws_with_bearer(url, None).await
+}
+
+/// Dial a WebSocket RPC server with an optional `Authorization: Bearer` header.
+pub async fn connect_ws_with_bearer(
+    url: &str,
+    bearer: Option<&str>,
+) -> Result<RpcClient, RpcError> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let mut request = url
+        .into_client_request()
+        .map_err(|e| RpcError::Transport(e.to_string()))?;
+    if let Some(token) = bearer.map(str::trim).filter(|token| !token.is_empty()) {
+        let header = format!("Bearer {token}").parse().map_err(
+            |e: tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue| {
+                RpcError::Transport(e.to_string())
+            },
+        )?;
+        request.headers_mut().insert("authorization", header);
+    }
     let (ws, _) = tokio::time::timeout(
         CONNECT_TIMEOUT,
-        tokio_tungstenite::connect_async_with_config(url, Some(crate::ws::config()), false),
+        tokio_tungstenite::connect_async_with_config(request, Some(crate::ws::config()), false),
     )
     .await
     .map_err(|_| RpcError::Transport(format!("timed out dialing {url}")))?

@@ -586,7 +586,10 @@ impl EngineCore {
     /// Devices → Allow remote control so a compromised edge cannot drive
     /// commands on a machine that never opted in.
     pub fn relay_rpc_service(&self) -> std::sync::Arc<dyn harness_rpc::RpcService> {
-        crate::rpc::RelayRpc::wrap(self.rpc_service(), self.registry.clone())
+        std::sync::Arc::new(rpc::RemoteRelayRpc::new(
+            crate::rpc::RelayRpc::wrap(self.rpc_service(), self.registry.clone()),
+            self.device_id.clone(),
+        ))
     }
 
     /// Revoke every account-scoped transport before any slower graceful
@@ -1162,7 +1165,37 @@ impl Engine {
             #[cfg(unix)]
             terminals: runtime.core().terminals.clone(),
         });
-        let server = serve_ipc(config.ipc_port, service).await?;
+        let mcp_service: Arc<dyn RpcService> =
+            Arc::new(rpc::McpScopedRpc::new(runtime.core().rpc_service()));
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.ipc_port)).await?;
+        let bound_port = listener.local_addr()?.port();
+        let admin_token = new_ipc_token();
+        let mcp_token = new_ipc_token();
+        runtime.core().sessions.set_ipc_mcp_token(mcp_token.clone());
+
+        let is_sandbox =
+            std::env::var_os("HARNESS_SANDBOX_TOKEN_FILE").is_some_and(|v| !v.is_empty());
+        let admin_path = ipc_token_path(&config.data_dir, bound_port);
+        let mcp_path = ipc_mcp_token_path(&config.data_dir, bound_port);
+        if is_sandbox {
+            // In a sandbox runtime, keep the admin token out of reach on disk and
+            // deliver only the scoped MCP token directly to ACP's harness MCP server.
+            let _ = std::fs::remove_file(&admin_path);
+            let _ = std::fs::remove_file(&mcp_path);
+        } else {
+            write_secret_token_file(&admin_path, &admin_token)?;
+            write_secret_token_file(&mcp_path, &mcp_token)?;
+        }
+
+        let server = serve_ipc_authenticated_listener(
+            listener,
+            harness_rpc::IpcAuth {
+                admin_token,
+                admin_service: service,
+                mcp_token,
+                mcp_service,
+            },
+        );
         // Bot routines run only while this engine does: it checks them once
         // a minute, and graff records what came due in between.
         let bot_ticker = bots::spawn_ticker(
@@ -1190,6 +1223,10 @@ impl Engine {
             }
         }
         tracing::info!("shutting down");
+        if !is_sandbox {
+            let _ = std::fs::remove_file(&admin_path);
+            let _ = std::fs::remove_file(&mcp_path);
+        }
         bot_ticker.abort();
         server.abort();
         runtime.shutdown().await;
@@ -1233,6 +1270,70 @@ async fn shutdown_signal() -> std::io::Result<()> {
 /// engine. That second case is the point — an embedded engine that keeps the
 /// port to itself forces anyone wanting a second viewport (the terminal app) to
 /// stop the desktop app, start a daemon, and start it again in the right order.
+pub fn ipc_token_path(data_dir: &Path, port: u16) -> PathBuf {
+    data_dir.join(format!("ipc-token-{port}"))
+}
+
+pub fn ipc_mcp_token_path(data_dir: &Path, port: u16) -> PathBuf {
+    data_dir.join(format!("ipc-mcp-token-{port}"))
+}
+
+fn new_ipc_token() -> String {
+    use rand_core::RngCore;
+    let mut bytes = [0u8; 32];
+    rand_core::OsRng.fill_bytes(&mut bytes);
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(&mut hex, "{b:02x}");
+    }
+    hex
+}
+
+fn write_secret_token_file(path: &Path, token: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_file_name(format!(
+        ".ipc-token-{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    {
+        let mut file = opts.open(&tmp)?;
+        file.write_all(token.as_bytes())?;
+        file.sync_all()?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
+}
+
+pub fn serve_ipc_authenticated_listener(
+    listener: tokio::net::TcpListener,
+    auth: harness_rpc::IpcAuth,
+) -> tokio::task::JoinHandle<()> {
+    let port = listener.local_addr().ok().map(|addr| addr.port());
+    tracing::info!(?port, "IPC server listening (authenticated)");
+    tokio::spawn(harness_rpc::serve_ws_listener_authenticated(
+        listener, auth,
+    ))
+}
+
 /// Serving here means any viewport can just attach.
 ///
 /// Localhost only, exactly as before: this widens *which process* can serve the

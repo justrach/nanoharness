@@ -802,7 +802,7 @@ export class PgRoomStore implements RoomStore {
     return this.run(async (pg) => {
       const res = await pg.query(
         `SELECT w.id, w.room_id, r.name AS room_name, w.seq, w.from_member, w.from_user_id,
-                i.github_login, i.fingerprint, w.to_member, w.to_ref, w.to_device, x.body
+                i.github_login, i.fingerprint, w.to_member, w.to_ref, w.to_device, x.body, x.hop
            FROM app.agent_wake_log w
            JOIN app.agent_rooms r ON r.id = w.room_id
            JOIN app.agent_room_messages x ON x.room_id = w.room_id AND x.seq = w.seq
@@ -824,7 +824,8 @@ export class PgRoomStore implements RoomStore {
         toMember: r.to_member as string,
         toRef: strOrNull(r.to_ref),
         toDevice: r.to_device as string,
-        body: r.body as string
+        body: r.body as string,
+        hop: num(r.hop)
       }));
     });
   }
