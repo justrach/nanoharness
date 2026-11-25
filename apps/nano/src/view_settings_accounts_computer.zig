@@ -86,7 +86,12 @@ pub fn card(c: *ui.Context, a: *App, k: theme.Colors) void {
         {
             const col = ui.div(c).column().w(@max(w, 120));
             defer col.end();
-            const heading = info.live.device_name orelse "Cloud Computer";
+            const strip_view = @import("view_sandbox_strip.zig");
+            const owner = strip_view.ownerForApp(c.alloc(), a);
+            const heading = if (owner != null)
+                strip_view.friendlyName(c.alloc(), owner, info.live.device_name, true, false, false)
+            else
+                info.live.device_name orelse "Cloud Computer";
             rows.title(c, k, heading, w);
             set.space(c, 3);
             const status_text: []const u8 = if (is_ended)

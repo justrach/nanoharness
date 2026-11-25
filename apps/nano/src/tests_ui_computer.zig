@@ -72,3 +72,80 @@ test "cloud computer settings card renders complimentary running state, attaches
     try testing.expect(h.t.containsText("Cloud computer request failed (403)."));
     try testing.expect(h.t.hasText("Open dashboard"));
 }
+
+test "sidebar computer cards personalize names, show dedicated computer and animated sprites" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.view.sidebar_open = true;
+    h.a.settings.set(.sidebar_compact, true);
+    h.a.account.scope = .synced;
+    h.a.account.user = .{
+        .name = try testing.allocator.dupe(u8, "Rach"),
+        .email = try testing.allocator.dupe(u8, "rach@example.test"),
+    };
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, running_complimentary, .{});
+        defer parsed.deinit();
+        computer.apply(&h.a, parsed.value);
+    }
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\{"enabled":true,"sandboxes":[{"id":"cnd_1","provider":"fleet","state":"running","tier":"persistent","harness":true,"keepRunning":true,"pricePerHourMicroUsd":79532}]}
+        , .{});
+        defer parsed.deinit();
+        @import("app_sandboxes.zig").apply(&h.a, parsed.value);
+    }
+    h.t.settle(0.2);
+
+    const comp_text = h.t.findText("Rach's computer") orelse return error.MissingDedicatedCard;
+    const sb_text = h.t.findText("Rach's sandbox") orelse return error.MissingSandboxCard;
+    try testing.expect(comp_text.x < 224 and sb_text.x < 224);
+    try testing.expect(h.t.containsText("Running · 4 vCPU, 8 GB"));
+    try testing.expect(h.t.containsText("Running · $0.08/h"));
+    try testing.expect(!h.t.containsText("Cloud sandbox"));
+
+    var canvas_count: usize = 0;
+    for (h.t.ctx.nodes.items) |node| {
+        if (node.content == .canvas) {
+            const r = h.t.ctx.rects.get(node.id) orelse continue;
+            if (r.x < 224 and r.y > 500) canvas_count += 1;
+        }
+    }
+    try testing.expect(canvas_count >= 2);
+    try testing.expect(h.t.ctx.frame_in != null and h.t.ctx.frame_in.? <= 0.1);
+
+    try snap(&h, "after-full");
+
+    // Reduced motion or paused state stops background sprite animation wakeups.
+    h.t.ctx.reduced_motion = true;
+    h.t.ctx.focus = 0;
+    h.t.settle(0.1);
+    try testing.expect(h.t.ctx.frame_in == null or h.t.ctx.frame_in.? >= 0.45);
+    h.t.ctx.reduced_motion = false;
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\{"enabled":true,"onSale":1,"freeSlots":0,"totalSlots":1,"priceMonthlyUsd":50,"spec":{"cpu":4,"memoryGiB":8,"diskGiB":60},"offer":{"state":"provisioned","slot":1,"machineId":"mch_synthetic000000000000000000000000000000","complimentary":true},"live":{"phase":"paused","machineId":"mch_synthetic000000000000000000000000000000","deviceName":"Cloud computer"}}
+        , .{});
+        defer parsed.deinit();
+        computer.apply(&h.a, parsed.value);
+    }
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\{"enabled":true,"sandboxes":[{"id":"cnd_1","provider":"fleet","state":"paused","tier":"persistent","harness":true}]}
+        , .{});
+        defer parsed.deinit();
+        @import("app_sandboxes.zig").apply(&h.a, parsed.value);
+    }
+    h.t.ctx.focus = 0;
+    h.t.settle(0.1);
+    try testing.expect(h.t.ctx.frame_in == null or h.t.ctx.frame_in.? >= 0.45);
+    try testing.expect(h.t.containsText("Paused · 4 vCPU, 8 GB"));
+
+    // Clicking the sidebar computer card navigates to Settings › Accounts.
+    const click_target = h.t.findText("Rach's computer") orelse return error.MissingDedicatedCardAfterPause;
+    h.t.click(click_target.x + 2, click_target.y + 2);
+    h.t.settle(0.2);
+    try testing.expect(h.a.view.settings_open);
+    try testing.expectEqual(Section.agents, h.a.settings.section);
+}
