@@ -1257,6 +1257,14 @@ fn is_gathered_row(row: &EnvRow) -> bool {
         MathNode::Row(items) => items.first(),
         other => Some(other),
     };
+    let first = match first {
+        Some(
+            MathNode::Superscript(base, _)
+            | MathNode::Subscript(base, _)
+            | MathNode::SubSup(base, _, _),
+        ) => Some(base.as_ref()),
+        other => other,
+    };
     !matches!(number, EqNumber::Tag { .. }) && !matches!(first, Some(MathNode::Atom('[' | '*', _)))
 }
 

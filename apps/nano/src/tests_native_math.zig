@@ -676,6 +676,20 @@ test "native math UI starred operators place display limits below the name (#156
     for ([_][]const u8{ "$\\operatorname*x$", "$\\operatorname*{}$", "$\\operatorname*{\\unsupported}$" }) |source| try expectLiteral(source);
 }
 
+test "native math UI starred operators in one paragraph are not emphasis (#156)" {
+    theme.registerFonts();
+    var f = Fixture{ .source = "Let $\\operatorname*{argmax}_{x} f$ and $\\operatorname*{argmin}_{y} g$ differ" };
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 620, .height = 240 });
+    defer t.deinit();
+    t.settle(3);
+    var equations: usize = 0;
+    for (t.ctx.nodes.items) |node| {
+        if (node.content == .image) equations += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), equations);
+}
+
 test "native math UI middle delimiters stretch with their enclosing pair (#156)" {
     const named = try geometry("$\\left\\langle a\\middle\\vert b\\right\\rangle$", null);
     const bar = try geometry("$\\left\\langle a\\middle| b\\right\\rangle$", null);

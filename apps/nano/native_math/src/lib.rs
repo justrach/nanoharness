@@ -1703,6 +1703,8 @@ mod tests {
             r"\begin{gathered}[t]a\\b\end{gathered}",
             r"\begin{gathered}a\\[4pt]b\end{gathered}",
             r"\begin{gathered}a\\*b\end{gathered}",
+            r"\begin{gathered}a\\*^2b\end{gathered}",
+            r"\begin{gathered}a\\[^2b\end{gathered}",
             r"\begin{gathered}a\\ \tag{1}b\end{gathered}",
             r"\begin{gathered}\hline a\end{gathered}",
             r"\begin{gathered}\intertext{and}a\end{gathered}",
