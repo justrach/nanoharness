@@ -23,7 +23,11 @@ Selection copies the original delimited equation source, not flattened math.
 
 Math style declarations apply within the current math list, including fractions,
 scripts, delimiters, and matrix cells. `\limits` and `\nolimits` override the
-operator's default placement. Explicit skips are added to automatic TeX glue
+operator's default placement. `\operatorname*` stacks its limits in display
+style, `\middle` fences take the size of their enclosing `\left`/`\right` pair,
+and `gathered` centers its rows with the row metrics of `aligned`. Options that
+would be misread as content (`[t]`, `\\[4pt]`, `\\*`), alignment tabs and tags
+inside `gathered` fall back. Explicit skips are added to automatic TeX glue
 without changing how binary operators are classified; `pt`/`bp` skips keep
 physical width across style changes. Unknown or malformed input, barless and
 style-specific fraction commands, and `\rule` still fall back to literal source.
@@ -48,6 +52,8 @@ runtime download.
 `e377ecb4af876b8b75e62b8b83e8a9535499944c`), with only the SVG backend built.
 The patch preserves style declarations, explicit operator placement and
 absolute skips in the AST and resolves spacing in the actual row layout.
+It also adds `\operatorname*`, `\middle` and `gathered` to the parser, AST and
+layout, which upstream 2.1.1 rejects (#156).
 The upstream crate discarded the declarations and treated skips as atom
 boundaries; moving the behavior here avoids guessing from source strings or
 repairing geometry after layout. Keep the upstream notices and font license

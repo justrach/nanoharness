@@ -244,6 +244,8 @@ pub enum MatrixStyle {
     Equation,
     /// `{split}`
     Split,
+    /// `{gathered}`
+    Gathered,
 }
 
 impl MatrixStyle {
@@ -263,6 +265,7 @@ impl MatrixStyle {
             Self::Multline => "multline",
             Self::Equation => "equation",
             Self::Split => "split",
+            Self::Gathered => "gathered",
         }
     }
 
@@ -552,13 +555,15 @@ pub enum MathNode {
     SubSup(Box<MathNode>, Box<MathNode>, Box<MathNode>),
     /// `\left ... \right`
     Delimited(Delimiter, Box<MathNode>, Delimiter),
+    /// `\middle`, only as a direct item of a [`MathNode::Delimited`] body row.
+    Middle(Delimiter),
     /// `\big` / `\Big` / `\bigg` / `\Bigg` (and `l`/`r`/`m` forms).
     SizedDelim(Delimiter, DelimSize, AtomKind),
     /// Horizontal list of nodes.
     Row(Vec<MathNode>),
     /// A style declaration applying to the remaining items in the current list.
     Style(MathStyle),
-    /// An operator with explicitly stacked or lateral limits.
+    /// An operator with explicit limit placement, or `\operatorname*`.
     OperatorWithLimits {
         /// Unscripted operator nucleus.
         base: Box<MathNode>,
@@ -567,7 +572,8 @@ pub enum MathNode {
         /// Upper limit.
         upper: Option<Box<MathNode>>,
         /// Whether the scripts stack rather than sit alongside the operator.
-        stacked: bool,
+        /// `None` stacks in display style only, as `\operatorname*` does.
+        stacked: Option<bool>,
     },
     /// Matrix or multiline environment. `colspec` is the `{array}` preamble (empty otherwise).
     Matrix(MatrixStyle, Vec<ColSpec>, Vec<EnvRow>),
@@ -641,6 +647,7 @@ impl MathNode {
             Self::Delimited(l, b, r) => {
                 format!("(delim {} {} {})", l.gold(), b.gold(), r.gold())
             }
+            Self::Middle(d) => format!("(middle {})", d.gold()),
             Self::SizedDelim(d, sz, k) => {
                 format!("(big {} {} {})", sz.gold(), k.gold(), quote_delim(d))
             }
@@ -716,6 +723,7 @@ impl MathNode {
                 upper,
                 stacked,
             } => {
+                let stacked = stacked.map_or("display".into(), |s| s.to_string());
                 format!(
                     "(operator-limits {stacked} {} {} {})",
                     base.gold(),
