@@ -909,9 +909,72 @@ fn truncate_diagnostic(s: &str, max_chars: usize) -> String {
     out
 }
 
+/// Whether an installer line says the Xcode license blocks it. Phrases rather
+/// than loose words: `xcode` is also an npm package with a LICENSE file. The
+/// desktop's `isXcodeLicenseBlocker` (view_updates.zig) matches the same ones.
 fn contains_xcode_license_blocker(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    lower.contains("xcodebuild -license") || (lower.contains("xcode") && lower.contains("license"))
+    [
+        "xcodebuild -license",
+        "xcode license",
+        "xcode/ios license",
+        "xcode and apple sdks license",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase))
+}
+
+/// The text of an `npm error ...` (`npm ERR! ...` before npm 10) line.
+fn npm_error_text(line: &str) -> Option<&str> {
+    ["npm error", "npm err!"].iter().find_map(|prefix| {
+        line.get(..prefix.len())
+            .filter(|head| head.eq_ignore_ascii_case(prefix))
+            .map(|_| line[prefix.len()..].trim())
+    })
+}
+
+/// npm's fields, log pointer and native-build chatter around the reason.
+fn is_npm_error_detail(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.is_empty()
+        || [
+            "code ",
+            "syscall ",
+            "path ",
+            "errno ",
+            "command ",
+            "dest ",
+            "a complete log of this run",
+            "gyp info",
+            "gyp verb",
+        ]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+        || lower.contains("/_logs/")
+        || lower.contains("\\_logs\\")
+}
+
+/// npm gives the reason first, then advice, then the path of its debug log.
+fn npm_failure_line<'a>(lines: &[&'a str]) -> Option<&'a str> {
+    let npm = || {
+        lines
+            .iter()
+            .copied()
+            .filter_map(|line| npm_error_text(line).map(|text| (line, text)))
+    };
+    npm()
+        .find(|(_, text)| !is_npm_error_detail(text))
+        .or_else(|| {
+            npm().find(|(_, text)| text.starts_with("command ") && *text != "command failed")
+        })
+        .or_else(|| npm().find(|(_, text)| !text.is_empty()))
+        .map(|(line, _)| line)
+}
+
+/// Homebrew's report that a command it ran failed, which isn't why.
+fn is_homebrew_wrapper(line: &str) -> bool {
+    line.to_ascii_lowercase()
+        .starts_with("error: failure while executing;")
 }
 
 fn is_meaningful_error_line(line: &str) -> bool {
@@ -947,32 +1010,38 @@ fn summarize_installer_failure(stderr: &str, stdout: &str, status_desc: &str) ->
         .filter(|line| !line.is_empty())
         .collect();
 
-    if contains_xcode_license_blocker(&combined) {
-        if let Some(license_line) = lines
-            .iter()
-            .copied()
-            .find(|line| contains_xcode_license_blocker(line))
+    if let Some(license_line) = lines
+        .iter()
+        .copied()
+        .find(|line| contains_xcode_license_blocker(line))
+    {
+        let message = if license_line
+            .to_ascii_lowercase()
+            .contains("xcodebuild -license")
         {
-            if license_line
-                .to_ascii_lowercase()
-                .contains("xcodebuild -license")
-            {
-                return truncate_diagnostic(license_line, 280);
-            }
-            return truncate_diagnostic(
-                &format!("{license_line} Run `sudo xcodebuild -license` and retry."),
-                280,
-            );
+            license_line.to_string()
+        } else {
+            format!("{license_line} Run `sudo xcodebuild -license` and retry.")
+        };
+        let message = truncate_diagnostic(&message, 280);
+        // The desktop recognizes the blocker from this text, so a long line
+        // must not lose it.
+        if contains_xcode_license_blocker(&message) {
+            return message;
         }
         return "Xcode license agreement required. Run `sudo xcodebuild -license` and retry."
             .to_string();
+    }
+
+    if let Some(line) = npm_failure_line(&lines) {
+        return truncate_diagnostic(line, 280);
     }
 
     if let Some(err_line) = lines
         .iter()
         .copied()
         .rev()
-        .find(|line| is_meaningful_error_line(line))
+        .find(|line| is_meaningful_error_line(line) && !is_homebrew_wrapper(line))
     {
         return truncate_diagnostic(err_line, 280);
     }
@@ -1281,6 +1350,179 @@ Please check your network or Homebrew tap.";
         assert_eq!(
             summarize_installer_failure("", "   ", "exit status: 42"),
             "updater exited with exit status: 42"
+        );
+    }
+
+    // npm ends every failure with the path of its debug log (#125).
+    #[test]
+    fn summarize_installer_failure_shows_npm_reason_not_its_log_path() {
+        let eacces = "\
+npm error code EACCES
+npm error syscall mkdir
+npm error path /synthetic/prefix/lib
+npm error errno -13
+npm error Error: EACCES: permission denied, mkdir '/synthetic/prefix/lib'
+npm error     at async mkdir (node:internal/fs/promises:861:10) {
+npm error   errno: -13,
+npm error   code: 'EACCES'
+npm error }
+npm error
+npm error The operation was rejected by your operating system.
+npm error A complete log of this run can be found in: /synthetic/.npm/_logs/debug-0.log";
+        assert_eq!(
+            summarize_installer_failure(eacces, "", "exit status: 243"),
+            "npm error Error: EACCES: permission denied, mkdir '/synthetic/prefix/lib'"
+        );
+
+        let script = "\
+npm error code 1
+npm error path /synthetic/prefix/lib/node_modules/demo-cli
+npm error command failed
+npm error command sh -c node install.js
+npm error gyp: No Xcode or CLT version detected!
+npm error A complete log of this run can be found in: /synthetic/.npm/_logs/debug-0.log";
+        assert_eq!(
+            summarize_installer_failure(script, "", "exit status: 1"),
+            "npm error gyp: No Xcode or CLT version detected!"
+        );
+
+        let old_npm = "\
+npm ERR! code ETARGET
+npm ERR! notarget No matching version found for demo-cli@latest.
+npm ERR! A complete log of this run can be found in:
+npm ERR!     /synthetic/.npm/_logs/debug-0.log";
+        assert_eq!(
+            summarize_installer_failure(old_npm, "", "exit status: 1"),
+            "npm ERR! notarget No matching version found for demo-cli@latest."
+        );
+
+        // A script that says nothing: the command, rather than the log path.
+        let silent = "\
+npm error code 1
+npm error path /synthetic/prefix/lib/node_modules/demo-cli
+npm error command failed
+npm error command sh -c exit 1
+npm error A complete log of this run can be found in: /synthetic/.npm/_logs/debug-0.log";
+        assert_eq!(
+            summarize_installer_failure(silent, "", "exit status: 1"),
+            "npm error command sh -c exit 1"
+        );
+
+        // Nothing but fields: the code, rather than the log path.
+        let code_only = "\
+npm error code E500
+npm error A complete log of this run can be found in: /synthetic/.npm/_logs/debug-0.log";
+        assert_eq!(
+            summarize_installer_failure(code_only, "", "exit status: 1"),
+            "npm error code E500"
+        );
+    }
+
+    // Homebrew wraps a failed command after saying what went wrong (#125).
+    #[test]
+    fn summarize_installer_failure_prefers_the_reason_over_homebrews_wrapper() {
+        let stderr = "\
+Error: SHA256 mismatch for downloaded codex archive
+Error: Failure while executing; `brew upgrade --cask codex` exited with 1.";
+        assert_eq!(
+            summarize_installer_failure(stderr, "", "exit status: 1"),
+            "Error: SHA256 mismatch for downloaded codex archive"
+        );
+
+        let wrapped = "\
+Error: Failure while executing; `/usr/bin/curl --fail` exited with 22. Here's the output:
+curl: (22) The requested URL returned error: 404";
+        assert_eq!(
+            summarize_installer_failure(wrapped, "", "exit status: 1"),
+            "curl: (22) The requested URL returned error: 404"
+        );
+
+        let only = "Error: Failure while executing; `brew upgrade --cask codex` exited with 1.";
+        assert_eq!(
+            summarize_installer_failure(only, "", "exit status: 1"),
+            only
+        );
+    }
+
+    // The words "Xcode" and "license" apart don't make it the license (#125).
+    #[test]
+    fn summarize_installer_failure_ignores_unrelated_xcode_and_license_words() {
+        let separate_lines = "\
+npm warn deprecated demo-dep@1.0.0: license changed, see the homepage
+npm error gyp: No Xcode or CLT version detected!";
+        assert_eq!(
+            summarize_installer_failure(separate_lines, "", "exit status: 1"),
+            "npm error gyp: No Xcode or CLT version detected!"
+        );
+
+        // `xcode` is an npm package, and a package has a LICENSE file.
+        let path =
+            "npm error EACCES: permission denied, unlink '/synthetic/node_modules/xcode/LICENSE'";
+        assert_eq!(
+            summarize_installer_failure(path, "", "exit status: 1"),
+            path
+        );
+    }
+
+    #[test]
+    fn summarize_installer_failure_recognizes_every_xcode_license_wording() {
+        for stderr in [
+            // Homebrew's own check.
+            "Error: You have not agreed to the Xcode license.\nAgree to the license by opening Xcode.app or running:\n  sudo xcodebuild -license",
+            // xcrun and git shims.
+            "You have not agreed to the Xcode license agreements. Please run 'sudo xcodebuild -license' from within a Terminal window to review and agree to the Xcode and Apple SDKs license.",
+            "Agreeing to the Xcode/iOS license requires admin privileges, please run “sudo xcodebuild -license” and then retry this command.",
+            // Only the command survives.
+            "Error: Failure while executing; `brew upgrade` exited with 1. Here's the output:\n  sudo xcodebuild -license accept",
+        ] {
+            let msg = summarize_installer_failure(stderr, "", "exit status: 1");
+            assert!(msg.contains("sudo xcodebuild -license"), "{msg}");
+        }
+
+        // A long line keeps the command even when the line is cut.
+        let long = format!("Error: {} run sudo xcodebuild -license", "x".repeat(400));
+        let msg = summarize_installer_failure(&long, "", "exit status: 1");
+        assert!(msg.contains("sudo xcodebuild -license"), "{msg}");
+    }
+
+    // The message the Updates popover shows is the installer's own, kept
+    // through `apply` with the retry still available (#125).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_apply_keeps_the_xcode_license_reason_and_stays_retryable() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cli = dir.path().join("grok");
+        std::fs::write(
+            &cli,
+            "#!/bin/sh\nif [ \"$1\" = \"version\" ]; then echo 1.2.0; exit 0; fi\nif [ \"$2\" = \"--check\" ]; then echo 1.3.1; exit 0; fi\necho 'Error: You have not agreed to the Xcode license.' >&2\necho '  sudo xcodebuild -license' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let registry = Arc::new(crate::default_registry());
+        registry.load_prefs(dir.path());
+        let coord = HarnessUpdateCoordinator::with_resolver(
+            dir.path(),
+            registry,
+            Arc::new(move |id| (id == HarnessId::Grok).then(|| cli.clone())),
+        );
+        coord.check_one(HarnessId::Grok).await.unwrap();
+        coord.apply(HarnessId::Grok).await.unwrap_err();
+        let row = coord
+            .snapshot()
+            .into_iter()
+            .find(|s| s.harness == HarnessId::Grok)
+            .unwrap();
+        assert_eq!(row.phase, HarnessUpdatePhase::Failed);
+        assert!(row.can_apply);
+        let error = row.error.unwrap();
+        assert_eq!(error.kind, HarnessUpdateFailureKind::Install);
+        assert!(error.message.contains("Xcode license"), "{}", error.message);
+        assert!(
+            error.message.contains("sudo xcodebuild -license"),
+            "{}",
+            error.message
         );
     }
 }
