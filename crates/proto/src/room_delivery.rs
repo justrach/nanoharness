@@ -37,6 +37,13 @@ pub struct RoomOrigin {
     pub from_github: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_fingerprint: Option<String>,
+    /// Cumulative cross-channel relay hop depth carried into this delivery.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub hop: u32,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 /// The queued text for a delivery: the tag line, then the framed message.
@@ -139,6 +146,7 @@ mod tests {
             from_display: None,
             from_github: None,
             from_fingerprint: None,
+            hop: 0,
         }
     }
 
@@ -216,5 +224,12 @@ mod tests {
         );
         let (_, meta) = lift(&text);
         assert_eq!(meta.unwrap()["from_user"], false);
+    }
+
+    #[test]
+    fn hop_round_trips_in_delivery_tag() {
+        let text = format(&RoomOrigin { hop: 4, ..origin() }, "ping");
+        let (_, meta) = lift(&text);
+        assert_eq!(meta.unwrap()["hop"], 4);
     }
 }

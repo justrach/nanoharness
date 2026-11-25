@@ -56,6 +56,8 @@ pub enum SessionCommandPayload {
     RespondInput {
         request_id: String,
         answers: Vec<UserInputAnswer>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        from_agent: bool,
     },
     /// Cancel this question's originating turn without supplying an answer.
     #[serde(rename_all = "camelCase")]

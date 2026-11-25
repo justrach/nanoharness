@@ -55,7 +55,12 @@ pub enum SteerOutcome {
     NotSteerable,
 }
 
-type PendingInputs = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserInputAnswer>>>>>;
+struct PendingInput {
+    tx: oneshot::Sender<Vec<UserInputAnswer>>,
+    requires_human_ui: bool,
+}
+
+type PendingInputs = Arc<Mutex<HashMap<String, PendingInput>>>;
 
 /// A harness-native session id plus the cwd it was created under. Harness
 /// session stores are cwd-scoped (claude keys conversations by project
@@ -347,6 +352,9 @@ struct Inner {
     /// browse Connected apps: gives runs a `browse` MCP server while browse
     /// is paired and running (wired at engine assembly; absent in bare tests).
     browse_link: OnceLock<Arc<crate::browse_link::BrowseLink>>,
+    /// Scoped MCP IPC bearer passed only to Harness's own MCP server process,
+    /// never to agent environments.
+    ipc_mcp_token: OnceLock<String>,
     /// The version this boot updated Harness to, when the last boot recorded
     /// an older one (`RunJournal::note_boot_version`). Names the update in
     /// the note on a run the restart cut short.
@@ -412,9 +420,16 @@ impl SessionsEngine {
                 generated_images: OnceLock::new(),
                 turn_listener: OnceLock::new(),
                 browse_link: OnceLock::new(),
+                ipc_mcp_token: OnceLock::new(),
                 boot_update: OnceLock::new(),
             }),
         }
+    }
+
+    /// Bind the scoped MCP IPC bearer token passed to Harness's own MCP server
+    /// child processes (`RunOrigin::ipc_token`).
+    pub fn set_ipc_mcp_token(&self, token: String) {
+        let _ = self.inner.ipc_mcp_token.set(token);
     }
 
     /// Wire the doc host (called once at engine assembly; the two services are mutually
@@ -831,7 +846,16 @@ impl SessionsEngine {
                 let (mut tx, rx) = oneshot::channel();
                 let (answer_tx, answer_rx) = oneshot::channel();
                 let request_id = new_id();
-                lock(&pending).insert(request_id.clone(), answer_tx);
+                let requires_human_ui = questions
+                    .iter()
+                    .any(harness_proto::is_human_approval_question);
+                lock(&pending).insert(
+                    request_id.clone(),
+                    PendingInput {
+                        tx: answer_tx,
+                        requires_human_ui,
+                    },
+                );
                 let _ = engine_tx.send(AgentEvent::InputRequested {
                     request_id: request_id.clone(),
                     questions,
@@ -861,6 +885,7 @@ impl SessionsEngine {
         let controls = RunControls {
             origin: Some(harness_adapters::RunOrigin {
                 chat_id: chat_id.to_string(),
+                ipc_token: self.inner.ipc_mcp_token.get().cloned(),
                 ..Default::default()
             }),
             request_input,
@@ -1085,7 +1110,7 @@ impl SessionsEngine {
         // classified as an error instead of an interrupted turn.
         let _ = cancel.send(true);
         // Unpark questions before harness teardown, which can await them.
-        let parked: Vec<_> = lock(&pending).drain().map(|(_, tx)| tx).collect();
+        let parked: Vec<_> = lock(&pending).drain().map(|(_, entry)| entry.tx).collect();
         for tx in parked {
             let _ = tx.send(Vec::new());
         }
@@ -1155,6 +1180,7 @@ impl SessionsEngine {
         chat_id: &str,
         request_id: &str,
         answers: Vec<UserInputAnswer>,
+        from_agent: bool,
     ) -> Result<bool, EngineError> {
         let target = lock(&self.inner.runs)
             .get(chat_id)
@@ -1162,8 +1188,21 @@ impl SessionsEngine {
         let Some((pending, engine_tx)) = target else {
             return Ok(false);
         };
-        let Some(resolver) = lock(&pending).remove(request_id) else {
-            return Ok(false);
+        let resolver = {
+            let mut guard = lock(&pending);
+            if from_agent
+                && guard
+                    .get(request_id)
+                    .is_some_and(|entry| entry.requires_human_ui)
+            {
+                return Err(EngineError::Other(
+                    "this prompt requires human approval in the Harness UI".into(),
+                ));
+            }
+            let Some(resolver) = guard.remove(request_id) else {
+                return Ok(false);
+            };
+            resolver.tx
         };
         let _ = resolver.send(answers);
         let _ = engine_tx.send(AgentEvent::InputResolved {
@@ -1188,7 +1227,7 @@ impl SessionsEngine {
         // Publish cancellation before waking the adapter, as in interrupt().
         // Dropping the resolver communicates cancellation, not an empty answer.
         let _ = run.cancel.send(true);
-        drop(resolver);
+        drop(resolver.tx);
         pending.clear();
         run.interrupt_token.cancel();
         true
@@ -4214,8 +4253,8 @@ async fn drive_run(
                         let resolver = lock(&inner.runs)
                             .get(&chat_id)
                             .and_then(|h| lock(&h.pending_inputs).remove(request_id));
-                        if let Some(tx) = resolver {
-                            let _ = tx.send(Vec::new());
+                        if let Some(entry) = resolver {
+                            let _ = entry.tx.send(Vec::new());
                         }
                         tracing::debug!(chat = %chat_id, "parked session: post-turn input request auto-declined");
                         continue;
@@ -4631,8 +4670,8 @@ async fn drive_run(
                 .filter(|h| h.run_id == run_id)
                 .map(|h| h.pending_inputs.clone());
             if let Some(pending) = pending {
-                for (_, tx) in lock(&pending).drain() {
-                    let _ = tx.send(Vec::new());
+                for (_, entry) in lock(&pending).drain() {
+                    let _ = entry.tx.send(Vec::new());
                 }
             }
             let message_status = match status {

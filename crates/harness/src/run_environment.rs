@@ -1,9 +1,14 @@
 use crate::{RunOrigin, process};
 
-/// Attribute build-wait markers only to the run explicitly owning this child.
-/// Discovery, titles and callers without a directory must not inherit a parent
-/// session's attribution when Harness itself was launched by an agent.
+/// Attribute build-wait markers only to the run explicitly owning this child,
+/// and scrub engine credentials (`HARNESS_IPC_TOKEN`,
+/// `HARNESS_SANDBOX_TOKEN_FILE`, `HARNESS_EDGE_TOKEN`) so untrusted agent
+/// processes never inherit direct engine/edge authority. The engine's MCP server
+/// receives its own scoped token explicitly via `RunOrigin.ipc_token`.
 pub(crate) fn apply_run_environment(cmd: &mut process::Command, origin: Option<&RunOrigin>) {
+    cmd.env_remove("HARNESS_IPC_TOKEN");
+    cmd.env_remove("HARNESS_SANDBOX_TOKEN_FILE");
+    cmd.env_remove("HARNESS_EDGE_TOKEN");
     if let Some(dir) = origin.and_then(|origin| origin.build_wait_dir.as_ref()) {
         cmd.env("HARNESS_BUILD_WAIT_DIR", dir);
     } else {
@@ -47,6 +52,35 @@ mod tests {
             // An explicit removal, not merely an absent override: inherited
             // process environment must be scrubbed as well.
             assert_eq!(configured_directory(&mut cmd), Some(None));
+        }
+    }
+
+    #[test]
+    fn scrubs_ipc_and_sandbox_tokens_from_child_environment() {
+        let origin = RunOrigin {
+            build_wait_dir: Some(std::path::PathBuf::from("synthetic/run")),
+            ..Default::default()
+        };
+        let mut cmd = process::Command::new("synthetic-agent");
+        for key in [
+            "HARNESS_IPC_TOKEN",
+            "HARNESS_SANDBOX_TOKEN_FILE",
+            "HARNESS_EDGE_TOKEN",
+        ] {
+            cmd.env(key, "secret-value");
+        }
+        apply_run_environment(&mut cmd, Some(&origin));
+        for key in [
+            "HARNESS_IPC_TOKEN",
+            "HARNESS_SANDBOX_TOKEN_FILE",
+            "HARNESS_EDGE_TOKEN",
+        ] {
+            let entry = cmd
+                .as_std_mut()
+                .get_envs()
+                .find(|(k, _)| *k == OsStr::new(key))
+                .map(|(_, v)| v.map(OsStr::to_os_string));
+            assert_eq!(entry, Some(None), "{key} must be scrubbed from agent env");
         }
     }
 }

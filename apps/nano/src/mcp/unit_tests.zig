@@ -729,6 +729,7 @@ test "mcp respond_to_input: the current pending question is found in the transcr
     try testing.expectEqualStrings("chat-alpha-1", u.str(sent, "chatId").?);
     try testing.expectEqualStrings("respondInput", sval(sent, &.{ "command", "kind" }).?);
     try testing.expectEqualStrings("req-7", sval(sent, &.{ "command", "requestId" }).?);
+    try testing.expect(u.boolean(u.get(sent, "command").?, "fromAgent").?);
     const ans = u.array(u.get(sent, "command").?, "answers").?;
     try testing.expectEqualStrings("q1", u.str(ans[0], "questionId").?);
     try testing.expectEqualStrings("Yes", u.array(ans[0], "labels").?[0].string);
@@ -741,6 +742,34 @@ test "mcp respond_to_input: the current pending question is found in the transcr
         \\   {"kind":"input","id":"i2","requestId":"req-7","questions":[{"id":"q1","prompt":"Push to main?"}],"resolved":true}]}]
     ;
     try expectErr(try w.call("respond_to_input", "{\"chat\":\"Alpha\",\"answers\":[{\"question_id\":\"q1\",\"labels\":[\"Yes\"]}]}"), "chat chat-alp has no pending question");
+}
+
+test "mcp respond_to_input refuses tool-approval prompts and peer relayDepth reads room hops" {
+    const w = try WorldFixture.create(.{});
+    defer w.destroy();
+    w.world.doc_reset =
+        \\[{"id":"u1","role":"user","createdAt":1,"deviceId":"dev-local","parts":[{"kind":"text","id":"t","text":"run it"}]},
+        \\ {"id":"a1","role":"assistant","createdAt":2,"deviceId":"dev-local","status":"streaming","parts":[
+        \\   {"kind":"input","id":"i2","requestId":"req-perm","questions":[{"id":"q1","header":"Approve tool","prompt":"Run shell command?","requiresHumanUi":true}],"resolved":false}]}]
+    ;
+    try expectErr(try w.call("respond_to_input", "{\"chat\":\"Alpha\",\"answers\":[{\"question_id\":\"q1\",\"labels\":[\"Yes\"]}]}"), "this prompt requires human approval in the Harness UI");
+    try testing.expect(w.lastWrite("QueueCommand") == null);
+
+    const room_msg =
+        \\<!--harness-room {"room_id":"r1","room_name":"build","seq":7,"from_member":"codex","member_kind":"graff","from_user":false,"external":false,"hop":4} -->
+        \\[room message from codex · room build #7 · agent, advisory]: @alpha ping
+    ;
+    try testing.expectEqual(@as(u32, 4), peer.relayDepth(room_msg));
+
+    const w_room = try WorldFixture.create(.{ .chat_id = "chat-alpha-1" });
+    defer w_room.destroy();
+    w_room.world.doc_reset =
+        \\[{"id":"u1","role":"user","createdAt":1,"deviceId":"dev-local","parts":[{"kind":"text","id":"t","text":"[Message from Harness chat Beta. Sender chat: chat-beta-1. Relay depth: 2/4. Agent coordination, not a human request. Reply with Harness `send_message` only for an actionable question, blocker, or final requested result; otherwise do not reply. Do not send acknowledgements or progress updates.]\n\ncheck"}]}]
+    ;
+    const posted = try ok(try w_room.call("post_room", "{\"room\":\"build\",\"text\":\"@beta update\"}"));
+    _ = posted;
+    const post_req = w_room.lastWrite("RoomRequest").?;
+    try testing.expectEqual(@as(i64, 2), u.int(u.get(post_req, "body").?, "parentHop").?);
 }
 
 test "mcp list_chats and create_chat ignore blank optional string filters" {

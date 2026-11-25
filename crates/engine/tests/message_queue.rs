@@ -125,6 +125,7 @@ impl Harness for HeldHarness {
                 prefill: None,
                 multiline: false,
                 multi_select: false,
+                requires_human_ui: false,
             }])
         });
         let mut steering = controls.steering;

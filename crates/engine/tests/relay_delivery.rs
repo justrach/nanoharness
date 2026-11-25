@@ -208,6 +208,7 @@ async fn rows_dark_command_delivers_over_the_peer_relay_exactly_once() {
 
     // Engine B hosts its device room on the fake relay.
     let core_b = assemble(&dirs.path().join("b"), "device-b");
+    core_b.registry.approve_remote_device("device-a");
     let _host = core_b.start_host_relay(&relay_url);
 
     // Engine A dials peers through the same relay — and has NO edge, so its

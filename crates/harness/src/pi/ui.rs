@@ -46,6 +46,7 @@ impl Dialogs {
             multi_select: false,
             prefill: frame["prefill"].as_str().map(str::to_owned),
             multiline: method == "editor",
+            requires_human_ui: false,
         };
         let question_id = question.id.clone();
         let answer = (input)(vec![question]);

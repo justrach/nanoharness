@@ -3436,6 +3436,7 @@ impl DocHost {
                     from_display: wake["fromDisplay"].as_str().map(str::to_owned),
                     from_github: wake["fromGithub"].as_str().map(str::to_owned),
                     from_fingerprint: wake["fromFingerprint"].as_str().map(str::to_owned),
+                    hop: wake["hop"].as_u64().unwrap_or(0) as u32,
                 };
                 let text = harness_proto::room_delivery::format(
                     &origin,
@@ -5126,8 +5127,6 @@ impl DocHost {
         if self.park_unapproved_remote(&sessions, &handle, &entry) {
             return Err(EngineError::Other(harness_rpc::RELAY_NEEDS_APPROVAL.into()));
         }
-        let mut entry = entry;
-        self.stamp_peer_origin(&mut entry);
         let commands = handle.doc.read_commands()?;
         let messages = handle.doc.read_entries().unwrap_or_default();
         let current_turn_id = messages.last().map(|m| m.id.clone());
@@ -5422,25 +5421,11 @@ impl DocHost {
         }
     }
 
-    /// Stamp Peer on remotely issued Run/Steer so autonomy and mail rules
-    /// see them as not-human even if the phone omitted turnOrigin.
-    fn stamp_peer_origin(&self, entry: &mut SessionCommandEntry) {
-        if entry.issued_by == self.device_id() {
-            return;
-        }
-        match &mut entry.payload {
-            SessionCommandPayload::Run { request, .. } => {
-                request.turn_origin = TurnOrigin::Peer;
-            }
-            SessionCommandPayload::Steer { turn_origin, .. } => {
-                *turn_origin = TurnOrigin::Peer;
-            }
-            _ => {}
-        }
-    }
-
     /// Park a remote Run/Steer until remote control is on or the user
-    /// approves. Returns true when the caller must skip execute.
+    /// approves. Returns true when the caller must skip execute. Admitted
+    /// remote human commands keep their `TurnOrigin` so phone/second-device
+    /// composers can steer live turns, while `McpScopedRpc`/bots/room wakes
+    /// stamp `TurnOrigin::Peer` and host autonomy applies to all runs.
     fn park_unapproved_remote(
         &self,
         sessions: &SessionsEngine,
@@ -5536,7 +5521,7 @@ impl DocHost {
                     skipped.insert(c.id.clone());
                 }
             }
-            let Some(mut entry) = commands
+            let Some(entry) = commands
                 .iter()
                 .find(|c| {
                     c.status == SessionCommandStatus::Pending
@@ -5551,7 +5536,6 @@ impl DocHost {
                 skipped.insert(entry.id.clone());
                 continue;
             }
-            self.stamp_peer_origin(&mut entry);
             let messages = handle.doc.read_entries().unwrap_or_default();
             let current_turn_id = messages.last().map(|m| m.id.clone());
             let turn_is_past = |turn_id: &str| messages.iter().any(|m| m.id == turn_id);
@@ -5990,7 +5974,14 @@ impl DocHost {
             SessionCommandPayload::RespondInput {
                 request_id,
                 answers,
+                from_agent,
             } if request_id.starts_with(branch_drift::REQUEST_PREFIX) => {
+                if *from_agent {
+                    return Ok((
+                        SessionCommandStatus::Rejected,
+                        Some("this prompt requires human approval in the Harness UI".into()),
+                    ));
+                }
                 self.answer_branch_drift(sessions, handle, request_id, Some(answers.as_slice()))
                     .await
             }
@@ -6022,9 +6013,15 @@ impl DocHost {
             SessionCommandPayload::RespondInput {
                 request_id,
                 answers,
+                from_agent,
             } => {
-                if sessions.respond_input(chat_id, request_id, answers.clone())? {
-                    return Ok((SessionCommandStatus::Applied, None));
+                match sessions.respond_input(chat_id, request_id, answers.clone(), *from_agent) {
+                    Ok(true) => return Ok((SessionCommandStatus::Applied, None)),
+                    Ok(false) => {}
+                    Err(err) if *from_agent => {
+                        return Ok((SessionCommandStatus::Rejected, Some(err.to_string())));
+                    }
+                    Err(err) => return Err(err),
                 }
                 // No live resolver. Only a request id the doc shows as an
                 // OPEN question on a SETTLED entry gets the orphan fallback:
@@ -6055,6 +6052,16 @@ impl DocHost {
                         Some("no pending input request".into()),
                     ));
                 };
+                if *from_agent
+                    && questions
+                        .iter()
+                        .any(harness_proto::is_human_approval_question)
+                {
+                    return Ok((
+                        SessionCommandStatus::Rejected,
+                        Some("this prompt requires human approval in the Harness UI".into()),
+                    ));
+                }
                 // The run died under the question (engine restart, crash).
                 // The question is still open in the doc and the command is
                 // durable, so honor it anyway — stamp the part resolved and
@@ -6072,7 +6079,11 @@ impl DocHost {
                     ));
                 };
                 request.prompt = respond_input_prompt(&questions, answers);
-                request.turn_origin = TurnOrigin::Human;
+                request.turn_origin = if *from_agent {
+                    TurnOrigin::Peer
+                } else {
+                    TurnOrigin::Human
+                };
                 request.resume = None; // dispatch re-derives the harness session
                 request.attachments = Vec::new();
                 if let Err(err) = handle.doc.resolve_input(request_id) {
