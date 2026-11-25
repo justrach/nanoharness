@@ -10,9 +10,9 @@
 //! and app installs run a background release check: 20 s after start, then
 //! hourly on the wall clock (1, 5, 15, 30 min after failures).
 //!
-//! Network, commands and the restart go through seams (`Http`,
-//! `proc_seam.Runner`, `Restarter`) so tests answer from made-up releases
-//! and never install or restart anything.
+//! Network, commands, the restart and the process list go through seams
+//! (`Http`, `proc_seam.Runner`, `Restarter`, `Processes`) so tests answer from
+//! made-up releases and never install or restart anything.
 const std = @import("std");
 const builtin = @import("builtin");
 const json = std.json;
@@ -142,6 +142,33 @@ pub fn detectInstallFrom(exe: []const u8, home: ?[]const u8, os: std.Target.Os.T
         end = slash;
     }
     return .{ .kind = .unmanaged };
+}
+
+/// Whether `entry` is a bundle `applyMacApp` moved aside from `bundle_name`:
+/// `.{bundle_name}.old-` and the swap's 12 hex digits.
+pub fn isReplacedBundle(entry: []const u8, bundle_name: []const u8) bool {
+    var rest = entry;
+    for ([_][]const u8{ ".", bundle_name, ".old-" }) |part| {
+        if (!std.mem.startsWith(u8, rest, part)) return false;
+        rest = rest[part.len..];
+    }
+    if (rest.len != 12) return false;
+    for (rest) |c| switch (c) {
+        '0'...'9', 'a'...'f' => {},
+        else => return false,
+    };
+    return true;
+}
+
+/// Whether any of `executables` is inside a folder called `dir_name`. Replaced
+/// bundles have random names, so the name alone decides: how the path up to it
+/// is spelled (`/tmp` or `/private/tmp`) doesn't matter.
+pub fn runsInside(executables: []const []const u8, dir_name: []const u8) bool {
+    for (executables) |exe| {
+        var it = std.mem.splitScalar(u8, std.fs.path.dirname(exe) orelse continue, '/');
+        while (it.next()) |part| if (std.mem.eql(u8, part, dir_name)) return true;
+    }
+    return false;
 }
 
 /// The `CFBundleIdentifier` string of an XML Info.plist.
@@ -371,8 +398,11 @@ pub const Updater = struct {
         return .{ .ok = .{ .version = ver } };
     }
 
-    /// One check; false on failure (retry sooner).
+    /// One check; false on failure (retry sooner). It first deletes the bundles
+    /// earlier app updates replaced: the background checks start 20 s after
+    /// launch and repeat, so one goes once the process it waited for quits.
     pub fn checkOnce(self: *Updater, now_ms: i64) !bool {
+        if (self.install.kind == .mac_app) self.removeReplacedBundles(self.install.path);
         self.setPhase(.checking);
         var arena_state = std.heap.ArenaAllocator.init(self.gpa);
         defer arena_state.deinit();
@@ -502,11 +532,17 @@ pub const Updater = struct {
     /// `apply_mac_app`: copy the staged bundle next to the installed one
     /// (`ditto`, metadata-preserving), then two renames; if the second fails
     /// the old bundle is put back. Null on success, else why.
+    ///
+    /// The replaced bundle stays beside it under its hidden `.old-` name: the
+    /// app (and its engine) still run from it until they relaunch, and macOS
+    /// can't look up the code of a process whose executable was deleted, so
+    /// its Open panel service fails (#173). `removeReplacedBundles` deletes it.
     pub fn applyMacApp(self: *Updater, arena: Allocator, staged: []const u8, bundle: []const u8) !?[]const u8 {
         if (builtin.os.tag != .macos) return "macOS app updates are not supported on this platform";
         const io = self.io orelse return "updates need file access";
         const parent = std.fs.path.dirname(bundle) orelse return "app bundle has no parent directory";
         const name = std.fs.path.basename(bundle);
+        self.removeReplacedBundles(bundle);
         var rnd: [6]u8 = undefined;
         io.random(&rnd);
         const fresh = try std.fmt.allocPrint(arena, "{s}/.{s}.new-{x}", .{ parent, name, rnd });
@@ -526,8 +562,35 @@ pub const Updater = struct {
             std.Io.Dir.cwd().deleteTree(io, fresh) catch {};
             return try std.fmt.allocPrint(arena, "installing the new app bundle: {s}", .{@errorName(e)});
         };
-        std.Io.Dir.cwd().deleteTree(io, old) catch {};
         return null;
+    }
+
+    /// Delete the bundles earlier updates moved aside from `bundle` that no
+    /// process runs from any more. Whatever can't be told or deleted stays
+    /// for the next time; so does everything while `bundle` itself is missing
+    /// (a swap cut short between its two renames).
+    pub fn removeReplacedBundles(self: *Updater, bundle: []const u8) void {
+        if (builtin.os.tag != .macos) return;
+        const io = self.io orelse return;
+        if (!exists(io, bundle)) return;
+        var arena_state = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const parent_path = std.fs.path.dirname(bundle) orelse return;
+        var parent = std.Io.Dir.cwd().openDir(io, parent_path, .{ .iterate = true }) catch return;
+        defer parent.close(io);
+        var replaced: std.ArrayList([]const u8) = .empty;
+        var it = parent.iterate();
+        while (it.next(io) catch return) |e| {
+            if (e.kind != .directory or !isReplacedBundle(e.name, std.fs.path.basename(bundle))) continue;
+            const name = arena.dupe(u8, e.name) catch return;
+            replaced.append(arena, name) catch return;
+        }
+        if (replaced.items.len == 0) return;
+        const executables = (self.processes.executables(arena) catch return) orelse return;
+        for (replaced.items) |name| {
+            if (!runsInside(executables, name)) parent.deleteTree(io, name) catch {};
+        }
     }
 
     /// Atomically repoint `app_root/current` at `app_root/<ver>`.
@@ -626,8 +689,39 @@ pub const Updater = struct {
     }
 };
 
-fn runningExecutables(_: ?*anyopaque, _: Allocator) Allocator.Error!?[]const []const u8 {
-    return null;
+const libproc = if (builtin.os.tag == .macos) struct {
+    const all_pids: u32 = 1;
+    const path_max = 4096;
+    extern "c" fn proc_listpids(kind: u32, typeinfo: u32, buffer: ?*anyopaque, buffersize: c_int) c_int;
+    extern "c" fn proc_pidpath(pid: c_int, buffer: [*]u8, buffersize: u32) c_int;
+} else struct {};
+
+/// `Processes` from the kernel. `proc_pidpath` follows a running executable
+/// through renames (`ps` prints the path it was launched with). A process that
+/// ended meanwhile, or whose executable is already gone from disk, runs from
+/// no bundle that is still there; any other failure means "couldn't tell".
+fn runningExecutables(_: ?*anyopaque, arena: Allocator) Allocator.Error!?[]const []const u8 {
+    if (comptime builtin.os.tag != .macos) return null;
+    const need = libproc.proc_listpids(libproc.all_pids, 0, null, 0);
+    if (need <= 0) return null;
+    // Room for processes that start between the two calls; a list that fills it may be cut short.
+    const pids = try arena.alloc(c_int, @as(usize, @intCast(need)) / @sizeOf(c_int) + 256);
+    const size: c_int = @intCast(pids.len * @sizeOf(c_int));
+    const got = libproc.proc_listpids(libproc.all_pids, 0, pids.ptr, size);
+    if (got <= 0 or got >= size) return null;
+    var paths: std.ArrayList([]const u8) = .empty;
+    for (pids[0 .. @as(usize, @intCast(got)) / @sizeOf(c_int)]) |pid| {
+        if (pid <= 0) continue;
+        var buf: [libproc.path_max]u8 = undefined;
+        const n = libproc.proc_pidpath(pid, &buf, buf.len);
+        if (n > 0) {
+            try paths.append(arena, try arena.dupe(u8, buf[0..@intCast(n)]));
+        } else switch (std.c.errno(@as(c_int, -1))) {
+            .SRCH, .NOENT => {},
+            else => return null,
+        }
+    }
+    return paths.items;
 }
 
 fn exists(io: std.Io, path: []const u8) bool {
@@ -2383,4 +2477,28 @@ test "updates: #173 a failed swap still puts the installed bundle back" {
     try testing.expectEqualStrings("installing the new app bundle: FileNotFound", why.?);
     try testing.expectEqualStrings("old release\n", try m.contents("Harness.app"));
     try testing.expectEqual(@as(usize, 0), (try m.replaced()).len);
+}
+
+test "updates: #173 the process list follows a running executable whose bundle was renamed" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
+    const name = try std.fmt.allocPrint(a, "Synthetic-{s}.app", .{tmp.sub_path});
+    const aside = try std.fmt.allocPrint(a, ".{s}.old-0123456789ab", .{name});
+    const dir = try std.fs.path.join(a, &.{ base, name, "Contents", "MacOS" });
+    try std.Io.Dir.cwd().createDirPath(testing.io, dir);
+    // A made-up app: a copy of this test program, waiting on its input.
+    const exe = try std.fs.path.join(a, &.{ dir, app_bin });
+    try std.Io.Dir.copyFileAbsolute(try std.process.executablePathAlloc(testing.io, a), exe, testing.io, .{});
+    var child = try std.process.spawn(testing.io, .{ .argv = &.{ exe, "--listen=-" }, .stdin = .pipe, .stdout = .ignore, .stderr = .ignore });
+    defer child.kill(testing.io);
+    try testing.expect(runsInside((try runningExecutables(null, a)).?, name));
+    try tmp.dir.rename(name, tmp.dir, aside, testing.io);
+    const running = (try runningExecutables(null, a)).?;
+    try testing.expect(runsInside(running, aside));
+    try testing.expect(!runsInside(running, name));
 }
