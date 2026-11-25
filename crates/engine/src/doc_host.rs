@@ -16,9 +16,9 @@
 //! another device POSTs a durable nudge to that device's room (§7 cold-chat delivery);
 //! the host's relay receives it and warm-opens the doc, which drains the queue.
 
-mod prompt_restore;
 #[cfg(test)]
 mod peer_dispatch_tests;
+mod prompt_restore;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -35,8 +35,8 @@ use tokio_util::task::TaskTracker;
 use harness_doc::{
     COMMAND_DEFAULT_TTL_MS, CommandBasedOn, CommandDisposition, DocError, EvaluationContext,
     MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, QueuedMessage, SessionCommandEntry,
-    SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, evaluate_command,
-    join_continuation_entries_shared,
+    SessionCommandKind, SessionCommandPayload, SessionCommandStatus, SessionDoc,
+    SessionMessageEntry, evaluate_command, join_continuation_entries_shared,
 };
 use harness_proto::{
     ConversationSourceContext, HarnessId, TurnOrigin, UserInputAnswer, UserInputQuestion,
@@ -1120,7 +1120,10 @@ impl DocHost {
     /// see — so watch session status instead and re-drain every warm chat.
     /// `drain_queue` is a cheap no-op for empty queues and busy agents, which
     /// is why this can afford to be indiscriminate.
-    fn spawn_queue_flush_watcher(&self, mut statuses: watch::Receiver<Vec<harness_proto::Session>>) {
+    fn spawn_queue_flush_watcher(
+        &self,
+        mut statuses: watch::Receiver<Vec<harness_proto::Session>>,
+    ) {
         let host = self.clone();
         self.spawn_worker(async move {
             while statuses.changed().await.is_ok() {
@@ -3028,7 +3031,8 @@ impl DocHost {
         let doc = handle.doc.clone();
         let body = tokio::task::spawn_blocking(move || {
             let tail =
-                harness_doc::materialize_tail(&doc, now_ms(), harness_doc::TAIL_MESSAGE_COUNT).ok()?;
+                harness_doc::materialize_tail(&doc, now_ms(), harness_doc::TAIL_MESSAGE_COUNT)
+                    .ok()?;
             serde_json::to_vec(&tail).ok()
         })
         .await
@@ -3356,7 +3360,11 @@ impl DocHost {
         let url = format!("{}/{path}", edge.url.trim_end_matches('/'));
         let request = match method {
             "GET" => self.inner.http.get(&url),
-            "POST" => self.inner.http.post(&url).json(&body.unwrap_or_else(|| serde_json::json!({}))),
+            "POST" => self
+                .inner
+                .http
+                .post(&url)
+                .json(&body.unwrap_or_else(|| serde_json::json!({}))),
             other => return Err(format!("unsupported method {other}")),
         };
         let res = request
@@ -3381,12 +3389,20 @@ impl DocHost {
     /// was offline drains when it reconnects. Returns how many were queued.
     pub async fn drain_room_wakes(&self) -> Result<usize, String> {
         let reply = self
-            .room_request("GET", "rooms/wakes", &[("limit".into(), "100".into())], None)
+            .room_request(
+                "GET",
+                "rooms/wakes",
+                &[("limit".into(), "100".into())],
+                None,
+            )
             .await?;
         if reply["status"].as_u64() != Some(200) {
             return Err(format!("rooms/wakes answered {}", reply["status"]));
         }
-        let wakes = reply["body"]["wakes"].as_array().cloned().unwrap_or_default();
+        let wakes = reply["body"]["wakes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         let workspace = self.workspace();
         let mut acked = Vec::new();
         let mut dropped = Vec::new();
@@ -3397,7 +3413,9 @@ impl DocHost {
             if wake["toDevice"].as_str() != Some(self.device_id()) {
                 continue;
             }
-            let Some(id) = wake["id"].as_u64() else { continue };
+            let Some(id) = wake["id"].as_u64() else {
+                continue;
+            };
             let chat_id = wake["toRef"].as_str().unwrap_or_default();
             let row = (!chat_id.is_empty())
                 .then(|| workspace.and_then(|w| w.chat(chat_id).ok().flatten()))
@@ -3447,7 +3465,8 @@ impl DocHost {
         for (ids, dropped) in [(acked, false), (dropped, true)] {
             if !ids.is_empty() {
                 let body = serde_json::json!({ "ids": ids, "dropped": dropped });
-                self.room_request("POST", "rooms/wakes/ack", &[], Some(body)).await?;
+                self.room_request("POST", "rooms/wakes/ack", &[], Some(body))
+                    .await?;
             }
         }
         Ok(queued)
@@ -5104,6 +5123,11 @@ impl DocHost {
         let sessions = self
             .sessions()
             .ok_or_else(|| EngineError::Other("executor unavailable".into()))?;
+        if self.park_unapproved_remote(&sessions, &handle, &entry) {
+            return Err(EngineError::Other(harness_rpc::RELAY_NEEDS_APPROVAL.into()));
+        }
+        let mut entry = entry;
+        self.stamp_peer_origin(&mut entry);
         let commands = handle.doc.read_commands()?;
         let messages = handle.doc.read_entries().unwrap_or_default();
         let current_turn_id = messages.last().map(|m| m.id.clone());
@@ -5388,6 +5412,87 @@ impl DocHost {
         request.harness.unwrap_or_else(|| self.harness_for(chat_id))
     }
 
+    fn command_kind_name(kind: SessionCommandKind) -> &'static str {
+        match kind {
+            SessionCommandKind::Run => "run",
+            SessionCommandKind::Steer => "steer",
+            SessionCommandKind::Interrupt => "interrupt",
+            SessionCommandKind::RespondInput => "respondInput",
+            SessionCommandKind::DismissInput => "dismissInput",
+        }
+    }
+
+    /// Stamp Peer on remotely issued Run/Steer so autonomy and mail rules
+    /// see them as not-human even if the phone omitted turnOrigin.
+    fn stamp_peer_origin(&self, entry: &mut SessionCommandEntry) {
+        if entry.issued_by == self.device_id() {
+            return;
+        }
+        match &mut entry.payload {
+            SessionCommandPayload::Run { request, .. } => {
+                request.turn_origin = TurnOrigin::Peer;
+            }
+            SessionCommandPayload::Steer { turn_origin, .. } => {
+                *turn_origin = TurnOrigin::Peer;
+            }
+            _ => {}
+        }
+    }
+
+    /// Park a remote Run/Steer until remote control is on or the user
+    /// approves. Returns true when the caller must skip execute.
+    fn park_unapproved_remote(
+        &self,
+        sessions: &SessionsEngine,
+        handle: &ChatDocHandle,
+        entry: &SessionCommandEntry,
+    ) -> bool {
+        let registry = sessions.registry();
+        let admit = harness_rpc::admit_remote_command(
+            self.device_id(),
+            &entry.issued_by,
+            Self::command_kind_name(entry.kind()),
+            registry.remote_control(),
+            registry.command_approved(&entry.id),
+            registry.remote_device_approved(&entry.issued_by),
+        );
+        if admit != harness_rpc::RemoteCommandAdmit::NeedsApproval {
+            return false;
+        }
+        let summary = match &entry.payload {
+            SessionCommandPayload::Run { request, .. } => {
+                let t = request.prompt.trim();
+                if t.is_empty() {
+                    "Run a command from another device".into()
+                } else {
+                    format!(
+                        "Run from {}: {}",
+                        entry.issued_by,
+                        t.chars().take(80).collect::<String>()
+                    )
+                }
+            }
+            SessionCommandPayload::Steer { prompt, .. } => {
+                format!(
+                    "Follow-up from {}: {}",
+                    entry.issued_by,
+                    prompt.chars().take(80).collect::<String>()
+                )
+            }
+            _ => format!("Remote action from {}", entry.issued_by),
+        };
+        registry.park_remote_approval(harness_rpc::RemoteApproval {
+            id: crate::new_id(),
+            kind: "command".into(),
+            device_id: entry.issued_by.clone(),
+            chat_id: Some(handle.chat_id().to_string()),
+            command_id: Some(entry.id.clone()),
+            method: None,
+            summary,
+        });
+        true
+    }
+
     /// Drain pending commands (host-only): evaluate → mark processed BEFORE execute →
     /// execute → write the outcome as the sole outcome writer.
     pub async fn drain_commands(&self, handle: &Arc<ChatDocHandle>) {
@@ -5431,7 +5536,7 @@ impl DocHost {
                     skipped.insert(c.id.clone());
                 }
             }
-            let Some(entry) = commands
+            let Some(mut entry) = commands
                 .iter()
                 .find(|c| {
                     c.status == SessionCommandStatus::Pending
@@ -5442,6 +5547,11 @@ impl DocHost {
             else {
                 return;
             };
+            if self.park_unapproved_remote(&sessions, handle, &entry) {
+                skipped.insert(entry.id.clone());
+                continue;
+            }
+            self.stamp_peer_origin(&mut entry);
             let messages = handle.doc.read_entries().unwrap_or_default();
             let current_turn_id = messages.last().map(|m| m.id.clone());
             let turn_is_past = |turn_id: &str| messages.iter().any(|m| m.id == turn_id);
@@ -6586,12 +6696,16 @@ mod transfer_progress_tests {
         };
         assert_eq!(to_vec(&rx.borrow().entries), full(&handle));
 
-        let mut writer = harness_doc::SegmentWriter::begin(&handle.doc, "reply", "device", 99).unwrap();
+        let mut writer =
+            harness_doc::SegmentWriter::begin(&handle.doc, "reply", "device", 99).unwrap();
         let mut text = String::new();
         for token in 0..50 {
             text.push_str(&format!("token{token} "));
             writer
-                .sync(&[harness_doc::MessagePart::Text { id: "t".into(), text: text.clone() }])
+                .sync(&[harness_doc::MessagePart::Text {
+                    id: "t".into(),
+                    text: text.clone(),
+                }])
                 .unwrap();
             handle.doc.doc().commit();
             handle.publish_messages_if_watched();
@@ -6636,7 +6750,10 @@ mod transfer_progress_tests {
         // Unwatched changes drop the cache; reattaching rebuilds correctly.
         drop(rx);
         writer
-            .sync(&[harness_doc::MessagePart::Text { id: "t".into(), text: format!("{text} done") }])
+            .sync(&[harness_doc::MessagePart::Text {
+                id: "t".into(),
+                text: format!("{text} done"),
+            }])
             .unwrap();
         handle.doc.doc().commit();
         handle.publish_messages_if_watched();

@@ -34,6 +34,7 @@ import { decodeFrame, encodeFrame, FRAME } from "./chat-frames";
 import { AUTH_USER_HEADER, type Env } from "./env";
 import { readCapped } from "./body";
 import { isPurge, wipeObject } from "./purge";
+import { ReplayCache, attributePushDevice, parseEnvelope } from "./device-auth";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Inbound frame budget: one pushed row (+ header slack). */
@@ -81,6 +82,8 @@ export class ChatRoom implements DurableObject {
   private readonly presence = new Map<string, number>();
   /** device → rolling push quota window. Memory-only. */
   private readonly quotas = new Map<string, QuotaWindow>();
+  /** Envelope nonce replay window (60s). Memory-only; hibernation resets it. */
+  private readonly replay = new ReplayCache();
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
@@ -272,19 +275,25 @@ export class ChatRoom implements DurableObject {
         return json({ error: "too_large" }, 413);
       }
       const payload = new Uint8Array(await request.arrayBuffer());
-      const retryAfterMs = this.admitQuota(device, payload.byteLength);
-      if (retryAfterMs !== undefined) {
+      const attributed = await this.attributeDevice(payload, device);
+      if (!attributed.ok) {
         this.recordPush(device, false);
+        return json({ error: attributed.code, message: attributed.message }, 400);
+      }
+      const attributedDevice = attributed.device;
+      const retryAfterMs = this.admitQuota(attributedDevice, payload.byteLength);
+      if (retryAfterMs !== undefined) {
+        this.recordPush(attributedDevice, false);
         return json({ error: "quota", retryAfterMs }, 429, {
           "retry-after": String(Math.ceil(retryAfterMs / 1000))
         });
       }
-      const outcome = appendRow(sql, device, batchId, payload, Date.now());
+      const outcome = appendRow(sql, attributedDevice, batchId, payload, Date.now());
       if (!outcome.ok) {
-        this.recordPush(device, false);
+        this.recordPush(attributedDevice, false);
         return json({ error: outcome.error }, outcome.error === "too_large" ? 413 : 400);
       }
-      this.recordPush(device, true);
+      this.recordPush(attributedDevice, true);
       if (!outcome.dup) {
         this.markBackupDirty();
         // Live relay to every ready socket — a same-device socket would
@@ -292,7 +301,7 @@ export class ChatRoom implements DurableObject {
         for (const socket of this.ctx.getWebSockets()) {
           const socketState = socket.deserializeAttachment() as SocketState | null;
           if (!socketState?.ready) continue;
-          send(socket, FRAME.row, { seq: outcome.seq, device, batchId }, payload);
+          send(socket, FRAME.row, { seq: outcome.seq, device: attributedDevice, batchId }, payload);
         }
       }
       return json({ batchId, seq: outcome.seq, dup: outcome.dup });
@@ -380,7 +389,7 @@ export class ChatRoom implements DurableObject {
         this.handleRowsReq(ws, state, frame.header);
         return;
       case FRAME.push:
-        this.handlePush(ws, state, frame.header, frame.payload);
+        await this.handlePush(ws, state, frame.header, frame.payload);
         return;
       case FRAME.presence:
         this.handlePresence(ws, state, frame.header, frame.payload);
@@ -404,6 +413,14 @@ export class ChatRoom implements DurableObject {
   private handleHello(ws: WebSocket, state: SocketState, header: Record<string, unknown>): void {
     if (typeof header.device === "string" && header.device.length > 0) {
       state.device = header.device;
+    }
+    if (
+      typeof header.device === "string" &&
+      header.device.length > 0 &&
+      typeof header.verifyingKey === "string" &&
+      header.verifyingKey.length > 0
+    ) {
+      setMeta(this.ctx.storage.sql, `devkey:${header.device}`, header.verifyingKey);
     }
     state.ready = true;
     ws.serializeAttachment(state);
@@ -442,12 +459,12 @@ export class ChatRoom implements DurableObject {
     send(ws, FRAME.rowsDone, { headSeq: headSeq(sql) });
   }
 
-  private handlePush(
+  private async handlePush(
     ws: WebSocket,
     state: SocketState,
     header: Record<string, unknown>,
     payload: Uint8Array
-  ): void {
+  ): Promise<void> {
     const batchId = typeof header.batchId === "string" ? header.batchId : "";
     // Push errors carry the batchId so clients can RETIRE permanently
     // rejected batches from their replay queues (an unretireable batch
@@ -457,6 +474,14 @@ export class ChatRoom implements DurableObject {
       send(ws, FRAME.error, { code: "bad_push", message: "hello first / malformed push", batchId });
       return;
     }
+    const attributed = await this.attributeDevice(payload, state.device);
+    if (!attributed.ok) {
+      this.recordPush(state.device, false);
+      send(ws, FRAME.error, { code: attributed.code, message: attributed.message, batchId });
+      return;
+    }
+    state.device = attributed.device;
+    ws.serializeAttachment(state);
     const retryAfterMs = this.admitQuota(state.device, payload.byteLength);
     if (retryAfterMs !== undefined) {
       this.recordPush(state.device, false);
@@ -542,6 +567,22 @@ export class ChatRoom implements DurableObject {
     window.bytes += bytes;
     if (window.pushes <= QUOTA_MAX_PUSHES && window.bytes <= QUOTA_MAX_BYTES) return undefined;
     return Math.max(1, window.since + QUOTA_WINDOW_MS - now);
+  }
+
+  private async attributeDevice(
+    payload: Uint8Array,
+    fallback: string
+  ): Promise<ReturnType<typeof attributePushDevice>> {
+    const env = parseEnvelope(payload);
+    const enrolledKey =
+      env !== undefined ? getMeta(this.ctx.storage.sql, `devkey:${env.deviceId}`) : undefined;
+    return attributePushDevice({
+      payload,
+      fallback,
+      enrolledKey,
+      replay: this.replay,
+      requireDeviceAuth: this.env.HARNESS_REQUIRE_DEVICE_AUTH === "1"
+    });
   }
 
   private recordPush(device: string, ok: boolean): void {

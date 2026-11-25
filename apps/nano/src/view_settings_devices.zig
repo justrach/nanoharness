@@ -38,6 +38,10 @@ pub const Page = struct {
     remote_known: bool = false,
     remote_saving: bool = false,
     remote_call: ?u64 = null,
+    /// Parked remote actions (`GetRemoteApprovals`).
+    pending: std.ArrayList(Pending) = .empty,
+    pending_call: ?u64 = null,
+    pending_known: bool = false,
     /// The expanded host's update controls.
     updates: updates_panel.State = .{},
 
@@ -48,7 +52,15 @@ pub const Page = struct {
         p.copied.deinit(gpa);
         p.confirm_remove.deinit(gpa);
         p.failure.deinit(gpa);
+        clearPending(p, gpa);
+        p.pending.deinit(gpa);
     }
+};
+
+pub const Pending = struct {
+    id: []u8,
+    device_id: []u8,
+    summary: []u8,
 };
 
 fn setTo(gpa: Allocator, list: *std.ArrayList(u8), s: []const u8) void {
@@ -153,6 +165,76 @@ pub fn shortId(buf: []u8, id: []const u8) []const u8 {
     return std.fmt.bufPrint(buf, "{s}…{s}", .{ id[0..8], id[id.len - 4 ..] }) catch id;
 }
 
+fn clearPending(p: *Page, gpa: Allocator) void {
+    for (p.pending.items) |row| {
+        gpa.free(row.id);
+        gpa.free(row.device_id);
+        gpa.free(row.summary);
+    }
+    p.pending.clearRetainingCapacity();
+}
+
+pub fn addPending(p: *Page, gpa: Allocator, id: []const u8, device_id: []const u8, summary: []const u8) void {
+    p.pending.append(gpa, .{
+        .id = gpa.dupe(u8, id) catch return,
+        .device_id = gpa.dupe(u8, device_id) catch return,
+        .summary = gpa.dupe(u8, summary) catch return,
+    }) catch {};
+}
+
+fn loadApprovals(a: *App) void {
+    const p = &a.view.devices;
+    if (!a.engine.up() or p.pending_call != null) return;
+    if (a.engine.call("GetRemoteApprovals", rpc.empty, .of(App, a, onApprovals))) |id| p.pending_call = id;
+}
+
+fn onApprovals(a: *App, id: u64, r: rpc.Reply) void {
+    const p = &a.view.devices;
+    if (p.pending_call != null and p.pending_call != id) return;
+    p.pending_call = null;
+    p.pending_known = true;
+    switch (r) {
+        .ok => |v| {
+            clearPending(p, a.gpa);
+            const items = if (v == .object) v.object.get("items") else null;
+            if (items) |arr| if (arr == .array) {
+                for (arr.array.items) |item| {
+                    if (item != .object) continue;
+                    const pid = if (item.object.get("id")) |x| (if (x == .string) x.string else "") else "";
+                    const device = if (item.object.get("deviceId")) |x| (if (x == .string) x.string else "") else "";
+                    const summary = if (item.object.get("summary")) |x| (if (x == .string) x.string else "") else "";
+                    if (pid.len > 0) addPending(p, a.gpa, pid, device, summary);
+                }
+            };
+        },
+        else => {},
+    }
+    a.redraw();
+}
+
+fn resolvePending(a: *App, id: []const u8, allow: bool, always: bool) void {
+    const p = &a.view.devices;
+    if (a.engine.up()) {
+        p.pending_known = false;
+        if (allow) {
+            _ = a.engine.call("ApproveRemoteAction", .{ .id = id, .always = always }, .of(App, a, onApprovals));
+        } else {
+            _ = a.engine.call("DenyRemoteAction", .{ .id = id }, .of(App, a, onApprovals));
+        }
+        return;
+    }
+    var i: usize = 0;
+    while (i < p.pending.items.len) {
+        if (std.mem.eql(u8, p.pending.items[i].id, id)) {
+            const row = p.pending.orderedRemove(i);
+            a.gpa.free(row.id);
+            a.gpa.free(row.device_id);
+            a.gpa.free(row.summary);
+        } else i += 1;
+    }
+    a.redraw();
+}
+
 fn loadRemote(a: *App) void {
     const p = &a.view.devices;
     if (!a.engine.up() or p.remote_call != null) return;
@@ -188,6 +270,7 @@ fn onRemote(a: *App, id: u64, r: rpc.Reply) void {
 
 pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (!a.view.devices.remote_known) loadRemote(a);
+    if (!a.view.devices.pending_known) loadApprovals(a);
     const devices = a.devices.items;
     set.header(c, k, "Devices", if (devices.len > 0) devices.len else null);
     set.subtitle(c, k, subtitle(a.account.scope), false);
@@ -279,6 +362,21 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (set.toggle(c, k, p.remote_on, live) or (live and r.clicked())) setRemote(a, !p.remote_on);
     }
     const p = &a.view.devices;
+    if (p.pending.items.len > 0) {
+        ui.key(c, "remote-approvals");
+        const acard = set.card(c, k);
+        defer acard.end();
+        for (p.pending.items, 0..) |item, ix| {
+            ui.key(c, item.id);
+            const r = set.row(c, k, ix == 0, false);
+            defer r.end();
+            set.tile(c, k, .@"remote-server");
+            set.words(c, k, "Approve remote action", item.summary, 168);
+            if (action(c, k, null, "Allow once", false)) resolvePending(a, item.id, true, false);
+            if (action(c, k, null, "Always allow", false)) resolvePending(a, item.id, true, true);
+            if (action(c, k, null, "Deny", false)) resolvePending(a, item.id, false, false);
+        }
+    }
     if (p.failure.items.len > 0) {
         if (@import("view_settings_accounts_rows.zig").errorStrip(c, k, p.failure.items, false)) p.failure.clearRetainingCapacity();
     }

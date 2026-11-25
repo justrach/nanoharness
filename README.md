@@ -137,7 +137,7 @@ The CodeGraff images are credited in [third-party notices](THIRD_PARTY_NOTICES.m
 
 Each desktop device runs an engine and stores its local sessions. The GUI connects to an engine on the local IPC port or starts one in the app process. `harness headless` runs the engine without a window.
 
-In the desktop app, open the account menu and choose **Enable sync**. Sign in with your CodeGraff account, then choose whether to bring existing local work into the synced workspace or start fresh. Harness does not upload existing local sessions until you choose **Bring my work**. New work in the synced workspace is stored at `edge.codegraff.com` and appears on your other signed-in devices, including the SwiftUI iOS companion. Running commands, terminals or file writes from another device also needs **Settings → Devices → Allow remote control** on the computer that would execute them (off by default).
+In the desktop app, open the account menu and choose **Enable sync**. Sign in with your CodeGraff account, then choose whether to bring existing local work into the synced workspace or start fresh. Harness does not upload existing local sessions until you choose **Bring my work**. New work in the synced workspace is stored at `edge.codegraff.com` and appears on your other signed-in devices, including the SwiftUI iOS companion. Running commands, terminals or file writes from another device also needs **Settings → Devices → Allow remote control** on the computer that would execute them (off by default), and the first of those actions from a given device still asks for a local approval. New installs default agent autonomy to Workspace; existing preferences are left alone.
 
 For a headless device, stop the engine before changing profiles:
 

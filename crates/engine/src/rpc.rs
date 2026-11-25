@@ -153,9 +153,10 @@ fn remote_control_reply(registry: &HarnessRegistry) -> serde_json::Value {
 }
 
 /// Host-relay wrapper: the same [`EngineRpc`] the local IPC socket serves,
-/// with [`harness_rpc::admit_relay_rpc`] in front. Compromised-edge frames
-/// cannot flip the gate (`SetRemoteControl` is local-only) and cannot run
-/// commands until the user enables Settings → Devices → Allow remote control.
+/// with [`harness_rpc::admit_relay_action`] in front. Compromised-edge frames
+/// cannot flip the gate (`SetRemoteControl` is local-only), cannot apply
+/// updates or autonomy, and first execution / file write / terminal from a
+/// remote caller parks until a person on this computer approves.
 pub struct RelayRpc {
     inner: std::sync::Arc<dyn RpcService>,
     registry: std::sync::Arc<HarnessRegistry>,
@@ -170,16 +171,61 @@ impl RelayRpc {
     }
 }
 
+fn relay_caller_device(params: &serde_json::Value) -> String {
+    for key in ["relayDeviceId", "fromDevice", "deviceId"] {
+        if let Some(id) = params
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            return id.to_string();
+        }
+    }
+    params
+        .pointer("/entry/issuedBy")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
 #[async_trait]
 impl RpcService for RelayRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
-        match harness_rpc::admit_relay_rpc(self.registry.remote_control(), method) {
+        let caller = relay_caller_device(&params);
+        let approved = !caller.is_empty() && self.registry.remote_device_approved(&caller);
+        match harness_rpc::admit_relay_action(self.registry.remote_control(), method, approved) {
             harness_rpc::RelayAdmit::Allow => self.inner.handle(method, params).await,
             harness_rpc::RelayAdmit::RemoteControlOff => {
                 Err(RpcError::Failed(harness_rpc::REMOTE_CONTROL_OFF.into()))
             }
             harness_rpc::RelayAdmit::LocalOnly => {
                 Err(RpcError::Failed(harness_rpc::RELAY_LOCAL_ONLY.into()))
+            }
+            harness_rpc::RelayAdmit::NeedsApproval => {
+                let device_id = if caller.is_empty() {
+                    "unknown".into()
+                } else {
+                    caller.clone()
+                };
+                self.registry
+                    .park_remote_approval(harness_rpc::RemoteApproval {
+                        id: crate::new_id(),
+                        kind: "rpc".into(),
+                        device_id,
+                        chat_id: params
+                            .get("chatId")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
+                        command_id: None,
+                        method: Some(method.to_string()),
+                        summary: if caller.is_empty() {
+                            format!("{method} from another device")
+                        } else {
+                            format!("{method} from {caller}")
+                        },
+                    });
+                Err(RpcError::Failed(harness_rpc::RELAY_NEEDS_APPROVAL.into()))
             }
         }
     }
@@ -1675,6 +1721,9 @@ fn forwardable(method: &str) -> bool {
             | methods::GET_AUTONOMY
             | methods::SET_AUTONOMY
             | methods::GET_REMOTE_CONTROL
+            | methods::GET_REMOTE_APPROVALS
+            | methods::GET_E2EE
+            | methods::GET_DEVICE_IDENTITY
             | methods::GET_GRAFF_DRAFT_SUBAGENTS
             | methods::SET_GRAFF_DRAFT_SUBAGENTS
             | methods::GET_GRAFF_COMPACT_AT
@@ -1810,6 +1859,7 @@ fn is_stream_method(method: &str) -> bool {
     matches!(
         method,
         methods::WATCH_DOC_MESSAGES
+            | methods::WATCH_REMOTE_APPROVALS
             | methods::WATCH_QUEUE
             | methods::WATCH_TOOL_PROGRESS
             | methods::SUBSCRIBE_TERMINAL
@@ -2422,6 +2472,71 @@ impl RpcService for EngineRpc {
                 self.registry.set_remote_control(p.enabled);
                 RpcReply::value(&remote_control_reply(&self.registry))
             }
+            methods::GET_REMOTE_APPROVALS => RpcReply::value(&serde_json::json!({
+                "items": self.registry.pending_remote_approvals(),
+            })),
+            methods::WATCH_REMOTE_APPROVALS => Ok(RpcReply::StreamRaw(watch_stream(
+                self.registry.watch_remote_approvals(),
+            ))),
+            methods::APPROVE_REMOTE_ACTION => {
+                #[derive(Deserialize)]
+                struct P {
+                    id: String,
+                    #[serde(default)]
+                    always: bool,
+                }
+                let p: P = parse_params(params)?;
+                let pending = self.registry.pending_remote_approvals();
+                let item = pending.into_iter().find(|a| a.id == p.id);
+                if !self.registry.resolve_remote_approval(&p.id, true, p.always) {
+                    return Err(RpcError::Failed("unknown remote approval".into()));
+                }
+                if let Some(chat_id) = item.and_then(|a| a.chat_id) {
+                    if let Ok(handle) = self.doc_host.open(&chat_id) {
+                        self.doc_host.drain_commands(&handle).await;
+                    }
+                }
+                RpcReply::value(&serde_json::json!({
+                    "ok": true,
+                    "items": self.registry.pending_remote_approvals(),
+                }))
+            }
+            methods::DENY_REMOTE_ACTION => {
+                #[derive(Deserialize)]
+                struct P {
+                    id: String,
+                }
+                let p: P = parse_params(params)?;
+                if !self.registry.resolve_remote_approval(&p.id, false, false) {
+                    return Err(RpcError::Failed("unknown remote approval".into()));
+                }
+                RpcReply::value(&serde_json::json!({
+                    "ok": true,
+                    "items": self.registry.pending_remote_approvals(),
+                }))
+            }
+            methods::GET_DEVICE_IDENTITY => {
+                let keys = self.registry.ensure_device_keys();
+                RpcReply::value(&serde_json::json!({
+                    "deviceId": self.doc_host.device_id(),
+                    "verifyingKey": keys.verifying_key_b64(),
+                    "ecdhPublic": keys.ecdh_public_b64(),
+                }))
+            }
+            methods::GET_E2EE => RpcReply::value(&serde_json::json!({
+                "enabled": self.registry.e2ee(),
+            })),
+            methods::SET_E2EE => {
+                #[derive(Deserialize)]
+                struct P {
+                    enabled: bool,
+                }
+                let p: P = parse_params(params)?;
+                self.registry.set_e2ee(p.enabled);
+                RpcReply::value(&serde_json::json!({
+                    "enabled": self.registry.e2ee(),
+                }))
+            }
             methods::GET_GRAFF_DRAFT_SUBAGENTS => {
                 RpcReply::value(&self.registry.graff_draft_subagents())
             }
@@ -2450,17 +2565,15 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&self.registry.graff_compact_at())
             }
             methods::GET_NATIVE_FLINT_STATUS => {
-                let flint = self
-                    .flint
-                    .as_ref()
-                    .ok_or_else(|| RpcError::Failed("Native Flint is unavailable on this engine".into()))?;
+                let flint = self.flint.as_ref().ok_or_else(|| {
+                    RpcError::Failed("Native Flint is unavailable on this engine".into())
+                })?;
                 RpcReply::value(&flint.status())
             }
             methods::START_NATIVE_FLINT => {
-                let flint = self
-                    .flint
-                    .as_ref()
-                    .ok_or_else(|| RpcError::Failed("Native Flint is unavailable on this engine".into()))?;
+                let flint = self.flint.as_ref().ok_or_else(|| {
+                    RpcError::Failed("Native Flint is unavailable on this engine".into())
+                })?;
                 let p: crate::flint::StartNativeFlintParams = if params.is_null() {
                     Default::default()
                 } else {
@@ -2470,10 +2583,9 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&status)
             }
             methods::STOP_NATIVE_FLINT => {
-                let flint = self
-                    .flint
-                    .as_ref()
-                    .ok_or_else(|| RpcError::Failed("Native Flint is unavailable on this engine".into()))?;
+                let flint = self.flint.as_ref().ok_or_else(|| {
+                    RpcError::Failed("Native Flint is unavailable on this engine".into())
+                })?;
                 RpcReply::value(&flint.stop())
             }
             methods::SET_TITLE_SETTINGS => {
@@ -2668,7 +2780,8 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 if p.id.is_empty()
                     || p.id.len() > 128
-                    || !p.id
+                    || !p
+                        .id
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
                 {
@@ -2703,7 +2816,12 @@ impl RpcService for EngineRpc {
                     ));
                 }
                 let art = crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
-                    .create_artifact(trimmed_title, &p.format, &p.content, p.visibility.as_deref())
+                    .create_artifact(
+                        trimmed_title,
+                        &p.format,
+                        &p.content,
+                        p.visibility.as_deref(),
+                    )
                     .await
                     .map_err(RpcError::Failed)?;
                 self.sessions
@@ -5205,10 +5323,18 @@ mod tests {
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));
         assert!(forwardable(methods::GET_REMOTE_CONTROL));
+        assert!(forwardable(methods::GET_REMOTE_APPROVALS));
         assert!(
             !forwardable(methods::SET_REMOTE_CONTROL),
             "opting this computer into remote control is local IPC only"
         );
+        assert!(
+            !forwardable(methods::WATCH_REMOTE_APPROVALS),
+            "approval chips are local to the computer"
+        );
+        assert!(!forwardable(methods::APPROVE_REMOTE_ACTION));
+        assert!(!forwardable(methods::DENY_REMOTE_ACTION));
+        assert!(!forwardable(methods::SET_E2EE));
         assert!(forwardable(methods::QUEUE_COMMAND));
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));

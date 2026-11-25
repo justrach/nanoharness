@@ -14,9 +14,11 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use harness_doc::{CommandBasedOn, SessionCommandEntry, SessionCommandPayload, SessionCommandStatus};
-use harness_engine::{EngineCore, HarnessRegistry};
 use harness_adapters::{Harness, HarnessError, RunControls};
+use harness_doc::{
+    CommandBasedOn, SessionCommandEntry, SessionCommandPayload, SessionCommandStatus,
+};
+use harness_engine::{EngineCore, HarnessRegistry};
 use harness_proto::{
     AgentEvent, ChatConfig, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SessionStatus, SteeringMode,
@@ -113,7 +115,10 @@ fn registry() -> Arc<HarnessRegistry> {
 fn assemble(dir: &std::path::Path, device_id: &str) -> EngineCore {
     std::fs::create_dir_all(dir).expect("create data dir");
     std::fs::write(dir.join("device-id"), device_id).expect("write device id");
-    EngineCore::assemble(dir, registry(), HarnessId::Mock, None).expect("engine core assembles")
+    let core = EngineCore::assemble(dir, registry(), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    core.registry.set_remote_control(true);
+    core
 }
 
 /// The in-process room: an in-memory registry server speaking the DO's JSON
