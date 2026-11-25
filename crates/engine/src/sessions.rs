@@ -383,6 +383,10 @@ pub struct SessionsEngine {
 }
 
 impl SessionsEngine {
+    pub fn registry(&self) -> &Arc<HarnessRegistry> {
+        &self.inner.registry
+    }
+
     pub fn new(
         device_id: String,
         journal: Arc<RunJournal>,

@@ -33,6 +33,10 @@ export interface Env {
   CODEGRAFF_OAUTH_CLIENT_ID: string;
   /** Secret for short-lived Harness JWTs; set with `wrangler secret put`. */
   HARNESS_AUTH_SIGNING_KEY?: string;
+  /** Optional Ed25519 seed (base64url, 32 bytes) for access-token signing. */
+  HARNESS_AUTH_ED25519_PRIVATE?: string;
+  /** Fail closed on unsigned mutating chat2 pushes. */
+  HARNESS_REQUIRE_DEVICE_AUTH?: string;
   /** "codegraff" or "dev" (bearer == userId, never prod). */
   AUTH_MODE: string;
   /** Gateway that vouches for a sandbox's device token (default https://gateway.codegraff.com); tests point it elsewhere. */

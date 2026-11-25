@@ -181,6 +181,7 @@ async fn an_image_send_steers_into_the_live_run() {
         None,
     )
     .expect("engine core assembles");
+    core.registry.set_remote_control(true);
     let client = harness_rpc::memory_client(core.rpc_service());
     client
         .call(

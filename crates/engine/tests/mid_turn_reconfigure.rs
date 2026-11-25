@@ -156,6 +156,7 @@ async fn a_send_with_a_new_model_waits_for_the_running_turn() {
         None,
     )
     .expect("engine core assembles");
+    core.registry.set_remote_control(true);
     let client = harness_rpc::memory_client(core.rpc_service());
     client
         .call(

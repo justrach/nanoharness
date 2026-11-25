@@ -34,7 +34,16 @@ pub use device_room::{
     NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
     decode_device_frame, device_room_ws_url, encode_device_frame,
 };
-pub use remote_control::{RELAY_LOCAL_ONLY, REMOTE_CONTROL_OFF, RelayAdmit, admit_relay_rpc};
+pub use harness_sync::device_crypto::{
+    DeviceEnvelope, DeviceKeypair, E2EE_FLAG, EnvelopeError, MAGIC_E2EE, MAGIC_SIGNED, ReplayCache,
+    WorkspaceKey, open_bytes, seal_bytes, unwrap_workspace_key, verify_envelope,
+    wrap_workspace_key,
+};
+pub use remote_control::{
+    RELAY_LOCAL_ONLY, RELAY_NEEDS_APPROVAL, REMOTE_CONTROL_OFF, RelayAdmit, RemoteApproval,
+    RemoteCommandAdmit, admit_relay_action, admit_relay_rpc, admit_remote_command,
+    relay_first_action_method,
+};
 pub use server::{serve_connection, serve_ws_listener};
 
 /// RPC method names — single source of truth for both ends.
@@ -77,6 +86,16 @@ pub mod methods {
     /// `{ enabled }`. `SetRemoteControl` is local IPC only.
     pub const GET_REMOTE_CONTROL: &str = "GetRemoteControl";
     pub const SET_REMOTE_CONTROL: &str = "SetRemoteControl";
+    /// Parked remote actions waiting for a person on this computer.
+    pub const GET_REMOTE_APPROVALS: &str = "GetRemoteApprovals";
+    pub const WATCH_REMOTE_APPROVALS: &str = "WatchRemoteApprovals";
+    pub const APPROVE_REMOTE_ACTION: &str = "ApproveRemoteAction";
+    pub const DENY_REMOTE_ACTION: &str = "DenyRemoteAction";
+    /// This device's Ed25519 / X25519 public keys (no secrets).
+    pub const GET_DEVICE_IDENTITY: &str = "GetDeviceIdentity";
+    /// Seal chat2 rows and ControlRpc payloads with the workspace key.
+    pub const GET_E2EE: &str = "GetE2ee";
+    pub const SET_E2EE: &str = "SetE2ee";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
     pub const LIST_COMMANDS: &str = "ListCommands";

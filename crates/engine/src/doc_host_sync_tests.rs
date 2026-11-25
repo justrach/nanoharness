@@ -1432,10 +1432,13 @@ async fn woken_chat_adopts_its_late_command_while_other_chats_take_free_slots() 
             edge: Some(EdgeConfig::with_static_token(&room.url, "test")),
         },
     );
+    let registry = Arc::new(crate::registry::HarnessRegistry::new());
+    // Phone Run/Steer drain only after opt-in (or a local approval chip).
+    registry.set_remote_control(true);
     host.set_sessions(crate::sessions::SessionsEngine::new(
         "host".into(),
         Arc::new(crate::run_journal::RunJournal::open(dir.path().join("journals")).unwrap()),
-        Arc::new(crate::registry::HarnessRegistry::new()),
+        registry,
     ));
     let woken = || lock(&host.inner.handles).get("from-phone").cloned();
     // The wake's read finds an empty room and retires the receipt.
