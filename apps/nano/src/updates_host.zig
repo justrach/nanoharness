@@ -207,6 +207,20 @@ pub const Restarter = struct {
     restart_fn: *const fn (ctx: ?*anyopaque, app_root: []const u8) void,
 };
 
+/// The executables running on this device, so an app bundle that was replaced
+/// is never deleted under a process still running from it.
+pub const Processes = struct {
+    ctx: ?*anyopaque = null,
+    /// Every running process's executable where it is on disk *now* (a process
+    /// whose bundle was renamed is listed under the new name), in `arena`.
+    /// Null: couldn't tell.
+    executables_fn: *const fn (ctx: ?*anyopaque, arena: Allocator) Allocator.Error!?[]const []const u8,
+
+    pub fn executables(self: Processes, arena: Allocator) Allocator.Error!?[]const []const u8 {
+        return self.executables_fn(self.ctx, arena);
+    }
+};
+
 // ---------------------------------------------------------------- state
 
 pub const Phase = enum { idle, checking, downloading, waitingForIdle, restarting, failed };
@@ -224,6 +238,7 @@ pub const Updater = struct {
     http: Http,
     runner: proc.Runner,
     restarter: Restarter,
+    processes: Processes = .{ .executables_fn = runningExecutables },
     /// Nothing would be interrupted by a restart now (no live run, no open terminal).
     quiescent_ctx: ?*anyopaque = null,
     quiescent_fn: ?*const fn (ctx: ?*anyopaque) bool = null,
@@ -610,6 +625,10 @@ pub const Updater = struct {
         return null;
     }
 };
+
+fn runningExecutables(_: ?*anyopaque, _: Allocator) Allocator.Error!?[]const []const u8 {
+    return null;
+}
 
 fn exists(io: std.Io, path: []const u8) bool {
     _ = std.Io.Dir.cwd().statFile(io, path, .{}) catch return false;
@@ -1638,7 +1657,12 @@ fn testUpdater(kind: InstallKind, path: []const u8, http: Http, runner: proc.Run
         .http = http,
         .runner = runner,
         .restarter = restart,
+        .processes = .{ .executables_fn = nothingRuns },
     };
+}
+
+fn nothingRuns(_: ?*anyopaque, _: Allocator) Allocator.Error!?[]const []const u8 {
+    return &.{};
 }
 
 test "updates: UpdateStatus shapes for each install, and a check fills them in" {
@@ -2133,14 +2157,16 @@ test "updates: `harness-engine update` swaps a macOS app for the verified releas
     try testing.expectEqual(@as(u8, 0), try updateCommand(&u, a, data_dir, &out.writer, &err_out.writer));
     try testing.expect(std.mem.indexOf(u8, out.written(), "relaunch Harness to finish.") != null);
     try testing.expectEqualStrings("", err_out.written());
-    // The installed bundle is the new one, and nothing is left beside it.
+    // The installed bundle is the new one, and no second app shows beside it.
     const now = try tmp.dir.readFileAlloc(testing.io, "Applications/Harness.app/Contents/MacOS/" ++ app_bin, a, .limited(64));
     try testing.expectEqualStrings("new release\n", now);
     var apps = try tmp.dir.openDir(testing.io, "Applications", .{ .iterate = true });
     defer apps.close(testing.io);
     var it = apps.iterate();
     var entries: usize = 0;
-    while (try it.next(testing.io)) |_| entries += 1;
+    while (try it.next(testing.io)) |e| if (e.name[0] != '.') {
+        entries += 1;
+    };
     try testing.expectEqual(@as(usize, 1), entries);
     // The app's update view reads these lines (`classifyUpdateOutput`).
     try testing.expectEqual(@import("view_updates.zig").UpdateCommandOutcome.installed, @import("view_updates.zig").classifyUpdateOutput(true, out.written(), err_out.written()));
@@ -2151,4 +2177,210 @@ test "updates: `harness-engine update` swaps a macOS app for the verified releas
     try testing.expectEqual(@as(u8, 0), try updateCommand(&u, a, data_dir, &out.writer, &err_out.writer));
     try testing.expectEqualStrings("Harness 0.2.101 is up to date (latest: 0.2.101).\n", out.written());
     try testing.expectEqual(@import("view_updates.zig").UpdateCommandOutcome.up_to_date, @import("view_updates.zig").classifyUpdateOutput(true, out.written(), ""));
+}
+
+/// A made-up `Applications/Harness.app` (an "old release") with made-up
+/// releases to update it to, and the processes that "run" meanwhile.
+const MacInstall = struct {
+    tmp: testing.TmpDir,
+    arena: std.heap.ArenaAllocator,
+    bundle: []const u8 = "",
+    data_dir: []const u8 = "",
+    routes: [2]FakeHttp.Route = undefined,
+    http: FakeHttp = undefined,
+    restart: FakeRestart = .{},
+    runner: proc.FakeRunner = undefined,
+    /// Executables of the running processes; null: they can't be listed.
+    running: ?[]const []const u8 = &.{},
+    u: Updater = undefined,
+
+    const main_exe = "Contents/MacOS/" ++ app_bin;
+
+    fn init(self: *MacInstall) !void {
+        const gpa = testing.allocator;
+        self.* = .{ .tmp = testing.tmpDir(.{}), .arena = .init(gpa) };
+        const a = self.arena.allocator();
+        const base = try self.tmp.dir.realPathFileAlloc(testing.io, ".", a);
+        try self.tmp.dir.createDirPath(testing.io, "Applications/Harness.app/Contents/MacOS");
+        try self.tmp.dir.writeFile(testing.io, .{ .sub_path = "Applications/Harness.app/" ++ main_exe, .data = "old release\n" });
+        try self.tmp.dir.createDirPath(testing.io, "data");
+        self.bundle = try std.fs.path.join(a, &.{ base, "Applications", "Harness.app" });
+        self.data_dir = try std.fs.path.join(a, &.{ base, "data" });
+        self.http = .{ .routes = &.{} };
+        self.runner = proc.FakeRunner.init(gpa, &.{
+            .{ .prefix = "tar -xzf", .effect = AppTarEffect.unpack },
+            .{ .prefix = "ditto", .effect = DittoEffect.copy },
+        });
+        self.u = testUpdater(.mac_app, self.bundle, self.http.http(), self.runner.runner(), self.restart.restarter(), testing.io);
+        self.u.processes = .{ .ctx = self, .executables_fn = executables };
+    }
+
+    fn deinit(self: *MacInstall) void {
+        self.u.deinit();
+        self.runner.deinit();
+        self.arena.deinit();
+        self.tmp.cleanup();
+    }
+
+    fn executables(ctx: ?*anyopaque, _: Allocator) Allocator.Error!?[]const []const u8 {
+        const self: *MacInstall = @ptrCast(@alignCast(ctx.?));
+        return self.running;
+    }
+
+    /// Put `version` on the release feed.
+    fn publish(self: *MacInstall, version: []const u8) !void {
+        const a = self.arena.allocator();
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash("app bytes", &digest, .{});
+        self.routes = .{
+            .{ .suffix = "/manifest.json", .status = 200, .body = try std.fmt.allocPrint(a, "{{\"version\":\"{s}\",\"files\":{{\"{s}\":{{\"sha256\":\"{s}\"}}}}}}", .{ version, try macAppArtifactAlloc(a, version), &std.fmt.bytesToHex(digest, .lower) }) },
+            .{ .suffix = "-app.tar.gz", .status = 200, .body = "app bytes" },
+        };
+        self.http.routes = &self.routes;
+    }
+
+    /// `harness update` to `version`.
+    fn update(self: *MacInstall, version: []const u8) !void {
+        try self.publish(version);
+        var out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        var err_out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer err_out.deinit();
+        try testing.expectEqual(@as(u8, 0), try updateCommand(&self.u, self.arena.allocator(), self.data_dir, &out.writer, &err_out.writer));
+        try testing.expect(std.mem.indexOf(u8, out.written(), "relaunch Harness to finish.") != null);
+        try testing.expectEqualStrings("", err_out.written());
+    }
+
+    /// The background release check every app install runs after it starts, then hourly.
+    fn check(self: *MacInstall) !void {
+        try testing.expect(try self.u.checkOnce(1_790_000_000_000));
+    }
+
+    /// The replaced bundles' folder names beside the installed app.
+    fn replaced(self: *MacInstall) ![]const []const u8 {
+        const a = self.arena.allocator();
+        var apps = try self.tmp.dir.openDir(testing.io, "Applications", .{ .iterate = true });
+        defer apps.close(testing.io);
+        var names: std.ArrayList([]const u8) = .empty;
+        var it = apps.iterate();
+        while (try it.next(testing.io)) |e| {
+            if (std.mem.startsWith(u8, e.name, ".Harness.app.old-")) try names.append(a, try a.dupe(u8, e.name));
+        }
+        return names.items;
+    }
+
+    /// A process launched from the bundle now called `name`, as the kernel lists it.
+    fn processIn(self: *MacInstall, name: []const u8) ![]const u8 {
+        return std.fmt.allocPrint(self.arena.allocator(), "/Applications/{s}/" ++ main_exe, .{name});
+    }
+
+    fn contents(self: *MacInstall, name: []const u8) ![]const u8 {
+        const a = self.arena.allocator();
+        return self.tmp.dir.readFileAlloc(testing.io, try std.fmt.allocPrint(a, "Applications/{s}/" ++ main_exe, .{name}), a, .limited(64));
+    }
+
+    fn has(self: *MacInstall, name: []const u8) !bool {
+        const path = try std.fmt.allocPrint(self.arena.allocator(), "Applications/{s}", .{name});
+        self.tmp.dir.access(testing.io, path, .{}) catch return false;
+        return true;
+    }
+};
+
+test "updates: #173 an applied macOS update keeps the bundle the running app was launched from" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var m: MacInstall = undefined;
+    try m.init();
+    defer m.deinit();
+    try m.update("0.2.101");
+    try testing.expectEqualStrings("new release\n", try m.contents("Harness.app"));
+    const kept = try m.replaced();
+    try testing.expectEqual(@as(usize, 1), kept.len);
+    try testing.expectEqualStrings("old release\n", try m.contents(kept[0]));
+}
+
+test "updates: #173 a replaced bundle goes at the next check once nothing runs from it, and nothing else does" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var m: MacInstall = undefined;
+    try m.init();
+    defer m.deinit();
+    const ours = ".Harness.app.old-0123456789ab";
+    const others = [_][]const u8{
+        ".Harness.app.old-mine",         ".Harness.app.old-0123456789abc", ".Harness.app.old-ABCDEF012345",
+        ".Harness.app.new-0123456789ab", ".Other.app.old-0123456789ab",    "Harness.app.old-0123456789ab",
+    };
+    try m.tmp.dir.createDirPath(testing.io, "Applications/" ++ ours ++ "/Contents/MacOS");
+    for (others) |name| try m.tmp.dir.createDirPath(testing.io, try std.fmt.allocPrint(m.arena.allocator(), "Applications/{s}", .{name}));
+    // Another app, and the installed one, run; nothing from the replaced bundle does.
+    m.running = &.{ "/Applications/Other.app/Contents/MacOS/other", "/Applications/Harness.app/" ++ MacInstall.main_exe };
+    try m.publish("0.2.100");
+    try m.check();
+    try testing.expect(!try m.has(ours));
+    for (others) |name| try testing.expect(try m.has(name));
+    try testing.expectEqualStrings("old release\n", try m.contents("Harness.app"));
+}
+
+test "updates: #173 a replaced bundle stays while a process runs from it, through checks and another update" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var m: MacInstall = undefined;
+    try m.init();
+    defer m.deinit();
+    try m.update("0.2.101");
+    const first = try m.replaced();
+    try testing.expectEqual(@as(usize, 1), first.len);
+    // The app (or its engine) still runs from the bundle that was moved aside.
+    m.running = &.{try m.processIn(first[0])};
+    try m.check();
+    try testing.expectEqualStrings("old release\n", try m.contents(first[0]));
+    try m.update("0.2.102");
+    try testing.expectEqualStrings("old release\n", try m.contents(first[0]));
+    try testing.expectEqual(@as(usize, 2), (try m.replaced()).len);
+    // It quit: the next check removes both.
+    m.running = &.{};
+    try m.check();
+    try testing.expectEqual(@as(usize, 0), (try m.replaced()).len);
+    try testing.expectEqualStrings("new release\n", try m.contents("Harness.app"));
+}
+
+test "updates: #173 the next update first removes replaced bundles nothing runs from" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var m: MacInstall = undefined;
+    try m.init();
+    defer m.deinit();
+    try m.update("0.2.101");
+    const first = try m.replaced();
+    try testing.expectEqual(@as(usize, 1), first.len);
+    try m.update("0.2.102");
+    const second = try m.replaced();
+    try testing.expectEqual(@as(usize, 1), second.len);
+    try testing.expect(!std.mem.eql(u8, first[0], second[0]));
+}
+
+test "updates: #173 replaced bundles stay when the processes can't be listed, or the app itself is missing" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var m: MacInstall = undefined;
+    try m.init();
+    defer m.deinit();
+    try m.update("0.2.101");
+    try testing.expectEqual(@as(usize, 1), (try m.replaced()).len);
+    m.running = null;
+    try m.check();
+    try testing.expectEqual(@as(usize, 1), (try m.replaced()).len);
+    // A swap cut short between its two renames: the aside copy is the only one.
+    m.running = &.{};
+    try m.tmp.dir.deleteTree(testing.io, "Applications/Harness.app");
+    try m.check();
+    try testing.expectEqual(@as(usize, 1), (try m.replaced()).len);
+}
+
+test "updates: #173 a failed swap still puts the installed bundle back" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var m: MacInstall = undefined;
+    try m.init();
+    defer m.deinit();
+    // `ditto` claims success but writes nothing, so the second rename fails.
+    m.runner.scripts = &.{.{ .prefix = "ditto" }};
+    const why = try m.u.applyMacApp(m.arena.allocator(), "/nowhere/Harness.app", m.bundle);
+    try testing.expectEqualStrings("installing the new app bundle: FileNotFound", why.?);
+    try testing.expectEqualStrings("old release\n", try m.contents("Harness.app"));
+    try testing.expectEqual(@as(usize, 0), (try m.replaced()).len);
 }
