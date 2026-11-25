@@ -93,6 +93,13 @@ pub const State = struct {
         gpa.free(sel.display);
         gpa.free(sel.link);
     }
+    fn dropOverlapping(s: *State, gpa: Allocator, lo: usize, hi: usize) void {
+        var ix: usize = 0;
+        while (ix < s.selected.items.len) {
+            const ref = s.selected.items[ix];
+            if (lo < ref.end and hi > ref.start) s.drop(gpa, ix) else ix += 1;
+        }
+    }
     /// Minimal changed span: edits wholly before a reference move it; any
     /// overlap or appended name suffix invalidates it rather than retargeting.
     pub fn sync(s: *State, gpa: Allocator, text: []const u8) !void {
@@ -380,7 +387,11 @@ pub fn accept(a: *App, c: *ui.Context, tok: rules.Token, entry: Entry) void {
     }
     s.sync(a.gpa, a.composer.text()) catch return;
     if (display != null) {
-        s.selected.append(a.gpa, .{ .start = range.start, .end = range.start + display.?.len, .display = display.?, .link = link.? }) catch return;
+        // `sync` keeps a reference whose text did not change, so accepting over
+        // one again would leave two for the same span (#178). The newest wins.
+        s.selected.ensureUnusedCapacity(a.gpa, 1) catch return;
+        s.dropOverlapping(a.gpa, range.start, range.start + display.?.len);
+        s.selected.appendAssumeCapacity(.{ .start = range.start, .end = range.start + display.?.len, .display = display.?, .link = link.? });
         std.sort.insertion(Selection, s.selected.items, {}, struct {
             fn less(_: void, x: Selection, y: Selection) bool {
                 return x.start < y.start;
@@ -451,6 +462,8 @@ pub fn activate(a: *App, action: Action) void {
 }
 
 /// Root send/queue/steer hook. Null means untouched ordinary prompt text.
+/// References out of order, overlapping or outside the draft are an error, not
+/// an out-of-range slice, so the caller can keep the draft.
 pub fn prompt(a: *App) !?[]u8 {
     const s = &a.completion;
     const key = try scopeKey(a, a.gpa);
@@ -462,6 +475,7 @@ pub fn prompt(a: *App) !?[]u8 {
     errdefer out.deinit(a.gpa);
     var at: usize = 0;
     for (s.selected.items) |sel| {
+        if (sel.start < at or sel.end < sel.start or sel.end > a.composer.text().len) return error.InvalidReferences;
         try out.appendSlice(a.gpa, a.composer.text()[at..sel.start]);
         try out.appendSlice(a.gpa, sel.link);
         at = sel.end;
@@ -638,11 +652,7 @@ pub fn beforeEdit(a: *App, c: *ui.Context) void {
         const lo = @min(anchor, caret);
         const hi = @max(anchor, caret);
         if (lo == hi) continue;
-        var ix: usize = 0;
-        while (ix < a.completion.selected.items.len) {
-            const ref = a.completion.selected.items[ix];
-            if (lo < ref.end and hi > ref.start) a.completion.drop(a.gpa, ix) else ix += 1;
-        }
+        a.completion.dropOverlapping(a.gpa, lo, hi);
     }
 }
 
