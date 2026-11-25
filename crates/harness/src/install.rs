@@ -212,6 +212,9 @@ pub fn installed(id: HarnessId) -> bool {
 
 /// Resolve the installed agent CLI binary on this device for version/update probes.
 pub fn resolve_executable(id: HarnessId) -> Option<PathBuf> {
+    if id == HarnessId::ClaudeCode {
+        return crate::claude::resolve_claude_executable_with_override();
+    }
     if !installed(id) {
         return None;
     }
@@ -230,7 +233,7 @@ pub fn resolve_executable(id: HarnessId) -> Option<PathBuf> {
     })
 }
 
-fn invalidate_versions(id: HarnessId) {
+pub fn invalidate_versions(id: HarnessId) {
     let (cli, _) = cli_and_dir(id);
     if id == HarnessId::Antigravity {
         crate::executable::invalidate_versions(&[cli, "agy_acp_server", "agy_acp_server.par"]);
@@ -633,6 +636,74 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("open a new terminal")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_code_resolve_executable_aligns_with_claude_harness_locations_and_override() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        const SENTINEL: &str = "HARNESS_INSTALL_CLAUDE_SUBPROCESS";
+        if std::env::var_os(SENTINEL).is_some() {
+            let mode = std::env::var(SENTINEL).unwrap();
+            let resolved = resolve_executable(HarnessId::ClaudeCode)
+                .expect("ClaudeCode should resolve consistently with ClaudeHarness");
+            let via_claude = crate::claude::resolve_claude_executable_with_override();
+            assert_eq!(Some(resolved.clone()), via_claude, "mode={mode}");
+            if mode == "override" {
+                let expected = std::env::var_os("EXPECTED_CLAUDE").unwrap();
+                assert_eq!(resolved, PathBuf::from(expected), "mode={mode}");
+            }
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let local_claude = home.join(".claude").join("local").join("claude");
+        std::fs::create_dir_all(local_claude.parent().unwrap()).unwrap();
+        std::fs::write(&local_claude, "#!/bin/sh\necho 2.1.322\n").unwrap();
+        std::fs::set_permissions(&local_claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let override_claude = dir.path().join("custom-claude");
+        std::fs::write(&override_claude, "#!/bin/sh\necho 2.1.999\n").unwrap();
+        std::fs::set_permissions(&override_claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let exe = std::env::current_exe().unwrap();
+        let test_name = "install::tests::claude_code_resolve_executable_aligns_with_claude_harness_locations_and_override";
+
+        // Case 1: `~/.claude/local/claude` with empty PATH must resolve just like ClaudeHarness.
+        let out_home = std::process::Command::new(&exe)
+            .args(["--exact", test_name, "--nocapture"])
+            .env(SENTINEL, "local")
+            .env("HOME", &home)
+            .env("PATH", "")
+            .env_remove("CLAUDE_CODE_EXECUTABLE")
+            .env("EXPECTED_CLAUDE", &local_claude)
+            .output()
+            .unwrap();
+        assert!(
+            out_home.status.success(),
+            "local fallback failed:\nstdout:{}\nstderr:{}",
+            String::from_utf8_lossy(&out_home.stdout),
+            String::from_utf8_lossy(&out_home.stderr),
+        );
+
+        // Case 2: `CLAUDE_CODE_EXECUTABLE` override must take precedence just like ClaudeHarness.
+        let out_override = std::process::Command::new(&exe)
+            .args(["--exact", test_name, "--nocapture"])
+            .env(SENTINEL, "override")
+            .env("HOME", &home)
+            .env("PATH", "")
+            .env("CLAUDE_CODE_EXECUTABLE", &override_claude)
+            .env("EXPECTED_CLAUDE", &override_claude)
+            .output()
+            .unwrap();
+        assert!(
+            out_override.status.success(),
+            "override resolution failed:\nstdout:{}\nstderr:{}",
+            String::from_utf8_lossy(&out_override.stdout),
+            String::from_utf8_lossy(&out_override.stderr),
         );
     }
 }

@@ -2457,7 +2457,13 @@ impl RpcService for EngineRpc {
             }
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
             methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
-            methods::LIST_HARNESSES => RpcReply::value(&self.registry.descriptors()),
+            methods::LIST_HARNESSES => {
+                let registry = self.registry.clone();
+                let descriptors = tokio::task::spawn_blocking(move || registry.descriptors())
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&descriptors)
+            }
             methods::INSTALL_HARNESS => {
                 let p: InstallHarnessParams = parse_params(params)?;
                 let installing = self.registry.installs.begin(p.harness)?;
@@ -2625,7 +2631,11 @@ impl RpcService for EngineRpc {
                 update_harness_enabled(&self.registry, p.harness, p.enabled).await?;
                 // Fresh catalog in the reply: the page repaints from it in one
                 // round trip, and a refused/raced toggle self-corrects.
-                RpcReply::value(&self.registry.descriptors())
+                let registry = self.registry.clone();
+                let descriptors = tokio::task::spawn_blocking(move || registry.descriptors())
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&descriptors)
             }
             methods::LIST_MODELS => {
                 let p: ListModelsParams = parse_params(params)?;

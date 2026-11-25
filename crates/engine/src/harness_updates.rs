@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -26,8 +27,12 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) const UPDATE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub(crate) const APPLY_REPLY_DEADLINE: Duration = Duration::from_secs(40 * 60);
 const BINARY_WATCH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
+const PIPE_CAPTURE_LIMIT: usize = 256 * 1024;
 
 const NONINTERACTIVE_ENV: &[(&str, &str)] = &[
+    ("CI", "1"),
+    ("TERM", "dumb"),
     ("GIT_TERMINAL_PROMPT", "0"),
     ("GCM_INTERACTIVE", "never"),
     ("NONINTERACTIVE", "1"),
@@ -479,6 +484,22 @@ impl HarnessUpdateCoordinator {
         self.inner.status_tx.borrow().clone()
     }
 
+    pub fn any_active(&self) -> bool {
+        if !lock(&self.inner.cancellations).is_empty() {
+            return true;
+        }
+        lock(&self.inner.statuses).values().any(|status| {
+            matches!(
+                status.phase,
+                HarnessUpdatePhase::WaitingForIdle
+                    | HarnessUpdatePhase::Preparing
+                    | HarnessUpdatePhase::Downloading
+                    | HarnessUpdatePhase::Installing
+                    | HarnessUpdatePhase::Verifying
+            )
+        })
+    }
+
     pub fn recheck_changed_binaries_soon(&self) {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
@@ -492,7 +513,19 @@ impl HarnessUpdateCoordinator {
     async fn recheck_changed_binaries(&self) {
         let order = lock(&self.inner.order).clone();
         for harness in order {
-            let current = (self.inner.resolver)(harness).and_then(|p| BinaryFingerprint::of(&p));
+            if self.inner.shutdown.is_cancelled() {
+                return;
+            }
+            let resolver = self.inner.resolver.clone();
+            let current = tokio::task::spawn_blocking(move || {
+                (resolver)(harness).and_then(|p| BinaryFingerprint::of(&p))
+            })
+            .await
+            .ok()
+            .flatten();
+            if self.inner.shutdown.is_cancelled() {
+                return;
+            }
             let changed = lock(&self.inner.checked_binaries).get(&harness).cloned() != current;
             if changed {
                 let _ = self.check_one(harness).await;
@@ -504,6 +537,9 @@ impl HarnessUpdateCoordinator {
         let order = lock(&self.inner.order).clone();
         let enabled = self.inner.registry.enabled_set();
         for harness in order {
+            if self.inner.shutdown.is_cancelled() {
+                return;
+            }
             let policy = lock(&self.inner.prefs)
                 .policies
                 .get(&harness)
@@ -522,8 +558,15 @@ impl HarnessUpdateCoordinator {
     }
 
     pub async fn check_one(&self, harness: HarnessId) -> Result<(), String> {
+        if self.inner.shutdown.is_cancelled() {
+            return Ok(());
+        }
         let gate = self.gate_for(harness);
-        let _guard = gate.lock().await;
+        let _guard = tokio::select! {
+            biased;
+            _ = self.inner.shutdown.cancelled() => return Ok(()),
+            guard = gate.lock() => guard,
+        };
         let policy = lock(&self.inner.prefs)
             .policies
             .get(&harness)
@@ -537,7 +580,20 @@ impl HarnessUpdateCoordinator {
             });
             return Ok(());
         }
-        let Some(executable) = (self.inner.resolver)(harness) else {
+        let resolver = self.inner.resolver.clone();
+        let resolved = tokio::task::spawn_blocking(move || {
+            let executable = (resolver)(harness)?;
+            let fp = BinaryFingerprint::of(&executable);
+            let source = classify_source(&executable);
+            let plan_res = build_update_plan(harness, &executable);
+            Some((executable, fp, source, plan_res))
+        })
+        .await
+        .map_err(|e| format!("failed to probe harness binary: {e}"))?;
+        if self.inner.shutdown.is_cancelled() {
+            return Ok(());
+        }
+        let Some((executable, fp, source, plan_res)) = resolved else {
             lock(&self.inner.checked_binaries).remove(&harness);
             self.mutate(harness, |status| {
                 status.installed_version = None;
@@ -548,7 +604,7 @@ impl HarnessUpdateCoordinator {
             });
             return Ok(());
         };
-        if let Some(fp) = BinaryFingerprint::of(&executable) {
+        if let Some(fp) = fp {
             lock(&self.inner.checked_binaries).insert(harness, fp);
         }
         self.mutate(harness, |status| {
@@ -556,16 +612,22 @@ impl HarnessUpdateCoordinator {
             status.error = None;
         });
 
-        let source = classify_source(&executable);
-        let plan_res = build_update_plan(harness, &executable);
         let can_apply = plan_res.is_ok();
         let manual_command = plan_res.err().filter(|msg| !msg.is_empty());
 
         let spec = provider(harness);
-        let installed = run_capture(&executable, spec.version_args, COMMAND_TIMEOUT)
-            .await
-            .ok()
-            .and_then(|out| extract_semver(&out));
+        let installed = run_capture_with_cancel(
+            &executable,
+            spec.version_args,
+            COMMAND_TIMEOUT,
+            Some(&self.inner.shutdown),
+        )
+        .await
+        .ok()
+        .and_then(|out| extract_semver(&out));
+        if self.inner.shutdown.is_cancelled() {
+            return Ok(());
+        }
 
         let Some(installed_ver) = installed else {
             self.mutate(harness, |status| {
@@ -578,23 +640,27 @@ impl HarnessUpdateCoordinator {
             return Ok(());
         };
 
-        let latest = match self.fetch_latest(harness, &executable).await {
-            Ok(ver) => ver,
-            Err(message) => {
-                self.mutate(harness, |status| {
-                    status.installed_version = Some(installed_ver);
-                    status.source = source;
-                    status.can_apply = can_apply;
-                    status.manual_command = manual_command;
-                    status.phase = HarnessUpdatePhase::Failed;
-                    status.checked_at = Some(now_ms());
-                    status.error = Some(HarnessUpdateFailure {
-                        message,
-                        retryable: true,
-                        kind: HarnessUpdateFailureKind::Check,
+        let latest = tokio::select! {
+            biased;
+            _ = self.inner.shutdown.cancelled() => return Ok(()),
+            res = self.fetch_latest(harness, &executable) => match res {
+                Ok(ver) => ver,
+                Err(message) => {
+                    self.mutate(harness, |status| {
+                        status.installed_version = Some(installed_ver);
+                        status.source = source;
+                        status.can_apply = can_apply;
+                        status.manual_command = manual_command;
+                        status.phase = HarnessUpdatePhase::Failed;
+                        status.checked_at = Some(now_ms());
+                        status.error = Some(HarnessUpdateFailure {
+                            message,
+                            retryable: true,
+                            kind: HarnessUpdateFailureKind::Check,
+                        });
                     });
-                });
-                return Ok(());
+                    return Ok(());
+                }
             }
         };
 
@@ -629,12 +695,25 @@ impl HarnessUpdateCoordinator {
     }
 
     pub async fn apply(&self, harness: HarnessId) -> Result<Option<String>, String> {
+        if self.inner.shutdown.is_cancelled() {
+            return Err("update cancelled".into());
+        }
         let gate = self.gate_for(harness);
-        let _guard = gate.lock().await;
-        let executable = (self.inner.resolver)(harness)
-            .ok_or_else(|| "agent CLI is not installed on this device".to_string())?;
-        let plan = build_update_plan(harness, &executable)?;
-        let cancel = CancellationToken::new();
+        let _guard = tokio::select! {
+            biased;
+            _ = self.inner.shutdown.cancelled() => return Err("update cancelled".into()),
+            guard = gate.lock() => guard,
+        };
+        let resolver = self.inner.resolver.clone();
+        let (executable, plan) = tokio::task::spawn_blocking(move || {
+            let executable = (resolver)(harness)
+                .ok_or_else(|| "agent CLI is not installed on this device".to_string())?;
+            let plan = build_update_plan(harness, &executable)?;
+            Ok::<_, String>((executable, plan))
+        })
+        .await
+        .map_err(|e| format!("failed to prepare updater: {e}"))??;
+        let cancel = self.inner.shutdown.child_token();
         let previous_phase = lock(&self.inner.statuses)
             .get(&harness)
             .map(|s| s.phase)
@@ -677,14 +756,28 @@ impl HarnessUpdateCoordinator {
             status.phase = HarnessUpdatePhase::Verifying;
         });
 
-        let post_exe = (self.inner.resolver)(harness).unwrap_or(executable);
-        if let Some(fp) = BinaryFingerprint::of(&post_exe) {
+        let resolver = self.inner.resolver.clone();
+        let fallback_exe = executable.clone();
+        let (post_exe, fp) = tokio::task::spawn_blocking(move || {
+            harness_adapters::install::invalidate_versions(harness);
+            let post_exe = (resolver)(harness).unwrap_or(fallback_exe);
+            let fp = BinaryFingerprint::of(&post_exe);
+            (post_exe, fp)
+        })
+        .await
+        .unwrap_or((executable, None));
+        if let Some(fp) = fp {
             lock(&self.inner.checked_binaries).insert(harness, fp);
         }
-        let verified = run_capture(&post_exe, provider(harness).version_args, COMMAND_TIMEOUT)
-            .await
-            .ok()
-            .and_then(|out| extract_semver(&out));
+        let verified = run_capture_with_cancel(
+            &post_exe,
+            provider(harness).version_args,
+            COMMAND_TIMEOUT,
+            Some(&self.inner.shutdown),
+        )
+        .await
+        .ok()
+        .and_then(|out| extract_semver(&out));
 
         self.mutate(harness, |status| {
             if let Some(ver) = &verified {
@@ -753,7 +846,13 @@ impl HarnessUpdateCoordinator {
         match provider(harness).latest {
             LatestSource::Manual => Ok(None),
             LatestSource::Command(args) => {
-                let out = run_capture(executable, args, COMMAND_TIMEOUT).await?;
+                let out = run_capture_with_cancel(
+                    executable,
+                    args,
+                    COMMAND_TIMEOUT,
+                    Some(&self.inner.shutdown),
+                )
+                .await?;
                 Ok(extract_semver(&out))
             }
             LatestSource::Npm(package) => {
@@ -864,25 +963,248 @@ fn save_prefs(path: &Path, prefs: &Preferences) {
     }
 }
 
-async fn run_capture(
-    executable: &Path,
-    args: &[&str],
-    timeout: Duration,
-) -> Result<String, String> {
-    let mut cmd = Command::new(executable);
-    harness_adapters::compose_login_shell_path(&mut cmd);
-    cmd.args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+fn configure_update_command(cmd: &mut Command) {
+    #[cfg(unix)]
+    cmd.process_group(0);
+    harness_adapters::compose_login_shell_path(cmd);
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("HARNESS_") {
+            cmd.env_remove(key);
+        }
+    }
+    for key in [
+        "HARNESS_IPC_TOKEN",
+        "HARNESS_SANDBOX_TOKEN_FILE",
+        "HARNESS_EDGE_TOKEN",
+        "CLAUDECODE",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_SSE_PORT",
+        "CLAUDE_AGENT_SDK_VERSION",
+    ] {
+        cmd.env_remove(key);
+    }
     for (k, v) in NONINTERACTIVE_ENV {
         cmd.env(k, v);
     }
-    let output = tokio::time::timeout(timeout, cmd.output())
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+}
+
+#[derive(Debug)]
+enum IsolationError {
+    Cancelled,
+    TimedOut,
+    Failed(String),
+}
+
+struct IsolatedOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+struct ProcessGroupGuard {
+    #[cfg(unix)]
+    pgid: Option<libc::pid_t>,
+}
+
+impl ProcessGroupGuard {
+    fn from_child(child: &tokio::process::Child) -> Self {
+        Self {
+            #[cfg(unix)]
+            pgid: child.id().map(|id| id as libc::pid_t),
+        }
+    }
+
+    fn disarm(&mut self) {
+        #[cfg(unix)]
+        {
+            self.pgid = None;
+        }
+    }
+
+    #[cfg(unix)]
+    fn signal(&self, sig: libc::c_int) {
+        if let Some(pid) = self.pgid {
+            // SAFETY: pid belongs to our spawned child's own process group (process_group(0)).
+            unsafe {
+                libc::kill(-pid, sig);
+            }
+        }
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.pgid.take() {
+            // SAFETY: pid belongs to our spawned child's own process group (process_group(0)).
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+async fn kill_isolated_child(guard: &mut ProcessGroupGuard, child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    {
+        guard.signal(libc::SIGTERM);
+        let grace_until = tokio::time::Instant::now() + Duration::from_millis(100);
+        loop {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                break;
+            }
+            if tokio::time::Instant::now() >= grace_until {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        guard.signal(libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    let _ = guard;
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(Duration::from_millis(500), child.wait()).await;
+    guard.disarm();
+}
+
+async fn drain_pipe_bounded<R: AsyncRead + Unpin>(mut pipe: R, buf: Arc<Mutex<Vec<u8>>>) {
+    let mut chunk = [0u8; 4096];
+    loop {
+        match pipe.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let mut guard = lock(&buf);
+                let remaining = PIPE_CAPTURE_LIMIT.saturating_sub(guard.len());
+                if remaining > 0 {
+                    guard.extend_from_slice(&chunk[..n.min(remaining)]);
+                }
+            }
+        }
+    }
+}
+
+async fn run_isolated_command(
+    mut cmd: Command,
+    cancel: Option<&CancellationToken>,
+    timeout: Duration,
+    action: &str,
+) -> Result<IsolatedOutput, IsolationError> {
+    if cancel.is_some_and(CancellationToken::is_cancelled) {
+        return Err(IsolationError::Cancelled);
+    }
+    configure_update_command(&mut cmd);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| IsolationError::Failed(format!("failed to {action}: {e}")))?;
+    let mut pg_guard = ProcessGroupGuard::from_child(&child);
+    let stdout_buf = Arc::new(Mutex::new(Vec::new()));
+    let stderr_buf = Arc::new(Mutex::new(Vec::new()));
+    let stdout_task = child
+        .stdout
+        .take()
+        .map(|p| tokio::spawn(drain_pipe_bounded(p, stdout_buf.clone())));
+    let stderr_task = child
+        .stderr
+        .take()
+        .map(|p| tokio::spawn(drain_pipe_bounded(p, stderr_buf.clone())));
+    let stdout_abort = stdout_task
+        .as_ref()
+        .map(tokio::task::JoinHandle::abort_handle);
+    let stderr_abort = stderr_task
+        .as_ref()
+        .map(tokio::task::JoinHandle::abort_handle);
+
+    let cancel_fut = async {
+        match cancel {
+            Some(tok) => tok.cancelled().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    let status = tokio::select! {
+        biased;
+        _ = cancel_fut => {
+            kill_isolated_child(&mut pg_guard, &mut child).await;
+            if let Some(h) = stdout_abort {
+                h.abort();
+            }
+            if let Some(h) = stderr_abort {
+                h.abort();
+            }
+            return Err(IsolationError::Cancelled);
+        }
+        _ = tokio::time::sleep(timeout) => {
+            kill_isolated_child(&mut pg_guard, &mut child).await;
+            if let Some(h) = stdout_abort {
+                h.abort();
+            }
+            if let Some(h) = stderr_abort {
+                h.abort();
+            }
+            return Err(IsolationError::TimedOut);
+        }
+        res = child.wait() => res.map_err(|e| IsolationError::Failed(format!("failed awaiting child: {e}")))?,
+    };
+
+    let drain_both = async {
+        if let Some(h) = stdout_task {
+            let _ = h.await;
+        }
+        if let Some(h) = stderr_task {
+            let _ = h.await;
+        }
+    };
+    tokio::pin!(drain_both);
+    if tokio::time::timeout(PIPE_DRAIN_GRACE, &mut drain_both)
         .await
-        .map_err(|_| format!("command `{}` timed out", executable.display()))?
-        .map_err(|e| format!("failed to launch `{}`: {e}", executable.display()))?;
+        .is_err()
+    {
+        #[cfg(unix)]
+        pg_guard.signal(libc::SIGKILL);
+        let _ = tokio::time::timeout(Duration::from_millis(500), &mut drain_both).await;
+        if let Some(h) = stdout_abort {
+            h.abort();
+        }
+        if let Some(h) = stderr_abort {
+            h.abort();
+        }
+    }
+    pg_guard.disarm();
+    let stdout = std::mem::take(&mut *lock(&stdout_buf));
+    let stderr = std::mem::take(&mut *lock(&stderr_buf));
+    Ok(IsolatedOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+async fn run_capture_with_cancel(
+    executable: &Path,
+    args: &[&str],
+    timeout: Duration,
+    cancel: Option<&CancellationToken>,
+) -> Result<String, String> {
+    let mut cmd = Command::new(executable);
+    cmd.args(args);
+    let output = match run_isolated_command(
+        cmd,
+        cancel,
+        timeout,
+        &format!("launch `{}`", executable.display()),
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(IsolationError::Cancelled) => return Err("check cancelled".into()),
+        Err(IsolationError::TimedOut) => {
+            return Err(format!("command `{}` timed out", executable.display()));
+        }
+        Err(IsolationError::Failed(msg)) => return Err(msg),
+    };
     let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
     if !output.stderr.is_empty() {
         if !combined.is_empty() {
@@ -894,6 +1216,15 @@ async fn run_capture(
         return Err(format!("command exited with {}", output.status));
     }
     Ok(combined)
+}
+
+#[cfg(test)]
+async fn run_capture(
+    executable: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String, String> {
+    run_capture_with_cancel(executable, args, timeout, None).await
 }
 
 fn truncate_diagnostic(s: &str, max_chars: usize) -> String {
@@ -1050,7 +1381,7 @@ fn summarize_installer_failure(stderr: &str, stdout: &str, status_desc: &str) ->
 }
 
 async fn execute_plan(plan: &UpdatePlan, cancel: &CancellationToken) -> Result<(), String> {
-    let mut cmd = match plan {
+    let cmd = match plan {
         UpdatePlan::Homebrew { brew, cask, token } => {
             let mut c = Command::new(brew);
             c.arg("upgrade")
@@ -1077,25 +1408,13 @@ async fn execute_plan(plan: &UpdatePlan, cancel: &CancellationToken) -> Result<(
             c
         }
     };
-    harness_adapters::compose_login_shell_path(&mut cmd);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    for (k, v) in NONINTERACTIVE_ENV {
-        cmd.env(k, v);
-    }
-
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to start updater: {e}"))?;
-    let output = tokio::select! {
-        _ = cancel.cancelled() => return Err("update cancelled".into()),
-        res = tokio::time::timeout(UPDATE_TIMEOUT, child.wait_with_output()) => {
-            res.map_err(|_| "updater timed out".to_string())?
-                .map_err(|e| format!("updater failed: {e}"))?
-        }
-    };
+    let output =
+        match run_isolated_command(cmd, Some(cancel), UPDATE_TIMEOUT, "start updater").await {
+            Ok(output) => output,
+            Err(IsolationError::Cancelled) => return Err("update cancelled".into()),
+            Err(IsolationError::TimedOut) => return Err("updater timed out".into()),
+            Err(IsolationError::Failed(msg)) => return Err(msg),
+        };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1524,5 +1843,306 @@ npm error gyp: No Xcode or CLT version detected!";
             "{}",
             error.message
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_plan_and_run_capture_do_not_hang_when_grandchild_inherits_pipes() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let update_pidfile = dir.path().join("update.pid");
+        let update_script = dir.path().join("slow-grandchild-update.sh");
+        std::fs::write(
+            &update_script,
+            format!(
+                "#!/bin/sh\nsleep 30 &\necho $! > \"{}\"\nexit 0\n",
+                update_pidfile.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&update_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let plan = UpdatePlan::Command {
+            executable: update_script.clone(),
+            args: &[],
+        };
+        let cancel = CancellationToken::new();
+        tokio::time::timeout(Duration::from_secs(6), execute_plan(&plan, &cancel))
+            .await
+            .expect("execute_plan hung on grandchild pipe FD")
+            .expect("execute_plan should succeed after wrapper exits");
+
+        let capture_pidfile = dir.path().join("capture.pid");
+        let capture_script = dir.path().join("slow-grandchild-capture.sh");
+        std::fs::write(
+            &capture_script,
+            format!(
+                "#!/bin/sh\necho 2.1.322\nsleep 30 &\necho $! > \"{}\"\nexit 0\n",
+                capture_pidfile.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&capture_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let out = tokio::time::timeout(
+            Duration::from_secs(6),
+            run_capture(&capture_script, &[], Duration::from_secs(30)),
+        )
+        .await
+        .expect("run_capture hung on grandchild pipe FD")
+        .expect("run_capture should return captured stdout");
+        assert!(out.contains("2.1.322"), "{out}");
+
+        for pf in [&update_pidfile, &capture_pidfile] {
+            if let Ok(raw) = std::fs::read_to_string(pf)
+                && let Ok(pid) = raw.trim().parse::<libc::pid_t>()
+            {
+                let exited = tokio::time::timeout(Duration::from_secs(2), async {
+                    while unsafe { libc::kill(pid, 0) } == 0 {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .is_ok();
+                if !exited {
+                    let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+                assert!(exited, "orphaned grandchild {pid} survived pipe drain");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn update_children_set_ci_and_term_dumb_and_scrub_harness_secrets() {
+        use std::ffi::OsStr;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut cmd = Command::new("/bin/sh");
+        cmd.env("HARNESS_IPC_TOKEN", "secret-ipc")
+            .env("HARNESS_SANDBOX_TOKEN_FILE", "/tmp/secret-sandbox")
+            .env("HARNESS_EDGE_TOKEN", "secret-edge");
+        configure_update_command(&mut cmd);
+        let envs: std::collections::HashMap<_, _> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| (k.to_os_string(), v.map(OsStr::to_os_string)))
+            .collect();
+        for secret_key in [
+            "HARNESS_IPC_TOKEN",
+            "HARNESS_SANDBOX_TOKEN_FILE",
+            "HARNESS_EDGE_TOKEN",
+        ] {
+            assert_eq!(
+                envs.get(OsStr::new(secret_key)),
+                Some(&None),
+                "{secret_key} must be scrubbed from updater env"
+            );
+        }
+        assert_eq!(envs.get(OsStr::new("CI")), Some(&Some("1".into())));
+        assert_eq!(envs.get(OsStr::new("TERM")), Some(&Some("dumb".into())));
+
+        // Verify live child processes see non-interactive env and never receive inherited HARNESS_* tokens.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("check-env.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\ntest \"$CI\" = 1 && test \"$TERM\" = dumb && test \"$NONINTERACTIVE\" = 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let plan = UpdatePlan::Command {
+            executable: script.clone(),
+            args: &[],
+        };
+        execute_plan(&plan, &CancellationToken::new())
+            .await
+            .expect("updater must set CI=1 and TERM=dumb");
+        run_capture(&script, &[], Duration::from_secs(5))
+            .await
+            .expect("run_capture must set CI=1 and TERM=dumb");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancel_mid_install_kills_process_group_and_returns_promptly() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("child.pid");
+        let script = dir.path().join("hang-install.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nsleep 60 &\necho $! > \"{}\"\nwait\n",
+                pidfile.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let plan = UpdatePlan::Command {
+            executable: script,
+            args: &[],
+        };
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let task = tokio::spawn(async move { execute_plan(&plan, &task_cancel).await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !pidfile.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        cancel.cancel();
+        let err = tokio::time::timeout(Duration::from_secs(4), task)
+            .await
+            .expect("cancel must return promptly")
+            .unwrap()
+            .expect_err("cancelled install should error");
+        assert!(err.contains("cancelled"), "{err}");
+        let pid: libc::pid_t = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while unsafe { libc::kill(pid, 0) } == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("process group descendant still alive after cancel");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_cancels_in_flight_check_without_hanging() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        struct InstalledGrokStub;
+
+        #[async_trait::async_trait]
+        impl harness_adapters::Harness for InstalledGrokStub {
+            fn id(&self) -> HarnessId {
+                HarnessId::Grok
+            }
+            fn display_name(&self) -> &str {
+                "Grok"
+            }
+            fn supports_steering(&self) -> bool {
+                false
+            }
+            fn steering_mode(&self) -> harness_proto::SteeringMode {
+                harness_proto::SteeringMode::StepBoundary
+            }
+            fn reasoning_levels(&self) -> &[harness_proto::ReasoningLevel] {
+                &[]
+            }
+            fn installed(&self) -> bool {
+                true
+            }
+            async fn models(
+                &self,
+            ) -> Result<Vec<harness_proto::Model>, harness_adapters::HarnessError> {
+                Ok(Vec::new())
+            }
+            async fn run(
+                &self,
+                _request: harness_proto::RunRequest,
+                _controls: harness_adapters::RunControls,
+            ) -> Result<
+                futures::stream::BoxStream<
+                    'static,
+                    Result<harness_proto::AgentEvent, harness_adapters::HarnessError>,
+                >,
+                harness_adapters::HarnessError,
+            > {
+                Err(harness_adapters::HarnessError::Protocol(
+                    "unused in probe test".into(),
+                ))
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("probe.pid");
+        let cli = dir.path().join("grok");
+        std::fs::write(
+            &cli,
+            format!("#!/bin/sh\necho $$ > \"{}\"\nsleep 30\n", pidfile.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(InstalledGrokStub));
+        registry.load_prefs(dir.path());
+        registry.set_enabled(HarnessId::Grok, true).unwrap();
+        let registry = Arc::new(registry);
+        let coord = HarnessUpdateCoordinator::with_resolver(
+            dir.path(),
+            registry,
+            Arc::new(move |id| (id == HarnessId::Grok).then(|| cli.clone())),
+        );
+        let worker_coord = coord.clone();
+        let check_task = tokio::spawn(async move { worker_coord.check_all().await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !pidfile.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(3), coord.shutdown())
+            .await
+            .expect("shutdown hung waiting for in-flight check_all");
+        tokio::time::timeout(Duration::from_secs(3), check_task)
+            .await
+            .expect("check_all task did not abort on shutdown")
+            .unwrap();
+        if let Ok(raw) = std::fs::read_to_string(&pidfile)
+            && let Ok(pid) = raw.trim().parse::<libc::pid_t>()
+        {
+            let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
+
+    #[test]
+    fn any_active_tracks_active_phases_and_clears_when_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(crate::default_registry());
+        let coord =
+            HarnessUpdateCoordinator::with_resolver(dir.path(), registry, Arc::new(|_| None));
+        assert!(!coord.any_active());
+
+        for phase in [
+            HarnessUpdatePhase::WaitingForIdle,
+            HarnessUpdatePhase::Preparing,
+            HarnessUpdatePhase::Downloading,
+            HarnessUpdatePhase::Installing,
+            HarnessUpdatePhase::Verifying,
+        ] {
+            coord.mutate(HarnessId::Grok, |s| s.phase = phase);
+            assert!(
+                coord.any_active(),
+                "{phase:?} must keep engine non-quiescent"
+            );
+        }
+
+        for phase in [
+            HarnessUpdatePhase::Checking,
+            HarnessUpdatePhase::Current,
+            HarnessUpdatePhase::Available,
+            HarnessUpdatePhase::Updated,
+            HarnessUpdatePhase::ManualActionRequired,
+            HarnessUpdatePhase::Failed,
+            HarnessUpdatePhase::Dormant,
+        ] {
+            coord.mutate(HarnessId::Grok, |s| s.phase = phase);
+            assert!(!coord.any_active(), "{phase:?} should allow quiescence");
+        }
     }
 }

@@ -37,7 +37,7 @@ fn actionFor(st: updates.Status) ?ActionSpec {
             .{ .label = "Check and update", .method = "ApplyHarnessUpdate" }
         else
             null,
-        .waiting_for_idle, .preparing, .downloading => .{ .label = "Cancel", .method = "CancelHarnessUpdate" },
+        .waiting_for_idle, .preparing, .downloading, .installing => .{ .label = "Cancel", .method = "CancelHarnessUpdate" },
         .failed => if (st.can_apply and st.error_kind == .install)
             .{ .label = "Retry update", .method = "ApplyHarnessUpdate" }
         else
@@ -490,6 +490,24 @@ test "Antigravity checklist keeps legacy manual servers hidden and disconnect di
     try h.tester.clickText("Check and update");
     h.tester.settle(0.3);
     try std.testing.expect(h.app.agent_updates.last_action == null);
+}
+
+test "Agent update installing state shows Cancel action and cancels cleanly" {
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+    try updates.setTestStatuses(&h.app, "synthetic-device", true,
+        \\[{"harness":"claude-code","installedVersion":"2.1.319","latestVersion":"2.1.322","phase":"installing","canApply":true,"progressMessage":"Installing…"}]
+    );
+    h.tester.settle(1);
+    try h.snap("agent-update-installing");
+    try std.testing.expect(h.tester.hasText("Cancel"));
+    try h.tester.clickText("Cancel");
+    h.tester.settle(0.3);
+    const action = h.app.agent_updates.last_action orelse return error.MissingCancelUpdateAction;
+    try std.testing.expectEqualStrings("CancelHarnessUpdate", action.method);
+    try std.testing.expectEqualStrings("claude-code", action.harness);
+    try std.testing.expectEqualStrings("synthetic-device", action.device_id);
 }
 
 fn retargetTween(old: ?updates.Tween, target: f32, now: f64, reduced: bool) updates.Tween {

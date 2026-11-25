@@ -1083,7 +1083,10 @@ impl Engine {
             let quiescent: update_bridge::QuiescentCheck = {
                 let sessions = core.sessions.clone();
                 let terminals = core.terminals.clone();
-                Arc::new(move || !sessions.any_active() && !terminals.any_open())
+                let harness_updates = core.harness_updates.clone();
+                Arc::new(move || {
+                    !sessions.any_active() && !terminals.any_open() && !harness_updates.any_active()
+                })
             };
             let updater = update_bridge::Updater::spawn(config.edge_url.clone(), Some(quiescent));
             if let Some(mut token_changes) = edge.as_ref().and_then(EdgeConfig::token_changes) {

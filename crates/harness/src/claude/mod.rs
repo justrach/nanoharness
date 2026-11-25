@@ -65,9 +65,10 @@ use wire::{ControlRequestFrame, Frame, allow_response, control_response_line};
 /// login-shell PATH snapshot (the user's shell init shapes PATH in ways a
 /// GUI/service launch never sees — see [`crate::shell_env`]), then known
 /// install locations as a last resort. The `CLAUDE_CODE_EXECUTABLE` override
-/// is applied by [`ClaudeHarness::resolve_executable`], so availability and
-/// launches agree on one resolution order. Resolved per call — cheap after
-/// the snapshot is cached.
+/// is applied by [`resolve_claude_executable_with_override`] and
+/// [`ClaudeHarness::resolve_executable`], so availability, version/update
+/// checks, and launches agree on one resolution order. Resolved per call —
+/// cheap after the snapshot is cached.
 fn resolve_claude_executable() -> Option<PathBuf> {
     let mut extra = Vec::new();
     if let Some(home) = crate::executable::home_dir() {
@@ -77,6 +78,18 @@ fn resolve_claude_executable() -> Option<PathBuf> {
     extra.push(PathBuf::from("/opt/homebrew/bin/claude"));
     extra.push(PathBuf::from("/usr/local/bin/claude"));
     crate::executable::find_on_paths("claude", extra)
+}
+
+/// Resolve `claude` honoring `CLAUDE_CODE_EXECUTABLE` before PATH and known
+/// Claude install locations so `install::resolve_executable` matches
+/// [`ClaudeHarness::resolve_executable`].
+pub(crate) fn resolve_claude_executable_with_override() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("CLAUDE_CODE_EXECUTABLE")
+        && !p.is_empty()
+    {
+        return crate::executable::validate_native_override(&PathBuf::from(p)).ok();
+    }
+    resolve_claude_executable()
 }
 
 fn option_is_on(options: &serde_json::Map<String, Value>, key: &str) -> bool {
@@ -138,12 +151,7 @@ impl ClaudeHarness {
         if let Some(p) = &self.executable {
             return crate::executable::validate_native_override(p);
         }
-        if let Some(p) = std::env::var_os("CLAUDE_CODE_EXECUTABLE")
-            && !p.is_empty()
-        {
-            return crate::executable::validate_native_override(&PathBuf::from(p));
-        }
-        resolve_claude_executable().ok_or_else(|| {
+        resolve_claude_executable_with_override().ok_or_else(|| {
             HarnessError::NotInstalled(
                 "claude (searched PATH, the login shell's PATH, ~/.claude/local, \
                  ~/.local/bin, /opt/homebrew/bin, /usr/local/bin, and \

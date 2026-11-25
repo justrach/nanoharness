@@ -1209,7 +1209,7 @@ pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const Unifi
             const action_label: ?[]const u8 = switch (st.phase) {
                 .available => if (st.can_apply) "Update" else "Steps",
                 .manual_action_required => if (st.can_apply) "Check and update" else null,
-                .waiting_for_idle, .preparing, .downloading => "Cancel",
+                .waiting_for_idle, .preparing, .downloading, .installing => "Cancel",
                 .failed => if (st.can_apply and st.error_kind == .install) "Retry" else "Check",
                 .updated => "Done",
                 else => null,
@@ -1224,7 +1224,7 @@ pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const Unifi
                     .{ .agent_rpc = .{ .device_id = w.device_id, .method = "ApplyHarnessUpdate", .harness = st.harness } }
                 else
                     .none,
-                .waiting_for_idle, .preparing, .downloading => .{ .agent_rpc = .{
+                .waiting_for_idle, .preparing, .downloading, .installing => .{ .agent_rpc = .{
                     .device_id = w.device_id,
                     .method = "CancelHarnessUpdate",
                     .harness = st.harness,
@@ -2109,4 +2109,21 @@ test "multi-surface updater never offers Restart before installed target matches
     a.updates.setAppInstalled(ver_c);
     try std.testing.expectEqualStrings(ver_c, appRestartVersion(&a).?);
     try std.testing.expectEqualStrings(ver_c, updateSummary(&sum_buf, &a, a.nowMs()).action.restart);
+}
+
+test "unified agent update row exposes Cancel during installing" {
+    var a: App = .init(std.testing.allocator, std.testing.io, 1);
+    defer a.deinit();
+    try agent_updates.setTestStatuses(&a, "synthetic-device", true,
+        \\[{"harness":"claude-code","installedVersion":"2.1.319","latestVersion":"2.1.322","phase":"installing","canApply":true}]
+    );
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const rows = collectUnifiedRows(&a, arena.allocator());
+    try std.testing.expectEqual(@as(usize, 1), rows.len);
+    try std.testing.expectEqual(.agent, rows[0].kind);
+    try std.testing.expect(rows[0].busy);
+    try std.testing.expectEqualStrings("Cancel", rows[0].action_label.?);
+    try std.testing.expectEqualStrings("CancelHarnessUpdate", rows[0].action.agent_rpc.method);
+    try std.testing.expectEqualStrings("claude-code", rows[0].action.agent_rpc.harness);
 }
