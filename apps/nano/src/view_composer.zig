@@ -443,13 +443,8 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
     if (a.queue_edit != null and c.shortcut(.{ .key = ui.Shortcut.escape })) a.queueFinishEdit(.cancel);
 }
 
-/// The message caret (composer.rs, the input's paint: "a rounded accent
-/// bar, inset from the line box"): 3 points wide, 2 short of the line box
-/// top and bottom, 1.5 round, in the primary accent (the user's accent
-/// override included). It blinks at 500 ms and is solid after an edit or
-/// a caret move, as nanoui's caret already does.
-/// GPUI's insertion caret: a hairline on the glyph, not a 3-point block.
-pub const message_caret: ui.TextFieldCaret = .{ .width = 3, .inset = 1, .radius = 1.5 };
+/// Keep the accent caret thin so it doesn't cover adjacent punctuation.
+pub const message_caret: ui.TextFieldCaret = .{ .width = 1.5, .inset = 1, .radius = 0.75 };
 
 /// ↑ at the text's start or ↓ at its end steps through the chat's earlier
 /// prompts (`history_step`, `navigate_prompt_history`), unless a question,
