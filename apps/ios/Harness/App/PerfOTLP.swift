@@ -51,16 +51,19 @@ struct PerfOTLPBatch {
         func string(_ key: String, _ value: String) -> [String: Any] {
             ["key": key, "value": ["stringValue": value]]
         }
-        let attributes: [[String: Any]] = [
+        // No hardware model, MAC, or other machine identifiers. A per-launch
+        // instance id is omitted unless the caller supplied one after consent.
+        var attributes: [[String: Any]] = [
             string("service.name", "harness.ios"),
             string("service.version", sanitized["app_version"] as? String ?? "0"),
-            string("service.instance.id", meta.installId),
             string("os.type", "ios"),
             string("os.version", String(PerfStatsBatch.versionString(meta.osVersion).prefix(16))),
             string("host.arch", meta.arch),
-            string("device.model.identifier", sanitized["device"] as? String ?? ""),
             ["key": "display.refresh_rate", "value": ["intValue": String(sanitized["refresh_hz"] as? Int ?? 60)]],
         ]
+        if !meta.installId.isEmpty {
+            attributes.insert(string("service.instance.id", meta.installId), at: 2)
+        }
         let metrics = window.metrics.compactMap { metric -> [String: Any]? in
             guard let definition = PerfOTLP.definition(for: metric.name) else { return nil }
             let point: [String: Any] = [

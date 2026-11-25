@@ -1,0 +1,202 @@
+{
+  "comment": "Fail-closed product-telemetry, crash-upload, background-network, and telemetry-ID rules shared by the Rust engine, Zig desktop app, and Swift iOS app. Implementations take an env map (no I/O). User-initiated agent turns, signed-in sync, and GitHub review are not gated here. DO_NOT_TRACK and HARNESS_OFFLINE are truthy when trimmed case-insensitive values are 1, true, or yes. Device-id for sync is not a telemetry ID and is not covered by createTelemetryId.",
+  "truthy": ["1", "true", "yes"],
+  "cases": [
+    {
+      "name": "defaults-consent-on",
+      "env": {},
+      "consent": true,
+      "crashConsent": true,
+      "expect": {
+        "doNotTrack": false,
+        "offline": false,
+        "productTelemetry": true,
+        "crashUpload": true,
+        "backgroundNetwork": true,
+        "createTelemetryId": true
+      }
+    },
+    {
+      "name": "defaults-consent-off",
+      "env": {},
+      "consent": false,
+      "crashConsent": false,
+      "expect": {
+        "doNotTrack": false,
+        "offline": false,
+        "productTelemetry": false,
+        "crashUpload": false,
+        "backgroundNetwork": true,
+        "createTelemetryId": false
+      }
+    },
+    {
+      "name": "perf-on-crash-off",
+      "env": {},
+      "consent": true,
+      "crashConsent": false,
+      "expect": {
+        "doNotTrack": false,
+        "offline": false,
+        "productTelemetry": true,
+        "crashUpload": false,
+        "backgroundNetwork": true,
+        "createTelemetryId": true
+      }
+    },
+    {
+      "name": "dnt-1-overrides-consent",
+      "env": { "DO_NOT_TRACK": "1" },
+      "consent": true,
+      "crashConsent": true,
+      "expect": {
+        "doNotTrack": true,
+        "offline": false,
+        "productTelemetry": false,
+        "crashUpload": false,
+        "backgroundNetwork": false,
+        "createTelemetryId": false
+      }
+    },
+    {
+      "name": "dnt-yes",
+      "env": { "DO_NOT_TRACK": "yes" },
+      "consent": true,
+      "crashConsent": true,
+      "expect": {
+        "doNotTrack": true,
+        "offline": false,
+        "productTelemetry": false,
+        "crashUpload": false,
+        "backgroundNetwork": false,
+        "createTelemetryId": false
+      }
+    },
+    {
+      "name": "dnt-true-uppercase",
+      "env": { "DO_NOT_TRACK": "TRUE" },
+      "consent": true,
+      "crashConsent": true,
+      "expect": {
+        "doNotTrack": true,
+        "offline": false,
+        "productTelemetry": false,
+        "crashUpload": false,
+        "backgroundNetwork": false,
+        "createTelemetryId": false
+      }
+    },
+    {
+      "name": "dnt-padded",
+      "env": { "DO_NOT_TRACK": " 1 " },
+      "consent": true,
+      "crashConsent": true,
+      "expect": {
+        "doNotTrack": true,
+        "offline": false,
+        "productTelemetry": false,
+        "crashUpload": false,
+        "backgroundNetwork": false,
+        "createTelemetryId": false
+      }
+    },
+    {
+      "name": "dnt-zero-is-not-set",
+      "env": { "DO_NOT_TRACK": "0" },
+      "consent": true,
+      "crashConsent": true,
+      "expect": {
+        "doNotTrack": false,
+        "offline": false,
+        "productTelemetry": true,
+        "crashUpload": true,
+        "backgroundNetwork": true,
+        "createTelemetryId": true
+      }
+    },
+    {
+      "name": "dnt-false-is-not-set",
+      "env": { "DO_NOT_TRACK": "false" },
+      "consent": true,
+      "crashConsent": true,
+      "expect": {
+        "doNotTrack": false,
+        "offline": false,
+        "productTelemetry": true,
+        "crashUpload": true,
+        "backgroundNetwork": true,
+        "createTelemetryId": true
+      }
+    },
+    {
+      "name": "offline-overrides-consent",
+      "env": { "HARNESS_OFFLINE": "1" },
+      "consent": true,
+      "crashConsent": true,
+      "expect": {
+        "doNotTrack": false,
+        "offline": true,
+        "productTelemetry": false,
+        "crashUpload": false,
+        "backgroundNetwork": false,
+        "createTelemetryId": false
+      }
+    },
+    {
+      "name": "offline-yes",
+      "env": { "HARNESS_OFFLINE": "yes" },
+      "consent": true,
+      "crashConsent": true,
+      "expect": {
+        "doNotTrack": false,
+        "offline": true,
+        "productTelemetry": false,
+        "crashUpload": false,
+        "backgroundNetwork": false,
+        "createTelemetryId": false
+      }
+    },
+    {
+      "name": "offline-zero-is-not-set",
+      "env": { "HARNESS_OFFLINE": "0" },
+      "consent": true,
+      "crashConsent": true,
+      "expect": {
+        "doNotTrack": false,
+        "offline": false,
+        "productTelemetry": true,
+        "crashUpload": true,
+        "backgroundNetwork": true,
+        "createTelemetryId": true
+      }
+    },
+    {
+      "name": "dnt-and-offline",
+      "env": { "DO_NOT_TRACK": "1", "HARNESS_OFFLINE": "1" },
+      "consent": true,
+      "crashConsent": true,
+      "expect": {
+        "doNotTrack": true,
+        "offline": true,
+        "productTelemetry": false,
+        "crashUpload": false,
+        "backgroundNetwork": false,
+        "createTelemetryId": false
+      }
+    },
+    {
+      "name": "dnt-with-consent-already-off",
+      "env": { "DO_NOT_TRACK": "1" },
+      "consent": false,
+      "crashConsent": false,
+      "expect": {
+        "doNotTrack": true,
+        "offline": false,
+        "productTelemetry": false,
+        "crashUpload": false,
+        "backgroundNetwork": false,
+        "createTelemetryId": false
+      }
+    }
+  ]
+}

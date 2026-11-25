@@ -99,4 +99,17 @@ final class CrashReportsTests: XCTestCase {
         XCTAssertEqual(CrashReports.sentNames(in: folder), Set(ids), "a deleted report is forgotten")
         XCTAssertEqual(reports.reports(in: folder).count, 2, "the sent list is not a report")
     }
+
+    func testDoNotTrackAndOfflineStopUploadsEvenWhenTheToggleIsOn() throws {
+        let suite = "CrashReportsTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertTrue(CrashReports.userEnabled(in: defaults))
+        XCTAssertTrue(CrashReports.uploadAllowed(in: defaults, env: [:]))
+        XCTAssertFalse(CrashReports.uploadAllowed(in: defaults, env: ["DO_NOT_TRACK": "1"]),
+                       "this fails on main: DO_NOT_TRACK=1 must stop crash uploads")
+        XCTAssertFalse(CrashReports.uploadAllowed(in: defaults, env: ["HARNESS_OFFLINE": "yes"]))
+        defaults.set(false, forKey: CrashReports.sendKey)
+        XCTAssertFalse(CrashReports.uploadAllowed(in: defaults, env: [:]))
+    }
 }

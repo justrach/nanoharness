@@ -59,7 +59,16 @@ final class CrashReports: NSObject, MXMetricManagerSubscriber, @unchecked Sendab
     static let batchCount = 10
     static let batchBytes = 900_000
 
-    var sending: Bool { UserDefaults.standard.object(forKey: Self.sendKey) as? Bool ?? true }
+    var sending: Bool { Self.uploadAllowed(in: .standard) }
+
+    static func userEnabled(in defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: sendKey) as? Bool ?? true
+    }
+
+    static func uploadAllowed(in defaults: UserDefaults,
+                              env: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        PrivacyKillswitch.decide(consent: true, crashConsent: userEnabled(in: defaults), env: env).crashUpload
+    }
 
     private let lock = NSLock()
     private var config: AppConfig?

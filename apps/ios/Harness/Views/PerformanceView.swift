@@ -105,7 +105,7 @@ struct PerformanceView: View {
                         Toggle("Share anonymous performance data", isOn: $share)
                             .accessibilityIdentifier("settings-share-performance")
                     } footer: {
-                        Text("On by default. Sends diagnostic ranges for operation timings, CPU use, memory footprint, disk writes and scroll/stream callback delays. Callback delays are responsiveness proxies, not actual GPU hitches. Includes your device model, refresh rate and app and OS versions, with a random id that changes each launch. No chat content, account or persistent device identifiers. Diagnostics are retained for 90 days. Turn sharing off at any time.")
+                        Text("On by default. Sends diagnostic ranges for operation timings, CPU use, memory footprint, disk writes and scroll/stream callback delays. Callback delays are responsiveness proxies, not actual GPU hitches. Includes refresh rate and app and OS versions, with a random id that changes each launch. No chat content, account, hardware identifiers or persistent device identifiers. Diagnostics are retained for 90 days. Turn sharing off at any time. Honors DO_NOT_TRACK=1 and HARNESS_OFFLINE=1.")
                     }
                     .harnessListRow()
                 }

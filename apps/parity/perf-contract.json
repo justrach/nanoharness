@@ -14,7 +14,7 @@
     "copyReport": "Copy report",
     "reset": "Reset",
     "shareToggle": "Share anonymous performance data",
-    "shareFootnote": "Sends numbers only: how long things took, grouped into ranges, your device model and the app and OS versions, under a random id that changes on every launch. No chat content, account or device identifiers. You can turn this off at any time."
+    "shareFootnote": "Sends numbers only: how long things took, grouped into ranges, and the app and OS versions, under a random id that changes on every launch. No chat content, account, hardware identifiers or persistent device identifiers. You can turn this off at any time."
   },
   "wire": {
     "startup.firstFrame": "app_launch_ms",
@@ -26,6 +26,6 @@
     "main.stall": "main_stall_ms"
   },
   "iosStrings": {
-    "shareFootnote": "On by default. Sends diagnostic ranges for operation timings, CPU use, memory footprint, disk writes and scroll/stream callback delays. Callback delays are responsiveness proxies, not actual GPU hitches. Includes your device model, refresh rate and app and OS versions, with a random id that changes each launch. No chat content, account or persistent device identifiers. Diagnostics are retained for 90 days. Turn sharing off at any time."
+    "shareFootnote": "On by default. Sends diagnostic ranges for operation timings, CPU use, memory footprint, disk writes and scroll/stream callback delays. Callback delays are responsiveness proxies, not actual GPU hitches. Includes refresh rate and app and OS versions, with a random id that changes each launch. No chat content, account, hardware identifiers or persistent device identifiers. Diagnostics are retained for 90 days. Turn sharing off at any time. Honors DO_NOT_TRACK=1 and HARNESS_OFFLINE=1."
   }
 }

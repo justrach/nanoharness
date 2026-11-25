@@ -700,4 +700,41 @@ final class ParityTests: XCTestCase {
         XCTAssertEqual(CloudSandboxRules.selectedSize(sizes, picked: "gone")?.id, "standard")
         XCTAssertNil(CloudSandboxRules.selectedSize([], picked: nil), "no sizes: today's create")
     }
+
+    // MARK: Privacy killswitch (protocol/privacy-killswitch.json)
+
+    func testPrivacyKillswitchMatchesTheSharedVector() throws {
+        let url = Self.root.appendingPathComponent("protocol/privacy-killswitch.json")
+        let data = try Data(contentsOf: url)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let cases = try rows(json, "cases")
+        XCTAssertFalse(cases.isEmpty)
+        for c in cases {
+            let name = c["name"] as? String ?? "?"
+            var env: [String: String] = [:]
+            if let raw = c["env"] as? [String: Any] {
+                for (key, value) in raw {
+                    env[key] = value as? String ?? "\(value)"
+                }
+            }
+            let expect = try XCTUnwrap(c["expect"] as? [String: Any], name)
+            func flag(_ key: String) throws -> Bool {
+                if let value = expect[key] as? Bool { return value }
+                if let number = expect[key] as? NSNumber { return number.boolValue }
+                XCTFail("\(name): missing \(key)")
+                return false
+            }
+            let got = PrivacyKillswitch.decide(
+                consent: c["consent"] as! Bool,
+                crashConsent: c["crashConsent"] as! Bool,
+                env: env
+            )
+            XCTAssertEqual(got.doNotTrack, try flag("doNotTrack"), name)
+            XCTAssertEqual(got.offline, try flag("offline"), name)
+            XCTAssertEqual(got.productTelemetry, try flag("productTelemetry"), name)
+            XCTAssertEqual(got.crashUpload, try flag("crashUpload"), name)
+            XCTAssertEqual(got.backgroundNetwork, try flag("backgroundNetwork"), name)
+            XCTAssertEqual(got.createTelemetryId, try flag("createTelemetryId"), name)
+        }
+    }
 }

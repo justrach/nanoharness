@@ -253,6 +253,8 @@ pub fn build(b: *std.Build) void {
     const protocol = if (test_data) |root| b.pathJoin(&.{ root, "protocol/desktop" }) else b.root.joinString(b.allocator, "../../protocol/desktop") catch @panic("OOM");
     const opts = b.addOptions();
     opts.addOption([]const u8, "protocol_dir", protocol);
+    // Product-telemetry / DNT / offline killswitch (protocol/privacy-killswitch.json).
+    opts.addOption([]const u8, "privacy_killswitch", if (test_data) |root| b.pathJoin(&.{ root, "protocol/privacy-killswitch.json" }) else b.root.joinString(b.allocator, "../../protocol/privacy-killswitch.json") catch @panic("OOM"));
     // And the app rules the phones share (apps/parity/vectors).
     opts.addOption([]const u8, "vectors_dir", if (test_data) |root| b.pathJoin(&.{ root, "apps/parity/vectors" }) else b.root.joinString(b.allocator, "../parity/vectors") catch @panic("OOM"));
     tests.root_module.addOptions("parity_options", opts);

@@ -1397,7 +1397,7 @@ pub fn runUpdateDaemon(gpa: Allocator, io: std.Io, edge_url: []const u8) !void {
 
     ctx.emitStatusIfChanged();
 
-    const should_run = install.checksReleases() or override != null or edge_url.len > 0;
+    const should_run = @import("privacy.zig").backgroundNetworkAllowedGet(proc.getenv("DO_NOT_TRACK"), proc.getenv("HARNESS_OFFLINE")) and (install.checksReleases() or override != null or edge_url.len > 0);
     const check_thread = if (should_run) try std.Thread.spawn(.{}, DaemonCtx.checkLoop, .{ctx}) else null;
     defer {
         ctx.stop_flag.store(true, .release);
@@ -1508,7 +1508,7 @@ pub fn forEngine(comptime Host: type, host: *Host) !*Updater {
         // No I/O, no network: a check fails instead of reading an unset `Io`.
         e.updater.http = .{ .get_fn = noNetwork };
     }
-    if (host.io != null and install.checksReleases()) {
+    if (host.io != null and install.checksReleases() and @import("privacy.zig").backgroundNetworkAllowedGet(proc.getenv("DO_NOT_TRACK"), proc.getenv("HARNESS_OFFLINE"))) {
         _ = host.bg_workers_active.fetchAdd(1, .acq_rel);
         if (std.Thread.spawn(.{}, Wiring(Host).loop, .{host})) |th| {
             th.detach();

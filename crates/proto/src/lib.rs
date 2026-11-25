@@ -17,6 +17,7 @@ pub mod mcp_servers;
 pub mod motion;
 pub mod peer_mail;
 pub mod preview;
+pub mod privacy;
 pub mod room_delivery;
 pub mod run_errors;
 pub mod sidebar_pins;

@@ -73,12 +73,14 @@ reports are unlinked analytics. None of these categories is used for advertising
 tracking. Keep the manifest, public policy, and App Store Connect answers aligned
 when changing collection or providers.
 
-iOS performance sharing starts off under `share-performance-consent-v1` and is
-enabled only by choosing the toggle in Settings → Diagnostics → Performance.
-The older `share-performance` setting is not treated as consent. Reports contain
-histograms, app/OS versions, hardware model, refresh rate, and a per-launch random
-ID, and the statistics service retains them for 90 days. Android's existing
-default remains represented separately in the shared parity fixtures.
+iOS performance sharing is **on by default** under `share-performance-consent-v2`
+and can be turned off in Settings → Diagnostics → Performance. An explicit choice
+on `share-performance-consent-v1` or `share-performance` is still honored.
+`DO_NOT_TRACK=1` and `HARNESS_OFFLINE=1` stop uploads even when the toggle is on.
+Reports contain histograms, app/OS versions, refresh rate, and a per-launch random
+ID minted only while sharing is allowed. They do not include a hardware model.
+The statistics service retains them for 90 days. Android's existing default
+remains represented separately in the shared parity fixtures. See [PRIVACY.md](../../PRIVACY.md).
 
 Before submitting a build, check TestFlight's beta description, feedback email,
 privacy URL, review contact, review notes, and build-specific What to Test. Live

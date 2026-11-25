@@ -15,7 +15,7 @@ struct CrashReportsView: View {
                 Toggle("Send to Harness", isOn: $send)
                     .accessibilityIdentifier("settings-send-crash-reports")
             } footer: {
-                Text("On by default. Each report goes to Harness once, linked to your account, so crashes can be fixed without you sharing them. Turn this off to keep reports on this iPhone.")
+                Text("On by default. Each report goes to Harness once, linked to your account, so crashes can be fixed without you sharing them. Turn this off to keep reports on this iPhone. DO_NOT_TRACK=1 and HARNESS_OFFLINE=1 also stop uploads.")
             }
             .harnessListRow()
             if reports.isEmpty {
