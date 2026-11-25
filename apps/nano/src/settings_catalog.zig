@@ -35,7 +35,7 @@ fn keywords(section: Section) []const u8 {
         .mcp => "integration tools protocol server",
         .extensions => "plugins extensions native panels controls callbacks github runners workers",
         .github_ci => "continuous integration build test runner repository GitHub",
-        .devices => "update release version hourly install automatic background download restart computer host remote desktop control relay",
+        .devices => "update release version hourly install automatic background download restart computer host remote desktop control relay approve approval chip",
         .appshots => "screenshot capture permission",
         .usage => "tokens model usage token counts local usage codex",
         .archived => "archive restore recover sessions chats history",

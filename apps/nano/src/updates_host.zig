@@ -88,6 +88,57 @@ pub fn macAppArtifactAlloc(gpa: Allocator, version: []const u8) ![]u8 {
     return std.fmt.allocPrint(gpa, "harness-{s}-macos-{s}-app.tar.gz", .{ version, platformKey().arch });
 }
 
+/// Ed25519 public key baked into the app. Until a production key is generated
+/// (`scripts/gen-release-key.py`, see docs/adr/0009) this is a TEST key and
+/// unsigned GitHub manifests are still accepted only by tests that opt out.
+pub const release_verify_key: [32]u8 = .{
+    0x11, 0x8e, 0x2c, 0x37, 0x6f, 0x9a, 0x4b, 0x51,
+    0xd0, 0x2c, 0x8e, 0x77, 0x14, 0x6a, 0x91, 0x03,
+    0x5e, 0x88, 0x4f, 0x22, 0xb1, 0x70, 0xcd, 0x09,
+    0xa3, 0x56, 0x7d, 0x1e, 0x40, 0x8c, 0x2f, 0x64,
+};
+
+/// `version` plus each `file=sha256` line, sorted. The private key signs this.
+pub fn manifestMessage(arena: Allocator, version: []const u8, files: ?json.ObjectMap) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(arena);
+    try buf.appendSlice(arena, version);
+    try buf.append(arena, '\n');
+    if (files) |map| {
+        var names: std.ArrayList([]const u8) = .empty;
+        defer names.deinit(arena);
+        var it = map.iterator();
+        while (it.next()) |e| try names.append(arena, e.key_ptr.*);
+        std.mem.sort([]const u8, names.items, {}, struct {
+            fn less(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.less);
+        for (names.items) |name| {
+            const meta = map.get(name) orelse continue;
+            if (meta != .object) continue;
+            const sha_v = meta.object.get("sha256") orelse continue;
+            if (sha_v != .string) continue;
+            try buf.appendSlice(arena, name);
+            try buf.append(arena, '=');
+            try buf.appendSlice(arena, sha_v.string);
+            try buf.append(arena, '\n');
+        }
+    }
+    return buf.toOwnedSlice(arena);
+}
+
+pub fn verifyManifestSig(message: []const u8, sig: []const u8, pubkey: [32]u8) bool {
+    if (sig.len != 64) return false;
+    const Ed = std.crypto.sign.Ed25519;
+    const pk = Ed.PublicKey.fromBytes(pubkey) catch return false;
+    var sig_bytes: [64]u8 = undefined;
+    @memcpy(&sig_bytes, sig[0..64]);
+    const signature = Ed.Signature.fromBytes(sig_bytes);
+    signature.verify(message, pk) catch return false;
+    return true;
+}
+
 pub fn autoUpdateFrom(value: ?[]const u8) bool {
     const v = std.mem.trim(u8, value orelse return true, " \t\r\n");
     var buf: [8]u8 = undefined;
@@ -221,6 +272,9 @@ pub const Updater = struct {
     current_version: []const u8,
     /// `HARNESS_RELEASES_URL`, when set.
     releases_override: ?[]const u8 = null,
+    /// Refuse ApplyUpdate unless the manifest carries a valid Ed25519 `sig`.
+    /// Tests that predate signing set this false; production stays true.
+    require_manifest_sig: bool = true,
     http: Http,
     runner: proc.Runner,
     restarter: Restarter,
@@ -318,15 +372,35 @@ pub const Updater = struct {
         version: []const u8,
         /// The artifact's `sha256`, when the manifest lists one.
         files: ?json.ObjectMap = null,
+        /// Raw 64-byte Ed25519 signature over [`manifestMessage`].
+        sig: ?[]const u8 = null,
 
         pub fn sha256For(self: Manifest, file: []const u8) ?[]const u8 {
-            const files = self.files orelse return null;
+            return sha256From(self.files orelse return null, file);
+        }
+
+        fn sha256From(files: json.ObjectMap, file: []const u8) ?[]const u8 {
             const meta = files.get(file) orelse return null;
             if (meta != .object) return null;
             const s = meta.object.get("sha256") orelse return null;
             return if (s == .string) s.string else null;
         }
     };
+
+    fn decodeSig(arena: Allocator, raw: []const u8) ?[]const u8 {
+        const t = std.mem.trim(u8, raw, " \t\r\n");
+        if (t.len == 128) {
+            const out = arena.alloc(u8, 64) catch return null;
+            _ = std.fmt.hexToBytes(out, t) catch return null;
+            return out;
+        }
+        const decoder = std.base64.url_safe_no_pad.Decoder;
+        const n = decoder.calcSizeForSlice(t) catch return null;
+        if (n != 64) return null;
+        const out = arena.alloc(u8, 64) catch return null;
+        decoder.decode(out, t) catch return null;
+        return out;
+    }
 
     /// `manifest.json`, falling back to `latest.txt`. Error → message (arena).
     pub fn fetchLatest(self: *Updater, arena: Allocator) !union(enum) { ok: Manifest, err: []const u8 } {
@@ -342,7 +416,13 @@ pub const Updater = struct {
                 if (version.len == 0) return .{ .err = "manifest.json has an empty version" };
                 if (!validVersion(version)) return .{ .err = try std.fmt.allocPrint(arena, "manifest.json names an invalid version: {f}", .{json.fmt(version, .{})}) };
                 const files = v.object.get("files");
-                return .{ .ok = .{ .version = version, .files = if (files) |f| (if (f == .object) f.object else null) else null } };
+                const sig_field = v.object.get("sig");
+                const sig = if (sig_field) |s| (if (s == .string) decodeSig(arena, s.string) else null) else null;
+                return .{ .ok = .{
+                    .version = version,
+                    .files = if (files) |f| (if (f == .object) f.object else null) else null,
+                    .sig = sig,
+                } };
             }
         } else |_| {}
         const lurl = try std.fmt.allocPrint(arena, "{s}/latest.txt", .{base});
@@ -546,12 +626,22 @@ pub const Updater = struct {
             .ok => |m| m,
             .err => |e| return .{ .err = self.keepErr(e) },
         };
+        if (try self.refuseUnsigned(arena, m)) |e| return .{ .err = self.keepErr(e) };
         if (!versionNewer(m.version, self.current_version))
             return .{ .err = self.keepErr(try std.fmt.allocPrint(arena, "already up to date ({s})", .{self.current_version})) };
         if (try self.stageHeadless(arena, m, self.install.path)) |e| return .{ .err = self.keepErr(e) };
         if (try self.applyHeadless(arena, self.install.path, m.version)) |e| return .{ .err = self.keepErr(e) };
         self.restarter.restart_fn(self.restarter.ctx, self.install.path);
         return .{ .version = try reply_gpa.dupe(u8, m.version) };
+    }
+
+    fn refuseUnsigned(self: *Updater, arena: Allocator, m: Manifest) !?[]const u8 {
+        if (!self.require_manifest_sig) return null;
+        const sig = m.sig orelse return try std.fmt.allocPrint(arena, "unsigned manifest; refusing to install", .{});
+        const message = try manifestMessage(arena, m.version, m.files);
+        if (!verifyManifestSig(message, sig, release_verify_key))
+            return try std.fmt.allocPrint(arena, "manifest signature mismatch", .{});
+        return null;
     }
 
     fn keepErr(self: *Updater, msg: []const u8) []const u8 {
@@ -592,6 +682,7 @@ pub const Updater = struct {
             self.unlock();
             return null;
         }
+        if (try self.refuseUnsigned(arena, m)) |e| return try self.gpa.dupe(u8, e);
         if (try self.stageHeadless(arena, m, self.install.path)) |e| return try self.gpa.dupe(u8, e);
         while (true) {
             self.setPhase(.waitingForIdle);
@@ -1638,6 +1729,7 @@ fn testUpdater(kind: InstallKind, path: []const u8, http: Http, runner: proc.Run
         .http = http,
         .runner = runner,
         .restarter = restart,
+        .require_manifest_sig = false,
     };
 }
 
@@ -2151,4 +2243,37 @@ test "updates: `harness-engine update` swaps a macOS app for the verified releas
     try testing.expectEqual(@as(u8, 0), try updateCommand(&u, a, data_dir, &out.writer, &err_out.writer));
     try testing.expectEqualStrings("Harness 0.2.101 is up to date (latest: 0.2.101).\n", out.written());
     try testing.expectEqual(@import("view_updates.zig").UpdateCommandOutcome.up_to_date, @import("view_updates.zig").classifyUpdateOutput(true, out.written(), ""));
+}
+
+test "updates: a generated Ed25519 key signs and verifies a manifest message" {
+    const Ed = std.crypto.sign.Ed25519;
+    const kp = Ed.KeyPair.generate();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var files: json.ObjectMap = .empty;
+    try files.put(arena.allocator(), "harness.bin", .{ .object = blk: {
+        var o: json.ObjectMap = .empty;
+        try o.put(arena.allocator(), "sha256", .{ .string = "abcd" });
+        break :blk o;
+    } });
+    const msg = try manifestMessage(arena.allocator(), "0.2.300", files);
+    const sig = try kp.sign(msg, null);
+    try testing.expect(verifyManifestSig(msg, &sig.toBytes(), kp.public_key.toBytes()));
+    var bad = sig.toBytes();
+    bad[0] ^= 1;
+    try testing.expect(!verifyManifestSig(msg, &bad, kp.public_key.toBytes()));
+}
+
+test "updates: ApplyUpdate refuses an unsigned manifest when signatures are required" {
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
+    var fh: FakeHttp = .{ .routes = &.{.{ .suffix = "/manifest.json", .status = 200, .body = "{\"version\":\"0.2.101\",\"files\":{}}" }} };
+    var fr: FakeRestart = .{};
+    var noop = proc.FakeRunner.init(testing.allocator, &.{});
+    defer noop.deinit();
+    var u = testUpdater(.managed, "/nowhere", fh.http(), noop.runner(), fr.restarter(), null);
+    defer u.deinit();
+    u.require_manifest_sig = true;
+    const msg = (try handle(&u, testing.allocator, .apply)).failed;
+    try testing.expect(std.mem.indexOf(u8, msg, "unsigned manifest") != null);
+    try testing.expectEqual(@as(usize, 0), fr.count);
 }

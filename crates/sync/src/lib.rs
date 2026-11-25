@@ -13,6 +13,7 @@
 pub mod budget;
 pub mod chat_client;
 pub mod chat_frames;
+pub mod device_crypto;
 pub mod dial;
 pub mod net_path;
 pub mod registry;
@@ -24,6 +25,12 @@ pub mod wake;
 
 pub use chat_client::{
     ChatClient, ChatDocSink, ChatEvent, ChatStatsSnapshot, ChatTuning, CheckpointFetcher,
+};
+pub use device_crypto::{
+    DeviceEnvelope, DeviceKeypair, E2EE_FLAG, EnvelopeError, MAGIC_E2EE, MAGIC_SIGNED, ReplayCache,
+    WorkspaceKey, e2ee_from_env, load_or_create_device_keys, looks_signed, open_bytes,
+    require_device_auth_from_env, seal_bytes, unwrap_workspace_key, verify_envelope,
+    wrap_workspace_key,
 };
 pub use registry::{
     ReconnectState, RegistryClient, RegistryEvent, RegistryTransport, RegistryTuning,

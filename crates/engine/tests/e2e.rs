@@ -215,8 +215,10 @@ fn registry_with(harness: Arc<dyn Harness>) -> Arc<HarnessRegistry> {
 }
 
 fn assemble(dir: &std::path::Path, harness: Arc<dyn Harness>) -> EngineCore {
-    EngineCore::assemble(dir, registry_with(harness), HarnessId::Mock, None)
-        .expect("engine core assembles")
+    let core = EngineCore::assemble(dir, registry_with(harness), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    core.registry.set_remote_control(true);
+    core
 }
 
 /// Queue a command into the chat doc the way a REMOTE viewer device would: an immutable
@@ -3055,7 +3057,9 @@ async fn tool_progress_streams_live_and_never_reaches_the_doc() {
         }),
     );
     let mut rx = core.sessions.watch_tool_progress(CHAT);
-    let seen = Arc::new(std::sync::Mutex::new(Vec::<Vec<harness_proto::ToolProgressItem>>::new()));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<
+        Vec<harness_proto::ToolProgressItem>,
+    >::new()));
     let record = seen.clone();
     tokio::spawn(async move {
         while rx.changed().await.is_ok() {
@@ -3094,7 +3098,10 @@ async fn tool_progress_streams_live_and_never_reaches_the_doc() {
         "the tool's result and the turn's end clear the live log"
     );
     let doc = serde_json::to_string(&entries(&core)).unwrap();
-    assert!(!doc.contains("LIVE-LOG"), "live output leaked into the doc: {doc}");
+    assert!(
+        !doc.contains("LIVE-LOG"),
+        "live output leaked into the doc: {doc}"
+    );
     assert!(doc.contains("tool-1"), "the tool chip itself still folds");
 }
 

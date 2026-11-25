@@ -7,7 +7,7 @@
 //! Per-device because CLI installs are — a viewer retargets the settings page at
 //! another device and edits THAT device's set over the forwarded RPCs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex, MutexGuard, PoisonError,
@@ -117,7 +117,10 @@ struct HarnessPrefsFile {
     /// The user's explicit opt-INS for agents that are off by default (see
     /// [`default_on`]). Still gated on detection: an opted-in agent whose CLI
     /// goes missing drops out until it is found again.
-    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "known_harnesses")]
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "known_harnesses"
+    )]
     opted_in: Vec<HarnessId>,
     titles: TitleSettings,
     /// The default autonomy stamped onto every run on this device. `None`
@@ -125,6 +128,18 @@ struct HarnessPrefsFile {
     /// full access, so existing users see no change until they pick one.
     #[serde(skip_serializing_if = "Option::is_none")]
     autonomy: Option<Autonomy>,
+    /// True when `autonomy` is the new-install Workspace default, not a
+    /// person's SetAutonomy. Existing files omit it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    autonomy_is_default: bool,
+    /// Devices the person has allowed to execute / write / open terminals
+    /// without another chip, while remote control is on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    approved_remote_devices: Vec<String>,
+    /// Seal chat2 rows and ControlRpc payloads. Off until the user opts in
+    /// (or `HARNESS_E2EE=1`); existing plaintext rows stay readable.
+    #[serde(default)]
+    e2ee: bool,
     graff_draft_subagents: bool,
     /// Hold off idle sleep while an agent works (see `keep_awake`).
     keep_awake: bool,
@@ -216,6 +231,13 @@ pub struct HarnessRegistry {
     graff_native_flint: Arc<std::sync::RwLock<Option<harness_adapters::NativeFlintEnv>>>,
     /// Live view of `keep_awake` for the engine's power-assertion task.
     keep_awake: tokio::sync::watch::Sender<bool>,
+    /// Parked remote actions (chat2 drain + first ControlRpc).
+    pending_remote: Mutex<Vec<harness_rpc::RemoteApproval>>,
+    remote_approvals: tokio::sync::watch::Sender<Vec<harness_rpc::RemoteApproval>>,
+    /// Command ids the user approved once (not persisted).
+    one_shot_commands: Mutex<HashSet<String>>,
+    /// Per-device Ed25519 + X25519, loaded from `{data_dir}/device-keys.json`.
+    device_keys: Mutex<Option<harness_sync::DeviceKeypair>>,
     /// Where the prefs persist; `None` (tests, bare registries) skips writes.
     prefs_path: Mutex<Option<PathBuf>>,
 }
@@ -237,6 +259,10 @@ impl HarnessRegistry {
             graff_compact_at: Arc::new(AtomicU8::new(0)),
             graff_native_flint: Arc::new(std::sync::RwLock::new(None)),
             keep_awake: tokio::sync::watch::Sender::new(false),
+            pending_remote: Mutex::new(Vec::new()),
+            remote_approvals: tokio::sync::watch::Sender::new(Vec::new()),
+            one_shot_commands: Mutex::new(HashSet::new()),
+            device_keys: Mutex::new(None),
             prefs_path: Mutex::new(None),
         }
     }
@@ -257,10 +283,17 @@ impl HarnessRegistry {
     /// path for writes. Corrupt/missing files fall back to the default set.
     pub fn load_prefs(&self, data_dir: &Path) {
         let path = data_dir.join("harness-prefs.json");
-        let loaded = std::fs::read_to_string(&path)
+        let existed = path.is_file();
+        let mut loaded = std::fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str::<HarnessPrefsFile>(&text).ok())
             .unwrap_or_default();
+        if !existed && loaded.autonomy.is_none() {
+            // Brand-new data dir: Workspace, not FullAccess. Existing files
+            // without the key keep FullAccess via `autonomy()`.
+            loaded.autonomy = Some(Autonomy::Workspace);
+            loaded.autonomy_is_default = true;
+        }
         self.graff_draft_subagents
             .store(loaded.graff_draft_subagents, Ordering::Relaxed);
         let compact_at = loaded.graff_compact_at.filter(|pct| valid_compact_at(*pct));
@@ -271,7 +304,13 @@ impl HarnessRegistry {
         *self
             .prefs_path
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(path);
+            .unwrap_or_else(PoisonError::into_inner) = Some(path.clone());
+        if let Ok(keys) = harness_sync::load_or_create_device_keys(data_dir) {
+            *self
+                .device_keys
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(keys);
+        }
         self.migrate_legacy_prefs();
     }
 
@@ -408,22 +447,28 @@ impl HarnessRegistry {
         self.prefs().titles.clone()
     }
 
-    /// This device's default autonomy (full access until the user picks).
+    /// This device's default autonomy. New installs use Workspace; prefs
+    /// files written before that setting existed stay FullAccess until the
+    /// user picks.
     pub fn autonomy(&self) -> Autonomy {
-        self.prefs().autonomy.unwrap_or_default()
+        self.prefs().autonomy.unwrap_or(Autonomy::FullAccess)
     }
 
     /// Whether the user ever picked an autonomy level (onboarding or
     /// Settings); clients use it to tell a fresh choice from the fallback.
     pub fn autonomy_chosen(&self) -> bool {
-        self.prefs().autonomy.is_some()
+        let prefs = self.prefs();
+        prefs.autonomy.is_some() && !prefs.autonomy_is_default
     }
 
     /// Persist the default autonomy. Applies to runs dispatched after the
     /// change; a live runtime is replaced on its next send because its
     /// baked sandbox no longer matches.
     pub fn set_autonomy(&self, autonomy: Autonomy) {
-        self.prefs().autonomy = Some(autonomy);
+        let mut prefs = self.prefs();
+        prefs.autonomy = Some(autonomy);
+        prefs.autonomy_is_default = false;
+        drop(prefs);
         self.persist_prefs();
     }
 
@@ -459,6 +504,153 @@ impl HarnessRegistry {
     pub fn set_remote_control(&self, enabled: bool) {
         self.prefs().remote_control = enabled;
         self.persist_prefs();
+    }
+
+    pub fn e2ee(&self) -> bool {
+        self.prefs().e2ee || harness_sync::e2ee_from_env()
+    }
+
+    /// This computer's device keypair, minting one into the data dir if needed.
+    pub fn ensure_device_keys(&self) -> harness_sync::DeviceKeypair {
+        {
+            let slot = self
+                .device_keys
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(keys) = slot.clone() {
+                return keys;
+            }
+        }
+        let dir = self
+            .prefs_path
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| std::env::temp_dir());
+        let keys = harness_sync::load_or_create_device_keys(&dir)
+            .unwrap_or_else(|_| harness_sync::DeviceKeypair::generate());
+        *self
+            .device_keys
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(keys.clone());
+        keys
+    }
+
+    pub fn set_e2ee(&self, enabled: bool) {
+        self.prefs().e2ee = enabled;
+        self.persist_prefs();
+    }
+
+    pub fn remote_device_approved(&self, device_id: &str) -> bool {
+        self.prefs()
+            .approved_remote_devices
+            .iter()
+            .any(|id| id == device_id)
+    }
+
+    pub fn approve_remote_device(&self, device_id: &str) {
+        if device_id.is_empty() || device_id == "unknown" {
+            return;
+        }
+        {
+            let mut prefs = self.prefs();
+            if !prefs
+                .approved_remote_devices
+                .iter()
+                .any(|id| id == device_id)
+            {
+                prefs.approved_remote_devices.push(device_id.to_string());
+            }
+        }
+        self.persist_prefs();
+    }
+
+    pub fn revoke_remote_device(&self, device_id: &str) {
+        self.prefs()
+            .approved_remote_devices
+            .retain(|id| id != device_id);
+        self.persist_prefs();
+    }
+
+    pub fn pending_remote_approvals(&self) -> Vec<harness_rpc::RemoteApproval> {
+        self.pending_remote
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn watch_remote_approvals(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Vec<harness_rpc::RemoteApproval>> {
+        self.remote_approvals.subscribe()
+    }
+
+    pub fn park_remote_approval(&self, item: harness_rpc::RemoteApproval) {
+        let mut pending = self
+            .pending_remote
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if pending.iter().any(|p| {
+            p.command_id == item.command_id
+                && p.method == item.method
+                && p.device_id == item.device_id
+        }) {
+            return;
+        }
+        pending.push(item);
+        let snapshot = pending.clone();
+        drop(pending);
+        self.remote_approvals.send_replace(snapshot);
+    }
+
+    pub fn resolve_remote_approval(&self, id: &str, allow: bool, always: bool) -> bool {
+        let mut pending = self
+            .pending_remote
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(idx) = pending.iter().position(|p| p.id == id) else {
+            return false;
+        };
+        let item = pending.remove(idx);
+        let snapshot = pending.clone();
+        drop(pending);
+        self.remote_approvals.send_replace(snapshot);
+        if allow {
+            if always {
+                self.approve_remote_device(&item.device_id);
+            }
+            if let Some(command_id) = item.command_id {
+                self.one_shot_commands
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(command_id);
+            }
+        }
+        allow
+    }
+
+    pub fn command_approved(&self, command_id: &str) -> bool {
+        self.one_shot_commands
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(command_id)
+    }
+
+    /// One-shot allow for a parked command id (does not persist the device).
+    pub fn allow_command_once(&self, command_id: &str) {
+        let mut pending = self
+            .pending_remote
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        pending.retain(|p| p.command_id.as_deref() != Some(command_id));
+        let snapshot = pending.clone();
+        drop(pending);
+        self.remote_approvals.send_replace(snapshot);
+        self.one_shot_commands
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(command_id.to_string());
     }
 
     /// The setting's live value, for the task that holds the assertion.
@@ -1649,6 +1841,7 @@ mod title_tests {
         let prefs: HarnessPrefsFile = serde_json::from_str(r#"{"disabled":[]}"#).unwrap();
         assert_eq!(prefs.autonomy, None);
         let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("harness-prefs.json"), r#"{"disabled":[]}"#).unwrap();
         let registry = HarnessRegistry::new();
         registry.load_prefs(dir.path());
         assert_eq!(registry.autonomy(), Autonomy::FullAccess);
@@ -1658,6 +1851,20 @@ mod title_tests {
         reloaded.load_prefs(dir.path());
         assert_eq!(reloaded.autonomy(), Autonomy::Workspace);
         assert!(reloaded.autonomy_chosen());
+    }
+
+    #[test]
+    fn new_install_defaults_autonomy_to_workspace_without_marking_it_chosen() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        assert_eq!(registry.autonomy(), Autonomy::Workspace);
+        assert!(!registry.autonomy_chosen());
+        registry.set_keep_awake(false);
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        assert_eq!(reloaded.autonomy(), Autonomy::Workspace);
+        assert!(!reloaded.autonomy_chosen());
     }
 
     #[test]

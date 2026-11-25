@@ -141,6 +141,17 @@ test "settings navigation keeps search and Back reachable on short windows and r
     try testing.expect(h.t.hasText("Settings / Devices and data"));
     try testing.expect(h.t.hasText("Allow remote control"));
     try snap(&h, "devices-remote-control");
+    @import("view_settings_devices.zig").addPending(
+        &h.a.view.devices,
+        h.a.gpa,
+        "pending-1",
+        "phone",
+        "Run from phone: list the files",
+    );
+    h.t.settle(0.1);
+    try testing.expect(h.t.hasText("Approve remote action"));
+    try testing.expect(h.t.hasText("Allow once"));
+    try snap(&h, "devices-remote-approval");
     try h.t.clickText("Back");
     h.t.settle(0.1);
     try testing.expect(!h.a.view.settings_open);

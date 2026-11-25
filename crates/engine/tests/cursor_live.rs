@@ -1,12 +1,12 @@
 //! Opt-in production engine + Cursor SDK checks. Uses real account quota.
 //! HARNESS_CURSOR_STATE_DIR=$(mktemp -d) cargo test -p harness-engine --test cursor_live -- --ignored --nocapture --test-threads=1
-use std::{sync::Arc, time::Duration};
+use harness_adapters::CursorHarness;
 use harness_doc::{
     MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionMessageEntry,
 };
 use harness_engine::{EngineCore, HarnessRegistry};
-use harness_adapters::CursorHarness;
 use harness_proto::{HarnessId, RunRequest, SandboxLevel};
+use std::{sync::Arc, time::Duration};
 
 const CHAT: &str = "cursor-live-audit";
 fn setup(path: &std::path::Path) -> EngineCore {
@@ -23,6 +23,7 @@ fn setup(path: &std::path::Path) -> EngineCore {
         None,
     )
     .unwrap();
+    core.registry.set_remote_control(true);
     core.workspace
         .create_space(
             "audit",

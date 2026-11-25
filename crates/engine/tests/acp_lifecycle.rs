@@ -1,13 +1,13 @@
 //! #296 through the engine: completed tools must not park a pending ACP turn.
 //! Separate binary because the diagnostic watchdog setting is process-wide.
-use std::{sync::Arc, time::Duration};
+use harness_adapters::AcpHarness;
 use harness_doc::{
     MessagePart, MessageRole, MessageStatus, SessionCommandEntry, SessionCommandPayload,
     SessionCommandStatus,
 };
 use harness_engine::{EngineCore, HarnessRegistry};
-use harness_adapters::AcpHarness;
 use harness_proto::{HarnessId, RunRequest, SandboxLevel, SessionStatus};
+use std::{sync::Arc, time::Duration};
 
 async fn wait_for(mut condition: impl FnMut() -> bool) {
     tokio::time::timeout(Duration::from_secs(15), async {
@@ -33,6 +33,7 @@ async fn quiet_acp_prompt_stays_working_until_response() {
     registry.register(Arc::new(AcpHarness::devin().with_executable(fixture)));
     let core =
         EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Devin, None).unwrap();
+    core.registry.set_remote_control(true);
     let chat = "acp-quiet-regression";
     let handle = core.doc_host.open(chat).unwrap();
     let doc = handle.doc();

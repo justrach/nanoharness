@@ -155,6 +155,7 @@ async fn setup() -> (
         None,
     )
     .expect("engine core assembles");
+    core.registry.set_remote_control(true);
     let client = harness_rpc::memory_client(core.rpc_service());
     client
         .call(

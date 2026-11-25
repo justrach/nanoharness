@@ -18,7 +18,7 @@ The iOS app keeps its Swift port of the sync protocol in `apps/ios/Harness/Sync`
 
 The TypeScript Worker at `edge/` implements the Harness sync protocol. It deploys from this directory to `https://edge.codegraff.com`. The worker validates Harness tokens before forwarding requests into Durable Objects. Session, chat, registry, preview, and device rooms use WebSockets for live updates; R2 stores attachments and release artifacts. The CLI and iOS app use the same endpoint. Agent rooms add one live Durable Object per room over PostgreSQL. See `docs/chat2-sync.md`, `docs/registry-sync.md` and `docs/agent-rooms.md` for wire details.
 
-A synced device can request files and commands from another device through the relay only when that computer has **Allow remote control** enabled in Settings → Devices (off by default). Treat account access plus that opt-in as access to the connected device's workspace files, including ignored files when that option is enabled.
+A synced device can request files and commands from another device through the relay only when that computer has **Allow remote control** enabled in Settings → Devices (off by default). The first execution, file write or terminal from a given remote caller still needs a local approval chip. Chat2 commands from another device are Peer work and drain only after that opt-in or chip. `ApplyUpdate`, `SetAutonomy` and `SetRemoteControl` never run on the host relay. Treat account access plus that opt-in as access to the connected device's workspace files, including ignored files when that option is enabled. See ADR 0009.
 
 ## Distribution
 
