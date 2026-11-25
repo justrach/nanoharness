@@ -615,14 +615,16 @@ test "project picker #15: beside the pane it changes while a Files or host tab i
         }
         strip.focus(&h.a, .{ .chat = 0 });
         strip.focus(&h.a, if (panel == .files) .files else .host);
+        // A slot first drawn in one frame is measured for the next.
+        h.t.frame();
         h.t.settle(2);
         try testing.expect(strip.active(&h.a) != .chat);
         h.press(picker_chord);
         errdefer std.debug.print("panel={t} n={d} draft={}\n", .{ panel, n, draft });
         if (panel == .files and n == 2 and !draft) snap(&h, "picker-files-tab-active");
+        try expectBeside(&h, try slotFolderChip(&h, 0));
         // It changes pane 0's project, so that is the folder it checks.
         try testing.expect(strip.same(h.a.view.strip.target, .{ .chat = 0 }));
-        try expectBeside(&h, try slotFolderChip(&h, 0));
         h.press(.{ .key = ui.Shortcut.escape });
     };
 }
