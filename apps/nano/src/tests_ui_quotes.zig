@@ -692,7 +692,8 @@ const slid_passage = "Synthetic passage beside the slide.";
 
 /// Replies of wrapping prose, the passage in the middle of them: in a reply
 /// of its own, or (`steer`) in what a reply gained after a message sent
-/// while it worked. `started` is that reply as the message arrived.
+/// while it worked. `started` is that reply as the message arrived: taller
+/// than the window, so that going to its start doesn't show what follows.
 fn slideHistory(steer: bool, started: bool) ![]u8 {
     const sentence = "Made-up prose that fills a few lines of the column, so that its height depends on how wide the column is, and that a slide of the sidebar has to lay out again once it is over. ";
     const prose = sentence ++ sentence ++ sentence;
@@ -702,7 +703,9 @@ fn slideHistory(steer: bool, started: bool) ![]u8 {
     for (0..50) |i| {
         if (i == 25) {
             try json.appendSlice(testing.allocator, "{\"id\":\"su\",\"role\":\"user\",\"parts\":[{\"id\":\"p\",\"kind\":\"text\",\"text\":\"Synthetic work\"}]},");
-            try json.print(testing.allocator, "{{\"id\":\"sa\",\"role\":\"assistant\",\"status\":\"{s}\",\"parts\":[{{\"id\":\"n\",\"kind\":\"text\",\"text\":\"Synthetic narration. {s}\"}}", .{ if (started) "streaming" else "complete", prose });
+            try json.print(testing.allocator, "{{\"id\":\"sa\",\"role\":\"assistant\",\"status\":\"{s}\",\"parts\":[{{\"id\":\"n\",\"kind\":\"text\",\"text\":\"Synthetic narration.", .{if (started) "streaming" else "complete"});
+            for (0..16) |_| try json.print(testing.allocator, "\\n\\n{s}", .{prose});
+            try json.appendSlice(testing.allocator, "\"}");
             if (!started) try json.print(testing.allocator, ",{{\"id\":\"q\",\"kind\":\"text\",\"text\":\"{s}\\n\\n{s}\"}}", .{ slid_passage, prose });
             try json.appendSlice(testing.allocator, "]},");
             if (steer) try json.appendSlice(testing.allocator, "{\"id\":\"steer\",\"role\":\"user\",\"parts\":[{\"id\":\"p\",\"kind\":\"text\",\"text\":\"Synthetic steer\"}]},");
@@ -736,6 +739,7 @@ test "quote selection chip goes to the real row while a slide's rows are measure
         // Every row is drawn once, and has a height to stand in for it.
         h.a.composer.set(draft);
         const at = h.t.ctx.nodes.items[h.node(slid_passage) orelse return error.TextMissing].rect;
+        if (steer) try testing.expect(h.t.findText("Synthetic steer").?.y < at.y);
         try h.scrollTo(h.offset() + at.y - 250);
         try h.quote(slid_passage);
         h.a.offscreen = false;
