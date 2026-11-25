@@ -1291,6 +1291,55 @@ test "failed Codex Xcode license update shows diagnostic, Copy command, and loca
     }
 }
 
+test "an update failure that only mentions Xcode and a LICENSE file keeps its own diagnostic (#125)" {
+    const updates = @import("agent_updates.zig");
+    const vu = @import("view_updates.zig");
+    const unrelated = "npm error EACCES: permission denied, unlink '/opt/demo/node_modules/xcode/LICENSE'";
+
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    const devs = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"synthetic-device","name":"Local MacBook","online":true}]
+    , .{});
+    defer devs.deinit();
+    try h.a.devices.replace(devs.value);
+    if (h.a.device_id) |old| h.a.gpa.free(old);
+    h.a.device_id = try h.a.gpa.dupe(u8, "synthetic-device");
+
+    try updates.setTestStatuses(&h.a, "synthetic-device", true,
+        \\[{"harness":"codex","installedVersion":"0.171.0","latestVersion":"0.172.0","phase":"failed","canApply":true,"error":{"kind":"install","message":"npm error EACCES: permission denied, unlink '/opt/demo/node_modules/xcode/LICENSE'"}}]
+    );
+    h.t.settle(1);
+    h.t.frame();
+    const btn = h.a.view.updates_anchor orelse return error.MissingTopbarUpdatesButton;
+    h.t.click(btn.x + btn.w / 2, btn.y + btn.h / 2);
+    h.t.settle(0.4);
+    h.t.frame();
+    if (std.c.getenv("NANO_SNAP_DIR")) |dir| {
+        var buf: [1024]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, "{s}/update-failure-unrelated.png", .{std.mem.span(dir)});
+        h.t.screenshot(path) catch {};
+    }
+    try testing.expect(h.t.hasText(unrelated));
+    try testing.expect(!h.t.hasText("Copy command"));
+    try testing.expect(!h.t.hasText("Open Terminal"));
+    try testing.expect(h.t.hasText("Retry"));
+    try testing.expect(h.t.hasText("Skip"));
+
+    try testing.expect(!vu.isXcodeLicenseBlocker(null));
+    try testing.expect(!vu.isXcodeLicenseBlocker(unrelated));
+    try testing.expect(!vu.isXcodeLicenseBlocker("license changed\nnpm error gyp: No Xcode or CLT version detected!"));
+    for ([_][]const u8{
+        "Error: You have not agreed to the Xcode license. Run `sudo xcodebuild -license` and retry.",
+        "You have not agreed to the Xcode license agreements.",
+        "Agreeing to the Xcode/iOS license requires admin privileges",
+        "The Xcode license has not been accepted",
+        "  sudo xcodebuild -license accept",
+    }) |msg| try testing.expect(vu.isXcodeLicenseBlocker(msg));
+}
+
 test "sidebar star banner, right-click menu, bottom account row, and compact model account popover" {
     var h: Harness = undefined;
     try h.init(true);
