@@ -31,7 +31,11 @@ const Harness = struct {
         h.a.offscreen = offscreen;
         h.a.dark = true;
         h.a.view.sidebar_open = false;
-        h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"QueueCommand\":{}}", .{});
+        h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\{"QueueCommand":{},"QueueMessage":{"id":"queued"},
+            \\ "BeginQueuedMessageEdit":{"outcome":"acquired","leaseId":"lease","baseTextHash":"hash","text":"Synthetic queued message"},
+            \\ "FinishQueuedMessageEdit":{"outcome":"committed"}}
+        , .{});
         h.a.engine.state = .connected;
         h.a.device_id = try testing.allocator.dupe(u8, "fixture");
         var chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
@@ -60,6 +64,10 @@ const Harness = struct {
         try h.a.transcript.apply(p.value);
     }
 
+    fn pump(h: *Harness) void {
+        for (0..20) |_| if (!h.a.engine.pump()) return;
+    }
+
     fn snap(h: *Harness, name: []const u8) !void {
         const dir = std.c.getenv("NANO_SNAP_DIR") orelse return;
         var buf: [1024]u8 = undefined;
@@ -69,11 +77,9 @@ const Harness = struct {
 
     /// A text leaf of the transcript (not of the composer over it).
     fn node(h: *Harness, text: []const u8) ?u32 {
-        const view = h.t.ctx.rects.get(h.a.view.jump_box) orelse return null;
         for (h.t.ctx.nodes.items, 0..) |n, ix| {
             if (n.content != .text or !std.mem.eql(u8, n.content.text.str, text)) continue;
             if (h.inComposer(n.rect)) continue;
-            _ = view;
             return @intCast(ix);
         }
         return null;
@@ -592,24 +598,29 @@ test "quote selection waits while a queued message being edited has the composer
     defer h.deinit();
     h.a.composer.set(draft);
     try h.quote(option_b);
-    const edit = try testing.allocator.dupe(u8, "row");
-    h.a.queue_edit = .{
-        .row = edit,
-        .lease = try testing.allocator.dupe(u8, "lease"),
-        .base_hash = try testing.allocator.dupe(u8, "hash"),
-        .renew_at = h.a.now + 60,
-    };
+    h.a.caps.edit_lease = true;
+    const queue = @import("app_queue.zig");
+    queue.beginEdit(&h.a, "row");
+    h.pump();
     h.t.settle(0.3);
+    try testing.expectEqualStrings("Synthetic queued message", h.a.composer.text());
     try testing.expect(h.chip(option_b) == null);
     // Nor is there a draft to quote into.
     try h.select(option_a, 0, option_a.len);
     try testing.expect(h.t.ctx.selection.anchor != null);
     try testing.expect(!h.t.hasText(action));
-    h.a.queue_edit.?.deinit(testing.allocator);
-    h.a.queue_edit = null;
+    // What it saves has no quote of the draft's.
+    queue.finishEdit(&h.a, .commit);
+    const frame = h.a.engine.sent.items[h.a.engine.sent.items.len - 1];
+    var sent = try std.json.parseFromSlice(std.json.Value, testing.allocator, frame, .{});
+    defer sent.deinit();
+    try testing.expectEqualStrings("Synthetic queued message", sent.value.object.get("params").?.object.get("text").?.string);
+    h.pump();
     h.t.settle(0.3);
+    try testing.expectEqualStrings(draft, h.a.composer.text());
     try testing.expect(h.chip(option_b) != null);
-    try testing.expect(h.t.hasText(action));
+    h.a.send();
+    try testing.expectEqualStrings("> " ++ option_b ++ "\n\n" ++ draft, try h.sentText());
 }
 
 test "quote selection offers a passage again once it is selected anew" {
