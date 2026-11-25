@@ -771,10 +771,22 @@ fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     return false;
 }
 
+/// Phrases rather than loose words: `xcode` is also an npm package with a
+/// LICENSE file. The engine's `contains_xcode_license_blocker`
+/// (harness_updates.rs) matches the same ones.
+const xcode_license_phrases = [_][]const u8{
+    "xcodebuild -license",
+    "xcode license",
+    "xcode/ios license",
+    "xcode and apple sdks license",
+};
+
 pub fn isXcodeLicenseBlocker(msg: ?[]const u8) bool {
     const text = msg orelse return false;
-    return containsAsciiIgnoreCase(text, "xcodebuild -license") or
-        (containsAsciiIgnoreCase(text, "xcode") and containsAsciiIgnoreCase(text, "license"));
+    for (xcode_license_phrases) |phrase| {
+        if (containsAsciiIgnoreCase(text, phrase)) return true;
+    }
+    return false;
 }
 
 fn openTerminalApp(a: *App) void {

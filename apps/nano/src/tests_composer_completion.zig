@@ -342,6 +342,202 @@ test "completion new canvas tab parking and first run retain accepted identity b
     try testing.expectEqualStrings("", h.a.composer.text());
 }
 
+/// Moves the live caret without rewriting the draft, as arrow keys or a click do.
+fn moveCaret(h: *Harness, caret: usize) void {
+    h.t.textOps(&.{.{ .select = .{ .anchor = caret, .caret = caret } }});
+    h.draw();
+}
+
+/// Leaves the accepted token, returns to its end and accepts it again.
+fn acceptAgain(h: *Harness, caret: usize) void {
+    moveCaret(h, h.a.composer.text().len);
+    moveCaret(h, caret);
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
+    h.draw();
+}
+
+/// The count comes before `prompt`, so a duplicate fails here, not in a slice.
+fn expectOnePrompt(h: *Harness, start: usize, end: usize, expected: []const u8) !void {
+    const refs = h.a.completion.selected.items;
+    try testing.expectEqual(@as(usize, 1), refs.len);
+    try testing.expectEqual(start, refs[0].start);
+    try testing.expectEqual(end, refs[0].end);
+    const encoded = (try @import("composer_completion.zig").prompt(&h.a)) orelse return error.MissingSelectedCommand;
+    defer testing.allocator.free(encoded);
+    try testing.expectEqualStrings(expected, encoded);
+}
+
+fn goalPrompt(suffix: []const u8) ![]u8 {
+    const link = try @import("composer_completion.zig").canonical(testing.allocator, .{ .name = "goal", .description = "" });
+    defer testing.allocator.free(link);
+    return std.fmt.allocPrint(testing.allocator, "{s}{s}", .{ link, suffix });
+}
+
+test "completion issue178 repeated accept keeps one reference and sends one command" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.draft("/goal write tests", 5);
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
+    h.draw();
+    acceptAgain(&h, 5);
+    try testing.expectEqualStrings("/goal write tests", h.a.composer.text());
+    const expected = try goalPrompt(" write tests");
+    defer testing.allocator.free(expected);
+    if (std.c.getenv("NANO_SNAP_DIR")) |dir| {
+        var buf: [1024]u8 = undefined;
+        try h.t.screenshot(try std.fmt.bufPrint(&buf, "{s}/issue178-accepted.png", .{std.mem.span(dir)}));
+    }
+    try expectOnePrompt(&h, 0, 5, expected);
+    h.a.send();
+    const wire = (try lastPrompt(&h)) orelse return error.NoQueueCommand;
+    defer testing.allocator.free(wire);
+    try testing.expectEqualStrings(expected, wire);
+}
+
+test "completion issue178 repeated accept that only restores the trailing space keeps one reference" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.draft("/goal", 5);
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
+    h.draw();
+    try testing.expectEqualStrings("/goal ", h.a.composer.text());
+    // Deleting the space leaves the accepted name and its reference in place.
+    h.t.textOps(&.{.{ .command = .delete_backward }});
+    h.draw();
+    try testing.expectEqualStrings("/goal", h.a.composer.text());
+    try testing.expectEqual(@as(usize, 1), h.a.completion.selected.items.len);
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
+    h.draw();
+    try testing.expectEqualStrings("/goal ", h.a.composer.text());
+    const expected = try goalPrompt(" ");
+    defer testing.allocator.free(expected);
+    try expectOnePrompt(&h, 0, 5, expected);
+}
+
+test "completion issue178 newest accept replaces the link and leaves other references alone" {
+    const completion = @import("composer_completion.zig");
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const text = "$review notes then /goal write tests";
+    const goal_start = std.mem.indexOf(u8, text, "/goal").?;
+    h.draft(text, goal_start + 5);
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
+    h.draw();
+    moveCaret(&h, 7);
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
+    h.draw();
+    try testing.expectEqual(@as(usize, 2), h.a.completion.selected.items.len);
+    // The same visible name now resolves to a different synthetic skill.
+    try replies(&h,
+        \\{"ListCommands":[{"name":"goal","description":"Synthetic goal command"}],"ListSkills":[{"name":"review","path":"/synthetic/skills/review-next.md","description":"Synthetic review skill","enabled":true}],"QueueCommand":{"commandId":"synthetic-command"},"FocusChat":{},"Mutate":{}}
+    );
+    h.draw();
+    acceptAgain(&h, 7);
+    try testing.expectEqualStrings(text, h.a.composer.text());
+    const refs = h.a.completion.selected.items;
+    try testing.expectEqual(@as(usize, 2), refs.len);
+    try testing.expectEqual(@as(usize, 0), refs[0].start);
+    try testing.expectEqual(goal_start, refs[1].start);
+    const review = try completion.canonical(testing.allocator, .{ .name = "review", .description = "", .path = "/synthetic/skills/review-next.md" });
+    defer testing.allocator.free(review);
+    const goal = try goalPrompt(" write tests");
+    defer testing.allocator.free(goal);
+    const expected = try std.fmt.allocPrint(testing.allocator, "{s} notes then {s}", .{ review, goal });
+    defer testing.allocator.free(expected);
+    const encoded = (try completion.prompt(&h.a)) orelse return error.MissingSelectedCommand;
+    defer testing.allocator.free(encoded);
+    try testing.expectEqualStrings(expected, encoded);
+}
+
+test "completion issue178 repeated accept after undo, redo, parking or paste keeps one reference" {
+    const expected = try goalPrompt(" prompt remains");
+    defer testing.allocator.free(expected);
+    for ([_]enum { redo, parked, pasted }{ .redo, .parked, .pasted }) |writer| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        h.draft("/goalprompt remains", 5);
+        _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
+        h.draw();
+        const text = "/goal prompt remains";
+        try testing.expectEqualStrings(text, h.a.composer.text());
+        switch (writer) {
+            .redo => {
+                _ = h.t.shortcut(.{ .key = 'z', .cmd = true });
+                h.draw();
+                try testing.expectEqual(@as(usize, 0), h.a.completion.selected.items.len);
+                _ = h.t.shortcut(.{ .key = 'z', .cmd = true, .shift = true });
+                h.draw();
+                try testing.expectEqual(@as(usize, 1), h.a.completion.selected.items.len);
+            },
+            .parked => {
+                h.a.select("other-synthetic-chat", null);
+                h.draw();
+                h.a.select("completion-chat", null);
+                h.a.view.focus_composer = true;
+                h.draw();
+                try testing.expectEqual(@as(usize, 1), h.a.completion.selected.items.len);
+            },
+            .pasted => {
+                h.t.textOps(&.{ .{ .select = .{ .anchor = 0, .caret = text.len } }, .{ .insert = text } });
+                h.draw();
+                try testing.expectEqual(@as(usize, 0), h.a.completion.selected.items.len);
+                acceptAgain(&h, 5);
+                try testing.expectEqual(@as(usize, 1), h.a.completion.selected.items.len);
+            },
+        }
+        acceptAgain(&h, 5);
+        try testing.expectEqualStrings(text, h.a.composer.text());
+        try expectOnePrompt(&h, 0, 5, expected);
+        if (writer != .redo) continue;
+        // The repeated accept changed no text, so undo still steps over the
+        // one completion edit and redo brings back exactly one reference.
+        _ = h.t.shortcut(.{ .key = 'z', .cmd = true });
+        h.draw();
+        try testing.expectEqualStrings("/goalprompt remains", h.a.composer.text());
+        try testing.expectEqual(@as(usize, 0), h.a.completion.selected.items.len);
+        _ = h.t.shortcut(.{ .key = 'z', .cmd = true, .shift = true });
+        h.draw();
+        try testing.expectEqualStrings(text, h.a.composer.text());
+        try expectOnePrompt(&h, 0, 5, expected);
+    }
+}
+
+test "completion issue178 invalid references fail the send and keep the draft" {
+    const completion = @import("composer_completion.zig");
+    const Span = struct { start: usize, end: usize };
+    const text = "/goal write tests";
+    // The inverted span comes first: unlike the rest it does not slice out of
+    // order, so an unchecked serializer fails the assertion instead of aborting.
+    const cases = [_][]const Span{
+        &.{.{ .start = 5, .end = 0 }},
+        &.{ .{ .start = 0, .end = 5 }, .{ .start = 0, .end = 5 } },
+        &.{ .{ .start = 0, .end = 5 }, .{ .start = 3, .end = 8 } },
+        &.{ .{ .start = 6, .end = 11 }, .{ .start = 0, .end = 5 } },
+        &.{.{ .start = 0, .end = text.len + 1 }},
+    };
+    for (cases) |spans| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        h.draft(text, 5);
+        for (spans) |span| {
+            const display = try testing.allocator.dupe(u8, "/goal");
+            const link = try testing.allocator.dupe(u8, "[/goal](harness-invoke:00)");
+            try h.a.completion.selected.append(testing.allocator, .{ .start = span.start, .end = span.end, .display = display, .link = link });
+        }
+        try testing.expectError(error.InvalidReferences, completion.prompt(&h.a));
+        h.a.send();
+        try testing.expectEqualStrings(text, h.a.composer.text());
+        try testing.expectEqual(spans.len, h.a.completion.selected.items.len);
+        try testing.expectEqualStrings("Could not prepare selected command or skill. Your draft is preserved.", h.a.noticeText() orelse return error.MissingNotice);
+        try testing.expect(try lastPrompt(&h) == null);
+    }
+}
+
 fn replies(h: *Harness, text: []const u8) !void {
     if (h.a.engine.scene) |*old| old.deinit();
     h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator, text, .{});
