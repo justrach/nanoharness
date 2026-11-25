@@ -47,6 +47,8 @@ pub fn dismissLeftPeek(a: *App) void {
 }
 
 pub fn updatePeek(c: *ui.Context, a: *App) void {
+    // After the shortcuts have read it, before this frame's headers are built.
+    a.view.strip.pane_header_anchor = null;
     if (!a.view.full_screen) return;
     if (a.view.fs_left_need_exit and (c.input.mouse.x > left_edge_px + 4 or a.view.sidebar_open)) {
         a.view.fs_left_need_exit = false;
@@ -294,6 +296,20 @@ pub fn drawTopPeek(c: *ui.Context, a: *App, strip_layout: strip.rendering.Layout
     if (exit_btn.clicked()) a.setFullScreen(false);
 }
 
+/// The project picker is open on this pane's header (not a footer chip's).
+fn pickerOpenAt(a: *const App, pane_ix: usize) bool {
+    const state = &a.view.strip;
+    return state.menu == .folder and !state.footer_folder and strip.same(state.target, .{ .chat = pane_ix });
+}
+
+/// Where the project picker opens for the focused chat in full screen. An
+/// open picker follows it through a resize.
+fn projectAnchor(c: *ui.Context, a: *App, pane_ix: usize, id: u64) void {
+    const r = c.rects.get(id) orelse return;
+    a.view.strip.pane_header_anchor = r;
+    if (pickerOpenAt(a, pane_ix)) a.view.strip.anchor = r;
+}
+
 pub fn chatHeader(
     c: *ui.Context,
     a: *App,
@@ -357,6 +373,7 @@ pub fn chatHeader(
             const lead = ui.div(c).row().grow().w(0).gap(6).itemsCenter().clip().control();
             defer lead.end();
             if (focused) {
+                projectAnchor(c, a, pane_ix, c.node(lead.index).id);
                 ui.div(c).size(5, 5).rounded(2.5).bg(k.accent.alpha(0.92)).end();
             }
             icons.icon(c, proj_icon, 12.5, ui.Color.white.alpha(if (focused) 0.78 else 0.45), 0);
@@ -378,6 +395,7 @@ pub fn chatHeader(
                     .bg(ui.Color.white.alpha(if (focused) 0.085 else 0.05)).clip();
                 if (proj_tip) |pt| pchip = tip.on(pchip, dk, .{ .text = pt, .look = .tab });
                 defer pchip.end();
+                if (focused) projectAnchor(c, a, pane_ix, c.node(pchip.index).id);
                 kit.ellipsisText(c, pn, .{
                     .size = 11,
                     .line_height = 14,
@@ -435,6 +453,7 @@ pub fn chatHeader(
             const frect = c.rects.get(c.node(fpill.index).id);
             if (focused) if (frect) |r| {
                 a.view.strip.active_folder_anchor = r;
+                if (pickerOpenAt(a, pane_ix)) a.view.strip.anchor = r;
             };
             icons.icon(c, .folder, 11, ui.Color.white.alpha(if (focused) 0.85 else 0.55), 0);
             kit.ellipsisText(c, proj_name, .{

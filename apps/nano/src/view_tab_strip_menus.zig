@@ -224,9 +224,12 @@ fn separator(c: *ui.Context, k: theme.Colors) void {
     ui.div(c).wFull().h(1).bg(k.border).end();
 }
 
-fn folderMenu(c: *ui.Context, a: *App, k: theme.Colors, anchor: ui.Rect) void {
+fn folderMenu(c: *ui.Context, a: *App, k: theme.Colors, opened_at: ui.Rect) void {
     const search = @import("strip_folder_search.zig");
     const state = &a.view.strip;
+    // Only the focused draft draws a footer chip. Follow it while the window
+    // resizes, as the tab strip's chip does.
+    const anchor = if (state.footer_folder and strip.same(state.target, strip.pickerPanel(a))) a.view.space_anchor orelse opened_at else opened_at;
     const target = state.target;
     var cursor_node: ?u32 = null;
     const device = strip.device(a, target);
