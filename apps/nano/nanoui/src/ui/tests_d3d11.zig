@@ -83,6 +83,7 @@ fn drawnPixels(px: gpu.Pixels, clear: ui.Color) usize {
 /// So the frame has to have content before it is compared.
 pub fn drawThenRead(r: *d3d11.Renderer, t: *ui.Tester, clear: ui.Color) !gpu.Pixels {
     const gpa = testing.allocator;
+    r.gradients = t.ctx.gradients.items;
     r.sync(t.text.atlas.mask(), t.text.atlas.generation, t.text.images.pictures(), t.text.images.generation);
     r.draw(t.instances.items, t.size, t.scale, clear, null);
     const px = try r.read(gpa);
@@ -140,6 +141,30 @@ test "d3d11: shapes match the CPU renderer" {
     try compare(&t, .{ .mean = 1.0, .worst = 240, .off_in = 20 });
 }
 
+test "d3d11: circular and continuous corners match CPU at fractional scales" {
+    const Scene = struct {
+        fn view(_: *@This(), c: *ui.Context) void {
+            for ([_]bool{ false, true }, 0..) |circular, i| {
+                _ = c.open(.{ .absolute = true, .offset = .{ .x = 8 + @as(f32, @floatFromInt(i)) * 100, .y = 8 }, .width = .{ .px = 80 }, .height = .{ .px = 56 }, .radius = 16, .corner_circular = circular, .background = .{ .r = 1, .a = 1 }, .border = .{ .g = 1, .a = 1 }, .border_width = 2 }, null);
+                c.end();
+            }
+            for ([_]bool{ false, true }, 0..) |circular, i| {
+                _ = c.open(.{ .absolute = true, .offset = .{ .x = 8 + @as(f32, @floatFromInt(i)) * 100, .y = 84 }, .width = .{ .px = 80 }, .height = .{ .px = 56 }, .radius = 16, .corner_circular = circular, .clip = true }, null);
+                _ = c.open(.{ .width = .fill, .height = .fill, .background = .{ .b = 1, .a = 1 } }, null);
+                c.end();
+                c.end();
+            }
+        }
+    };
+    for ([_]f32{ 1, 1.25, 2 }) |scale| {
+        var scene: Scene = .{};
+        var t: ui.Tester = undefined;
+        try t.init(testing.allocator, .init(&scene, Scene.view), .{ .width = 240, .height = 160, .scale = scale });
+        defer t.deinit();
+        try compare(&t, .{ .mean = 0.1, .worst = 8, .off_in = 1000 });
+    }
+}
+
 test "d3d11: glass matches the CPU renderer" {
     const Scene = @import("tests_glass.zig").Scene;
     for ([_]ui.Theme{ .light, .dark_theme }) |theme| {
@@ -160,6 +185,16 @@ test "d3d11: a canvas matches the CPU renderer" {
     defer t.deinit();
     t.settle(0.1);
     try compare(&t, .{ .mean = 0.5, .worst = 240, .off_in = 20 });
+}
+
+test "d3d11: scroll fade groups match the CPU renderer" {
+    const Scene = @import("tests_scroll_fade.zig").Scene;
+    var s: Scene = .{ .opacity = 0.65 };
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&s, Scene.view), .{ .width = 140, .height = 110, .scale = 1 });
+    defer t.deinit();
+    t.settle(0.1);
+    try compare(&t, .{ .mean = 0.1, .worst = 16, .off_in = 500 });
 }
 
 test "d3d11: a coloured quad keeps its channels" {
@@ -195,6 +230,27 @@ test "d3d11: a coloured quad keeps its channels" {
     try testing.expectEqual([4]u8{ 0, 0, 255, 255 }, red);
     try testing.expectEqual([4]u8{ 0, 255, 0, 255 }, green);
     try testing.expectEqual([4]u8{ 255, 0, 0, 255 }, blue);
+}
+
+test "d3d11: small Classic and large Natural glyphs share one atlas" {
+    const Mixed = struct {
+        fn view(_: *@This(), c: *ui.Context) void {
+            ui.text(c, "Task Manager 1006.3 MB", .{ .size = 12, .color = c.theme.text });
+            ui.text(c, "Task Manager 1006.3 MB", .{ .size = 26, .color = c.theme.text });
+        }
+    };
+    for ([_]bool{ false, true }) |dark| for ([_]f32{ 1, 1.25 }) |scale| {
+        var sample: Mixed = .{};
+        var theme = ui.Theme.light;
+        theme.background = if (dark) .hex(0x202020) else .white;
+        theme.text = if (dark) .hex(0xf0f0f0) else .hex(0x1a1a1a);
+        theme.font = "Segoe UI";
+        var t: ui.Tester = undefined;
+        try t.init(testing.allocator, .init(&sample, Mixed.view), .{ .width = 400, .height = 100, .scale = scale, .theme = theme });
+        defer t.deinit();
+        for (0..3) |_| t.frame();
+        try compare(&t, .{ .mean = 2, .worst = 2, .off_in = 0 });
+    };
 }
 
 test "d3d11: ClearType coverage blends each color channel" {
@@ -388,4 +444,31 @@ test "d3d11: the sizes a drag passes through keep every glass target alive" {
         try testing.expect(r.b.texture != null and r.b.rtv != null and r.b.srv != null);
         try testing.expect(r.snap.texture != null and r.snap.rtv != null and r.snap.srv != null);
     }
+}
+
+test "d3d11: multi-stop gradients and dithered shadows match the CPU renderer" {
+    const Scene = struct {
+        const stops = [_]ui.GradientStop{
+            .{ .at = 0, .color = .hex(0x00ff14) },
+            .{ .at = 0.3, .color = .hex(0x3cc350) },
+            .{ .at = 0.6, .color = .hex(0x00ff8c) },
+            .{ .at = 1, .color = .hex(0x50afdc) },
+        };
+        fn view(_: *@This(), c: *ui.Context) void {
+            const root = ui.div(c).sizeFull().bg(.hex(0x191816));
+            defer root.end();
+            ui.div(c).absolute().offset(12, 12).w(44).h(96).rounded(10).bg(.white).gradientStops(&stops, null).end();
+            ui.div(c).absolute().offset(68, 60).w(44).h(48).bg(.white).gradientStops(&stops, .{ .x = 0, .y = -48, .w = 44, .h = 96 }).end();
+            ui.div(c).absolute().offset(136, 20).w(84).h(64).rounded(14).bg(.hex(0x282724))
+                .shadow(.{ .blur = 14, .y = 6, .color = .{ .a = 0.45 } })
+                .shadow(.{ .blur = 6, .y = 2, .knockout = true, .color = .{ .a = 0.3 } })
+                .end();
+        }
+    };
+    var s: Scene = .{};
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&s, Scene.view), .{ .width = 240, .height = 120, .theme = .dark_theme });
+    defer t.deinit();
+    t.settle(0.1);
+    try compare(&t, .{ .mean = 0.5, .worst = 10, .off_in = 500 });
 }

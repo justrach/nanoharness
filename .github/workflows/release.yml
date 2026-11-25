@@ -313,7 +313,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          sparse-checkout: docs/releases
+          sparse-checkout: |
+            docs/releases
+            scripts
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -341,7 +343,12 @@ jobs:
             || { echo "missing docs/releases/v$ver.md (the release notes)"; exit 1; }
           echo "VERSION=$ver" >> "$GITHUB_ENV"
       - name: updater manifest
+        env:
+          RELEASE_MANIFEST_SIGNING_KEY: ${{ secrets.RELEASE_MANIFEST_SIGNING_KEY }}
         run: |
+          set -euo pipefail
+          test -n "${RELEASE_MANIFEST_SIGNING_KEY:-}" \
+            || { echo "::error::missing RELEASE_MANIFEST_SIGNING_KEY secret"; exit 1; }
           manifest=$(jq -n --arg version "$VERSION" '{version: $version, files: {}}')
           for f in dist/*; do
             sha=$(sha256sum "$f" | cut -d' ' -f1)
@@ -349,6 +356,13 @@ jobs:
               '.files[$name] = {sha256: $sha}' <<<"$manifest")
           done
           printf '%s' "$manifest" > manifest.json
+          key_file=$(mktemp)
+          trap 'rm -f "$key_file"' EXIT
+          chmod 600 "$key_file"
+          printf '%s\n' "$RELEASE_MANIFEST_SIGNING_KEY" > "$key_file"
+          python3 scripts/gen-release-key.py --key "$key_file" --sign manifest.json
+          jq -e '.sig | type == "string" and length == 128' manifest.json >/dev/null \
+            || { echo "::error::manifest.json missing 128-char hex Ed25519 sig"; exit 1; }
           printf '%s' "$VERSION" > latest.txt
       - uses: softprops/action-gh-release@v2
         with:

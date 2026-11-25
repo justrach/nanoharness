@@ -88,14 +88,13 @@ pub fn macAppArtifactAlloc(gpa: Allocator, version: []const u8) ![]u8 {
     return std.fmt.allocPrint(gpa, "harness-{s}-macos-{s}-app.tar.gz", .{ version, platformKey().arch });
 }
 
-/// Ed25519 public key baked into the app. Until a production key is generated
-/// (`scripts/gen-release-key.py`, see docs/adr/0009) this is a TEST key and
-/// unsigned GitHub manifests are still accepted only by tests that opt out.
+/// Ed25519 public key baked into the app (`scripts/gen-release-key.py`, see
+/// docs/adr/0009); pairs with the CI `RELEASE_MANIFEST_SIGNING_KEY` secret.
 pub const release_verify_key: [32]u8 = .{
-    0x11, 0x8e, 0x2c, 0x37, 0x6f, 0x9a, 0x4b, 0x51,
-    0xd0, 0x2c, 0x8e, 0x77, 0x14, 0x6a, 0x91, 0x03,
-    0x5e, 0x88, 0x4f, 0x22, 0xb1, 0x70, 0xcd, 0x09,
-    0xa3, 0x56, 0x7d, 0x1e, 0x40, 0x8c, 0x2f, 0x64,
+    0x81, 0x1b, 0x3c, 0x04, 0x21, 0x34, 0x1b, 0x27,
+    0xdf, 0xbd, 0x46, 0xd0, 0x90, 0xc2, 0x99, 0x5d,
+    0x7a, 0xe5, 0x70, 0x76, 0x16, 0x2c, 0xe7, 0x77,
+    0x39, 0x0d, 0x12, 0xb2, 0xa5, 0xe5, 0xa8, 0xe1,
 };
 
 /// `version` plus each `file=sha256` line, sorted. The private key signs this.
@@ -2396,6 +2395,37 @@ test "updates: ApplyUpdate refuses an unsigned manifest when signatures are requ
     const msg = (try handle(&u, testing.allocator, .apply)).failed;
     try testing.expect(std.mem.indexOf(u8, msg, "unsigned manifest") != null);
     try testing.expectEqual(@as(usize, 0), fr.count);
+}
+
+test "updates: manifestMessage and verifyManifestSig match gen-release-key.py test vector" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var files: json.ObjectMap = .empty;
+    inline for (.{ .{ "b.zip", "2222" }, .{ "a.tar.gz", "1111" } }) |entry| {
+        var obj: json.ObjectMap = .empty;
+        try obj.put(a, "sha256", .{ .string = entry[1] });
+        try files.put(a, entry[0], .{ .object = obj });
+    }
+    const msg = try manifestMessage(a, "0.2.237", files);
+    try testing.expectEqualStrings("0.2.237\na.tar.gz=1111\nb.zip=2222\n", msg);
+
+    var pubkey: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&pubkey, "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8");
+    var sig: [64]u8 = undefined;
+    _ = try std.fmt.hexToBytes(
+        &sig,
+        "31682043ec7dc3bcf3db6e76618652e92d5b3120032be03d718e9e4f0554aeae" ++
+            "0d7012143d917424c4744bc3a570dd49acbb8194307ee7b34db3723755b1b30f",
+    );
+    try testing.expect(verifyManifestSig(msg, &sig, pubkey));
+
+    var bad_sig = sig;
+    bad_sig[0] ^= 1;
+    try testing.expect(!verifyManifestSig(msg, &bad_sig, pubkey));
+
+    const alt_msg = try manifestMessage(a, "0.2.238", files);
+    try testing.expect(!verifyManifestSig(alt_msg, &sig, pubkey));
 }
 
 /// A made-up `Applications/Harness.app` (an "old release") with made-up

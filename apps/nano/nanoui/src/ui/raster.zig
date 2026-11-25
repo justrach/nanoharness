@@ -19,6 +19,10 @@ pub const Mask = struct {
     size: u32,
     native_pixels: []const u8 = &.{},
     text_params: @import("text_blend.zig").Params = .{},
+    /// For glyphs tagged Classic (254, 127): DirectWrite blends GDI Classic
+    /// analyses with their own gamma and contrast, not the system default's.
+    classic_text_params: @import("text_blend.zig").Params = .{},
+    classic_gray_params: @import("text_blend.zig").Params = .{},
 };
 
 /// The image atlas: BGRA premultiplied, `size` × `size` (empty: none).
@@ -404,12 +408,12 @@ pub fn cornerSdf(px: f32, py: f32, hw: f32, hh: f32, r_in: f32) [2]f32 {
 /// all of it, but in the clip's rounded corners (as the shader's
 /// `clip_cover`).
 pub inline fn clipCover(i: *const gpu.Instance, wx: f32, wy: f32, inv: f32) f32 {
-    if (i.clip_round <= 0) return 1;
+    if (i.clip_round == 0) return 1;
     const round = gpu.clipCorners(i.clip_round);
     const c = i.clip;
     const hw = (c[2] - c[0]) * 0.5;
     const hh = (c[3] - c[1]) * 0.5;
-    const r = @min(round.radius, @min(hw, hh));
+    const r = @min(@abs(round.radius), @min(hw, hh));
     const reach = @min(1.52866495 * r, @max(hw, hh));
     // Between the corners, nothing is cut.
     if ((wx > c[0] + reach and wx < c[2] - reach) or (wy > c[1] + reach and wy < c[3] - reach)) return 1;
@@ -417,7 +421,7 @@ pub inline fn clipCover(i: *const gpu.Instance, wx: f32, wy: f32, inv: f32) f32 
     const qy = wy - c[1] - hh;
     const bit: u4 = if (qy < 0) (if (qx < 0) 1 else 2) else (if (qx < 0) 8 else 4);
     if (round.corners & bit == 0) return 1;
-    const sd = cornerSdf(qx, qy, hw, hh, r);
+    const sd = cornerSdf(qx, qy, hw, hh, if (round.radius < 0) -r else r);
     const aa = @max(sd[1] * inv, 0.0001) * 0.5;
     return 1 - smoothstep(-aa, aa, sd[0]);
 }
@@ -537,18 +541,21 @@ fn glyph(out: gpu.Pixels, i: *const gpu.Instance, mask: Mask, scale: f32, b: [4]
                 const ay: usize = @intFromFloat(std.math.clamp(@floor(v * side), 0, side - 1));
                 const native = mask.native_pixels[(ay * mask.size + ax) * 4 ..][0..4];
                 if (native[3] != 0) {
+                    const classic = native[3] == 254 or native[3] == 127;
+                    const text_params = if (classic) mask.classic_text_params else mask.text_params;
+                    const gray_params = if (classic) mask.classic_gray_params else mask.text_params;
                     const lightness = 0.30 * c[0] + 0.59 * c[1] + 0.11 * c[2];
                     // ClearType requires an opaque destination. Transparent
                     // pixels retain genuine grayscale coverage and alpha.
-                    if (native[3] == 255 and out.bytes[at + 3] == 255) {
+                    if ((native[3] == 255 or native[3] == 254) and out.bytes[at + 3] == 255) {
                         for (0..3) |channel| {
-                            const cov = mask.text_params.coverage(@as(f32, @floatFromInt(native[channel])) / 255, c[channel], lightness, true) * opacity;
+                            const cov = text_params.coverage(@as(f32, @floatFromInt(native[channel])) / 255, c[channel], lightness, true) * opacity;
                             const dest = at + 2 - channel; // output is BGRA
                             out.bytes[dest] = unit(c[channel] * cov + @as(f32, @floatFromInt(out.bytes[dest])) / 255 * (1 - cov));
                         }
                         continue;
                     }
-                    const a = mask.text_params.coverage(sample(mask, u, v), 0.25 * c[0] + 0.5 * c[1] + 0.25 * c[2], lightness, false) * opacity;
+                    const a = gray_params.coverage(sample(mask, u, v), 0.25 * c[0] + 0.5 * c[1] + 0.25 * c[2], lightness, false) * opacity;
                     blend(out.bytes, at, c[0] * a, c[1] * a, c[2] * a, a);
                     continue;
                 }

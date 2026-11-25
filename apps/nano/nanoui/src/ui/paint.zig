@@ -238,7 +238,7 @@ fn paintNode(c: *Context, out: *std.ArrayList(metal.Instance), index: u32, clip_
         push(c, out, .{ .rect = .{ visible.x, visible.y, visible.w, visible.h }, .color = .{ 1, 1, 1, 1 }, .kind = metal.Kind.layer_begin, .clip = metal.clip4(child_clip) });
     }
     while (child != none) : (child = c.node(child).next) paintNode(c, out, child, child_clip, if (masked) 1 else opacity, selectable, inner_scrolled);
-    if ((st.clip or st.scroll or st.scroll_x) and st.radius > 0) roundClip(out.items[first..], r, visible, st.radius, st.clip_corners);
+    if ((st.clip or st.scroll or st.scroll_x) and st.radius > 0) roundClip(out.items[first..], r, visible, rad, st.clip_corners);
     if (masked) {
         c.painting_group = was_group;
         push(c, out, .{

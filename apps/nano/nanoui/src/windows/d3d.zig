@@ -20,9 +20,13 @@ const Guid = extern struct { a: u32, b: u16, c: u16, d: [8]u8 };
 
 const iid_dxgi_device: Guid = .{ .a = 0x54ec77fa, .b = 0x1377, .c = 0x44e6, .d = .{ 0x8c, 0x32, 0x88, 0xfd, 0x5f, 0x44, 0xc8, 0x4c } };
 const iid_dxgi_factory2: Guid = .{ .a = 0x50c83a1c, .b = 0xe072, .c = 0x4c48, .d = .{ 0x87, 0xb0, 0x36, 0x30, 0xfa, 0x36, 0xa6, 0xd0 } };
+/// IDXGISwapChain3 (dxgi1_4.h): `SetColorSpace1` for explicit sRGB output.
+const iid_swap_chain3: Guid = .{ .a = 0x94d99bdb, .b = 0xf1f8, .c = 0x4ab0, .d = .{ 0xb2, 0x36, 0x7d, 0xa0, 0x17, 0x0e, 0xda, 0xb1 } };
 const iid_texture2d: Guid = .{ .a = 0x6f15aaf2, .b = 0xd208, .c = 0x4e89, .d = .{ 0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c } };
 
 const format_bgra8: u32 = 87; // DXGI_FORMAT_B8G8R8A8_UNORM, as the renderer writes
+/// DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 (sRGB).
+const colour_space_srgb: u32 = 0;
 
 const shared_device = @import("../ui/d3d11_device.zig");
 
@@ -145,7 +149,18 @@ pub const Presenter = struct {
         try check(factory.?.slot(*const fn (*Com, *Com, w.HWND, *const SwapChainDesc1, ?*anyopaque, ?*anyopaque, *?*Com) callconv(.winapi) HRESULT, 15)(factory.?, dev, hwnd, &desc, null, null, &swap)); // CreateSwapChainForHwnd
         // Alt+Enter is nanoui's to give meaning to, not DXGI's.
         _ = factory.?.slot(*const fn (*Com, w.HWND, u32) callconv(.winapi) HRESULT, 8)(factory.?, hwnd, 2); // MakeWindowAssociation, NO_ALT_ENTER
-        return .{ .device = dev, .context = ctx, .swap = swap orelse return error.Direct3D, .width = desc.width, .height = desc.height };
+        const swap_out = swap orelse return error.Direct3D;
+        _ = setColourSpace(swap_out, colour_space_srgb);
+        return .{ .device = dev, .context = ctx, .swap = swap_out, .width = desc.width, .height = desc.height };
+    }
+
+    fn setColourSpace(swap: *Com, colour_space: u32) bool {
+        const sc3 = swap.query(&iid_swap_chain3) catch return false;
+        defer sc3.release();
+        var support: u32 = 0;
+        // CheckColorSpaceSupport, then SetColorSpace1: present support is bit 0.
+        if (sc3.slot(*const fn (*Com, u32, *u32) callconv(.winapi) HRESULT, 37)(sc3, colour_space, &support) < 0 or support & 1 == 0) return false;
+        return sc3.slot(*const fn (*Com, u32) callconv(.winapi) HRESULT, 38)(sc3, colour_space) >= 0;
     }
 
     pub fn deinit(p: *Presenter) void {

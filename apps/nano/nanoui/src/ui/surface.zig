@@ -459,7 +459,7 @@ pub const Surface = struct {
         const atlas_reset = self.text.atlas.reset_during_frame or self.text.images.reset_during_frame;
         if (atlas_reset) self.renderer.waitIdle();
         self.renderer.syncImages(&self.text.images);
-        self.renderer.color_atlas_texture = self.text.colorTexture();
+        self.renderer.color_atlas_texture = if (text.portable) null else self.text.colorTexture();
         self.renderer.textures = c.textures.items;
         self.renderer.gradients = c.gradients.items;
         self.renderer.before_encode = self.before_encode;
