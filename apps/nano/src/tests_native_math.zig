@@ -420,3 +420,204 @@ test "native math UI inline \\displaystyle renders at display sizing and copies 
     t.frame();
     try testing.expectEqualStrings(source, t.ctx.selection.text.items);
 }
+
+test "native math parses multiple display equations on one source line (#154)" {
+    theme.registerFonts();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    for ([_][]const u8{
+        "\\[a^2\\] and \\[b^2\\]",
+        "$$a^2$$ and $$b^2$$",
+        "Example: \\[a^2\\] and \\[b^2\\]",
+        "Example: $$a^2$$ and $$b^2$$",
+    }) |src| {
+        const blocks = md.parse(a, src, pal);
+        try testing.expectEqual(@as(usize, 1), blocks.len);
+        try testing.expect(blocks[0] == .paragraph);
+        const p = blocks[0].paragraph;
+        try testing.expectEqual(@as(usize, 2), p.maths.len);
+        try testing.expectEqualStrings("a^2", p.maths[0].source);
+        try testing.expect(p.maths[0].display);
+        try testing.expectEqualStrings("b^2", p.maths[1].source);
+        try testing.expect(p.maths[1].display);
+        try testing.expect(std.mem.indexOf(u8, p.text, " and ") != null);
+    }
+
+    for ([_][]const u8{ "$$a^2$$", "\\[a^2\\]" }) |single| {
+        const blocks = md.parse(a, single, pal);
+        try testing.expectEqual(@as(usize, 1), blocks.len);
+        try testing.expect(blocks[0] == .math);
+        try testing.expectEqualStrings("a^2", blocks[0].math.maths[0].source);
+        try testing.expect(blocks[0].math.maths[0].display);
+    }
+
+    const multiline = "\\[\n\\begin{matrix}a&b\\\\c&d\\end{matrix}\n\\]";
+    const mblocks = md.parse(a, multiline, pal);
+    try testing.expectEqual(@as(usize, 1), mblocks.len);
+    try testing.expect(mblocks[0] == .math);
+    try testing.expect(mblocks[0].math.maths[0].display);
+
+    for ([_][]const u8{ "\\[a^2\\] and \\[b^2\\]", "$$a^2$$ and $$b^2$$" }) |src| {
+        var f = Fixture{ .source = src };
+        var t: ui.Tester = undefined;
+        try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 620, .height = 240 });
+        defer t.deinit();
+        t.settle(3);
+        var images: usize = 0;
+        for (t.ctx.nodes.items) |node| {
+            if (node.content == .image) images += 1;
+        }
+        try testing.expectEqual(@as(usize, 2), images);
+    }
+}
+
+test "native math recovers at later complete equation after unmatched opener (#153)" {
+    theme.registerFonts();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    for ([_][]const u8{
+        "Unfinished \\(draft; then $x^2$.",
+        "Unfinished $$draft; then $x^2$.",
+        "Unfinished \\[draft; then $x^2$.",
+        "Unfinished $draft_1; then \\(x^2\\).",
+    }) |src| {
+        const p = md.parse(a, src, pal)[0].paragraph;
+        try testing.expectEqual(@as(usize, 1), p.maths.len);
+        try testing.expectEqualStrings("x^2", p.maths[0].source);
+        try testing.expectEqualStrings(src, p.text);
+    }
+
+    for ([_][]const u8{
+        "Unfinished \\(draft; then $x^2$ and **bold**.",
+        "Unfinished $$draft; then **bold** and $x^2$.",
+    }) |src| {
+        const p = md.parse(a, src, pal)[0].paragraph;
+        try testing.expectEqual(@as(usize, 1), p.maths.len);
+        try testing.expectEqualStrings("x^2", p.maths[0].source);
+        var saw_bold = false;
+        for (p.spans) |sp| {
+            if (sp.weight == .semibold and std.mem.eql(u8, p.text[sp.start..sp.end], "bold")) {
+                saw_bold = true;
+                break;
+            }
+        }
+        try testing.expect(saw_bold);
+    }
+
+    for ([_][]const u8{
+        "\\(x_i",
+        "$$x_{a}_b",
+        "$x_{a}_b",
+        "Unfinished \\(draft",
+        "Unfinished \\(draft; then `$x^2$`.",
+    }) |incomplete| {
+        const p = md.parse(a, incomplete, pal)[0].paragraph;
+        try testing.expectEqual(@as(usize, 0), p.maths.len);
+        if (std.mem.indexOfScalar(u8, incomplete, '`') == null) {
+            try testing.expectEqualStrings(incomplete, p.text);
+        }
+    }
+
+    var f = Fixture{ .source = "Unfinished \\(draft" };
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 620, .height = 240 });
+    defer t.deinit();
+    t.settle(3);
+    var before_images: usize = 0;
+    for (t.ctx.nodes.items) |node| {
+        if (node.content == .image) before_images += 1;
+    }
+    try testing.expectEqual(@as(usize, 0), before_images);
+    try testing.expect(t.hasText("Unfinished \\(draft"));
+
+    f.source = "Unfinished \\(draft; then $x^2$.";
+    t.settle(3);
+    var after_images: usize = 0;
+    for (t.ctx.nodes.items) |node| {
+        if (node.content == .image) after_images += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), after_images);
+}
+
+test "native math prevents dollar price from stealing later inline equation opener (#155)" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    for ([_][]const u8{
+        "Pay $9, then ($x^2$).",
+        "Pay $9.99, then ($x^2$).",
+        "Pay $1,200, then [$x^2$].",
+        "Pay $9, then \"$x^2$\".",
+        "Pay $9 (not $10) for ($x^2$).",
+    }) |src| {
+        const p = md.parse(a, src, pal)[0].paragraph;
+        try testing.expectEqual(@as(usize, 1), p.maths.len);
+        try testing.expectEqualStrings("x^2", p.maths[0].source);
+        try testing.expectEqualStrings(src, p.text);
+    }
+
+    const streaming = md.parse(a, "Pay $9, then ($x^2", pal)[0].paragraph;
+    try testing.expectEqual(@as(usize, 0), streaming.maths.len);
+
+    const code_price = md.parse(a, "`$9, then ($x^2$)`", pal)[0].paragraph;
+    try testing.expectEqual(@as(usize, 0), code_price.maths.len);
+
+    for ([_]struct { src: []const u8, eq: []const u8 }{
+        .{ .src = "$5$", .eq = "5" },
+        .{ .src = "$1, 2$", .eq = "1, 2" },
+        .{ .src = "$2x + 3$", .eq = "2x + 3" },
+        .{ .src = "$12.50 - 3$", .eq = "12.50 - 3" },
+    }) |case| {
+        const p = md.parse(a, case.src, pal)[0].paragraph;
+        try testing.expectEqual(@as(usize, 1), p.maths.len);
+        try testing.expectEqualStrings(case.eq, p.maths[0].source);
+    }
+
+    const numeric_then_math = md.parse(a, "$1 + 2$, then ($x^2$)", pal)[0].paragraph;
+    try testing.expectEqual(@as(usize, 2), numeric_then_math.maths.len);
+    try testing.expectEqualStrings("1 + 2", numeric_then_math.maths[0].source);
+    try testing.expectEqualStrings("x^2", numeric_then_math.maths[1].source);
+}
+
+test "native math UI delimiter regressions render cleanly (#153 #154 #155)" {
+    theme.registerFonts();
+    var f = Fixture{ .source =
+        \\**#153 Unmatched opener:** Unfinished \(draft; then $x^2$.
+        \\
+        \\Unfinished $$draft; then $x^2$.
+        \\
+        \\**#154 Same-line display:**
+        \\
+        \\\[a^2\] and \[b^2\]
+        \\
+        \\$$a^2$$ and $$b^2$$
+        \\
+        \\**#155 Currency before equation:** Pay $9, then ($x^2$).
+    };
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 560, .height = 410 });
+    defer t.deinit();
+    t.settle(3);
+    if (std.c.getenv("NANO_MATH_DELIM_SNAP")) |raw| {
+        try t.screenshot(std.mem.span(raw));
+    }
+
+    var equations: usize = 0;
+    var saw_price = false;
+    var saw_raw_eq = false;
+    for (t.ctx.nodes.items) |node| {
+        if (node.content == .image) equations += 1;
+        if (node.content == .text and node.content.text.color.a != 0) {
+            if (std.mem.indexOf(u8, node.content.text.str, "$9") != null) saw_price = true;
+            if (std.mem.indexOf(u8, node.content.text.str, "x^2$") != null) saw_raw_eq = true;
+        }
+    }
+    try testing.expectEqual(@as(usize, 7), equations);
+    try testing.expect(saw_price);
+    try testing.expect(!saw_raw_eq);
+}
