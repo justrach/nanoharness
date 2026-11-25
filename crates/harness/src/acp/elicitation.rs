@@ -155,6 +155,7 @@ pub(super) fn form(params: &Value, new_id: impl Fn() -> String) -> Option<Form> 
                 prefill: None,
                 multiline: false,
                 multi_select: false,
+                requires_human_ui: false,
             },
         });
     }

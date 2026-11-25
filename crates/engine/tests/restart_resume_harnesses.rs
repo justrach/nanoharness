@@ -72,6 +72,7 @@ fn question() -> UserInputQuestion {
         prefill: None,
         multiline: false,
         multi_select: false,
+        requires_human_ui: false,
     }
 }
 
@@ -414,6 +415,7 @@ fn answer(core: &EngineCore, request_id: &str, label: &str) {
                     question_id: "q1".into(),
                     labels: vec![label.into()],
                 }],
+                from_agent: false,
             },
         )
         .expect("queue answer");

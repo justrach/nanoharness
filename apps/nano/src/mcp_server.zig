@@ -59,6 +59,7 @@ pub const Config = struct {
     origin: tools.Origin = .{},
     home: ?[]const u8 = null,
     graff_executable: ?[]const u8 = null,
+    ipc_token: ?[]const u8 = null,
 
     pub fn fromEnv(env: *const std.process.Environ.Map) Config {
         const read = struct {
@@ -72,6 +73,7 @@ pub const Config = struct {
             .origin = .{ .chat_id = read(env, "HARNESS_CHAT_ID"), .device_id = read(env, "HARNESS_DEVICE_ID") },
             .home = env.get("HOME"),
             .graff_executable = env.get("GRAFF_EXECUTABLE"),
+            .ipc_token = read(env, "HARNESS_IPC_TOKEN"),
         };
     }
 };
@@ -351,6 +353,9 @@ pub fn serveStdio(gpa: Allocator, io: Io, env: *const std.process.Environ.Map) !
     // answers even before the engine is up.
     var ws_link = engine_link.WsEngine.init(gpa, io, config.ipc_port);
     defer ws_link.deinit();
+    const data_dir = @import("engine_cli.zig").resolveDataDir(gpa, io, env) catch null;
+    defer if (data_dir) |d| gpa.free(d);
+    try ws_link.setAuth(data_dir, config.ipc_token);
     const graff = try peer.graffExecutable(arena, io, config.graff_executable, config.home);
     var graff_peer: peer.GraffPeer = .{ .io = io, .graff = graff };
     var graff_bots: tools.bots.GraffBots = .{ .io = io, .graff = graff };

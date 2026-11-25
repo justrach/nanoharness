@@ -100,6 +100,7 @@ export const deleteAccount = async (request: Request, env: Env): Promise<Respons
   const bearer = bearerFromRequest(request);
   const caller = bearer ? await verifyToken(env, bearer) : undefined;
   if (!caller) return json({ error: "invalid or missing bearer token" }, 401);
+  if (caller.trustTier === "sandbox") return json({ error: "trust_tier_denied" }, 403);
 
   const body = (await request.json().catch(() => null)) as { refreshToken?: unknown; confirm?: unknown } | null;
   if (body?.confirm !== "delete") return json({ error: "confirm_required" }, 400);

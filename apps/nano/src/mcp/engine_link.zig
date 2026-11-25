@@ -121,6 +121,8 @@ pub const WsEngine = struct {
     /// Reader threads still running. Each is detached and counts itself
     /// out as it ends, so reconnects leave nothing behind.
     live_readers: usize = 0,
+    data_dir: ?[]u8 = null,
+    explicit_token: ?[]u8 = null,
 
     const Slot = struct {
         generation: u64,
@@ -141,6 +143,16 @@ pub const WsEngine = struct {
         return .{ .gpa = gpa, .io = io, .port = port };
     }
 
+    pub fn setAuth(self: *WsEngine, data_dir: ?[]const u8, explicit_token: ?[]const u8) !void {
+        const next_dir = if (data_dir) |d| try self.gpa.dupe(u8, d) else null;
+        errdefer if (next_dir) |d| self.gpa.free(d);
+        const next_tok = if (explicit_token) |t| try self.gpa.dupe(u8, t) else null;
+        if (self.data_dir) |d| self.gpa.free(d);
+        if (self.explicit_token) |t| self.gpa.free(t);
+        self.data_dir = next_dir;
+        self.explicit_token = next_tok;
+    }
+
     /// Closes the socket and waits for its reader to end. No call may be
     /// in flight.
     pub fn deinit(self: *WsEngine) void {
@@ -151,6 +163,8 @@ pub const WsEngine = struct {
         var it = self.slots.iterator();
         while (it.next()) |e| self.freeSlot(e.value_ptr.*);
         self.slots.deinit(self.gpa);
+        if (self.data_dir) |d| self.gpa.free(d);
+        if (self.explicit_token) |t| self.gpa.free(t);
         self.mutex.unlock(self.io);
     }
 
@@ -221,7 +235,9 @@ pub const WsEngine = struct {
         self.dialing = true;
         self.mutex.unlock(self.io);
 
-        const dialed = ws.Client.connect(self.gpa, self.io, self.port, "/");
+        const tok = ws.resolveIpcToken(self.gpa, self.io, self.explicit_token, self.data_dir, self.port, true);
+        defer if (tok) |t| self.gpa.free(t);
+        const dialed = ws.Client.connectWithBearer(self.gpa, self.io, self.port, "/", tok);
 
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);

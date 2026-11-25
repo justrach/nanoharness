@@ -9,10 +9,14 @@ import {
 } from "jose";
 import type { Env } from "./env";
 
+export type TrustTier = "personal" | "sandbox";
+
 export interface Verified {
   readonly userId: string;
   readonly sessionId?: string;
   readonly orgId?: string;
+  readonly trustTier: TrustTier;
+  readonly sandboxId?: string;
 }
 
 const ISSUER = "https://edge.codegraff.com";
@@ -57,7 +61,7 @@ const eddsaKey = async (env: Env) => {
 };
 
 export const issueToken = async (env: Env, userId: string): Promise<string> => {
-  const claims = { org_id: personalOrgId(userId) };
+  const claims = { org_id: personalOrgId(userId), trust_tier: "personal" };
   const ed = await eddsaKey(env);
   if (ed) {
     return new SignJWT(claims)
@@ -78,6 +82,27 @@ export const issueToken = async (env: Env, userId: string): Promise<string> => {
     .setSubject(userId)
     .setIssuedAt()
     .setExpirationTime(ACCESS_TTL)
+    .sign(key);
+};
+
+export const issueSandboxToken = async (
+  env: Env,
+  userId: string,
+  sandboxId?: string
+): Promise<string> => {
+  const key = signingKey(env);
+  if (!key) throw new Error("HARNESS_AUTH_SIGNING_KEY is not configured");
+  return new SignJWT({
+    org_id: personalOrgId(userId),
+    trust_tier: "sandbox",
+    ...(sandboxId ? { sandbox_id: sandboxId } : {})
+  })
+    .setProtectedHeader({ alg: "HS256" })
+    .setIssuer(ISSUER)
+    .setAudience(AUDIENCE)
+    .setSubject(userId)
+    .setIssuedAt()
+    .setExpirationTime("5m")
     .sign(key);
 };
 
@@ -186,14 +211,18 @@ export const verifyToken = async (env: Env, token: string): Promise<Verified | u
   if (env.AUTH_MODE === "dev") {
     if (!token) return undefined;
     const at = token.indexOf("@");
-    if (at > 0) return { userId: token.slice(0, at), orgId: token.slice(at + 1) };
-    return { userId: token };
+    if (at > 0) return { userId: token.slice(0, at), orgId: token.slice(at + 1), trustTier: "personal" };
+    return { userId: token, trustTier: "personal" };
   }
   const claimsOf = (payload: JWTPayload): Verified | undefined => {
     if (typeof payload.sub !== "string" || !payload.sub) return undefined;
+    const trustTier: TrustTier = payload.trust_tier === "sandbox" ? "sandbox" : "personal";
+    const sandboxId = typeof payload.sandbox_id === "string" && payload.sandbox_id ? payload.sandbox_id : undefined;
     return {
       userId: payload.sub,
-      orgId: typeof payload.org_id === "string" ? payload.org_id : undefined
+      orgId: typeof payload.org_id === "string" ? payload.org_id : undefined,
+      trustTier,
+      ...(sandboxId ? { sandboxId } : {})
     };
   };
   const ed = await eddsaKey(env);

@@ -53,6 +53,7 @@ fn room_post(text: &str) -> String {
             from_display: None,
             from_github: None,
             from_fingerprint: None,
+            hop: 0,
         },
         text,
     )

@@ -1136,6 +1136,7 @@ fn permission_question(tool: &str, input: &Value) -> UserInputQuestion {
         prefill: None,
         multiline: false,
         multi_select: false,
+        requires_human_ui: true,
     }
 }
 
@@ -1167,6 +1168,7 @@ fn parse_questions(input: &Value) -> Vec<UserInputQuestion> {
                     .iter()
                     .find_map(|k| q.get(*k).and_then(Value::as_bool))
                     .unwrap_or(false),
+                requires_human_ui: false,
                 options: q
                     .get("options")
                     .and_then(Value::as_array)

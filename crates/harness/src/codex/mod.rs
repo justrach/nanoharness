@@ -1887,6 +1887,7 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
                     .iter()
                     .find_map(|k| q.get(*k).and_then(Value::as_bool))
                     .unwrap_or(false),
+                requires_human_ui: false,
             };
             (wire_id, question)
         })
@@ -1939,6 +1940,7 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
         prefill: None,
         multiline: false,
         multi_select: false,
+        requires_human_ui: true,
     }
 }
 

@@ -590,6 +590,8 @@ pub const App = struct {
 
     /// Starts the connection; `a` must stay where it is from now on.
     pub fn start(a: *App) !void {
+        const env_tok = if (a.env) |env| env.get("HARNESS_IPC_TOKEN") else null;
+        try a.engine.setAuth(a.settings.dataDir(), env_tok);
         a.engine.events = .{ .ctx = a, .state = stateChanged };
         try a.engine.start();
     }

@@ -295,6 +295,9 @@ impl Terminals {
                 cmd.arg("-l"); // login shell — the user's real PATH/profile
             }
             cmd.cwd(cwd);
+            cmd.env_remove("HARNESS_IPC_TOKEN");
+            cmd.env_remove("HARNESS_SANDBOX_TOKEN_FILE");
+            cmd.env_remove("HARNESS_EDGE_TOKEN");
             cmd.env("TERM", "xterm-256color");
             cmd.env("COLORTERM", "truecolor");
             cmd.env("TERM_PROGRAM", "Harness");
@@ -1285,6 +1288,46 @@ mod initial_command_tests {
                 .is_err()
         );
         assert!(!terminals.any_open());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pty_scrubs_engine_and_sandbox_tokens_from_shell_env() {
+        let root = tempfile::tempdir().unwrap();
+        let terminals = Terminals::new();
+        let output = root.path().join("env.out");
+        let mut env = HashMap::new();
+        env.insert("HARNESS_SAFE_VAR".to_string(), "ok".to_string());
+        // SAFETY: isolated test checking child PTY env scrubbing.
+        unsafe {
+            std::env::set_var("HARNESS_IPC_TOKEN", "secret-ipc-tok");
+            std::env::set_var("HARNESS_SANDBOX_TOKEN_FILE", "/secret/tok");
+            std::env::set_var("HARNESS_EDGE_TOKEN", "secret-edge-tok");
+        }
+        let session = terminals
+            .open_session(
+                root.path().to_str().unwrap(),
+                80,
+                24,
+                Some("/bin/sh"),
+                &env,
+                Some("printf '%s|%s|%s|%s' \"$HARNESS_SAFE_VAR\" \"$HARNESS_IPC_TOKEN\" \"$HARNESS_SANDBOX_TOKEN_FILE\" \"$HARNESS_EDGE_TOKEN\" > env.out; exit 0"),
+            )
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&output)
+                    && !text.is_empty()
+                {
+                    break text;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("pty command finished");
+        assert_eq!(std::fs::read_to_string(&output).unwrap(), "ok|||");
+        terminals.close(&session.id).unwrap();
     }
 }
 

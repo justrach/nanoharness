@@ -21,7 +21,13 @@
  */
 import { applyOp, validateOp, type Op, type Row } from "./registry-core";
 import { freshPresence, type PresenceBeat } from "./registry-presence";
-import { AUTH_USER_HEADER, apnsConfig, type Env } from "./env";
+import {
+  AUTH_SANDBOX_ID_HEADER,
+  AUTH_TRUST_TIER_HEADER,
+  AUTH_USER_HEADER,
+  apnsConfig,
+  type Env
+} from "./env";
 import { isDeadToken, sendApns, type ApnsEnvironment } from "./apns";
 import {
   apnsPayload,
@@ -46,6 +52,8 @@ const MAX_FRAME_BYTES = 1_000_000;
 interface SocketState {
   userId: string;
   device: string;
+  trustTier: "personal" | "sandbox";
+  sandboxId: string;
   /** Set once a valid hello established the session. */
   ready?: boolean;
 }
@@ -114,6 +122,9 @@ export class RegistryRoom implements DurableObject {
     // wipes them with everything else.
     sql.exec(
       "CREATE TABLE IF NOT EXISTS push_targets (device TEXT PRIMARY KEY, token TEXT NOT NULL, environment TEXT NOT NULL, prefs TEXT NOT NULL, updated_at INTEGER NOT NULL)"
+    );
+    sql.exec(
+      "CREATE TABLE IF NOT EXISTS device_claims (device TEXT PRIMARY KEY, tier TEXT NOT NULL, sandbox_id TEXT NOT NULL DEFAULT '')"
     );
   }
 
@@ -195,6 +206,154 @@ export class RegistryRoom implements DurableObject {
     return out;
   }
 
+  private deviceFromChatRow(chatId: string): string | undefined {
+    const chat = this.loadRow("chats", chatId);
+    if (!chat || chat.deleted) return undefined;
+    const d = chat.fields.deviceId;
+    return typeof d === "string" && d !== "" ? d : undefined;
+  }
+
+  private chatHostInfo(chatId: string): {
+    found: boolean;
+    deviceId?: string;
+    tier?: "personal" | "sandbox";
+    sandboxId?: string;
+  } {
+    const deviceId = this.deviceFromChatRow(chatId);
+    if (!deviceId) return { found: false };
+    const claim = [
+      ...this.ctx.storage.sql.exec("SELECT tier, sandbox_id FROM device_claims WHERE device = ?", deviceId)
+    ][0];
+    if (claim) {
+      return {
+        found: true,
+        deviceId,
+        tier: (claim.tier as string) === "sandbox" ? "sandbox" : "personal",
+        sandboxId: (claim.sandbox_id as string) ?? ""
+      };
+    }
+    return { found: true, deviceId, tier: "personal", sandboxId: "" };
+  }
+
+  private claimOrVerifyDevice(
+    device: string,
+    trustTier: "personal" | "sandbox",
+    sandboxId: string
+  ): { ok: true } | { ok: false; status: number; code: string; message: string } {
+    if (trustTier === "personal") {
+      if (device !== "") {
+        this.ctx.storage.sql.exec(
+          "INSERT OR IGNORE INTO device_claims (device, tier, sandbox_id) VALUES (?, 'personal', '')",
+          device
+        );
+      }
+      return { ok: true };
+    }
+    if (device === "") {
+      return { ok: false, status: 400, code: "bad_request", message: "device required" };
+    }
+    const existing = [
+      ...this.ctx.storage.sql.exec("SELECT tier, sandbox_id FROM device_claims WHERE device = ?", device)
+    ][0];
+    if (existing) {
+      const claimTier = (existing.tier as string) === "sandbox" ? "sandbox" : "personal";
+      const claimSandbox = (existing.sandbox_id as string) ?? "";
+      if (claimTier !== "sandbox" || (claimSandbox !== "" && claimSandbox !== sandboxId)) {
+        return {
+          ok: false,
+          status: 403,
+          code: "trust_tier_denied",
+          message: "device belongs to another trust tier or sandbox"
+        };
+      }
+      if (claimSandbox === "" && sandboxId !== "") {
+        this.ctx.storage.sql.exec("UPDATE device_claims SET sandbox_id = ? WHERE device = ?", sandboxId, device);
+      }
+      return { ok: true };
+    }
+    // Pre-claim personal devices already in the registry remain personal-only.
+    const existingDevice = this.loadRow("devices", device);
+    if (existingDevice) {
+      this.ctx.storage.sql.exec(
+        "INSERT OR IGNORE INTO device_claims (device, tier, sandbox_id) VALUES (?, 'personal', '')",
+        device
+      );
+      return { ok: false, status: 403, code: "trust_tier_denied", message: "device belongs to personal tier" };
+    }
+    this.ctx.storage.sql.exec(
+      "INSERT INTO device_claims (device, tier, sandbox_id) VALUES (?, 'sandbox', ?)",
+      device,
+      sandboxId
+    );
+    return { ok: true };
+  }
+
+  private rowVisibleToDevice(row: Row, device: string): boolean {
+    if (row.kind === "devices") return row.id === device;
+    if (row.kind === "spaces" || row.kind === "chats" || row.kind === "sessions") {
+      return row.fields.deviceId === device;
+    }
+    return false;
+  }
+
+  private filterRowsForTier(rows: Row[], trustTier: "personal" | "sandbox", device: string): Row[] {
+    return trustTier === "sandbox" ? rows.filter((r) => this.rowVisibleToDevice(r, device)) : rows;
+  }
+
+  private filterPresenceForTier(
+    presence: Record<string, number>,
+    trustTier: "personal" | "sandbox",
+    device: string
+  ): Record<string, number> {
+    if (trustTier !== "sandbox") return presence;
+    const at = presence[device];
+    return at === undefined ? {} : { [device]: at };
+  }
+
+  private validateSandboxBatch(device: string, ops: WireOp[]): string | undefined {
+    const allowedKinds = new Set(["devices", "spaces", "chats", "sessions"]);
+    const createdChats = new Map<string, string>();
+    for (const op of ops) {
+      if (!allowedKinds.has(op.kind)) {
+        return `kind ${op.kind} is not writable from a sandbox token`;
+      }
+      if (op.kind === "devices") {
+        if (op.id !== device) return `sandbox ${device} cannot mutate device ${op.id}`;
+        continue;
+      }
+      const before = this.loadRow(op.kind, op.id);
+      if (op.op === "delete") {
+        const beforeDev = before?.fields.deviceId;
+        if (beforeDev !== device) return `${op.kind}/${op.id} is not owned by device ${device}`;
+        continue;
+      }
+      // op.op === "upsert"
+      const setDev = op.set && "deviceId" in op.set ? op.set.deviceId : undefined;
+      if (setDev !== undefined && setDev !== device) {
+        return `${op.kind}/${op.id} cannot set deviceId outside ${device}`;
+      }
+      if (before) {
+        const beforeDev =
+          before.fields.deviceId ?? (op.kind === "sessions" ? this.deviceFromChatRow(op.id) : undefined);
+        if (beforeDev !== device) {
+          return `${op.kind}/${op.id} is owned by another device`;
+        }
+      } else if (op.kind === "chats") {
+        if (setDev !== device) return `chats/${op.id} must set deviceId to ${device}`;
+        createdChats.set(op.id, device);
+      } else if (op.kind === "spaces") {
+        if (setDev !== device) return `spaces/${op.id} must set deviceId to ${device}`;
+      } else if (op.kind === "sessions") {
+        const ownerDev =
+          setDev === device ? device : createdChats.get(op.id) ?? this.deviceFromChatRow(op.id);
+        if (ownerDev !== device) {
+          return `sessions/${op.id} must belong to device ${device}`;
+        }
+      }
+    }
+    return undefined;
+  }
+
   // ── HTTP surface (only reachable through the authed Worker; org membership
   //    and the per-user room name were enforced there) ──────────────────────
 
@@ -202,12 +361,20 @@ export class RegistryRoom implements DurableObject {
     const url = new URL(request.url);
     const userId = request.headers.get(AUTH_USER_HEADER);
     if (!userId) return json({ error: "unauthenticated" }, 401);
+    const trustTier = request.headers.get(AUTH_TRUST_TIER_HEADER) === "sandbox" ? "sandbox" : "personal";
+    const sandboxId = request.headers.get(AUTH_SANDBOX_ID_HEADER) ?? "";
+
+    if (url.pathname === "/internal/chat-host" && request.method === "GET") {
+      const chatId = url.searchParams.get("chatId") ?? "";
+      return json(this.chatHostInfo(chatId));
+    }
 
     // Account deletion (purge.ts). The Worker names this room from the
     // verified user, so no owner check: hand back every chat, session and
     // device id it lists (tombstones too, since a deleted chat's rooms can
     // still hold data) for the purge to wipe next, then wipe the registry.
     if (isPurge(request, url)) {
+      if (trustTier === "sandbox") return json({ error: "trust_tier_denied" }, 403);
       const ids: Record<string, string[]> = { chats: [], sessions: [], devices: [] };
       for (const raw of this.ctx.storage.sql.exec(
         "SELECT kind, id FROM rows WHERE kind IN ('chats', 'sessions', 'devices')"
@@ -221,14 +388,17 @@ export class RegistryRoom implements DurableObject {
 
     if (url.pathname === "/ws") {
       const device = url.searchParams.get("device") ?? "";
+      const claim = this.claimOrVerifyDevice(device, trustTier, sandboxId);
+      if (!claim.ok) return json({ error: claim.code, message: claim.message }, claim.status);
       const pair = new WebSocketPair();
       this.ctx.acceptWebSocket(pair[1]);
-      const state: SocketState = { userId, device };
+      const state: SocketState = { userId, device, trustTier, sandboxId };
       pair[1].serializeAttachment(state);
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
 
     if (url.pathname === "/stats" && request.method === "GET") {
+      if (trustTier === "sandbox") return json({ error: "trust_tier_denied" }, 403);
       const rowCount = [...this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM rows")][0]
         ?.n as number;
       const tombstones = [
@@ -254,6 +424,7 @@ export class RegistryRoom implements DurableObject {
     // A phone registering (or updating) its APNs token and choices; DELETE on
     // sign-out or when the user turns notifications off.
     if (url.pathname === "/push-target") {
+      if (trustTier === "sandbox") return json({ error: "trust_tier_denied" }, 403);
       const device = url.searchParams.get("device") ?? "";
       if (device === "") return json({ error: "bad_request", message: "device required" }, 400);
       if (request.method === "DELETE") {
@@ -293,24 +464,29 @@ export class RegistryRoom implements DurableObject {
       const sinceNum = sinceRaw === null ? NaN : Number(sinceRaw);
       const cursor = Number.isInteger(sinceNum) && sinceNum >= 0 ? sinceNum : null;
       const device = url.searchParams.get("device") ?? "";
+      const claim = this.claimOrVerifyDevice(device, trustTier, sandboxId);
+      if (!claim.ok) return json({ error: claim.code, message: claim.message }, claim.status);
       if (device !== "" && url.searchParams.get("beat") === "1") {
         const at = Date.now();
         this.presence.set(device, { at, seenAt: at });
         for (const socket of this.ctx.getWebSockets()) {
           const socketState = socket.deserializeAttachment() as SocketState | null;
           if (!socketState?.ready) continue;
+          if (socketState.trustTier === "sandbox" && socketState.device !== device) continue;
           send(socket, { t: "presence", device, at });
         }
       }
       const seq = this.seq();
       const gcFloor = this.gcFloor();
       const full = cursor === null || cursor < gcFloor || cursor > seq;
+      const rows = full ? this.rowsSince(0) : this.rowsSince(cursor);
+      const presence = freshPresence(this.presence, Date.now());
       return json({
         seq,
         full,
         gcFloor,
-        rows: full ? this.rowsSince(0) : this.rowsSince(cursor),
-        presence: freshPresence(this.presence, Date.now())
+        rows: this.filterRowsForTier(rows, trustTier, device),
+        presence: this.filterPresenceForTier(presence, trustTier, device)
       });
     }
 
@@ -321,6 +497,8 @@ export class RegistryRoom implements DurableObject {
       // body. LWW clocks make replayed batches apply zero ops, so
       // at-least-once delivery (including 0-RTT/early-data replays) is safe.
       const device = url.searchParams.get("device") ?? "";
+      const claim = this.claimOrVerifyDevice(device, trustTier, sandboxId);
+      if (!claim.ok) return json({ error: claim.code, message: claim.message }, claim.status);
       // Pre-read cap (the WS path gets this for free from MAX_FRAME_BYTES):
       // a legitimate batch is bounded well under this by MAX_BATCH_OPS ×
       // MAX_OP_BYTES; anything larger only burns this room's own CPU.
@@ -332,12 +510,16 @@ export class RegistryRoom implements DurableObject {
       } catch {
         return json({ error: "bad_push", message: "malformed body" }, 400);
       }
-      const outcome = this.applyPushBatch(device, frame);
-      if (!outcome.ok) return json({ error: outcome.code, message: outcome.message }, 400);
+      const outcome = this.applyPushBatch(device, frame, trustTier);
+      if (!outcome.ok) {
+        const status = outcome.code === "trust_tier_denied" ? 403 : 400;
+        return json({ error: outcome.code, message: outcome.message }, status);
+      }
       return json({ batch: outcome.batch, seq: outcome.seq, applied: outcome.applied });
     }
 
     if (url.pathname === "/reset" && request.method === "POST") {
+      if (trustTier === "sandbox") return json({ error: "trust_tier_denied" }, 403);
       // Operator wipe. Recovery is automatic and lossless: every client
       // detects `state.seq < cursor` on its next hello and re-seeds the table
       // from its local rows with their ORIGINAL clocks (registry-core
@@ -405,7 +587,19 @@ export class RegistryRoom implements DurableObject {
   private handleHello(ws: WebSocket, state: SocketState, frame: Record<string, unknown>): void {
     const cursor = typeof frame.cursor === "number" && frame.cursor >= 0 ? frame.cursor : null;
     if (typeof frame.device === "string" && frame.device.length > 0) {
-      state.device = frame.device;
+      if (state.trustTier === "sandbox") {
+        if (frame.device !== state.device) {
+          send(ws, {
+            t: "error",
+            code: "trust_tier_denied",
+            message: "sandbox socket cannot switch device identity"
+          });
+          return;
+        }
+      } else {
+        state.device = frame.device;
+        this.claimOrVerifyDevice(state.device, "personal", "");
+      }
     }
     state.ready = true;
     ws.serializeAttachment(state);
@@ -417,13 +611,14 @@ export class RegistryRoom implements DurableObject {
     // (former) or re-seeding the server (latter; see registry.rs).
     const full = cursor === null || cursor < gcFloor || cursor > seq;
     const rows = full ? this.rowsSince(0) : this.rowsSince(cursor);
+    const presence = freshPresence(this.presence, Date.now());
     send(ws, {
       t: "state",
       seq,
       full,
       gcFloor,
-      rows,
-      presence: freshPresence(this.presence, Date.now())
+      rows: this.filterRowsForTier(rows, state.trustTier, state.device),
+      presence: this.filterPresenceForTier(presence, state.trustTier, state.device)
     });
   }
 
@@ -433,7 +628,7 @@ export class RegistryRoom implements DurableObject {
       send(ws, { t: "error", code: "bad_push", message: "hello first / malformed push" });
       return;
     }
-    const outcome = this.applyPushBatch(state.device, frame);
+    const outcome = this.applyPushBatch(state.device, frame, state.trustTier);
     if (!outcome.ok) {
       send(ws, { t: "error", code: outcome.code, message: outcome.message });
       return;
@@ -446,7 +641,8 @@ export class RegistryRoom implements DurableObject {
    * fallback. The caller delivers the ack/error on its own transport. */
   private applyPushBatch(
     device: string,
-    frame: Record<string, unknown>
+    frame: Record<string, unknown>,
+    trustTier: "personal" | "sandbox" = "personal"
   ):
     | { ok: false; code: string; message: string }
     | { ok: true; batch: string; seq: number; applied: number } {
@@ -468,6 +664,13 @@ export class RegistryRoom implements DurableObject {
         // to partially apply. Rejections are attributed per device on /stats.
         this.recordPush(device, false);
         return { ok: false, code: "invalid_op", message: `${op.kind}/${op.id}: ${invalid}` };
+      }
+    }
+    if (trustTier === "sandbox") {
+      const denied = this.validateSandboxBatch(device, ops);
+      if (denied) {
+        this.recordPush(device, false);
+        return { ok: false, code: "trust_tier_denied", message: denied };
       }
     }
 
@@ -505,7 +708,8 @@ export class RegistryRoom implements DurableObject {
       for (const socket of this.ctx.getWebSockets()) {
         const socketState = socket.deserializeAttachment() as SocketState | null;
         if (!socketState?.ready) continue;
-        send(socket, { t: "rows", seq, rows });
+        const visible = this.filterRowsForTier(rows, socketState.trustTier, socketState.device);
+        if (visible.length > 0) send(socket, { t: "rows", seq, rows: visible });
       }
       this.notifySessions(sessionsBefore, touched);
     }
@@ -597,6 +801,7 @@ export class RegistryRoom implements DurableObject {
       if (socket === ws) continue;
       const socketState = socket.deserializeAttachment() as SocketState | null;
       if (!socketState?.ready) continue;
+      if (socketState.trustTier === "sandbox" && socketState.device !== state.device) continue;
       send(socket, { t: "presence", device: state.device, at });
     }
   }

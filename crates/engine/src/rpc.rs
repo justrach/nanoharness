@@ -191,8 +191,15 @@ fn relay_caller_device(params: &serde_json::Value) -> String {
 
 #[async_trait]
 impl RpcService for RelayRpc {
-    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+    async fn handle(
+        &self,
+        method: &str,
+        mut params: serde_json::Value,
+    ) -> Result<RpcReply, RpcError> {
         let caller = relay_caller_device(&params);
+        if let Some(obj) = params.as_object_mut() {
+            obj.remove("relayDeviceId");
+        }
         let approved = !caller.is_empty() && self.registry.remote_device_approved(&caller);
         match harness_rpc::admit_relay_action(self.registry.remote_control(), method, approved) {
             harness_rpc::RelayAdmit::Allow => self.inner.handle(method, params).await,
@@ -1359,13 +1366,24 @@ impl EngineRpc {
         &self,
         target: &str,
         method: &str,
-        params: serde_json::Value,
+        mut params: serde_json::Value,
     ) -> Result<RpcReply, RpcError> {
         let Some(links) = &self.links else {
             return Err(RpcError::Failed(format!(
                 "cannot reach device {target}: remote routing unavailable (offline)"
             )));
         };
+        if let Some(obj) = params.as_object_mut()
+            && !obj
+                .get("relayDeviceId")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty())
+        {
+            obj.insert(
+                "relayDeviceId".to_string(),
+                serde_json::Value::String(self.doc_host.device_id().to_string()),
+            );
+        }
         let client = links.client(target).await?;
         if is_stream_method(method) {
             // Streams are unbounded by design (a quiet WATCH_* is healthy);
@@ -4833,6 +4851,138 @@ impl RpcService for EngineRpc {
     }
 }
 
+/// Scoped local-IPC RPC service for Harness's own MCP server. Restricts calls
+/// to the chat/room/artifact surface and prevents bypassing human-approval
+/// prompts or mutating unrelated device settings/lifecycle.
+pub struct McpScopedRpc {
+    inner: std::sync::Arc<dyn RpcService>,
+}
+
+impl McpScopedRpc {
+    pub fn new(inner: std::sync::Arc<dyn RpcService>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl RpcService for McpScopedRpc {
+    async fn handle(
+        &self,
+        method: &str,
+        mut params: serde_json::Value,
+    ) -> Result<RpcReply, RpcError> {
+        let allowed = match method {
+            methods::WATCH_CHATS
+            | methods::WATCH_SPACES
+            | methods::WATCH_SESSIONS
+            | methods::WATCH_DEVICES
+            | methods::WATCH_DOC_MESSAGES
+            | methods::WATCH_QUEUE
+            | methods::LOCAL_DEVICE
+            | methods::ENGINE_INFO
+            | methods::ENGINE_READY
+            | methods::LIST_HARNESSES
+            | methods::LIST_MODELS
+            | methods::BOTS_STATE
+            | methods::ROOM_REQUEST
+            | methods::SHOW_IMAGE
+            | methods::SHOW_VISUAL
+            | methods::CREATE_ARTIFACT
+            | methods::UPDATE_ARTIFACT
+            | methods::RUN_BOT => true,
+            methods::QUEUE_MESSAGE => {
+                let Some(obj) = params.as_object_mut() else {
+                    return Err(RpcError::BadParams("params object required".into()));
+                };
+                obj.insert("turnOrigin".into(), serde_json::json!("peer"));
+                true
+            }
+            methods::MUTATE => matches!(
+                params.get("op").and_then(|v| v.as_str()),
+                Some("createChat" | "renameChat" | "setChatArchived")
+            ),
+            methods::QUEUE_COMMAND => {
+                let Some(cmd) = params.get_mut("command").and_then(|v| v.as_object_mut()) else {
+                    return Err(RpcError::BadParams("command object required".into()));
+                };
+                match cmd.get("kind").and_then(|v| v.as_str()) {
+                    Some("respondInput") => {
+                        cmd.insert("fromAgent".into(), serde_json::Value::Bool(true));
+                        true
+                    }
+                    Some("run") => {
+                        if let Some(req) = cmd.get_mut("request").and_then(|v| v.as_object_mut()) {
+                            req.insert("turnOrigin".into(), serde_json::json!("peer"));
+                        }
+                        true
+                    }
+                    Some("steer") => {
+                        cmd.insert("turnOrigin".into(), serde_json::json!("peer"));
+                        true
+                    }
+                    Some("interrupt" | "dismissInput") => true,
+                    _ => false,
+                }
+            }
+            _ => false,
+        };
+        if !allowed {
+            return Err(RpcError::Failed(format!(
+                "method {method} is not permitted on MCP token"
+            )));
+        }
+        self.inner.handle(method, params).await
+    }
+}
+
+/// Methods the host-relay surface (`RemoteRelayRpc`) accepts from another
+/// device: forwardable device-control RPCs, `RelayCommand`, and `#180` liveness
+/// / configuration probes (`EngineInfo`, `EngineReady`) that `RelayRpc` serves
+/// even before remote control is opted in.
+fn remote_relay_allowed(method: &str) -> bool {
+    forwardable(method)
+        || method == methods::RELAY_COMMAND
+        || matches!(method, methods::ENGINE_INFO | methods::ENGINE_READY)
+}
+
+/// Host-relay RPC wrapper exposed to remote peers over DeviceRoom. Only
+/// forwardable device-control methods (plus `RelayCommand` and host probes)
+/// may be invoked remotely, and multi-hop re-forwarding to another device is
+/// refused.
+pub struct RemoteRelayRpc {
+    inner: std::sync::Arc<dyn RpcService>,
+    local_device_id: String,
+}
+
+impl RemoteRelayRpc {
+    pub fn new(inner: std::sync::Arc<dyn RpcService>, local_device_id: impl Into<String>) -> Self {
+        Self {
+            inner,
+            local_device_id: local_device_id.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl RpcService for RemoteRelayRpc {
+    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        if !remote_relay_allowed(method) {
+            return Err(RpcError::Failed(format!(
+                "method {method} is not forwardable over DeviceRelay"
+            )));
+        }
+        if let Some(target) = params.get("targetDeviceId").and_then(|v| v.as_str())
+            && !target.is_empty()
+            && target != self.local_device_id
+        {
+            return Err(RpcError::Failed(format!(
+                "remote relay cannot re-forward {method} to {target}"
+            )));
+        }
+        self.inner.handle(method, params).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6032,5 +6182,227 @@ mod context_usage_tests {
         );
 
         host.shutdown_workers().await;
+    }
+
+    struct EchoMethodService;
+
+    #[async_trait]
+    impl RpcService for EchoMethodService {
+        async fn handle(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<RpcReply, RpcError> {
+            RpcReply::value(&serde_json::json!({ "method": method, "params": params }))
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_scoped_rpc_restricts_surface_and_forces_agent_flags() {
+        let svc = McpScopedRpc::new(std::sync::Arc::new(EchoMethodService));
+
+        for denied in [
+            methods::STOP_ENGINE,
+            methods::AUTH_STATUS,
+            methods::OPEN_TERMINAL,
+            methods::SET_AUTONOMY,
+            methods::WRITE_WORKSPACE_FILE,
+        ] {
+            let err = svc
+                .handle(denied, serde_json::json!({}))
+                .await
+                .err()
+                .expect("denied method must fail");
+            assert!(err.to_string().contains("not permitted"), "{denied}: {err}");
+        }
+
+        let bad_mutate = svc
+            .handle(
+                methods::MUTATE,
+                serde_json::json!({ "op": "deleteChat", "chatId": "c1" }),
+            )
+            .await
+            .err()
+            .expect("deleteChat must be refused on MCP token");
+        assert!(bad_mutate.to_string().contains("not permitted"));
+
+        assert!(
+            svc.handle(
+                methods::MUTATE,
+                serde_json::json!({ "op": "createChat", "id": "c1", "title": "Chat" }),
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            svc.handle(methods::WATCH_CHATS, serde_json::json!({}))
+                .await
+                .is_ok()
+        );
+
+        let reply = svc
+            .handle(
+                methods::QUEUE_COMMAND,
+                serde_json::json!({
+                    "chatId": "c1",
+                    "command": {
+                        "kind": "respondInput",
+                        "requestId": "req-1",
+                        "answers": [],
+                        "fromAgent": false
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        let val = reply.into_value().unwrap();
+        assert_eq!(val["params"]["command"]["fromAgent"], true);
+
+        let steer_reply = svc
+            .handle(
+                methods::QUEUE_COMMAND,
+                serde_json::json!({
+                    "chatId": "c1",
+                    "command": {
+                        "kind": "steer",
+                        "prompt": "follow up",
+                        "turnOrigin": "human"
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        let steer_val = steer_reply.into_value().unwrap();
+        assert_eq!(steer_val["params"]["command"]["turnOrigin"], "peer");
+
+        let queue_reply = svc
+            .handle(
+                methods::QUEUE_MESSAGE,
+                serde_json::json!({
+                    "chatId": "c1",
+                    "text": "queued follow up",
+                    "turnOrigin": "human"
+                }),
+            )
+            .await
+            .unwrap();
+        let queue_val = queue_reply.into_value().unwrap();
+        assert_eq!(queue_val["params"]["turnOrigin"], "peer");
+    }
+
+    #[tokio::test]
+    async fn remote_relay_rpc_blocks_non_forwardable_and_re_forwarding() {
+        let svc = RemoteRelayRpc::new(std::sync::Arc::new(EchoMethodService), "dev-local");
+
+        for denied in [
+            methods::LOCAL_DEVICE,
+            methods::AUTH_STATUS,
+            methods::MUTATE,
+            methods::STOP_ENGINE,
+            methods::SET_REMOTE_CONTROL,
+            methods::SET_E2EE,
+        ] {
+            let err = svc
+                .handle(denied, serde_json::json!({}))
+                .await
+                .err()
+                .expect("non-forwardable method must fail");
+            assert!(
+                err.to_string().contains("not forwardable"),
+                "{denied}: {err}"
+            );
+        }
+
+        for probe in [
+            methods::ENGINE_INFO,
+            methods::ENGINE_READY,
+            methods::GET_REMOTE_CONTROL,
+            methods::GET_REMOTE_APPROVALS,
+            methods::LIST_HARNESSES,
+            methods::GET_DEVICE_IDENTITY,
+            methods::GET_E2EE,
+        ] {
+            assert!(
+                svc.handle(probe, serde_json::json!({})).await.is_ok(),
+                "{probe} probe must be permitted on RemoteRelayRpc"
+            );
+        }
+
+        // Cross-device targetDeviceId must not multi-hop through a remote relay.
+        let hop_err = svc
+            .handle(
+                methods::LIST_HARNESSES,
+                serde_json::json!({ "targetDeviceId": "dev-third" }),
+            )
+            .await
+            .err()
+            .expect("cross-device targetDeviceId must be refused");
+        assert!(
+            hop_err.to_string().contains("cannot re-forward"),
+            "{hop_err}"
+        );
+
+        // Local-target and RelayCommand succeed.
+        assert!(
+            svc.handle(
+                methods::LIST_HARNESSES,
+                serde_json::json!({ "targetDeviceId": "dev-local" }),
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            svc.handle(methods::RELAY_COMMAND, serde_json::json!({}))
+                .await
+                .is_ok()
+        );
+
+        // Composed with RelayRpc: probes still work with remote control off,
+        // while forwardable actions require opt-in and non-forwardable methods
+        // are blocked before RelayRpc admission.
+        let registry = std::sync::Arc::new(HarnessRegistry::new());
+        let composed = RemoteRelayRpc::new(
+            RelayRpc::wrap(std::sync::Arc::new(EchoMethodService), registry.clone()),
+            "dev-local",
+        );
+        assert!(
+            composed
+                .handle(methods::ENGINE_INFO, serde_json::json!({}))
+                .await
+                .is_ok()
+        );
+        let off_err = composed
+            .handle(methods::LIST_REPOS, serde_json::json!({}))
+            .await
+            .err()
+            .expect("non-probe must fail when remote control is off");
+        assert!(
+            off_err.to_string().contains("Remote control is off"),
+            "{off_err}"
+        );
+        registry.set_remote_control(true);
+        assert!(
+            composed
+                .handle(methods::LIST_REPOS, serde_json::json!({}))
+                .await
+                .is_ok()
+        );
+        let autonomy_err = composed
+            .handle(methods::SET_AUTONOMY, serde_json::json!({}))
+            .await
+            .err()
+            .expect("SetAutonomy must be blocked by RelayRpc even when forwardable");
+        assert!(
+            autonomy_err
+                .to_string()
+                .contains("only be done on the computer"),
+            "{autonomy_err}"
+        );
+        let non_fwd = composed
+            .handle(methods::AUTH_STATUS, serde_json::json!({}))
+            .await
+            .err()
+            .expect("AuthStatus must still be blocked even with remote control on");
+        assert!(non_fwd.to_string().contains("not forwardable"), "{non_fwd}");
     }
 }

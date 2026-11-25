@@ -44,6 +44,10 @@ pub const Client = struct {
     /// Connects to `127.0.0.1:port` and upgrades `path`. Heap-allocated: the
     /// reader and writer point into its buffers.
     pub fn connect(gpa: Allocator, io: Io, port: u16, path: []const u8) Error!*Client {
+        return connectWithBearer(gpa, io, port, path, null);
+    }
+
+    pub fn connectWithBearer(gpa: Allocator, io: Io, port: u16, path: []const u8, bearer: ?[]const u8) Error!*Client {
         const addr = net.IpAddress.parseIp4("127.0.0.1", port) catch return error.HandshakeFailed;
         const stream = addr.connect(io, .{ .mode = .stream }) catch return error.HandshakeFailed;
         const self = try gpa.create(Client);
@@ -52,19 +56,23 @@ pub const Client = struct {
         self.rd = net.Stream.Reader.init(stream, io, &self.rbuf);
         self.wr = net.Stream.Writer.init(stream, io, &self.wbuf);
         errdefer self.stream.close(io);
-        try handshake(io, &self.rd.interface, &self.wr.interface, port, path);
+        try handshakeWithBearer(io, &self.rd.interface, &self.wr.interface, port, path, bearer);
         return self;
     }
 
     /// Upgrades an already connected `stream` (taken over: closed on error).
     pub fn upgrade(gpa: Allocator, io: Io, stream: net.Stream, port: u16, path: []const u8) Error!*Client {
+        return upgradeWithBearer(gpa, io, stream, port, path, null);
+    }
+
+    pub fn upgradeWithBearer(gpa: Allocator, io: Io, stream: net.Stream, port: u16, path: []const u8, bearer: ?[]const u8) Error!*Client {
         errdefer stream.close(io);
         const self = try gpa.create(Client);
         errdefer gpa.destroy(self);
         self.* = .{ .io = io, .stream = stream, .rd = undefined, .wr = undefined };
         self.rd = net.Stream.Reader.init(stream, io, &self.rbuf);
         self.wr = net.Stream.Writer.init(stream, io, &self.wbuf);
-        try handshake(io, &self.rd.interface, &self.wr.interface, port, path);
+        try handshakeWithBearer(io, &self.rd.interface, &self.wr.interface, port, path, bearer);
         return self;
     }
 
@@ -104,16 +112,46 @@ pub const Client = struct {
     }
 };
 
-fn handshake(io: Io, r: *Io.Reader, w: *Io.Writer, port: u16, path: []const u8) Error!void {
+fn trimToken(raw: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    if (std.mem.indexOfAny(u8, trimmed, "\r\n") != null) return null;
+    return trimmed;
+}
+
+/// Resolves the caller's bearer token (owned) from `explicit_token` first, then
+/// `{data_dir}/ipc-mcp-token-{port}` (when `prefer_mcp`) and `{data_dir}/ipc-token-{port}`.
+pub fn resolveIpcToken(gpa: Allocator, io: Io, explicit_token: ?[]const u8, data_dir: ?[]const u8, port: u16, prefer_mcp: bool) ?[]u8 {
+    if (explicit_token) |raw| if (trimToken(raw)) |t| return gpa.dupe(u8, t) catch null;
+    const dir = data_dir orelse return null;
+    const names = if (prefer_mcp) [_][]const u8{ "ipc-mcp-token-", "ipc-token-" } else [_][]const u8{ "ipc-token-", "ipc-token-" };
+    const count: usize = if (prefer_mcp) 2 else 1;
+    for (names[0..count]) |prefix| {
+        const name = std.fmt.allocPrint(gpa, "{s}{d}", .{ prefix, port }) catch continue;
+        defer gpa.free(name);
+        const path = std.fs.path.join(gpa, &.{ dir, name }) catch continue;
+        defer gpa.free(path);
+        const raw = Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(4096)) catch continue;
+        defer gpa.free(raw);
+        if (trimToken(raw)) |t| return gpa.dupe(u8, t) catch null;
+    }
+    return null;
+}
+
+fn handshakeWithBearer(io: Io, r: *Io.Reader, w: *Io.Writer, port: u16, path: []const u8, bearer: ?[]const u8) Error!void {
     var key_raw: [16]u8 = undefined;
     io.random(&key_raw);
     var key: [24]u8 = undefined;
     _ = std.base64.standard.Encoder.encode(&key, &key_raw);
     try w.print(
         "GET {s} HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" ++
-            "Sec-WebSocket-Key: {s}\r\nSec-WebSocket-Version: 13\r\n\r\n",
+            "Sec-WebSocket-Key: {s}\r\nSec-WebSocket-Version: 13\r\n",
         .{ path, port, &key },
     );
+    if (bearer) |raw| if (trimToken(raw)) |tok| {
+        try w.print("Authorization: Bearer {s}\r\n", .{tok});
+    };
+    try w.writeAll("\r\n");
     try w.flush();
     const status = r.takeDelimiterInclusive('\n') catch return error.HandshakeFailed;
     if (std.mem.indexOf(u8, status, " 101 ") == null) return error.HandshakeFailed;
@@ -126,7 +164,7 @@ fn handshake(io: Io, r: *Io.Reader, w: *Io.Writer, port: u16, path: []const u8) 
 /// Writes one final frame, masked with `mask` as a client must.
 pub fn writeFrame(w: *Io.Writer, op: Opcode, payload: []const u8, mask: [4]u8) Io.Writer.Error!void {
     var hdr: [14]u8 = undefined;
-    hdr[0] = 0x80 | @as(u8, @intFromEnum(op));
+    hdr[0] = 0x80 | @as(u8, @backingInt(op));
     var n: usize = 2;
     if (payload.len < 126) {
         hdr[1] = 0x80 | @as(u8, @intCast(payload.len));
@@ -166,7 +204,7 @@ pub fn readMessageFrom(
     while (true) {
         const h = try r.takeArray(2);
         const fin = (h[0] & 0x80) != 0;
-        const op: Opcode = @enumFromInt(@as(u4, @truncate(h[0] & 0x0f)));
+        const op: Opcode = @fromBackingInt(@intCast(@as(u4, @truncate(h[0] & 0x0f))));
         const masked = (h[1] & 0x80) != 0;
         var len: u64 = h[1] & 0x7f;
         if (len == 126) {
@@ -255,4 +293,32 @@ test "lengths past 125 and 65535 use the longer headers" {
         _ = try readMessageFrom(gpa, &r, &out, {}, noPing);
         try testing.expectEqualSlices(u8, payload, out.items);
     }
+}
+
+test "resolveIpcToken separates admin and mcp token lookup" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(dir);
+    const admin_path = try std.fs.path.join(gpa, &.{ dir, "ipc-token-27664" });
+    defer gpa.free(admin_path);
+    const mcp_path = try std.fs.path.join(gpa, &.{ dir, "ipc-mcp-token-27664" });
+    defer gpa.free(mcp_path);
+    try Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = admin_path, .data = "admin-tok\n" });
+    try Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = mcp_path, .data = "mcp-tok\n" });
+
+    const explicit = resolveIpcToken(gpa, testing.io, "  env-tok \n", dir, 27664, true).?;
+    defer gpa.free(explicit);
+    try testing.expectEqualStrings("env-tok", explicit);
+
+    const mcp = resolveIpcToken(gpa, testing.io, null, dir, 27664, true).?;
+    defer gpa.free(mcp);
+    try testing.expectEqualStrings("mcp-tok", mcp);
+
+    const admin = resolveIpcToken(gpa, testing.io, null, dir, 27664, false).?;
+    defer gpa.free(admin);
+    try testing.expectEqualStrings("admin-tok", admin);
+
+    try testing.expect(resolveIpcToken(gpa, testing.io, "bad\ntok", null, 27664, false) == null);
 }
