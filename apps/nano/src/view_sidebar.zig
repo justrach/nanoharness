@@ -120,7 +120,7 @@ fn sidebarTitlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
             .color = bar_k.muted,
             .tip = .{ .text = if (peeking) "Dock sidebar (\u{2318}B)" else "Hide sidebar (\u{2318}B)", .delay = tip.quick },
         })) {
-            fs_chrome.clearLeftPeek(a);
+            fs_chrome.togglingSidebar(a);
             if (peeking) {
                 a.view.sidebar_open = true;
             } else {

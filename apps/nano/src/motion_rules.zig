@@ -244,6 +244,27 @@ pub fn tweenColumnWidth(tweening: bool, raw_col: f32, max_col: f32) f32 {
     return raw_col;
 }
 
+/// The transcript column while the sidebar slides (`Nano.Tween.slideColumnWidth`):
+/// the narrower end's column, `narrow_col`, for the whole slide, so visible text
+/// breaks into lines once instead of at every width on the way.
+/// Proven in `Nano/Tween.lean` never to exceed `raw_col`, and to be one width for
+/// every frame whose pane is at least as wide as the narrower end.
+pub fn slideColumnWidth(raw_col: f32, narrow_col: f32) f32 {
+    return @min(raw_col, narrow_col);
+}
+
+test "the sliding column is one width from end to end and never overflows its pane" {
+    const testing = std.testing;
+    var raw: f32 = 420;
+    while (raw <= 495) : (raw += 2.5) {
+        try testing.expectEqual(@as(f32, 420), slideColumnWidth(raw, 420));
+        try testing.expect(slideColumnWidth(raw, 420) <= raw);
+    }
+    try testing.expectEqual(@as(f32, 400), slideColumnWidth(400, 420));
+    // At the cap on both ends nothing changes.
+    try testing.expectEqual(@as(f32, 736), slideColumnWidth(736, 736));
+}
+
 /// Right-side control reservation inside a top-strip slot (`Nano.StripMenu.slotControlsWidth`).
 /// When unhovered (`!hovered`) and `menu_count <= 1`, reserves `0px` instead of `66px`.
 pub fn slotControlsWidth(slot_w: f32, hovered: bool, menu_count: usize) f32 {
