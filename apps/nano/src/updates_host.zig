@@ -2247,7 +2247,7 @@ test "updates: `harness-engine update` swaps a macOS app for the verified releas
 
 test "updates: a generated Ed25519 key signs and verifies a manifest message" {
     const Ed = std.crypto.sign.Ed25519;
-    const kp = Ed.KeyPair.generate();
+    const kp = Ed.KeyPair.generate(testing.io);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var files: json.ObjectMap = .empty;
