@@ -1483,12 +1483,10 @@ impl AcpHarness {
     pub async fn login_command(&self) -> Result<crate::process::Command, HarnessError> {
         let (exe, _) = self.resolve_program(false).await?;
         let args = self.login_args(&exe);
-        if self.spec.id == HarnessId::Antigravity
-            && args.first().map(String::as_str) != Some("acp")
+        if self.spec.id == HarnessId::Antigravity && args.first().map(String::as_str) != Some("acp")
         {
             return Err(HarnessError::Protocol(
-                "Antigravity paste-code login needs the native agy CLI (`agy acp --login`)"
-                    .into(),
+                "Antigravity paste-code login needs the native agy CLI (`agy acp --login`)".into(),
             ));
         }
         let mut cmd = crate::process::Command::new(&exe);

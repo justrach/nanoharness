@@ -994,7 +994,11 @@ async fn antigravity_acp_login_records_the_browser_url_and_accepts_a_pasted_code
     let browser_dir = workspace.path().join("browser");
     std::fs::create_dir_all(&browser_dir).unwrap();
     let browser = browser_dir.join("record");
-    std::fs::write(&browser, "#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$0.url\"\nexit 0\n").unwrap();
+    std::fs::write(
+        &browser,
+        "#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$0.url\"\nexit 0\n",
+    )
+    .unwrap();
     std::fs::set_permissions(&browser, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let mut cmd = AcpHarness::antigravity()
@@ -1023,8 +1027,8 @@ async fn antigravity_acp_login_records_the_browser_url_and_accepts_a_pasted_code
     drop(stdin);
     let status = child.wait().await.unwrap();
     assert!(status.success(), "{status}");
-    let creds = std::fs::read_to_string(gemini.join("antigravity-cli").join("oauth_creds.json"))
-        .unwrap();
+    let creds =
+        std::fs::read_to_string(gemini.join("antigravity-cli").join("oauth_creds.json")).unwrap();
     assert!(creds.contains("pasted-code"), "{creds}");
 }
 
