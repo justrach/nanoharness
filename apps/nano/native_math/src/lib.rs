@@ -1403,4 +1403,319 @@ mod tests {
             }
         }
     }
+
+    fn glyphs<'a>(tree: &'a MathBox, wanted: char) -> Vec<&'a MathBox> {
+        let mut pending = vec![tree];
+        let mut found = Vec::new();
+        while let Some(node) = pending.pop() {
+            match &node.content {
+                BoxContent::Glyph { ch, .. } if *ch == wanted => found.push(node),
+                BoxContent::HList(nodes)
+                | BoxContent::VList(nodes)
+                | BoxContent::Overlap(nodes) => pending.extend(nodes),
+                BoxContent::Color(_, inner)
+                | BoxContent::BackColor(_, inner)
+                | BoxContent::Frame { inner, .. } => pending.push(inner),
+                _ => {}
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn ams_starred_operators_stack_limits_in_display_style_only() {
+        let tree = layout_source(r"\operatorname*{argmax}_{x}^{n}", true, 20.).unwrap();
+        let BoxContent::Overlap(parts) = &tree.content else {
+            panic!("display starred operator must stack limits");
+        };
+        let [base, upper, lower] = parts.as_slice() else {
+            panic!("operator and two limits")
+        };
+        assert!(value(&upper.shift) - value(&upper.depth) > value(&base.height));
+        assert!(value(&lower.shift) + value(&lower.height) < -value(&base.depth));
+
+        // The star changes display placement only; the name keeps its shape,
+        // operator spacing and ordinary scripts in text style.
+        for (starred, plain) in [
+            (
+                r"\operatorname*{argmax}_{x} f(x)",
+                r"\operatorname{argmax}_{x} f(x)",
+            ),
+            (r"2\operatorname*{argmax} f", r"2\operatorname{argmax} f"),
+            (
+                r"\operatorname*{argmax}\nolimits_{x}",
+                r"\operatorname{argmax}_{x}",
+            ),
+        ] {
+            assert_eq!(
+                vector(starred, false).svg,
+                vector(plain, false).svg,
+                "{starred}"
+            );
+        }
+        for display in [false, true] {
+            let starred = vector(r"\operatorname*{argmax}\limits_{x}", display);
+            assert!(starred.depth > vector(r"\operatorname{argmax}_{x}", display).depth);
+            assert_eq!(
+                vector(r"\operatorname*{argmax}\nolimits_{x}", display).svg,
+                vector(r"\operatorname{argmax}_{x}", display).svg
+            );
+            // Unstarred names keep lateral scripts in both styles.
+            assert_eq!(
+                vector(r"\operatorname{argmax}_{x}", display).svg,
+                vector(r"\mathrm{argmax}_{x}", display).svg
+            );
+        }
+        assert_eq!(
+            vector(r"\displaystyle\operatorname*{argmax}_{x}", false).svg,
+            vector(r"\operatorname*{argmax}_{x}", true).svg
+        );
+    }
+
+    #[test]
+    fn ams_starred_operator_names_typeset_as_written() {
+        for (starred, expected) in [
+            // A skip inside the name is a skip, not a literal comma.
+            (r"\operatorname*{arg\,max}", r"\mathrm{arg}\,\mathrm{max}"),
+            // TeX ignores spaces and upright-sets letters in the name.
+            (r"\operatorname*{arg max}", r"\mathrm{argmax}"),
+            (r"\operatorname*{arg~max}", r"\mathrm{arg}\ \mathrm{max}"),
+            // Operator names use a text hyphen, not a binary minus.
+            (r"\operatorname*{ess-sup}", r"\text{ess-sup}"),
+            (r"\operatorname*{a*b}", r"\text{a*b}"),
+            (r"\operatorname*{a(b)}", r"\mathrm{a}(\mathrm{b})"),
+            // A name that is also a symbol's name is still a word.
+            (r"\operatorname*{alpha}", r"\mathrm{alpha}"),
+            (r"\operatorname*{\alpha}", r"\alpha"),
+        ] {
+            for display in [false, true] {
+                assert_eq!(
+                    vector(starred, display).svg,
+                    vector(expected, display).svg,
+                    "{starred}"
+                );
+            }
+        }
+        for source in [
+            r"\operatorname*",
+            r"\operatorname*{}",
+            r"\operatorname*{ }",
+            r"\operatorname*x",
+            r"\operatorname*{argmax",
+            r"\operatorname**{argmax}",
+            r"\operatorname*{argmax}_x_y",
+            r"\operatorname*{\unsupported}",
+            r"\operatorname*{x^2}",
+            r"{\operatorname*{x}_a}\limits_b",
+        ] {
+            assert!(render_svg(source, true, 20.0, [0; 4]).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn ams_middle_delimiters_match_their_enclosing_pair() {
+        for display in [false, true] {
+            for body in [
+                ["a", "b"],
+                [r"\frac{a}{b}", "c"],
+                ["a", r"\frac{b}{\frac{c}{d}}"],
+                ["", r"\sum_{i}^{n}"],
+            ] {
+                let [a, b] = body;
+                let split =
+                    layout_source(&format!(r"\left|{a}\middle|{b}\right|"), display, 20.).unwrap();
+                let whole =
+                    layout_source(&format!(r"\left|{a}{{}}{b}\right|"), display, 20.).unwrap();
+                let fences = glyphs(&split, '|');
+                assert_eq!(fences.len(), 3, "{body:?}");
+                for fence in &fences {
+                    assert_eq!(
+                        (&fence.height, &fence.depth, &fence.shift),
+                        (&fences[0].height, &fences[0].depth, &fences[0].shift),
+                        "{body:?}"
+                    );
+                }
+                // Sized from the content alone: the pair itself doesn't grow.
+                let outer = glyphs(&whole, '|');
+                assert_eq!(fences[0].height, outer[0].height, "{body:?}");
+                assert_eq!(fences[0].depth, outer[0].depth, "{body:?}");
+            }
+            assert_eq!(
+                vector(r"\left\langle a\middle\vert b\right\rangle", display).svg,
+                vector(r"\left\langle a\middle| b\right\rangle", display).svg
+            );
+            assert!(
+                vector(
+                    r"\left\langle\frac{a}{b}\middle\|\frac{c}{d}\right\rangle",
+                    display
+                )
+                .width
+                    > vector(r"\left\langle\frac{a}{b}\frac{c}{d}\right\rangle", display).width
+            );
+        }
+        let width = |s| value(&layout_source(s, false, 20.).unwrap().width);
+        // As in e-TeX a middle fence closes the list on its left and opens the
+        // one on its right: tight on both sides, and a unary minus after it.
+        let bar = value(
+            &glyphs(
+                &layout_source(r"\left(a\middle|b\right)", false, 20.).unwrap(),
+                '|',
+            )[0]
+            .width,
+        );
+        assert!(
+            (width(r"\left(a\middle|b\right)") - width(r"\left(ab\right)") - bar).abs() < 0.0005
+        );
+        assert!((width(r"\left(a\middle.b\right)") - width(r"\left(ab\right)")).abs() < 0.0005);
+        for (signed, plain) in [
+            (r"\left(a\middle|-b\right)", r"\left(a\middle|b\right)"),
+            (r"\left(a-\middle|b\right)", r"\left(a\middle|b\right)"),
+        ] {
+            assert!(
+                (width(signed) - width(plain) - width("-")).abs() < 0.0005,
+                "{signed}"
+            );
+        }
+        // It also ends a style declaration, which still applies on its own side.
+        for (declared, plain) in [
+            (
+                r"\left(\displaystyle a\middle|\frac{b}{c}\right)",
+                r"\left(a\middle|\frac{b}{c}\right)",
+            ),
+            (
+                r"\left(a\middle|\displaystyle\frac{b}{c}\right)",
+                r"\left(a\middle|\displaystyle{\frac{b}{c}}\right)",
+            ),
+        ] {
+            assert_eq!(vector(declared, false).svg, vector(plain, false).svg);
+        }
+        assert!(
+            vector(r"\left(a\middle|\displaystyle\frac{b}{c}\right)", false).height
+                > vector(r"\left(a\middle|\frac{b}{c}\right)", false).height
+        );
+        // Several fences, nesting, and color each stay within their own pair.
+        for source in [
+            r"\left(a\middle|b\middle|c\right)",
+            r"\left(\left[\frac{a}{b}\middle/c\right]\middle\vert d\right)",
+            r"\left(\color{red} a\middle|b\right)",
+            r"\mathrm{\left(a\middle|b\right)}",
+            r"\left(\middle|\right)",
+        ] {
+            assert!(render_svg(source, true, 20.0, [0; 4]).is_ok(), "{source}");
+        }
+        let nested = layout_source(
+            r"\left(\left[\frac{a}{b}\middle|c\right]\middle|d\right)",
+            true,
+            20.,
+        )
+        .unwrap();
+        assert_eq!(glyphs(&nested, '|').len(), 2);
+    }
+
+    #[test]
+    fn ams_middle_outside_a_delimited_list_stays_literal() {
+        for source in [
+            r"\middle",
+            r"a\middle|b",
+            r"\left(a\middle|b",
+            r"\left(a\middle b\right)",
+            r"\left(a\middle\right)",
+            r"\left({a\middle|b}\right)",
+            r"\left(\frac{a\middle|b}{c}\right)",
+            r"\left(\begin{matrix}a\middle|b\end{matrix}\right)",
+            r"\left(a\right)\middle|b",
+            r"\left(a\middle|\displaystyle\right)",
+        ] {
+            assert!(render_svg(source, true, 20.0, [0; 4]).is_err(), "{source}");
+        }
+        assert_eq!(
+            layout_source(r"a\middle|b", false, 20.).unwrap_err(),
+            "unmatched delimiter"
+        );
+    }
+
+    #[test]
+    fn ams_gathered_rows_are_centered_and_spaced_like_aligned_rows() {
+        let ink_rows = |source| {
+            let equation = vector(source, true);
+            let svg = usvg::Tree::from_str(&equation.svg, &usvg::Options::default()).unwrap();
+            let mut boxes = Vec::new();
+            let mut groups = vec![svg.root()];
+            while let Some(group) = groups.pop() {
+                for node in group.children() {
+                    match node {
+                        usvg::Node::Group(inner) => groups.push(inner),
+                        other => boxes.push(other.abs_bounding_box()),
+                    }
+                }
+            }
+            let split = equation.height / 2.;
+            [true, false].map(|upper| {
+                let row = || boxes.iter().filter(|b| (b.bottom() < split) == upper);
+                assert!(row().count() > 0, "{source}");
+                let left = row().map(|b| b.left()).fold(f32::MAX, f32::min);
+                let right = row().map(|b| b.right()).fold(f32::MIN, f32::max);
+                (left + right) / 2.
+            })
+        };
+        for source in [
+            r"\begin{gathered}0\\00000\end{gathered}",
+            r"\begin{gathered}00000\\0\end{gathered}",
+            r"\begin{gathered}0=0\\00=00\\\end{gathered}",
+        ] {
+            let [upper, lower] = ink_rows(source);
+            assert!((upper - lower).abs() < 0.05, "{source}: {upper} vs {lower}");
+        }
+        let [upper, lower] = ink_rows(r"\begin{aligned}0\\00000\end{aligned}");
+        assert!(upper > lower + 5., "control: aligned rows end at the tab");
+
+        for display in [false, true] {
+            let gathered = vector(r"\begin{gathered}a=b\\c=d\end{gathered}", display);
+            let aligned = vector(r"\begin{aligned}a=b\\c=d\end{aligned}", display);
+            assert!((gathered.height - aligned.height).abs() < 0.01);
+            assert!((gathered.ascent - aligned.ascent).abs() < 0.01);
+            assert!(gathered.height > vector("a=b", display).height * 1.5);
+            // Every row is set in display style, wherever it appears.
+            assert_eq!(
+                vector(r"\begin{gathered}\frac{a}{b}\end{gathered}", display).svg,
+                vector(
+                    r"\begin{gathered}\displaystyle\frac{a}{b}\end{gathered}",
+                    display
+                )
+                .svg
+            );
+        }
+        let braced = vector(r"\left\{\begin{gathered}a\\b\end{gathered}\right.", false);
+        assert!(braced.width > vector(r"\begin{gathered}a\\b\end{gathered}", false).width);
+    }
+
+    #[test]
+    fn ams_gathered_declines_what_it_would_misrender() {
+        for source in [
+            r"\begin{gathered}\end{gathered}",
+            r"\begin{gathered}a",
+            r"\begin{gathered}a\end{aligned}",
+            r"\begin{gathered*}a\end{gathered*}",
+            // No alignment tabs in a single centered column.
+            r"\begin{gathered}a&b\end{gathered}",
+            r"\begin{gathered}a\\c&d\end{gathered}",
+            // Position, row-skip and starred-break options aren't content.
+            r"\begin{gathered}[t]a\\b\end{gathered}",
+            r"\begin{gathered}a\\[4pt]b\end{gathered}",
+            r"\begin{gathered}a\\*b\end{gathered}",
+            r"\begin{gathered}a\\*^2b\end{gathered}",
+            r"\begin{gathered}a\\[^2b\end{gathered}",
+            r"\begin{gathered}a\\ \tag{1}b\end{gathered}",
+            r"\begin{gathered}\hline a\end{gathered}",
+            r"\begin{gathered}\intertext{and}a\end{gathered}",
+        ] {
+            assert!(render_svg(source, true, 20.0, [0; 4]).is_err(), "{source}");
+        }
+        for source in [
+            r"\begin{gathered}\left[a\right]\\(b)\end{gathered}",
+            r"\begin{gathered}a[b]\\c\nonumber\end{gathered}",
+        ] {
+            assert!(render_svg(source, true, 20.0, [0; 4]).is_ok(), "{source}");
+        }
+    }
 }

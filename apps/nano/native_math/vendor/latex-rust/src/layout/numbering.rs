@@ -221,6 +221,7 @@ fn collect_node(node: &MathNode, st: &mut NumberingState) {
         }
         MathNode::Atom(_, _)
         | MathNode::SizedDelim(_, _, _)
+        | MathNode::Middle(_)
         | MathNode::Text(_, _)
         | MathNode::Space(_)
         | MathNode::Style(_)

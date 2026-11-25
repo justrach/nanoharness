@@ -233,12 +233,13 @@ pub fn view(a: *App, c: *ui.Context) void {
             }
             a.view.sidebar_tween = tween;
         }
+        @import("view_fullscreen_chrome.zig").stepLeftPeek(c, a);
         @import("view_drag.zig").update(c, a);
         {
             ui.key(c, "sidebar-slot");
             const slot = ui.div(c).w(a.view.sidebar_width).hFull().clip();
             defer slot.end();
-            if (a.view.sidebar_width > 0) {
+            if (a.view.sidebar_width > 0 and !@import("view_fullscreen_chrome.zig").leftPeekCovers(a)) {
                 // Shrink only the viewport: rows retain their layout and slide
                 // left beneath its clip, rather than squeezing their contents.
                 const content = ui.div(c).absolute().offset(a.view.sidebar_width - side_width, 0).w(side_width).hFull();
@@ -254,6 +255,10 @@ pub fn view(a: *App, c: *ui.Context) void {
         const github_host = strip.hasHost(a) and @import("app_github_repository.zig").surface(a);
         const preferred_host = if (github_host) @max(chrome.right_pane_default, a.settings.rightPaneWidth()) else a.settings.rightPaneWidth();
         a.view.chrome = chrome.zenFrameWithTop(c.size.w, c.size.h, a.view.sidebar_width, side_width, top_inset, strip.chatCount(a), if (layout) |s| s.axis == .horizontal and !s.zoomed else true, strip.hasHost(a), strip.hasFiles(a), preferred_host);
+        transcript_view.slide_chat_width = if (a.view.sidebar_tween) |tw|
+            (if (strip.layoutExpanded(a) != null) null else chrome.zenFrameWithTop(c.size.w, c.size.h, @max(tw.from, tw.to), side_width, top_inset, strip.chatCount(a), if (layout) |s| s.axis == .horizontal and !s.zoomed else true, strip.hasHost(a), strip.hasFiles(a), preferred_host).chat_width)
+        else
+            null;
         a.view.chrome.compact_host = github_host and a.view.chrome.host_width < chrome.github_min_width;
         strip_layout = strip.rendering.layout(c, a);
         if (!fs and strip_layout.pane_row) {
@@ -1082,7 +1087,7 @@ fn sessionNavigationKeys(c: *ui.Context, a: *App) bool {
 /// Mouse and keyboard share search cleanup and return hidden controls' focus
 /// to the composer. Motion is owned entirely by nanoui on the next layout.
 fn toggleSidebar(c: *ui.Context, a: *App, pointer: bool) void {
-    @import("view_fullscreen_chrome.zig").clearLeftPeek(a);
+    @import("view_fullscreen_chrome.zig").togglingSidebar(a);
     a.view.sidebar_open = !a.view.sidebar_open;
     if (!a.view.sidebar_open) {
         // A pointer press on the toggle may already have blurred the search

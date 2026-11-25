@@ -621,3 +621,98 @@ test "native math UI delimiter regressions render cleanly (#153 #154 #155)" {
     try testing.expect(saw_price);
     try testing.expect(!saw_raw_eq);
 }
+
+const ams_forms =
+    \\$\operatorname*{argmax}_{x} f(x)$
+    \\
+    \\$\operatorname{argmax}_{x} f(x)$
+    \\
+    \\$\left\langle a\middle\vert b\right\rangle$
+    \\
+    \\$\begin{gathered}a=b\\c=d\end{gathered}$
+;
+
+fn expectLiteral(source: []const u8) !void {
+    theme.registerFonts();
+    var f = Fixture{ .source = source };
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 620, .height = 240 });
+    defer t.deinit();
+    t.settle(3);
+    for (t.ctx.nodes.items) |node| if (node.content == .image) return error.UnexpectedEquation;
+    try testing.expect(t.hasText(source));
+}
+
+test "native math UI AMS forms all typeset without literal source (#156)" {
+    theme.registerFonts();
+    var f = Fixture{ .source = ams_forms };
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 400, .height = 240 });
+    defer t.deinit();
+    t.settle(3);
+    if (std.c.getenv("NANO_SNAP_DIR")) |dir| {
+        var buf: [2048]u8 = undefined;
+        try t.screenshot(try std.fmt.bufPrint(&buf, "{s}/math-ams-forms.png", .{std.mem.span(dir)}));
+    }
+    var equations: usize = 0;
+    for (t.ctx.nodes.items) |node| {
+        if (node.content == .image) equations += 1;
+        if (node.content != .text or node.content.text.color.a == 0) continue;
+        try testing.expect(std.mem.indexOfScalar(u8, node.content.text.str, '\\') == null);
+    }
+    try testing.expectEqual(@as(usize, 4), equations);
+}
+
+test "native math UI starred operators place display limits below the name (#156)" {
+    const starred = try geometry("$$\\operatorname*{argmax}_{x}$$", null);
+    const plain = try geometry("$$\\operatorname{argmax}_{x}$$", null);
+    try testing.expect(starred.h > plain.h * 1.2);
+    try testing.expect(starred.w < plain.w);
+    const inline_starred = try geometry("$\\operatorname*{argmax}_{x} f(x)$", null);
+    const inline_plain = try geometry("$\\operatorname{argmax}_{x} f(x)$", null);
+    try testing.expectApproxEqAbs(inline_plain.w, inline_starred.w, 0.01);
+    try testing.expectApproxEqAbs(inline_plain.h, inline_starred.h, 0.01);
+    _ = try geometry("$$\\operatorname*{arg\\,max}_{x} f(x)$$", null);
+    for ([_][]const u8{ "$\\operatorname*x$", "$\\operatorname*{}$", "$\\operatorname*{\\unsupported}$" }) |source| try expectLiteral(source);
+}
+
+test "native math UI starred operators in one paragraph are not emphasis (#156)" {
+    theme.registerFonts();
+    var f = Fixture{ .source = "Let $\\operatorname*{argmax}_{x} f$ and $\\operatorname*{argmin}_{y} g$ differ" };
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 620, .height = 240 });
+    defer t.deinit();
+    t.settle(3);
+    var equations: usize = 0;
+    for (t.ctx.nodes.items) |node| {
+        if (node.content == .image) equations += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), equations);
+}
+
+test "native math UI middle delimiters stretch with their enclosing pair (#156)" {
+    const named = try geometry("$\\left\\langle a\\middle\\vert b\\right\\rangle$", null);
+    const bar = try geometry("$\\left\\langle a\\middle| b\\right\\rangle$", null);
+    try testing.expectApproxEqAbs(named.w, bar.w, 0.01);
+    try testing.expectApproxEqAbs(named.h, bar.h, 0.01);
+    const joined = try geometry("$\\left\\langle ab\\right\\rangle$", null);
+    try testing.expect(bar.w > joined.w);
+    try testing.expectApproxEqAbs(joined.h, bar.h, 0.01);
+    const tall = try geometry("$$\\left\\langle\\frac{a}{b}\\middle| c\\right\\rangle$$", null);
+    const tall_joined = try geometry("$$\\left\\langle\\frac{a}{b} c\\right\\rangle$$", null);
+    try testing.expectApproxEqAbs(tall_joined.h, tall.h, 0.01);
+    for ([_][]const u8{ "$a\\middle|b$", "$\\left(a\\middle|b$", "$\\left({a\\middle|b}\\right)$" }) |source| try expectLiteral(source);
+}
+
+test "native math UI gathered rows stack and center (#156)" {
+    const one = try geometry("$a=b$", null);
+    const two = try geometry("$\\begin{gathered}a=b\\\\c=d\\end{gathered}$", null);
+    const aligned = try geometry("$\\begin{aligned}a=b\\\\c=d\\end{aligned}$", null);
+    try testing.expect(two.h > one.h * 1.5);
+    try testing.expectApproxEqAbs(aligned.h, two.h, 0.01);
+    // Row order doesn't change the width of a centered column.
+    const first = try geometry("$$\\begin{gathered}a=b+c\\\\d\\end{gathered}$$", null);
+    const last = try geometry("$$\\begin{gathered}d\\\\a=b+c\\end{gathered}$$", null);
+    try testing.expectApproxEqAbs(first.w, last.w, 0.01);
+    for ([_][]const u8{ "$\\begin{gathered}a&b\\end{gathered}$", "$\\begin{gathered}a\\\\[4pt]b\\end{gathered}$", "$\\begin{gathered}a=b$" }) |source| try expectLiteral(source);
+}

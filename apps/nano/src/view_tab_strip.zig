@@ -40,11 +40,17 @@ pub const State = struct {
     /// Composer project picker shares search state, but uses desktop's
     /// wider card and New project → No project action ordering.
     footer_folder: bool = false,
+    /// A narrow draft's footer has two project chips: the second row's
+    /// opened this one, so that is the one it stays above.
+    footer_second: bool = false,
     anchor: ?ui.Rect = null,
     /// Active pane's top-strip folder control and tab rect from the previous frame,
     /// so keyboard project-picker invocation stays anchored to the active tab.
     active_folder_anchor: ?ui.Rect = null,
     active_tab_anchor: ?ui.Rect = null,
+    /// Full screen has no tab slots: the focused chat's project chip in its
+    /// pane header, from the previous frame, or the header without one.
+    pane_header_anchor: ?ui.Rect = null,
     /// The computer chip's own anchor, so a folder menu or the footer cannot
     /// move the device popover while it is open.
     device_anchor: ?ui.Rect = null,
@@ -102,6 +108,11 @@ pub fn active(a: *const App) Panel {
         .host => if (hasHost(a)) .host else .{ .chat = 0 },
         .files => if (hasFiles(a)) .files else .{ .chat = 0 },
     };
+}
+/// The pane whose project the picker changes: the focused chat's, also while
+/// a host or Files tab beside it has the workspace's focus (#15).
+pub fn pickerPanel(a: *const App) Panel {
+    return .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
 }
 pub fn focus(a: *App, panel: Panel) void {
     const expanded = a.view.strip.expanded != null;
@@ -326,17 +337,19 @@ pub fn toggleProjectPicker(a: *App) void {
     a.view.checkout_menu = false;
     a.view.ref_menu = false;
     a.view.star_menu = false;
+    const target = pickerPanel(a);
     if (state.active_folder_anchor) |anchor| {
-        open(a, .folder, active(a), anchor);
+        open(a, .folder, target, anchor);
         state.footer_folder = false;
         return;
     }
     if (a.view.space_anchor) |anchor| {
-        open(a, .folder, active(a), anchor);
+        open(a, .folder, target, anchor);
         state.footer_folder = true;
+        state.footer_second = false;
         return;
     }
-    open(a, .folder, active(a), state.active_tab_anchor);
+    open(a, .folder, target, state.pane_header_anchor orelse state.active_tab_anchor);
     state.footer_folder = false;
 }
 

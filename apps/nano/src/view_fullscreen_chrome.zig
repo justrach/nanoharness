@@ -47,6 +47,8 @@ pub fn dismissLeftPeek(a: *App) void {
 }
 
 pub fn updatePeek(c: *ui.Context, a: *App) void {
+    // After the shortcuts have read it, before this frame's headers are built.
+    a.view.strip.pane_header_anchor = null;
     if (!a.view.full_screen) return;
     if (a.view.fs_left_need_exit and (c.input.mouse.x > left_edge_px + 4 or a.view.sidebar_open)) {
         a.view.fs_left_need_exit = false;
@@ -187,46 +189,69 @@ pub fn drawLeftHandle(c: *ui.Context, a: *App) void {
     }
 }
 
-pub fn drawLeftPeek(c: *ui.Context, a: *App, k: theme.Colors) void {
-    if (!a.view.full_screen or a.view.sidebar_open or a.view.settings_open) {
+/// The peek's own slide, before anything draws it (`view.zig`, after the
+/// seam's). A peek that ⌘B docks stays where it is, and finishes coming in,
+/// while the canvas slides out from under it.
+pub fn stepLeftPeek(c: *ui.Context, a: *App) void {
+    const docking = a.view.sidebar_open and a.view.sidebar_tween != null and a.view.fs_left_peek_w > 0.5;
+    if (!a.view.full_screen or a.view.settings_open or (a.view.sidebar_open and !docking)) {
         if (a.view.fs_left_peek_w > 0 or a.view.fs_left_peek) clearLeftPeek(a);
         return;
     }
     const side_w = a.settings.sidebarWidth();
-    const target_w: f32 = if (a.view.fs_left_peek) side_w else 0;
+    const target_w: f32 = if (a.view.fs_left_peek or docking) side_w else 0;
     if (c.reduced_motion) {
         a.view.fs_left_peek_w = target_w;
         a.view.fs_left_peek_tween = null;
-    } else {
-        var tween = a.view.fs_left_peek_tween;
-        if (tween == null and @abs(a.view.fs_left_peek_w - target_w) > 0.01) {
-            const start_time = if (a.window != null and !a.offscreen) c.time - (1.0 / 120.0) else c.time;
-            tween = .{ .from = a.view.fs_left_peek_w, .to = target_w, .started = start_time };
-        }
-        if (tween) |*tw| {
-            if (tw.started == null) tw.started = c.time;
-            if (tw.to != target_w) {
-                const prev_raw: f32 = @floatCast(std.math.clamp((c.time - (tw.started orelse c.time)) / 0.18, 0, 1));
-                const prev_eased = ui.motion.Easing.css_ease_out.sample(prev_raw)[0];
-                tw.from = tw.from + (tw.to - tw.from) * prev_eased;
-                tw.to = target_w;
-                tw.started = c.time;
-            }
-            const raw: f32 = @floatCast(std.math.clamp((c.time - (tw.started orelse c.time)) / 0.18, 0, 1));
-            if (raw >= 1) {
-                a.view.fs_left_peek_w = target_w;
-                tween = null;
-            } else {
-                const eased = ui.motion.Easing.css_ease_out.sample(raw)[0];
-                a.view.fs_left_peek_w = tw.from + (tw.to - tw.from) * eased;
-                c.frame_in = null;
-                c.animationFrame();
-            }
-        }
-        a.view.fs_left_peek_tween = tween;
+        return;
     }
-    if (a.view.fs_left_peek_w <= 0.5) return;
+    var tween = a.view.fs_left_peek_tween;
+    if (tween == null and @abs(a.view.fs_left_peek_w - target_w) > 0.01) {
+        const start_time = if (a.window != null and !a.offscreen) c.time - (1.0 / 120.0) else c.time;
+        tween = .{ .from = a.view.fs_left_peek_w, .to = target_w, .started = start_time };
+    }
+    if (tween) |*tw| {
+        if (tw.started == null) tw.started = c.time;
+        if (tw.to != target_w) {
+            const prev_raw: f32 = @floatCast(std.math.clamp((c.time - (tw.started orelse c.time)) / 0.18, 0, 1));
+            const prev_eased = ui.motion.Easing.css_ease_out.sample(prev_raw)[0];
+            tw.from = tw.from + (tw.to - tw.from) * prev_eased;
+            tw.to = target_w;
+            tw.started = c.time;
+        }
+        const raw: f32 = @floatCast(std.math.clamp((c.time - (tw.started orelse c.time)) / 0.18, 0, 1));
+        if (raw >= 1) {
+            a.view.fs_left_peek_w = target_w;
+            tween = null;
+        } else {
+            const eased = ui.motion.Easing.css_ease_out.sample(raw)[0];
+            a.view.fs_left_peek_w = tw.from + (tw.to - tw.from) * eased;
+            c.frame_in = null;
+            c.animationFrame();
+        }
+    }
+    a.view.fs_left_peek_tween = tween;
+}
 
+/// Whether the peek is what shows the sidebar. It is drawn once: by the
+/// peek while that reaches further than the docked slot, else by the slot.
+pub fn leftPeekCovers(a: *const App) bool {
+    return a.view.full_screen and a.view.fs_left_peek_w > @max(0.5, a.view.sidebar_width);
+}
+
+/// The sidebar's toggle (⌘B, or the button in the peek) over a peek: shown
+/// whole or partway in, it stays. Hiding one that was docking tucks it away
+/// from where it is, and waits for the pointer to leave the edge.
+pub fn togglingSidebar(a: *App) void {
+    if (!a.view.full_screen or a.view.fs_left_peek_w <= 0.5) return clearLeftPeek(a);
+    if (a.view.sidebar_open) return dismissLeftPeek(a);
+    a.view.fs_left_edge_at = null;
+    a.view.fs_left_leave_at = null;
+}
+
+pub fn drawLeftPeek(c: *ui.Context, a: *App, k: theme.Colors) void {
+    if (!leftPeekCovers(a)) return;
+    const side_w = a.settings.sidebarWidth();
     ui.key(c, "fullscreen-left-peek-panel");
     const panel = kit.shadowLg(
         ui.div(c).fixed().offset(0, 0).size(a.view.fs_left_peek_w, c.size.h)
@@ -239,7 +264,7 @@ pub fn drawLeftPeek(c: *ui.Context, a: *App, k: theme.Colors) void {
         sidebar.sidebar(c, a, k);
     }
     ui.div(c).absolute().offset(@max(0, a.view.fs_left_peek_w - 1), 0).size(1, c.size.h)
-        .bg(ui.Color.white.alpha(0.10)).end();
+        .bg(ui.Color.white.alpha(0.10 * (1 - a.view.sidebar_width / a.view.fs_left_peek_w))).end();
 }
 
 pub fn drawTopPeek(c: *ui.Context, a: *App, strip_layout: strip.rendering.Layout, pane_widths: *const [tabs.max_panes]?f32) void {
@@ -292,6 +317,20 @@ pub fn drawTopPeek(c: *ui.Context, a: *App, strip_layout: strip.rendering.Layout
     icons.icon(c, .@"expand-arrows", 11, ui.Color.white.alpha(0.75), 0);
     ui.text(c, "Exit full screen", .{ .size = 11, .line_height = 14, .weight = .medium, .color = ui.Color.white.alpha(0.85) });
     if (exit_btn.clicked()) a.setFullScreen(false);
+}
+
+/// The project picker is open on this pane's header (not a footer chip's).
+fn pickerOpenAt(a: *const App, pane_ix: usize) bool {
+    const state = &a.view.strip;
+    return state.menu == .folder and !state.footer_folder and strip.same(state.target, .{ .chat = pane_ix });
+}
+
+/// Where the project picker opens for the focused chat in full screen. An
+/// open picker follows it through a resize.
+fn projectAnchor(c: *ui.Context, a: *App, pane_ix: usize, id: u64) void {
+    const r = c.rects.get(id) orelse return;
+    a.view.strip.pane_header_anchor = r;
+    if (pickerOpenAt(a, pane_ix)) a.view.strip.anchor = r;
 }
 
 pub fn chatHeader(
@@ -357,6 +396,7 @@ pub fn chatHeader(
             const lead = ui.div(c).row().grow().w(0).gap(6).itemsCenter().clip().control();
             defer lead.end();
             if (focused) {
+                projectAnchor(c, a, pane_ix, c.node(lead.index).id);
                 ui.div(c).size(5, 5).rounded(2.5).bg(k.accent.alpha(0.92)).end();
             }
             icons.icon(c, proj_icon, 12.5, ui.Color.white.alpha(if (focused) 0.78 else 0.45), 0);
@@ -378,6 +418,7 @@ pub fn chatHeader(
                     .bg(ui.Color.white.alpha(if (focused) 0.085 else 0.05)).clip();
                 if (proj_tip) |pt| pchip = tip.on(pchip, dk, .{ .text = pt, .look = .tab });
                 defer pchip.end();
+                if (focused) projectAnchor(c, a, pane_ix, c.node(pchip.index).id);
                 kit.ellipsisText(c, pn, .{
                     .size = 11,
                     .line_height = 14,
@@ -435,6 +476,7 @@ pub fn chatHeader(
             const frect = c.rects.get(c.node(fpill.index).id);
             if (focused) if (frect) |r| {
                 a.view.strip.active_folder_anchor = r;
+                if (pickerOpenAt(a, pane_ix)) a.view.strip.anchor = r;
             };
             icons.icon(c, .folder, 11, ui.Color.white.alpha(if (focused) 0.85 else 0.55), 0);
             kit.ellipsisText(c, proj_name, .{

@@ -289,7 +289,7 @@ impl Parser {
             Token::AlignmentTab if stop.amp => true,
             Token::Command(s) if s == "\\" && stop.cr => true,
             Token::Command(s) if s == "cr" && stop.cr => true,
-            Token::Command(s) if s == "right" && stop.right => true,
+            Token::Command(s) if (s == "right" || s == "middle") && stop.right => true,
             Token::Command(s) if s == "end" && stop.end_env => true,
             Token::Char(']') if stop.rbracket => true,
             _ => false,
@@ -459,7 +459,22 @@ impl Parser {
                 _ => break,
             }
         }
-        if let Some(stacked) = limits {
+        // `\operatorname*` carries its own placement; `\limits` overrides it.
+        if let MathNode::OperatorWithLimits {
+            base,
+            lower: None,
+            upper: None,
+            stacked: None,
+        } = nucleus
+        {
+            return Ok(MathNode::OperatorWithLimits {
+                base,
+                lower: sub.map(Box::new),
+                upper: sup.map(Box::new),
+                stacked: limits,
+            });
+        }
+        if limits.is_some() {
             if !matches!(
                 nucleus,
                 MathNode::Operator(..)
@@ -476,7 +491,7 @@ impl Parser {
                 base: Box::new(nucleus),
                 lower: sub.map(Box::new),
                 upper: sup.map(Box::new),
-                stacked,
+                stacked: limits,
             });
         }
         Ok(apply_scripts(nucleus, sub, sup))
@@ -519,7 +534,7 @@ impl Parser {
                 Ok(MathNode::Radical(index, Box::new(rad)))
             }
             "left" => self.parse_delimited(),
-            "right" => Err(ParseError::UnmatchedDelimiter),
+            "right" | "middle" => Err(ParseError::UnmatchedDelimiter),
             "begin" => self.parse_begin(),
             "end" => Err(ParseError::Malformed("unexpected \\end".into())),
             "over" => Err(ParseError::Malformed("\\over outside a group".into())),
@@ -607,6 +622,15 @@ impl Parser {
             "xleftarrow" => self.parse_xarrow("longleftarrow"),
             "text" | "mbox" => self.parse_text(TextStyle::Text),
             "operatorname" => {
+                if matches!(self.peek_ws(), Some(Token::Char('*'))) {
+                    self.bump();
+                    return Ok(MathNode::OperatorWithLimits {
+                        base: Box::new(operator_name(self.parse_group()?)?),
+                        lower: None,
+                        upper: None,
+                        stacked: None,
+                    });
+                }
                 let name = self.collect_group_text()?;
                 Ok(MathNode::Operator(name, false))
             }
@@ -782,10 +806,18 @@ impl Parser {
 
     fn parse_delimited(&mut self) -> Result<MathNode, ParseError> {
         let open = self.parse_delimiter()?;
-        let body = self.parse_list(Stop::delim())?;
-        match self.bump() {
-            Some(Token::Command(n)) if n == "right" => {}
-            _ => return Err(ParseError::UnmatchedDelimiter),
+        let mut body = self.parse_list(Stop::delim())?;
+        loop {
+            match self.bump() {
+                Some(Token::Command(n)) if n == "right" => break,
+                Some(Token::Command(n)) if n == "middle" => {
+                    let mut items = row_items(body);
+                    items.push(MathNode::Middle(self.parse_delimiter()?));
+                    items.extend(row_items(self.parse_list(Stop::delim())?));
+                    body = MathNode::Row(items);
+                }
+                _ => return Err(ParseError::UnmatchedDelimiter),
+            }
         }
         let close = self.parse_delimiter()?;
         Ok(MathNode::Delimited(open, Box::new(body), close))
@@ -852,12 +884,16 @@ impl Parser {
             "multline" => MatrixStyle::Multline,
             "equation" => MatrixStyle::Equation,
             "split" => MatrixStyle::Split,
+            "gathered" => MatrixStyle::Gathered,
             other => {
                 return Err(ParseError::Unsupported(format!("environment {other}")));
             }
         };
         let rows = self.parse_rows()?;
         self.expect_end(&name)?;
+        if style == MatrixStyle::Gathered && !rows.iter().all(is_gathered_row) {
+            return Err(ParseError::Unsupported("gathered row or option".into()));
+        }
         Ok(MathNode::Matrix(style, colspec, rows))
     }
 
@@ -1174,6 +1210,62 @@ fn wrap_row(mut items: Vec<MathNode>) -> MathNode {
     } else {
         MathNode::Row(items)
     }
+}
+
+fn row_items(node: MathNode) -> Vec<MathNode> {
+    match node {
+        MathNode::Row(items) => items,
+        other => vec![other],
+    }
+}
+
+/// Upright `\operatorname*` name. Letters, digits, `-` and `*` form words;
+/// symbols, styled text and skips keep their own meaning, and anything that
+/// isn't part of a name is declined.
+fn operator_name(body: MathNode) -> Result<MathNode, ParseError> {
+    if is_empty_node(&body) {
+        return Err(ParseError::Malformed("empty operator name".into()));
+    }
+    let items = row_items(body)
+        .into_iter()
+        .map(|item| match item {
+            MathNode::Atom('~', _) => Ok(MathNode::Space(SpaceKind::ControlSpace)),
+            MathNode::Atom(c, _) if matches!(c, '-' | '*') || c.is_alphanumeric() => {
+                Ok(MathNode::Text(c.to_string(), TextStyle::Rm))
+            }
+            MathNode::Atom(..)
+            | MathNode::Text(..)
+            | MathNode::Symbol(_)
+            | MathNode::Space(_)
+            | MathNode::Operator(..) => Ok(item),
+            _ => Err(ParseError::Unsupported("operator name".into())),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(collapse_text(MathNode::Row(items)))
+}
+
+/// One untagged centered cell. A leading `[` or `*` is a position, row-skip or
+/// starred-break option rather than content, so it isn't typeset as content.
+fn is_gathered_row(row: &EnvRow) -> bool {
+    let EnvRow::Cells { cells, number, .. } = row else {
+        return false;
+    };
+    let [cell] = cells.as_slice() else {
+        return false;
+    };
+    let first = match cell {
+        MathNode::Row(items) => items.first(),
+        other => Some(other),
+    };
+    let first = match first {
+        Some(
+            MathNode::Superscript(base, _)
+            | MathNode::Subscript(base, _)
+            | MathNode::SubSup(base, _, _),
+        ) => Some(base.as_ref()),
+        other => other,
+    };
+    !matches!(number, EqNumber::Tag { .. }) && !matches!(first, Some(MathNode::Atom('[' | '*', _)))
 }
 
 fn parse_colspec(s: &str) -> Result<Vec<ColSpec>, ParseError> {

@@ -437,8 +437,12 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
         }
     }
     defer box.end();
-    if (strip.same(strip.active(a), target)) {
+    if (strip.same(strip.pickerPanel(a), target)) {
         if (c.rects.get(c.node(box.index).id)) |r| a.view.strip.active_tab_anchor = r;
+    }
+    // A picker open on this tab follows it; its folder chip, below, wins.
+    if (a.view.strip.menu == .folder and !a.view.strip.footer_folder and strip.same(a.view.strip.target, target)) {
+        if (c.rects.get(c.node(box.index).id)) |r| a.view.strip.anchor = r;
     }
     const hot = box.hovered() or group_hot;
     const vis = tabStyle(k, on, hot);
@@ -502,7 +506,7 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
             if (pick_glyph_only or (pick_text_w orelse 0) > chips.pick_text_max) pick = tip.on(pick, k, .{ .text = f.name, .look = .tab });
             defer pick.end();
             const pick_rect = c.rects.get(c.node(pick.index).id) orelse c.rects.get(c.node(box.index).id);
-            if (f.changeable and strip.same(strip.active(a), target)) {
+            if (f.changeable and strip.same(strip.pickerPanel(a), target)) {
                 if (pick_rect) |r| a.view.strip.active_folder_anchor = r;
             }
             if (f.changeable and a.view.strip.menu == .folder and !a.view.strip.footer_folder and strip.same(a.view.strip.target, target)) {

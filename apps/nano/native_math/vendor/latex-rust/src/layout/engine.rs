@@ -391,15 +391,16 @@ impl Engine<'_> {
                 stacked,
             } => {
                 let (lo, hi) = (lower.as_deref(), upper.as_deref());
+                let stacked = stacked.unwrap_or(style.is_display());
                 match base.as_ref() {
-                    MathNode::Sum(None, None) => self.large_op('∑', lo, hi, style, *stacked),
-                    MathNode::Product(None, None) => self.large_op('∏', lo, hi, style, *stacked),
+                    MathNode::Sum(None, None) => self.large_op('∑', lo, hi, style, stacked),
+                    MathNode::Product(None, None) => self.large_op('∏', lo, hi, style, stacked),
                     MathNode::Integral(kind, None, None) => {
-                        self.integral_op(*kind, lo, hi, style, *stacked)
+                        self.integral_op(*kind, lo, hi, style, stacked)
                     }
                     _ => {
                         let op = self.item(base, style)?;
-                        self.attach_limits(op.bx, hi, lo, style, *stacked)
+                        self.attach_limits(op.bx, hi, lo, style, stacked)
                     }
                 }
             }
@@ -409,6 +410,9 @@ impl Engine<'_> {
             MathNode::Subscript(base, sub) => self.scripts(base, Some(sub), None, style),
             MathNode::SubSup(base, sub, exp) => self.scripts(base, Some(sub), Some(exp), style),
             MathNode::Delimited(open, body, close) => self.delimited(open, body, close, style),
+            MathNode::Middle(_) => Err(Error::Unsupported {
+                what: "middle outside left and right".into(),
+            }),
             MathNode::SizedDelim(d, size, k) => {
                 let needed = self.explicit_delim_span(*size, style);
                 Ok(Item {
@@ -985,15 +989,40 @@ impl Engine<'_> {
         close: &Delimiter,
         style: MathStyle,
     ) -> Result<Item, Error> {
-        let body_b = self.layout(body, style)?;
+        // Each side of a `\middle` is its own list, as in e-TeX: the fence closes
+        // the list before it, opens the one after, and ends a style declaration.
+        let mut fences = Vec::new();
+        let mut parts = Vec::new();
+        match body {
+            MathNode::Row(items) if items.iter().any(|n| matches!(n, MathNode::Middle(_))) => {
+                for list in items.split(|n| matches!(n, MathNode::Middle(_))) {
+                    parts.push(self.row(list, style)?.bx);
+                }
+                fences.extend(items.iter().filter_map(|n| match n {
+                    MathNode::Middle(d) => Some(d),
+                    _ => None,
+                }));
+            }
+            _ => parts.push(self.layout(body, style)?),
+        }
         let s = self.params.scale(style);
         let axis = &self.params.axis_height * &s;
-        let needed = self.delimiter_target(&body_b.height, &body_b.depth, &axis);
-        let left = self.center_delimiter(self.delim_box(open, &needed, style)?, &axis);
-        let right = self.center_delimiter(self.delim_box(close, &needed, style)?, &axis);
+        let height = parts.iter().fold(Dim::zero(), |h, p| h.max(&p.height));
+        let depth = parts.iter().fold(Dim::zero(), |d, p| d.max(&p.depth));
+        let needed = self.delimiter_target(&height, &depth, &axis);
+        let fence =
+            |d| Ok::<_, Error>(self.center_delimiter(self.delim_box(d, &needed, style)?, &axis));
+        let mut children = vec![fence(open)?];
+        for (i, part) in parts.into_iter().enumerate() {
+            if i > 0 {
+                children.push(fence(fences[i - 1])?);
+            }
+            children.push(part);
+        }
+        children.push(fence(close)?);
         Ok(Item {
             class: Some(AtomKind::Inner),
-            bx: shifted_hpack(vec![left, body_b, right]),
+            bx: shifted_hpack(children),
         })
     }
 
@@ -1955,6 +1984,7 @@ impl Engine<'_> {
             MatrixStyle::Align => self.align_env(rows, body_style, true),
             MatrixStyle::Aligned => self.amsmath_aligned(rows, body_style),
             MatrixStyle::Split => self.align_env(rows, body_style, false),
+            MatrixStyle::Gathered => self.amsmath_gathered(rows, body_style),
             MatrixStyle::Gather => self.gather_env(rows, body_style),
             MatrixStyle::Multline => self.multline_env(rows, body_style),
             MatrixStyle::Equation => self.equation_env(rows, body_style),
@@ -2076,6 +2106,30 @@ impl Engine<'_> {
                 }
             },
             |column| column > 0 && column % 2 == 0,
+        );
+
+        let gaps = self.aligned_interrow_gaps(&packed_rows);
+
+        let stack = self.center_amsmath_stack(packed_rows, &gaps, style);
+
+        let bx = self.wrap_amsmath_stack(stack, (None, None), style)?;
+
+        Ok(Item {
+            class: Some(AtomKind::Inner),
+            bx,
+        })
+    }
+
+    /// `{gathered}`: the row metrics of `{aligned}` in one centered column.
+    fn amsmath_gathered(&self, rows: &[EnvRow], style: MathStyle) -> Result<Item, Error> {
+        let cells = self.layout_environment_rows(&data_cells(rows)?, MathStyle::Display)?;
+
+        let packed_rows = self.build_amsmath_rows(
+            cells,
+            &Dim::zero(),
+            &self.tex_points_in_root_em(TEX_BASELINE_SKIP_PT),
+            |_| ColSpec::Center,
+            |_| false,
         );
 
         let gaps = self.aligned_interrow_gaps(&packed_rows);
@@ -3057,6 +3111,7 @@ fn class_of(n: &MathNode) -> Option<AtomKind> {
         | MathNode::Strut(_, _)
         | MathNode::Label(_)
         | MathNode::NoNumber
+        | MathNode::Middle(_)
         | MathNode::Hline => None,
     }
 }

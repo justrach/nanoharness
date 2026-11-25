@@ -687,3 +687,97 @@ test "quote selection keeps a command picked from the completion menu at the mes
         try testing.expectEqualStrings(expected, try h.sentText());
     }
 }
+
+const slid_passage = "Synthetic passage beside the slide.";
+
+/// Replies of wrapping prose, the passage in the middle of them: in a reply
+/// of its own, or (`steer`) in what a reply gained after a message sent
+/// while it worked. `started` is that reply as the message arrived.
+fn slideHistory(steer: bool, started: bool) ![]u8 {
+    const sentence = "Made-up prose that fills a few lines of the column, so that its height depends on how wide the column is, and that a slide of the sidebar has to lay out again once it is over. ";
+    const prose = sentence ++ sentence ++ sentence;
+    var json: std.ArrayList(u8) = .empty;
+    errdefer json.deinit(testing.allocator);
+    try json.appendSlice(testing.allocator, "{\"reset\":[");
+    for (0..50) |i| {
+        if (i == 25) {
+            try json.appendSlice(testing.allocator, "{\"id\":\"su\",\"role\":\"user\",\"parts\":[{\"id\":\"p\",\"kind\":\"text\",\"text\":\"Synthetic work\"}]},");
+            try json.print(testing.allocator, "{{\"id\":\"sa\",\"role\":\"assistant\",\"status\":\"{s}\",\"parts\":[{{\"id\":\"n\",\"kind\":\"text\",\"text\":\"Synthetic narration. {s}\"}}", .{ if (started) "streaming" else "complete", prose });
+            if (!started) try json.print(testing.allocator, ",{{\"id\":\"q\",\"kind\":\"text\",\"text\":\"{s}\\n\\n{s}\"}}", .{ slid_passage, prose });
+            try json.appendSlice(testing.allocator, "]},");
+            if (steer) try json.appendSlice(testing.allocator, "{\"id\":\"steer\",\"role\":\"user\",\"parts\":[{\"id\":\"p\",\"kind\":\"text\",\"text\":\"Synthetic steer\"}]},");
+            if (started) break;
+        }
+        try json.print(testing.allocator,
+            \\{{"id":"u{d}","role":"user","parts":[{{"id":"p","kind":"text","text":"Synthetic prompt {d}"}}]}},
+            \\{{"id":"a{d}","role":"assistant","status":"complete","parts":[{{"id":"p","kind":"text","text":"Synthetic answer {d}. {s}"}}]}},
+        , .{ i, i, i, i, prose });
+    }
+    _ = json.pop();
+    try json.appendSlice(testing.allocator, "]}");
+    return json.toOwnedSlice(testing.allocator);
+}
+
+test "quote selection chip goes to the real row while a slide's rows are measured out of sight" {
+    for ([_]bool{ false, true }) |steer| {
+        var h: Harness = undefined;
+        {
+            const frame = try slideHistory(steer, steer);
+            defer testing.allocator.free(frame);
+            try h.open(frame, true);
+        }
+        defer h.deinit();
+        if (steer) {
+            const frame = try slideHistory(true, false);
+            defer testing.allocator.free(frame);
+            try h.apply(frame);
+            h.t.settle(0.5);
+        }
+        // Every row is drawn once, and has a height to stand in for it.
+        h.a.composer.set(draft);
+        const at = h.t.ctx.nodes.items[h.node(slid_passage) orelse return error.TextMissing].rect;
+        try h.scrollTo(h.offset() + at.y - 250);
+        try h.quote(slid_passage);
+        h.a.offscreen = false;
+        try h.scrollTo(h.t.ctx.scroll_max.get(h.a.view.jump_box).?);
+        try testing.expect(h.node(slid_passage) == null);
+        _ = h.t.shortcut(.{ .key = 'b', .cmd = true });
+        try testing.expect(h.a.view.sidebar_tween != null);
+        while (h.a.view.sidebar_tween != null) h.t.frame();
+        // The chip is pressed, and let go of in a frame that has the passage
+        // only as a row drawn for its height.
+        const chip = h.chip(slid_passage) orelse return error.ChipMissing;
+        h.t.down(chip.x + 4, chip.y + chip.h / 2);
+        var frames: usize = 0;
+        while (h.node(slid_passage) == null) : (frames += 1) {
+            if (frames > 600) return error.NeverMeasured;
+            h.t.frame();
+        }
+        try testing.expect(h.t.ctx.nodes.items[h.node(slid_passage).?].rect.y < -5e5);
+        const before = h.offset();
+        h.t.up();
+        frames = 0;
+        var shown: usize = 0;
+        while (h.t.ctx.animating) : (frames += 1) {
+            if (frames > 2000) return error.NeverRested;
+            h.t.frame();
+            const anchor = h.t.ctx.selection.anchor orelse continue;
+            shown += 1;
+            for (h.t.ctx.nodes.items) |n| {
+                if (n.id == anchor.id) try testing.expect(n.rect.y > -5e5);
+                // Wanted for real, it is not measured aside too.
+                if (n.content == .text and n.rect.y < -5e5) try testing.expect(!std.mem.eql(u8, n.content.text.str, slid_passage));
+            }
+        }
+        try testing.expect(shown > 0);
+        try testing.expect(@abs(h.offset() - before) > 500);
+        // Where the slide's measuring ends, the passage is still in view.
+        try h.expectHighlighted(slid_passage);
+        const real = h.t.ctx.nodes.items[h.node(slid_passage).?];
+        try testing.expectEqual(real.id, h.t.ctx.selection.anchor.?.id);
+        const view = h.t.ctx.rects.get(h.a.view.jump_box).?;
+        try testing.expect(real.rect.y >= view.y and real.rect.y + real.rect.h <= view.y + view.h);
+        try testing.expectEqualStrings(draft, h.a.composer.text());
+        try h.expectUnsent();
+    }
+}
