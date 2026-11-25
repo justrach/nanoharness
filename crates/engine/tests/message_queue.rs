@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
+use harness_adapters::{Harness, HarnessError, RunControls};
 use harness_doc::{
     MessagePart, MessageRole, QueueDeliveryGate, SessionCommandPayload, SessionMessageEntry,
 };
@@ -22,7 +23,6 @@ use harness_engine::doc_host::{
     BeginQueueEditOutcome, FinishQueueEditAction, FinishQueueEditOutcome,
 };
 use harness_engine::{EngineCore, HarnessRegistry};
-use harness_adapters::{Harness, HarnessError, RunControls};
 use harness_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SessionStatus,
     SteeringMode, UserInputQuestion,
@@ -289,8 +289,12 @@ async fn setup_with(
 fn assemble_at(path: &std::path::Path, harness: Arc<HeldHarness>) -> EngineCore {
     let registry = HarnessRegistry::new();
     registry.register(harness);
-    EngineCore::assemble(path, Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles")
+    let core = EngineCore::assemble(path, Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    // These tests drain viewer/phone commands; that is the iOS composer path
+    // after the person opts in on this computer.
+    core.registry.set_remote_control(true);
+    core
 }
 
 async fn create_chat(core: &EngineCore) {
@@ -1886,7 +1890,9 @@ fn queue_rows(core: &EngineCore) -> Vec<(String, String, Vec<String>)> {
 }
 
 fn session_status(core: &EngineCore) -> Option<SessionStatus> {
-    core.sessions.session_status(CHAT).map(|session| session.status)
+    core.sessions
+        .session_status(CHAT)
+        .map(|session| session.status)
 }
 
 /// An errored turn is not a turn boundary (#466): losing the network mid-turn
@@ -1965,7 +1971,11 @@ async fn an_errored_turn_pauses_the_queue_until_an_explicit_send() {
         );
 
         assert!(core.doc_host.send_queued_now(CHAT, &third).await.unwrap());
-        wait_for(|| prompts.lock().unwrap().len() == 3, "attachment row retry").await;
+        wait_for(
+            || prompts.lock().unwrap().len() == 3,
+            "attachment row retry",
+        )
+        .await;
         assert!(prompts.lock().unwrap()[2].starts_with("third"));
         harness.finish.send(()).unwrap();
         wait_for(
