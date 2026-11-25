@@ -13,6 +13,7 @@ const kit = @import("view_kit.zig");
 const rules = @import("rules.zig");
 const attachments = @import("app_attachments.zig");
 const attachmentStrip = @import("view_composer_attachments.zig").strip;
+const quotes = @import("app_quotes.zig");
 const transcript_view = @import("view_transcript.zig");
 const footer_view = @import("view_session_footer.zig");
 const App = @import("app.zig").App;
@@ -82,7 +83,7 @@ pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
             .dock = outer.index,
         });
     }
-    const expanded = attachments.count(a) > 0 or composerFlip(
+    const expanded = attachments.count(a) > 0 or quotes.count(a) > 0 or composerFlip(
         a.view.composer_expanded,
         c.text.width(a.composer.text(), .{ .size = 14, .line_height = 22.75 }),
         compactCapacity(w, dictate.shown(a)),
@@ -219,7 +220,10 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, corn
         c.selection.clear();
     }
     if (c.rects.get(c.node(box.index).id)) |r| a.view.composer_anchor = r else if (a.window == null) c.animationFrame();
-    if (shape == .expanded) attachmentStrip(c, a, k, w);
+    if (shape == .expanded) {
+        attachmentStrip(c, a, k, w);
+        @import("view_quotes.zig").strip(c, a, k, w);
+    }
     {
         // Keep the field's keyed ancestry in both shapes. Only styles and
         // neighboring controls change: focus, selection, undo and caret do
@@ -427,7 +431,7 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
     // takes the other follow-up, as ⌘⌥↩ always does (`on_modified_submit`,
     // `on_follow_up_shortcut`).
     const queue_mod = @import("app_queue.zig");
-    const has_content = std.mem.trim(u8, a.composer.text(), " \n\t").len > 0 or attachments.count(a) > 0;
+    const has_content = std.mem.trim(u8, a.composer.text(), " \n\t").len > 0 or attachments.count(a) > 0 or quotes.count(a) > 0;
     const other = queue_mod.opposite(queue_mod.followUpBehavior(a));
     if (has_content and c.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true })) {
         if (on_enter and a.queues() and a.queue_edit == null) a.sendFollowUp(other) else a.send();
@@ -686,7 +690,7 @@ fn skeleton(c: *ui.Context) void {
 
 /// Send (or queue, while a run goes); Stop with nothing typed mid-run.
 fn send(c: *ui.Context, a: *App, k: theme.Colors, pad_left: f32) void {
-    const empty = std.mem.trim(u8, a.composer.text(), " \n\t").len == 0 and attachments.count(a) == 0;
+    const empty = std.mem.trim(u8, a.composer.text(), " \n\t").len == 0 and attachments.count(a) == 0 and quotes.count(a) == 0;
     const running = a.selectedStatus() == .working;
     const stop = running and empty;
     // Dimmed only when it can't send at all; an empty box just does nothing.

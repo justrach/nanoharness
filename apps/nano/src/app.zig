@@ -438,6 +438,8 @@ pub const App = struct {
     /// ↑/↓ through the open chat's earlier prompts.
     prompt_nav: @import("prompt_history.zig").Nav = .{},
     attachments: @import("app_attachments.zig").State = .{},
+    /// The passages "Add to chat" put on each chat's draft.
+    quotes: @import("app_quotes.zig").State = .{},
     artifacts: @import("artifact_links.zig").State = .{},
     file_drop: @import("view_attachment_drop.zig").State = .{},
     /// The last error the engine gave, shown under the composer.
@@ -610,6 +612,7 @@ pub const App = struct {
         a.external_navigation.deinit(a.gpa);
         a.reap();
         a.attachments.deinit(a.gpa);
+        a.quotes.deinit(a.gpa);
         a.file_drop.deinit(a.gpa);
         @import("app_send_feedback.zig").deinit(a);
         var blobs = a.tool_blobs.valueIterator();
@@ -2017,6 +2020,7 @@ pub const App = struct {
     pub fn reap(a: *App) void {
         a.panels.github_repository.images.reap();
         @import("app_attachments.zig").reap(a);
+        @import("app_quotes.zig").reap(a);
         @import("app_send_feedback.zig").reap(a);
         a.spaces.reap();
         a.chats.reap();
@@ -2076,27 +2080,36 @@ pub const App = struct {
         };
         defer if (completed) |p| a.gpa.free(p);
         const text = std.mem.trim(u8, completed orelse a.composer.text(), " \n\t");
-        const attached = attachments.prompt(a, text) catch {
+        const quotes = @import("app_quotes.zig");
+        const quoted = quotes.prompt(a, text) catch {
+            a.setNotice("Couldn't prepare the quoted passages. Your draft is preserved.");
+            return a.redraw();
+        };
+        defer if (quoted) |p| a.gpa.free(p);
+        const message = quoted orelse text;
+        const attached = attachments.prompt(a, message) catch {
             a.setNotice("Wait for the attachments to finish, or remove/retry the failed file.");
             return a.redraw();
         };
         defer if (attached) |p| a.gpa.free(p);
-        const prompt = attached orelse text;
+        const prompt = attached orelse message;
+        // The workspace's own commands are not messages: quotes wait for one.
+        const command = if (attached == null) text else prompt;
         // `/resume` is the workspace's, not the agent's: the palette that
         // puts a chat in this tab (`WorkspaceCommand::Resume`).
-        if (std.mem.eql(u8, prompt, "/resume")) {
+        if (std.mem.eql(u8, command, "/resume")) {
             a.composer.clear();
             return @import("view_palette.zig").toggle(a, .replace_current);
         }
-        if (std.mem.eql(u8, prompt, "/zen")) {
+        if (std.mem.eql(u8, command, "/zen")) {
             a.composer.clear();
             const was_design = a.settings.uiMode() == .design;
             a.settings.toggleUiMode();
             if (was_design and a.settings.uiMode() != .design) @import("app_panels.zig").closeDesignCanvas(a);
             return a.redraw();
         }
-        if (std.mem.eql(u8, prompt, "/custom-theme") or std.mem.startsWith(u8, prompt, "/custom-theme ")) {
-            const raw_arg = if (prompt.len > "/custom-theme".len) std.mem.trim(u8, prompt["/custom-theme".len..], " \t\r\n") else "";
+        if (std.mem.eql(u8, command, "/custom-theme") or std.mem.startsWith(u8, command, "/custom-theme ")) {
+            const raw_arg = if (command.len > "/custom-theme".len) std.mem.trim(u8, command["/custom-theme".len..], " \t\r\n") else "";
             var arg_buf: [512]u8 = undefined;
             const n = @min(raw_arg.len, arg_buf.len);
             if (n > 0) @memcpy(arg_buf[0..n], raw_arg[0..n]);
@@ -2114,7 +2127,7 @@ pub const App = struct {
         // A plain chat with no Auto tier would fall to graff's own default.
         if (@import("app_agent.zig").chatSendBlocked(a)) return;
         if (a.queues()) {
-            const blocker = queue_mod.steerBlocker(a, text.len > 0, attachments.count(a) > 0);
+            const blocker = queue_mod.steerBlocker(a, message.len > 0, attachments.count(a) > 0);
             const action = explicit orelse queue_mod.followUpBehavior(a);
             if (action == .steer) {
                 if (blocker) |why| {
@@ -2126,6 +2139,7 @@ pub const App = struct {
                 a.view.stick_end = true;
             } else queue_mod.queueMessage(a, prompt);
             attachments.clear(a);
+            quotes.clear(a);
             a.composer.clear();
             return a.redraw();
         }
@@ -2197,6 +2211,7 @@ pub const App = struct {
         }), .of(feedback.Pending, pending, feedback.Pending.onReply));
         // Sent: the prompt is no one's draft any more.
         attachments.clear(a);
+        quotes.clear(a);
         a.composer.clear();
         a.view.stick_end = true;
         if (a.selected == null) {

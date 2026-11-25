@@ -564,3 +564,82 @@ test "quote selection works in a neighboring pane once it has focus" {
     try testing.expectEqualStrings("> " ++ option_a[0..9], try h.sentText());
     try testing.expectEqualStrings("reading", h.a.pending_sends.items[0].chat);
 }
+
+test "quote selection goes with a queued follow-up" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var sessions = try std.json.parseFromSlice(std.json.Value, testing.allocator, "[{\"chatId\":\"reading\",\"status\":\"working\",\"updatedAt\":1000}]", .{});
+    defer sessions.deinit();
+    try h.a.sessions.replace(sessions.value);
+    h.a.caps.queue = true;
+    h.t.settle(0.3);
+    try h.quote(option_b);
+    h.a.composer.set(draft);
+    h.a.sendFollowUp(.queue);
+    h.t.settle(0.3);
+    const frame = h.a.engine.sent.items[h.a.engine.sent.items.len - 1];
+    var sent = try std.json.parseFromSlice(std.json.Value, testing.allocator, frame, .{});
+    defer sent.deinit();
+    try testing.expectEqualStrings("QueueMessage", sent.value.object.get("method").?.string);
+    try testing.expectEqualStrings("> " ++ option_b ++ "\n\n" ++ draft, sent.value.object.get("params").?.object.get("text").?.string);
+    try testing.expect(h.chip(option_b) == null);
+}
+
+test "quote selection waits while a queued message being edited has the composer" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.a.composer.set(draft);
+    try h.quote(option_b);
+    const edit = try testing.allocator.dupe(u8, "row");
+    h.a.queue_edit = .{
+        .row = edit,
+        .lease = try testing.allocator.dupe(u8, "lease"),
+        .base_hash = try testing.allocator.dupe(u8, "hash"),
+        .renew_at = h.a.now + 60,
+    };
+    h.t.settle(0.3);
+    try testing.expect(h.chip(option_b) == null);
+    // Nor is there a draft to quote into.
+    try h.select(option_a, 0, option_a.len);
+    try testing.expect(h.t.ctx.selection.anchor != null);
+    try testing.expect(!h.t.hasText(action));
+    h.a.queue_edit.?.deinit(testing.allocator);
+    h.a.queue_edit = null;
+    h.t.settle(0.3);
+    try testing.expect(h.chip(option_b) != null);
+    try testing.expect(h.t.hasText(action));
+}
+
+test "quote selection offers a passage again once it is selected anew" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try h.quote(option_b);
+    try h.clickChip(option_b);
+    try h.expectHighlighted(option_b);
+    try testing.expect(!h.t.hasText(action));
+    try h.select(option_b, 0, option_b.len);
+    try testing.expect(h.t.hasText(action));
+    // Once is enough: it is the same passage.
+    try h.t.clickText(action);
+    h.t.settle(0.3);
+    try testing.expectEqual(@as(usize, 1), @import("app_quotes.zig").count(&h.a));
+}
+
+test "quote selection shows its chips on the Write page, whose click goes back to the chat" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.a.composer.set(draft);
+    try h.quote(option_b);
+    @import("view_write.zig").open(&h.a);
+    h.t.settle(0.5);
+    const r = h.t.findText(option_b) orelse return error.ChipMissing;
+    h.t.click(r.x + 4, r.y + r.h / 2);
+    h.t.advance(1);
+    try testing.expect(!h.a.view.write_open);
+    try h.expectHighlighted(option_b);
+    try testing.expectEqualStrings(draft, h.a.composer.text());
+}

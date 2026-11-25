@@ -14,6 +14,7 @@ const theme = @import("theme.zig");
 const icons = @import("icons.zig");
 const tip = @import("view_tooltip.zig");
 const attachments = @import("app_attachments.zig");
+const quotes = @import("app_quotes.zig");
 const App = @import("app.zig").App;
 
 /// `WRITE_TEXT_SIZE`, its line (`LINE_HEIGHT_RATIO` 1.6, rounded), the
@@ -117,6 +118,12 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         defer ui.end(c);
         @import("view_composer_attachments.zig").strip(c, a, k, pageWidth(w));
     }
+    if (quotes.count(a) > 0) {
+        ui.key(c, "write-quotes");
+        const material = column(c, w).column().pb(8);
+        defer material.end();
+        @import("view_quotes.zig").strip(c, a, k, pageWidth(w));
+    }
     {
         // The bare field contributes two points of vertical padding.
         const area = column(c, w).grow().h(0).pt(10).pb(10);
@@ -202,7 +209,7 @@ fn toolbar(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         ui.text(c, "Edit message", .{ .size = 13, .line_height = 13 * 1.618, .color = k.muted });
     }
     ui.spacer(c);
-    const has = std.mem.trim(u8, a.composer.text(), " \n\t").len > 0 or attachments.count(a) > 0;
+    const has = std.mem.trim(u8, a.composer.text(), " \n\t").len > 0 or attachments.count(a) > 0 or quotes.count(a) > 0;
     const enabled = has and !@import("app_agent.zig").chatSendBlocked(a);
     {
         ui.key(c, "write-send");

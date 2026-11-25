@@ -23,6 +23,7 @@ const before_after = @import("view_before_after.zig");
 const image_gallery = @import("view_image_gallery.zig");
 const reply_images = @import("view_reply_images.zig");
 const sidebar = @import("view_sidebar.zig");
+const quote_view = @import("view_quotes.zig");
 const App = @import("app.zig").App;
 const rows_st = @import("view_settings_accounts_rows.zig").st;
 
@@ -362,6 +363,9 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
             }
         }
     }
+    // What of the open chat's replies can be quoted into its draft.
+    var quotable: quote_view.Rows = .{};
+    const quote_rows: ?*quote_view.Rows = if (subagent == null and t == &a.transcript) &quotable else null;
     var turn_node: ?u32 = null;
     defer if (turn_node != null) c.end();
     for (entries_, 0..) |*e, i| {
@@ -385,7 +389,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         }
         const tail = if (steered and e.role == .user) steer_order.tailAfter(steer, steer_chat.?, entries_, i) else null;
         // After its message, whether that was drawn or is off screen.
-        defer if (tail) |x| steerTail(c, a, k, x, entries_, i, chat_id, cull, just_stuck, &sel_pin);
+        defer if (tail) |x| steerTail(c, a, k, x, entries_, i, chat_id, cull, just_stuck, &sel_pin, quote_rows);
         const parts_len = e.parts.items.len;
         const head_end = if (steered and e.role == .assistant) steer_order.headEnd(steer, steer_chat.?, entries_, i) else parts_len;
         // Everything it has came after the message: nothing in its place.
@@ -395,7 +399,8 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         ui.key(c, c.print("entry-{s}-{s}", .{ chat_id orelse "", e.id }));
         const row_id = c.peekId(null);
         const row_pinned = sel_pin.isPinned(row_id);
-        const can_cull = !row_pinned and (!just_stuck or i + 1 < entries_.len) and !(anchor != null and i == turn_start.?) and e.status != .streaming;
+        const quoted = quote_rows != null and quote_view.wants(a, e.id);
+        const can_cull = !row_pinned and !quoted and (!just_stuck or i + 1 < entries_.len) and !(anchor != null and i == turn_start.?) and e.status != .streaming;
         if (can_cull and i < cold_cutoff and e.cached_h == 0 and c.rects.get(row_id) == null) {
             const est = estimateEntryHeight(e, col);
             _ = c.leaf(.{ .width = .fill, .height = .{ .px = est } }, .none, null);
@@ -410,7 +415,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
             continue;
         }
         const row_start = c.nodes.items.len;
-        var at: At = .{ .chat_id = chat_id, .entries = entries_, .index = i, .col = col, .scroll = scroll_rect };
+        var at: At = .{ .chat_id = chat_id, .entries = entries_, .index = i, .col = col, .scroll = scroll_rect, .quotes = quote_rows };
         switch (e.role) {
             .user => {
                 // Its row starts where the turn's gap does (`top_gap_for`).
@@ -506,6 +511,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
             };
         }
     }
+    if (quote_rows) |q| quote_view.settle(c, a, k, q, t, drawn.box);
     drawn.ticks = ticks.items;
     return drawn;
 }
@@ -607,7 +613,7 @@ fn steerPiece(c: *ui.Context, e: *const tr.Entry, id: []const u8, start: usize, 
 
 /// Under a message sent while its turn worked: what the reply gained
 /// after it, a row of its own with the gap of one.
-fn steerTail(c: *ui.Context, a: *App, k: theme.Colors, t: steer_order.Tail, entries_: []tr.Entry, user_ix: usize, chat_id: ?[]const u8, cull: Cull, just_stuck: bool, sel_pin: *SelectionPin) void {
+fn steerTail(c: *ui.Context, a: *App, k: theme.Colors, t: steer_order.Tail, entries_: []tr.Entry, user_ix: usize, chat_id: ?[]const u8, cull: Cull, just_stuck: bool, sel_pin: *SelectionPin, quote_rows: ?*quote_view.Rows) void {
     if (t.start >= t.end) return;
     const owner = &entries_[t.owner];
     const message = entries_[user_ix].id;
@@ -616,14 +622,15 @@ fn steerTail(c: *ui.Context, a: *App, k: theme.Colors, t: steer_order.Tail, entr
     const row_id = c.peekId(null);
     const row_pinned = sel_pin.isPinned(row_id);
     const at_end = user_ix + 1 == entries_.len;
-    if (spacer(c, cull, !row_pinned and (!just_stuck or !at_end) and owner.status != .streaming, &t.cut.cached_h, &t.cut.cached_w, &t.cut.measured_w) != null) {
+    const quoted = quote_rows != null and quote_view.wants(a, owner.id);
+    if (spacer(c, cull, !row_pinned and !quoted and (!just_stuck or !at_end) and owner.status != .streaming, &t.cut.cached_h, &t.cut.cached_w, &t.cut.measured_w) != null) {
         sel_pin.noteCulled();
         return;
     }
     const row_start = c.nodes.items.len;
     const piece = steerPiece(c, owner, c.print("{s}~{s}", .{ owner.id, message }), t.start, t.end) orelse return;
     const closes = t.end == owner.parts.items.len;
-    assistant(c, a, k, piece, .{ .chat_id = chat_id, .entries = entries_, .index = t.owner, .col = cull.col, .scroll = cull.view, .closes = closes, .last = closes and at_end });
+    assistant(c, a, k, piece, .{ .chat_id = chat_id, .entries = entries_, .index = t.owner, .col = cull.col, .scroll = cull.view, .closes = closes, .last = closes and at_end, .quotes = quote_rows });
     sel_pin.observe(c, row_id, row_start);
 }
 
@@ -763,10 +770,13 @@ const At = struct {
     closes: bool = true,
     /// The transcript's last row, though its entry isn't the last one.
     last: bool = false,
+    /// Where its replies' text is noted, to be quoted from.
+    quotes: ?*quote_view.Rows = null,
 };
 
 fn assistant(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at: At) void {
     const last = at.last or at.index + 1 == at.entries.len;
+    if (at.quotes) |q| q.next();
     const col = ui.div(c).column().wFull();
     defer col.end();
     const hovered = col.hovered() or (last and underLastRow(c, a, c.rects.get(c.node(col.index).id), at.scroll));
@@ -882,6 +892,8 @@ pub fn streamMarkdown(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Ent
 fn part(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const tr.Part, at: At, answer: Answer) void {
     switch (p.kind) {
         .text => {
+            const start = c.nodes.items.len;
+            defer if (at.quotes) |q| q.note(c, at.entries[at.index].id, p.id, start);
             if (answer.part == p) {
                 const box = ui.div(c).column().wFull();
                 defer box.end();
@@ -1015,7 +1027,11 @@ fn workLine(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: 
     }
     const override = if (live) live_key else settled_key;
     const default_open = compact.defaultWorkOpen(e.parts.items, live);
-    const open = a.view.groups.get(override) orelse if (live) true else (a.view.groups.get(key) orelse a.view.groups.get(legacy) orelse default_open);
+    var open = a.view.groups.get(override) orelse if (live) true else (a.view.groups.get(key) orelse a.view.groups.get(legacy) orelse default_open);
+    if (!open and at.quotes != null and quote_view.opens(a, at.entries[at.index].id, work)) {
+        a.view.toggleGroup(a.gpa, override, open);
+        open = true;
+    }
     const box = ui.div(c).column().wFull();
     defer box.end();
     {
