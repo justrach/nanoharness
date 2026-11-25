@@ -235,13 +235,44 @@ async fn handle_request(
     }
 }
 
+/// Bearer credentials and scoped services accepted on an authenticated local
+/// IPC WebSocket listener.
+#[derive(Clone)]
+pub struct IpcAuth {
+    pub admin_token: String,
+    pub admin_service: Arc<dyn RpcService>,
+    pub mcp_token: String,
+    pub mcp_service: Arc<dyn RpcService>,
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+fn bearer_token(headers: &tokio_tungstenite::tungstenite::http::HeaderMap) -> Option<&str> {
+    let raw = headers.get("authorization")?.to_str().ok()?.trim();
+    let (scheme, token) = raw.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim();
+    (!token.is_empty()).then_some(token)
+}
+
 /// Accept WebSocket connections forever, serving each with `service`.
 pub async fn serve_ws_listener(listener: TcpListener, service: Arc<dyn RpcService>) {
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
                 tracing::debug!(%peer, "rpc: connection accepted");
-                tokio::spawn(serve_ws_socket(stream, service.clone()));
+                tokio::spawn(serve_ws_socket(stream, None, Some(service.clone())));
             }
             Err(err) => {
                 tracing::warn!(error = %err, "rpc: accept failed");
@@ -251,18 +282,41 @@ pub async fn serve_ws_listener(listener: TcpListener, service: Arc<dyn RpcServic
     }
 }
 
-async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
+/// Accept WebSocket connections forever, authenticating each client with a
+/// bearer token (`admin_token` or `mcp_token`) before upgrading.
+pub async fn serve_ws_listener_authenticated(listener: TcpListener, auth: IpcAuth) {
+    let auth = Arc::new(auth);
+    loop {
+        match listener.accept().await {
+            Ok((stream, peer)) => {
+                tracing::debug!(%peer, "rpc: connection accepted");
+                tokio::spawn(serve_ws_socket(stream, Some(auth.clone()), None));
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "rpc: accept failed");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+async fn serve_ws_socket(
+    stream: TcpStream,
+    auth: Option<Arc<IpcAuth>>,
+    fallback: Option<Arc<dyn RpcService>>,
+) {
     // Native viewports dial this socket with a bare `connect_async` and send
     // no `Origin` header. A browser always attaches `Origin` to a WebSocket
     // handshake and cannot forge or suppress it from script, and WebSockets
-    // are exempt from the Same-Origin Policy — so only rejecting any handshake
+    // are exempt from the Same-Origin Policy — so rejecting any handshake
     // that carries `Origin` keeps a page the user happens to visit from
-    // reaching this local socket. Keep this check.
+    // reaching this local socket, alongside bearer authentication.
     //
     // The large `Err` (ErrorResponse) is the shape tungstenite's Callback
     // trait requires; it can't be boxed away here.
+    let selected: std::sync::Mutex<Option<Arc<dyn RpcService>>> = std::sync::Mutex::new(fallback);
     #[allow(clippy::result_large_err)]
-    let reject_cross_origin = |req: &HandshakeRequest, resp: HandshakeResponse| {
+    let handshake_check = |req: &HandshakeRequest, resp: HandshakeResponse| {
         if let Some(origin) = req.headers().get("origin") {
             tracing::warn!(
                 origin = %String::from_utf8_lossy(origin.as_bytes()),
@@ -272,11 +326,33 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
             *err.status_mut() = StatusCode::FORBIDDEN;
             return Err(err);
         }
+        if let Some(auth) = &auth {
+            let service = bearer_token(req.headers()).and_then(|presented| {
+                if !auth.admin_token.is_empty()
+                    && constant_time_eq(presented.as_bytes(), auth.admin_token.as_bytes())
+                {
+                    Some(auth.admin_service.clone())
+                } else if !auth.mcp_token.is_empty()
+                    && constant_time_eq(presented.as_bytes(), auth.mcp_token.as_bytes())
+                {
+                    Some(auth.mcp_service.clone())
+                } else {
+                    None
+                }
+            });
+            let Some(service) = service else {
+                let mut err =
+                    ErrorResponse::new(Some("missing or invalid IPC bearer token".to_string()));
+                *err.status_mut() = StatusCode::UNAUTHORIZED;
+                return Err(err);
+            };
+            *selected.lock().expect("ipc service lock") = Some(service);
+        }
         Ok(resp)
     };
     let ws = match tokio_tungstenite::accept_hdr_async_with_config(
         stream,
-        reject_cross_origin,
+        handshake_check,
         Some(crate::ws::config()),
     )
     .await
@@ -286,6 +362,9 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
             tracing::warn!(error = %err, "rpc: websocket handshake failed");
             return;
         }
+    };
+    let Some(service) = selected.into_inner().expect("ipc service lock") else {
+        return;
     };
     let (out_tx, out_rx) = mpsc::channel::<String>(256);
     let (in_tx, in_rx) = mpsc::channel::<String>(256);

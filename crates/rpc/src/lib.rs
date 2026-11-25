@@ -28,7 +28,7 @@ mod remote_control;
 mod server;
 mod ws;
 
-pub use client::{RpcClient, RpcSubscription, connect_ws};
+pub use client::{RpcClient, RpcSubscription, connect_ws, connect_ws_with_bearer};
 pub use device_room::{
     DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
     NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
@@ -44,7 +44,7 @@ pub use remote_control::{
     RemoteCommandAdmit, admit_relay_action, admit_relay_rpc, admit_remote_command,
     relay_first_action_method,
 };
-pub use server::{serve_connection, serve_ws_listener};
+pub use server::{IpcAuth, serve_connection, serve_ws_listener, serve_ws_listener_authenticated};
 
 /// RPC method names — single source of truth for both ends.
 /// Full surface: docs/research/feature-inventory.md §2.
@@ -879,5 +879,77 @@ mod tests {
         // The next unary call still works — the dead stream didn't wedge the connection.
         let echoed = client.call("Echo", serde_json::json!(2)).await.unwrap();
         assert_eq!(echoed, serde_json::json!(2));
+    }
+
+    #[tokio::test]
+    async fn authenticated_ipc_routes_admin_and_mcp_tiers_and_rejects_unauth() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        struct ScopedEcho(&'static str);
+        #[async_trait]
+        impl RpcService for ScopedEcho {
+            async fn handle(
+                &self,
+                method: &str,
+                _params: serde_json::Value,
+            ) -> Result<RpcReply, RpcError> {
+                if self.0 == "mcp" && method == "AdminOnly" {
+                    return Err(RpcError::UnknownMethod(method.to_owned()));
+                }
+                RpcReply::value(&serde_json::json!({ "tier": self.0, "method": method }))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(serve_ws_listener_authenticated(
+            listener,
+            IpcAuth {
+                admin_token: "admin-tok".into(),
+                admin_service: Arc::new(ScopedEcho("admin")),
+                mcp_token: "mcp-tok".into(),
+                mcp_service: Arc::new(ScopedEcho("mcp")),
+            },
+        ));
+
+        // Missing or wrong bearer is rejected during WebSocket handshake.
+        assert!(connect_ws(&format!("ws://127.0.0.1:{port}")).await.is_err());
+        assert!(
+            connect_ws_with_bearer(&format!("ws://127.0.0.1:{port}"), Some("wrong-tok"))
+                .await
+                .is_err()
+        );
+
+        // Even with a valid bearer, a browser-supplied Origin header is refused.
+        let mut req = format!("ws://127.0.0.1:{port}")
+            .into_client_request()
+            .unwrap();
+        req.headers_mut()
+            .insert("origin", "https://evil.example".parse().unwrap());
+        req.headers_mut()
+            .insert("authorization", "Bearer admin-tok".parse().unwrap());
+        assert!(tokio_tungstenite::connect_async(req).await.is_err());
+
+        // MCP bearer gets MCP service (denied AdminOnly, allowed Read).
+        let mcp = connect_ws_with_bearer(&format!("ws://127.0.0.1:{port}"), Some("mcp-tok"))
+            .await
+            .unwrap();
+        assert_eq!(
+            mcp.call("Read", serde_json::json!({})).await.unwrap(),
+            serde_json::json!({ "tier": "mcp", "method": "Read" })
+        );
+        assert!(mcp.call("AdminOnly", serde_json::json!({})).await.is_err());
+
+        // Admin bearer reaches Admin service.
+        let admin = connect_ws_with_bearer(&format!("ws://127.0.0.1:{port}"), Some("admin-tok"))
+            .await
+            .unwrap();
+        assert_eq!(
+            admin
+                .call("AdminOnly", serde_json::json!({}))
+                .await
+                .unwrap(),
+            serde_json::json!({ "tier": "admin", "method": "AdminOnly" })
+        );
     }
 }

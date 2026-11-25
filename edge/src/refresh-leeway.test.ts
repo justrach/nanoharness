@@ -68,7 +68,11 @@ describe("refresh leeway", () => {
 
     expect(upstream.calls).toBe(1);
     expect(b.refreshToken).toBe(a.refreshToken);
-    expect(await verifyToken(baseEnv, b.accessToken)).toEqual({ userId: "42", orgId: "user-42" });
+    expect(await verifyToken(baseEnv, b.accessToken)).toEqual({
+      userId: "42",
+      orgId: "user-42",
+      trustTier: "personal"
+    });
   });
 
   it("lets the successor refresh as usual afterwards", async () => {

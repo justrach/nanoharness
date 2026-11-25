@@ -25,6 +25,8 @@ pub const Engine = struct {
     gpa: Allocator,
     io: std.Io,
     port: u16,
+    data_dir: ?[]u8 = null,
+    explicit_token: ?[]u8 = null,
     events: Events = .{},
     mux: rpc.Mux,
     state: State = .connecting,
@@ -55,6 +57,16 @@ pub const Engine = struct {
         return std.fmt.parseInt(u16, v, 10) catch default_port;
     }
 
+    pub fn setAuth(e: *Engine, data_dir: ?[]const u8, explicit_token: ?[]const u8) !void {
+        const next_dir = if (data_dir) |d| try e.gpa.dupe(u8, d) else null;
+        errdefer if (next_dir) |d| e.gpa.free(d);
+        const next_tok = if (explicit_token) |t| try e.gpa.dupe(u8, t) else null;
+        if (e.data_dir) |d| e.gpa.free(d);
+        if (e.explicit_token) |t| e.gpa.free(t);
+        e.data_dir = next_dir;
+        e.explicit_token = next_tok;
+    }
+
     /// Starts dialing; `e` must stay where it is from now on.
     pub fn start(e: *Engine) !void {
         e.thread = try std.Thread.spawn(.{}, run, .{e});
@@ -66,6 +78,8 @@ pub const Engine = struct {
         if (e.thread) |t| t.join();
         if (e.live.load(.acquire)) |c| c.deinit(e.gpa);
         if (e.scene) |*sc| sc.deinit();
+        if (e.data_dir) |d| e.gpa.free(d);
+        if (e.explicit_token) |t| e.gpa.free(t);
         for (e.queued.items) |q| e.gpa.free(q);
         e.queued.deinit(e.gpa);
         for (e.sent.items) |q| e.gpa.free(q);
@@ -163,7 +177,9 @@ pub const Engine = struct {
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(e.gpa);
         while (!e.stopping.load(.acquire)) {
-            const c = ws.Client.connect(e.gpa, e.io, e.port, "/") catch {
+            const tok = ws.resolveIpcToken(e.gpa, e.io, e.explicit_token, e.data_dir, e.port, false);
+            defer if (tok) |t| e.gpa.free(t);
+            const c = ws.Client.connectWithBearer(e.gpa, e.io, e.port, "/", tok) catch {
                 e.post(.{ .state = .disconnected });
                 e.pause();
                 continue;

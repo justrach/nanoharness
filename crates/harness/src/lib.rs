@@ -116,6 +116,9 @@ pub struct RunOrigin {
     /// Per-run directory for build-wrapper wait markers (`<pid>` files whose
     /// contents are Unix seconds). Never inherited from the host process.
     pub build_wait_dir: Option<std::path::PathBuf>,
+    /// Scoped MCP IPC bearer passed only to Harness's own MCP server process,
+    /// never to the agent child environment.
+    pub ipc_token: Option<String>,
 }
 
 /// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.

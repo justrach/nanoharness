@@ -1,5 +1,5 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
-import { issueRefreshCredential, issueToken, personalOrgId, verifyRefreshCredential } from "./auth";
+import { issueRefreshCredential, issueSandboxToken, issueToken, personalOrgId, verifyRefreshCredential } from "./auth";
 import type { Env } from "./env";
 import { ensureHarnessMemberProfile } from "./member-profile";
 
@@ -142,10 +142,11 @@ export const sandboxExchange = async (env: Env, token: string, fetchImpl: typeof
   }
   const id = String(who.user_id);
   const user = await ensureHarnessMemberProfile(env, id, who.email);
+  const sandboxId = typeof who.sandbox_id === "string" && who.sandbox_id.trim() ? who.sandbox_id.trim() : undefined;
   return {
     user,
     orgId: personalOrgId(id),
-    accessToken: await issueToken(env, id)
+    accessToken: await issueSandboxToken(env, id, sandboxId)
   };
 };
 

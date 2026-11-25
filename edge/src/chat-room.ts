@@ -31,7 +31,13 @@ import {
   setMeta
 } from "./chat-log";
 import { decodeFrame, encodeFrame, FRAME } from "./chat-frames";
-import { AUTH_USER_HEADER, type Env } from "./env";
+import {
+  AUTH_SANDBOX_ID_HEADER,
+  AUTH_TRUST_TIER_HEADER,
+  AUTH_USER_HEADER,
+  CHAT_HOST_SANDBOX_HEADER,
+  type Env
+} from "./env";
 import { readCapped } from "./body";
 import { isPurge, wipeObject } from "./purge";
 import { ReplayCache, attributePushDevice, parseEnvelope } from "./device-auth";
@@ -101,12 +107,26 @@ export class ChatRoom implements DurableObject {
     const url = new URL(request.url);
     const userId = request.headers.get(AUTH_USER_HEADER);
     if (!userId) return json({ error: "unauthenticated" }, 401);
+    const trustTier = request.headers.get(AUTH_TRUST_TIER_HEADER) === "sandbox" ? "sandbox" : "personal";
+    const sandboxId = request.headers.get(AUTH_SANDBOX_ID_HEADER) ?? "";
+    const chatHostSandbox = request.headers.get(CHAT_HOST_SANDBOX_HEADER) === "1";
 
     const sql = this.ctx.storage.sql;
     const owner = getMeta(sql, "owner");
 
+    if (url.pathname === "/internal/owner" && request.method === "GET") {
+      const storedTier = getMeta(sql, "tier") ?? "personal";
+      const storedSandbox = getMeta(sql, "sandbox_id") ?? "";
+      const allowed =
+        owner === userId &&
+        storedTier === "sandbox" &&
+        (storedSandbox === "" || storedSandbox === sandboxId);
+      return json({ allowed });
+    }
+
     // Account deletion (purge.ts): only the owner's chat is wiped.
     if (isPurge(request, url)) {
+      if (trustTier === "sandbox") return json({ error: "trust_tier_denied" }, 403);
       if (owner !== userId) return json({ purged: false });
       this.presence.clear();
       this.quotas.clear();
@@ -117,12 +137,35 @@ export class ChatRoom implements DurableObject {
       return json({ purged: true, backup: `backup/chat2/${this.ctx.id.toString()}/latest.json` });
     }
 
+    if (trustTier === "sandbox" && url.pathname === "/reset" && !owner) {
+      return json({ error: "trust_tier_denied" }, 403);
+    }
+
+    const admitOwner = (): Response | undefined => {
+      if (!owner) {
+        setMeta(sql, "owner", userId);
+        setMeta(sql, "tier", trustTier);
+        if (trustTier === "sandbox" && sandboxId) setMeta(sql, "sandbox_id", sandboxId);
+        return undefined;
+      }
+      if (owner !== userId) return json({ error: "forbidden" }, 403);
+      if (trustTier === "sandbox" && !chatHostSandbox) {
+        const storedTier = getMeta(sql, "tier") ?? "personal";
+        const storedSandbox = getMeta(sql, "sandbox_id") ?? "";
+        if (storedTier !== "sandbox" || (storedSandbox !== "" && storedSandbox !== sandboxId)) {
+          return json({ error: "trust_tier_denied" }, 403);
+        }
+        if (storedSandbox === "" && sandboxId) setMeta(sql, "sandbox_id", sandboxId);
+      }
+      return undefined;
+    };
+
     if (url.pathname === "/ws") {
       // Claim-on-first-join ownership, then owner-only forever (the s2
       // discipline: chat ids are client-minted, the first authed user to
       // dial one owns it).
-      if (!owner) setMeta(sql, "owner", userId);
-      else if (owner !== userId) return json({ error: "forbidden" }, 403);
+      const denied = admitOwner();
+      if (denied) return denied;
       const device = url.searchParams.get("device") ?? "";
       const pair = new WebSocketPair();
       this.ctx.acceptWebSocket(pair[1]);
@@ -132,8 +175,8 @@ export class ChatRoom implements DurableObject {
     }
 
     if (url.pathname === "/checkpoint" && request.method === "POST") {
-      if (!owner) setMeta(sql, "owner", userId);
-      else if (owner !== userId) return json({ error: "forbidden" }, 403);
+      const denied = admitOwner();
+      if (denied) return denied;
       const seqCovered = Number(url.searchParams.get("seqCovered") ?? "");
       if (!Number.isInteger(seqCovered) || seqCovered < 0) {
         return json({ error: "bad_seq_covered" }, 400);
@@ -161,8 +204,8 @@ export class ChatRoom implements DurableObject {
     // transport and 404'd an unclaimed room, which deadlocked a brand-new
     // chat on WS-hostile networks: the sender's push 404s, the host's pull
     // 404s, and the only claimants (WS join, checkpoint heal) never run.
-    if (!owner) setMeta(sql, "owner", userId);
-    else if (owner !== userId) return json({ error: "forbidden" }, 403);
+    const denied = admitOwner();
+    if (denied) return denied;
 
     if (url.pathname === "/checkpoint" && request.method === "GET") {
       const bytes = this.blobs.get(CHECKPOINT_BLOB);

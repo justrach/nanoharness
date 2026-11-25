@@ -44,8 +44,9 @@ export const HOP_CAP = 6;
 
 /** A wake chain whose last link is older than this starts over at hop 1, so
  * a pair of agents that once hit the cap aren't muted in that room forever.
- * An explicit reply keeps its parent's hop whatever its age. */
-export const HOP_DECAY_S = 600;
+ * An explicit reply keeps its parent's hop whatever its age. Kept at >=1h so
+ * slower cross-channel exchanges don't silently decay mid-conversation. */
+export const HOP_DECAY_S = 3600;
 
 export interface RoomOptions {
   hopDecayS?: number;
@@ -194,6 +195,7 @@ export interface PendingWake {
   toRef: string | null;
   toDevice: string;
   body: string;
+  hop: number;
 }
 
 /** `agent_wake_check`'s verdict; only `allowed` wakes. */
@@ -398,6 +400,8 @@ export interface PostArgs {
   mentions: string[];
   clientId: string | null;
   claimKey: string | null;
+  /** Relay hop carried from a cross-channel peer-mail chain (`send_message` -> `post_room`). */
+  parentHop: number;
   /** Personal details rewritten in the body, by kind. */
   redacted: Partial<Record<PersonalKind, number>>;
   /** Invisible characters removed from the body. */
@@ -436,6 +440,11 @@ export function parsePost(body: Json): PostArgs {
   if ((kind === "claim" || kind === "done") !== (claimKey !== null)) {
     throw bad("claimKey: required for claim and done posts, and only for them");
   }
+  const rawParentHop = body.parentHop;
+  const parentHop =
+    typeof rawParentHop === "number" && Number.isInteger(rawParentHop) && rawParentHop > 0
+      ? Math.min(HOP_CAP, rawParentHop)
+      : 0;
   // No `fromUser` here: whether a person wrote a post is never the caller's
   // claim to make (it resets the hop cap). See RoomCore.post.
   return {
@@ -446,6 +455,7 @@ export function parsePost(body: Json): PostArgs {
     mentions,
     clientId,
     claimKey,
+    parentHop,
     redacted: clean.redacted,
     stripped: clean.stripped
   };
@@ -782,7 +792,13 @@ export class RoomCore {
    * could restart a loop. A chain found by that fallback (not an explicit
    * reply) whose last link is older than the decay starts over at 1.
    * Clamped at the cap. */
-  private hopFor(fromUser: boolean, sender: MemberRow, replyTo: number | null, now: number): number {
+  private hopFor(
+    fromUser: boolean,
+    sender: MemberRow,
+    replyTo: number | null,
+    now: number,
+    parentHop = 0
+  ): number {
     if (fromUser) return 0;
     let parent: MessageRow | undefined;
     if (replyTo !== null) {
@@ -794,10 +810,14 @@ export class RoomCore {
         if (m.sender !== sender.member && addressedTo(m, sender.member)) parent = m;
       }
     }
-    if (!parent) return 1;
     const decay = this.options.hopDecayS ?? HOP_DECAY_S;
-    if (replyTo === null && now - parent.createdAt > decay) return 1;
-    return Math.min(HOP_CAP, parent.fromUser ? 1 : parent.hop + 1);
+    const base = !parent
+      ? 1
+      : replyTo === null && now - parent.createdAt > decay
+        ? 1
+        : Math.min(HOP_CAP, parent.fromUser ? 1 : parent.hop + 1);
+    const carried = parentHop > 0 ? Math.min(HOP_CAP, parentHop + 1) : 0;
+    return Math.max(base, carried);
   }
 
   /** `fromUser` is set by the actor from how the caller reached it, never
@@ -858,7 +878,7 @@ export class RoomCore {
         body: args.body,
         replyTo: args.replyTo,
         mentions,
-        hop: this.hopFor(fromUser, sender, args.replyTo, now),
+        hop: this.hopFor(fromUser, sender, args.replyTo, now, args.parentHop),
         clientId: args.clientId,
         claimKey: args.claimKey,
         createdAt: now
@@ -1207,6 +1227,7 @@ export class MemoryRoomStore implements RoomStore {
     const today = this.wakes.filter((x) => x.toUserId === to && w.now - x.at < 86_400).length;
     if (today >= rules.dailyCap) return "capped";
     const body = r?.messages.find((m) => m.seq === w.seq)?.body ?? "";
+    const hop = r?.messages.find((m) => m.seq === w.seq)?.hop ?? 0;
     this.wakes.push({
       id: this.wakes.length + 1,
       roomId: w.roomId,
@@ -1222,6 +1243,7 @@ export class MemoryRoomStore implements RoomStore {
       toDevice: w.target.deviceId,
       toUserId: to,
       body,
+      hop,
       at: w.now,
       deliveredAt: null,
       droppedAt: null

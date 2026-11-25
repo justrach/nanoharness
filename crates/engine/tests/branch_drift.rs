@@ -184,6 +184,7 @@ fn answer(core: &EngineCore, request_id: &str, label: &str) {
             question_id: "branch".into(),
             labels: vec![label.into()],
         }],
+        from_agent: false,
     };
     core.doc_host
         .queue_command(CHAT, payload)
@@ -330,6 +331,7 @@ fn seed_old_question(core: &EngineCore, held: &str, options: &[&str]) -> String 
                     multi_select: false,
                     prefill: None,
                     multiline: false,
+                    requires_human_ui: false,
                 }],
                 resolved: false,
             }],

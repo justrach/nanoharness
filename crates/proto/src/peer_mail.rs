@@ -90,6 +90,7 @@ mod tests {
                 from_display: None,
                 from_github: None,
                 from_fingerprint: None,
+                hop: 0,
             },
             "done here",
         )

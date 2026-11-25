@@ -632,6 +632,20 @@ pub struct UserInputQuestion {
     pub prefill: Option<String>,
     #[serde(default)]
     pub multiline: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requires_human_ui: bool,
+}
+
+/// True when a question is a tool/permission approval prompt that only a
+/// human clicking in a native UI may answer (never another agent via MCP).
+pub fn is_human_approval_question(q: &UserInputQuestion) -> bool {
+    q.requires_human_ui
+        || q.id.starts_with("permission:")
+        || q.header.eq_ignore_ascii_case("Approve tool")
+        || q.header.eq_ignore_ascii_case("Approve command")
+        || q.header.eq_ignore_ascii_case("Approve file change")
+        || q.header.eq_ignore_ascii_case("Permission")
+        || q.header.eq_ignore_ascii_case("Approve")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

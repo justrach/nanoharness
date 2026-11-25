@@ -63,6 +63,7 @@ impl Harness for AskingHarness {
             prefill: None,
             multiline: false,
             multi_select: false,
+            requires_human_ui: false,
         }]);
         let interrupt = controls.interrupt.clone();
         let progress = self.progress_after_answer;
@@ -205,6 +206,7 @@ async fn ask_and_answer(core: &EngineCore, answers: &Arc<Mutex<Vec<Vec<UserInput
                 question_id: "q1".into(),
                 labels: vec!["Yes".into()],
             }],
+            false,
         )
         .expect("answer");
     assert!(answered, "the live run takes the answer");
