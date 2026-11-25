@@ -119,19 +119,27 @@ window rests.
 | 240 turns, 3 panes | open | 0.86 → 13.82 | 0.96 → 0.99 | 0.99 → 1.31 | 1,527.75 → 3.74 | 2.08 ×1 → 4.55 ×718 | 36,610 → 3,807 |
 | | close | 1.01 → 1.00 | 0.96 → 1.04 | 1.01 → 1.40 | 1,531.42 → 16.38 | 1.97 ×1 → 4.28 ×718 | 36,182 → 3,379 |
 
-Windowed at the same size is within noise of every row, before and after.
-
 | Cmd+B over a whole peek | Before | After |
 | --- | ---: | ---: |
 | Sidebar's right edge on the press frame (224 before it) | 0 | 224 |
-| Frames until the sidebar is whole again | 24 | 0 |
+| Frames until the sidebar is whole again (24 is the 200 ms tween) | 24 | 0 |
 
-What it costs: the frame that breaks the visible text at its new width (the
-press when opening, the slide's end when closing) is 9 to 16 ms with two or three
-240-turn panes when nothing is cached, more than a 120 Hz frame. Before, the
-same work was repeated at each step of the column that wasn't cached. And the
-window draws for 1 to 6 seconds after the slide while it measures, at a few ms a
-frame, rather than stopping for 1 to 1.5 seconds.
+Windowed at the same size is within noise of every row, before and after, so in
+splits the gap to a window is the window's size: at 1200×780, 60 turns and three
+panes, opening ended in a 5.14 ms frame before (0.48 after), not 384 ms.
+
+What it costs:
+
+- With two or three 240-turn panes, the frame that breaks the visible text at its
+  new width (the press when opening, the slide's end when closing) is 9 to 16 ms
+  when nothing is cached, more than a 120 Hz frame. The press frame when opening
+  is a regression there: 0.61 to 8.81 ms and 0.86 to 13.82 ms. The likely reason,
+  not instrumented, is that the remount of the whole history on `main` also left
+  the text caches holding these widths, which measuring a few rows a frame
+  doesn't. With the measuring but without the single column, the press was
+  14.01 ms as well and the mean frame 5.49 ms against 0.99.
+- The window draws for 1 to 6 seconds after the slide while it measures, at up to
+  5.26 ms a frame, rather than stopping for 1 to 1.5 seconds.
 
 These are CPU figures. GPU presentation at fullscreen resolution, and how it
 feels on a display, aren't measured here.
