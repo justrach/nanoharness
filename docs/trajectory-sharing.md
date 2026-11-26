@@ -2,6 +2,10 @@
 
 **Status: proposal only.** NanoHarness does not collect or upload runs for this program. The Settings page is informational and has no opt-in control. This document is not the program terms or a representation that a provider permits sharing.
 
+## Current visibility gate
+
+The informational Settings › Privacy preview is shown only when NanoHarness has a successful `CodegraffAuthStatus` with a resolved Codegraff identity (a credential alone is not enough). It is hidden for signed-out users, users signed into other providers, and if the engine disconnects or the Codegraff status refresh fails; a stale saved Privacy selection falls back to Account. This is only a visibility gate. Signing into Codegraff does not enable collection, grant consent, verify company approval, or authorize a provider subscription. The feature still has no capture, persistence, or upload path.
+
 ## Intended scope
 
 A future, separately reviewed opt-in could cover eligible future NanoHarness sessions, including regular sessions using a customer’s own supported agent or model subscription. A trajectory could include prompts, responses, tool calls and results, outcomes, and eligible delegated-agent steps. The feature must remain off for every account unless all user, organization, provider, and server-side requirements below are met. No historical or pre-consent session data may be collected.

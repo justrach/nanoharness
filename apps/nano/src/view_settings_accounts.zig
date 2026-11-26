@@ -387,6 +387,7 @@ fn signOutCodegraff(a: *App) void {
 
 fn onSignOut(a: *App, _: u64, r: rpc.Reply) void {
     a.view.accounts.signing_out = false;
+    if (r == .ok) @import("app_account.zig").clearCodegraff(a);
     if (r == .err) {
         var buf: [256]u8 = undefined;
         setNotice(a, std.fmt.bufPrint(&buf, "Sign out of Codegraff failed: {s}", .{why(r.err)}) catch "Sign out of Codegraff failed");

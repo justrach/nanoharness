@@ -30,9 +30,20 @@ pub fn st(c: *ui.Context, size: f32, base: ui.TextStyle) ui.TextStyle {
 
 pub fn open(a: *App) void {
     if (!a.view.settings_open) a.view.settings_search_focus = true;
+    if (a.settings.section == .privacy and !privacyVisible(a)) a.settings.setSection(.account);
     a.view.settings_open = true;
     a.view.account_menu = false;
     a.redraw();
+}
+
+fn privacyVisible(a: *const App) bool {
+    // The engine's signed_in flag alone also means an unresolved key is present.
+    return a.account.codegraff.signed_in and
+        if (a.account.codegraff.who) |who| who.len > 0 else false;
+}
+
+fn sectionVisible(a: *const App, s: Section) bool {
+    return s != .privacy or privacyVisible(a);
 }
 
 pub fn close(a: *App) void {
@@ -44,6 +55,7 @@ pub fn close(a: *App) void {
 }
 
 fn show(a: *App, s: Section) void {
+    if (!sectionVisible(a, s)) return;
     a.settings.setSection(s);
     a.view.settings_search.clear();
     a.redraw();
@@ -51,8 +63,17 @@ fn show(a: *App, s: Section) void {
 
 /// Match task words, not just the name of the section that owns them.
 pub fn matches(query: []const u8, buf: []Section) []Section {
+    return matchesVisible(query, buf, null);
+}
+
+fn matchesForApp(query: []const u8, buf: []Section, a: *const App) []Section {
+    return matchesVisible(query, buf, a);
+}
+
+fn matchesVisible(query: []const u8, buf: []Section, a: ?*const App) []Section {
     var n: usize = 0;
     for (Section.all) |s| {
+        if (a) |app| if (!sectionVisible(app, s)) continue;
         if (catalog.matches(s, query)) {
             buf[n] = s;
             n += 1;
@@ -128,7 +149,7 @@ fn navBody(c: *ui.Context, a: *App, k: theme.Colors, zen: bool) void {
         const query = std.mem.trim(u8, a.view.settings_search.text(), " \t\r\n");
         if (query.len > 0) {
             var buf: [Section.all.len]Section = undefined;
-            const found = matches(query, &buf);
+            const found = matchesForApp(query, &buf, a);
             if (found.len == 0) {
                 const e = ui.div(c).column().wFull().px(8).py(6).gap(4);
                 defer e.end();
@@ -150,6 +171,7 @@ fn navBody(c: *ui.Context, a: *App, k: theme.Colors, zen: bool) void {
         } else {
             var group: []const u8 = "";
             for (Section.all) |s| {
+                if (!sectionVisible(a, s)) continue;
                 if (!std.mem.eql(u8, group, s.group())) {
                     group = s.group();
                     const h = ui.div(c).row().px(8).pt(12).pb(4);
@@ -201,6 +223,10 @@ fn navRow(c: *ui.Context, k: theme.Colors, s: Section, selected: bool, searching
 
 /// The open section's page.
 pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
+    if (a.settings.section == .privacy and !privacyVisible(a)) {
+        a.settings.setSection(.account);
+        a.redraw();
+    }
     // Prevent retain.store from caching a viewport-culled partial scene for
     // Settings pages, so every 120Hz scroll event paints newly revealed cards
     // immediately without torn borders or pop-in.
