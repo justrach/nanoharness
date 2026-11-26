@@ -270,21 +270,7 @@ jobs:
           secret-access-key: ${{ secrets.KACHE_S3_SECRET_ACCESS_KEY }}
           endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
           manifest-key: ${{ github.job }}-${{ strategy.job-index }}
-      - name: Native visual sandbox regressions
-        run: |
-          Push-Location apps/nano
-          zig build test-visual
-          if ($LASTEXITCODE -ne 0) { throw 'Visual sandbox tests failed' }
-          Pop-Location
-      - name: Windows workspace regressions
-        run: |
-          cargo test --locked -p harness-engine --test workspace_files
-          if ($LASTEXITCODE -ne 0) { throw 'Windows workspace-file tests failed' }
-      - name: Native Nano regressions
-        working-directory: apps/nano
-        run: |
-          zig build test
-          if ($LASTEXITCODE -ne 0) { throw 'Windows Nano tests failed' }
+      # Regression coverage runs in Windows PR CI; releases verify the shipped package.
       - name: package portable app
         run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
       - uses: actions/upload-artifact@v4
