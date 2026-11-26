@@ -2075,6 +2075,9 @@ pub const App = struct {
     /// asked for it (`choose_follow_up`) rather than Settings' choice.
     pub fn sendFollowUp(a: *App, explicit: ?queue_mod.FollowUp) void {
         if (a.queue_edit != null) return queue_mod.finishEdit(a, .commit);
+        // A bare `/name` is the agent's command once its catalog confirms it;
+        // until the catalog answers, the send waits rather than going as text.
+        if (@import("composer_completion.zig").sendGate(a, explicit) == .held) return a.redraw();
         const attachments = @import("app_attachments.zig");
         const completed = @import("composer_completion.zig").prompt(a) catch {
             a.setNotice("Could not prepare selected command or skill. Your draft is preserved.");

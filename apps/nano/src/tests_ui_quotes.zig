@@ -32,7 +32,7 @@ const Harness = struct {
         h.a.dark = true;
         h.a.view.sidebar_open = false;
         h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
-            \\{"QueueCommand":{},"QueueMessage":{"id":"queued"},
+            \\{"QueueCommand":{},"QueueMessage":{"id":"queued"},"ListCommands":[],"ListSkills":[],
             \\ "BeginQueuedMessageEdit":{"outcome":"acquired","leaseId":"lease","baseTextHash":"hash","text":"Synthetic queued message"},
             \\ "FinishQueuedMessageEdit":{"outcome":"committed"}}
         , .{});
@@ -539,6 +539,9 @@ test "quote selection keeps slash commands at the message's start" {
     try testing.expect(h.chip(option_b) != null);
     h.a.composer.set("/compact");
     h.a.send();
+    // A bare `/name` waits for the agent's command catalog (the scene answers
+    // it on a pump); this one lists no `compact`, so it goes as typed text.
+    h.pump();
     try testing.expectEqualStrings("/compact\n\n> " ++ option_b, try h.sentText());
 }
 

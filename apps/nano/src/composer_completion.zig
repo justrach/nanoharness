@@ -1,5 +1,7 @@
-//! Catalog-backed completion provenance. Plain / and $ text is never promoted
-//! by matching a catalog. Only acceptance mints existing harness-invoke links.
+//! Catalog-backed completion provenance. Plain / and $ text inside a draft is
+//! never promoted by matching a catalog: only acceptance mints harness-invoke
+//! links. Sending a draft that is nothing but one `/name` the catalog lists is
+//! that acceptance (`sendGate`).
 const std = @import("std");
 const ui = @import("nanoui").ui;
 const rpc = @import("rpc.zig");
@@ -21,6 +23,9 @@ pub const Entry = struct {
     }
 };
 const Selection = struct { start: usize, end: usize, display: []u8, link: []u8 };
+const FollowUp = @import("app_queue.zig").FollowUp;
+/// A send that waits for the catalog: the draft it was asked for, and how.
+const HeldSend = struct { text: []u8, explicit: ?FollowUp };
 const LongEdit = struct {
     before: []u8,
     after: []u8,
@@ -60,6 +65,11 @@ pub const State = struct {
     parked: std.StringHashMapUnmanaged([]u8) = .empty,
     undo_refs: std.ArrayList([]u8) = .empty,
     long_edit: ?LongEdit = null,
+    /// A bare `/name` sent before the catalog answered; it goes once it does.
+    held_send: ?HeldSend = null,
+    /// A bare `/name` stopped once because discovery failed: sending this same
+    /// draft again sends it as plain text.
+    plain_ok: std.ArrayList(u8) = .empty,
 
     pub fn deinit(s: *State, gpa: Allocator) void {
         s.clearSelections(gpa);
@@ -77,6 +87,8 @@ pub const State = struct {
         for (s.undo_refs.items) |v| gpa.free(v);
         s.undo_refs.deinit(gpa);
         if (s.long_edit) |*x| x.deinit(gpa);
+        if (s.held_send) |held| gpa.free(held.text);
+        s.plain_ok.deinit(gpa);
         if (s.arena) |*ar| ar.deinit();
         if (s.scope) |v| gpa.free(v);
         s.* = .{};
@@ -152,6 +164,9 @@ fn ensure(a: *App) void {
         if (s.scope) |old| a.gpa.free(old);
         s.scope = key;
         s.clearSelections(a.gpa);
+        if (s.held_send) |held| a.gpa.free(held.text);
+        s.held_send = null;
+        s.plain_ok.clearRetainingCapacity();
         s.commands.clearRetainingCapacity();
         s.skills.clearRetainingCapacity();
         if (s.arena) |*ar| ar.deinit();
@@ -236,9 +251,11 @@ fn receive(a: *App, id: u64, reply: rpc.Reply, skill: bool) void {
 }
 fn commandsReply(a: *App, id: u64, r: rpc.Reply) void {
     receive(a, id, r, false);
+    releaseHeld(a);
 }
 fn skillsReply(a: *App, id: u64, r: rpc.Reply) void {
     receive(a, id, r, true);
+    releaseHeld(a);
 }
 
 pub fn refresh(a: *App, caret: usize) ?rules.Token {
@@ -459,6 +476,95 @@ pub fn activate(a: *App, action: Action) void {
             a.view.dialogs.focus_name = true;
         },
     }
+}
+
+pub const Gate = enum { proceed, held };
+
+/// The whole draft, but for surrounding whitespace, as one `/name`.
+fn bareCommand(text: []const u8) ?rules.Range {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    if (trimmed.len < 2) return null;
+    const start = @intFromPtr(trimmed.ptr) - @intFromPtr(text.ptr);
+    const end = start + trimmed.len;
+    const tok = rules.token(text, end) orelse return null;
+    if (tok.prefix != '/' or tok.range.start != start or tok.range.end != end) return null;
+    return .{ .start = start, .end = end };
+}
+
+/// Root send hook, before `prompt`. A draft that is nothing but `/name` is the
+/// agent's command when its catalog lists exactly that name: sending it is the
+/// acceptance the menu would have taken, so it gets the same reference. While
+/// the catalog is still loading the send waits for it. Sent as plain text, the
+/// agent would answer `/compact` as a prompt instead of running it.
+pub fn sendGate(a: *App, explicit: ?FollowUp) Gate {
+    const s = &a.completion;
+    if (a.wizard != null or a.queue_edit != null) return .proceed;
+    const text = a.composer.text();
+    const bare = bareCommand(text) orelse {
+        s.plain_ok.clearRetainingCapacity();
+        return .proceed;
+    };
+    const name = text[bare.start + 1 .. bare.end];
+    // The workspace's own: `sendFollowUp` handles them as typed.
+    for ([_][]const u8{ "resume", "zen", "custom-theme" }) |own| if (std.mem.eql(u8, name, own)) return .proceed;
+    ensure(a);
+    s.sync(a.gpa, text) catch return .proceed;
+    for (s.selected.items) |sel| if (sel.start == bare.start and sel.end == bare.end) return .proceed;
+    if (s.plain_ok.items.len > 0 and std.mem.eql(u8, s.plain_ok.items, text)) return .proceed;
+    s.plain_ok.clearRetainingCapacity();
+    if (s.remote or !a.engine.up()) return .proceed;
+    if (!s.commands_done or !s.skills_done) {
+        // Nothing asked for, so nothing would answer: don't wait forever.
+        if ((!s.commands_done and s.commands_request == null) or (!s.skills_done and s.skills_request == null)) return .proceed;
+        if (s.held_send) |old| a.gpa.free(old.text);
+        s.held_send = null;
+        const copy_ = a.gpa.dupe(u8, text) catch return .proceed;
+        s.held_send = .{ .text = copy_, .explicit = explicit };
+        return .held;
+    }
+    // As in `entries`: a skill that claims the command speaks for it.
+    for (s.skills.items) |skill| if (skill.command) |native_command| if (std.mem.eql(u8, native_command.name, name)) {
+        mint(a, bare, skill) catch {};
+        return .proceed;
+    };
+    for (s.commands.items) |command| if (std.mem.eql(u8, command.name, name)) {
+        mint(a, bare, command) catch {};
+        return .proceed;
+    };
+    if (s.failed) {
+        s.plain_ok.appendSlice(a.gpa, text) catch return .proceed;
+        a.setNotice("Couldn't load this agent's commands, so the slash command wasn't sent. Send again to send it as plain text.");
+        return .held;
+    }
+    return .proceed;
+}
+
+/// The reference `accept` would have left on the typed name.
+fn mint(a: *App, range: rules.Range, entry: Entry) !void {
+    const s = &a.completion;
+    const display = try a.gpa.dupe(u8, a.composer.text()[range.start..range.end]);
+    errdefer a.gpa.free(display);
+    const link = try canonical(a.gpa, entry);
+    errdefer a.gpa.free(link);
+    try s.selected.ensureUnusedCapacity(a.gpa, 1);
+    s.dropOverlapping(a.gpa, range.start, range.end);
+    s.selected.appendAssumeCapacity(.{ .start = range.start, .end = range.end, .display = display, .link = link });
+    std.sort.insertion(Selection, s.selected.items, {}, struct {
+        fn less(_: void, x: Selection, y: Selection) bool {
+            return x.start < y.start;
+        }
+    }.less);
+}
+
+/// Both catalog answers are in: a send that waited for them goes now, if the
+/// draft is still the one it was asked for.
+fn releaseHeld(a: *App) void {
+    const s = &a.completion;
+    if (!s.commands_done or !s.skills_done) return;
+    const held = s.held_send orelse return;
+    s.held_send = null;
+    defer a.gpa.free(held.text);
+    if (std.mem.eql(u8, held.text, a.composer.text())) a.sendFollowUp(held.explicit);
 }
 
 /// Root send/queue/steer hook. Null means untouched ordinary prompt text.
