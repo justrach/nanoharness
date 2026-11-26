@@ -2,11 +2,17 @@
 //! user to fill a small flat schema mid-turn. Graff 0.0.302.6 sends ask_user
 //! this way to clients that advertise `clientCapabilities.elicitation.form`,
 //! and answers at once ("assume and continue") for clients that don't.
+//! Antigravity's agy (verified 1.5.14) sends its ask_question tool this way
+//! too, and writes the questions into its reply as `- [1] …` rows for
+//! clients that don't.
 //!
 //! Each supported property becomes one question on the engine's input bridge:
-//! strings (free text, or picks when the schema has an `enum`), booleans
-//! (Yes / No), and numbers. A schema with a required property we can't show
-//! is declined so the agent never waits on a form nobody can fill.
+//! strings (free text, or picks when the schema lists choices as an `enum` or
+//! titled `oneOf` / `anyOf` entries), arrays of choices (several picks),
+//! booleans (Yes / No), and numbers. A choice `K` with a choice-less string
+//! `K_other` beside it (agy's write-in) is one question: a pick answers `K`,
+//! typed text `K_other`. A schema with a required property we can't show is
+//! declined so the agent never waits on a form nobody can fill.
 
 use harness_proto::{UserInputAnswer, UserInputQuestion};
 use serde_json::{Map, Value, json};
@@ -24,10 +30,22 @@ enum Kind {
     Number,
 }
 
+/// One choice: the label the picker shows and the value the answer sends.
+#[derive(Debug, Clone)]
+struct Choice {
+    label: String,
+    value: Value,
+}
+
 #[derive(Debug, Clone)]
 struct Field {
     key: String,
     kind: Kind,
+    /// In `question.options` order.
+    choices: Vec<Choice>,
+    required: bool,
+    /// Where typed text goes instead of a pick (agy's `K_other`).
+    write_in: Option<String>,
     question: UserInputQuestion,
 }
 
@@ -46,39 +64,96 @@ impl Form {
     }
 
     /// The `elicitation/create` result for these answers. No answers at all
-    /// (the resolver was dropped or the turn ended) cancels; an answered form
-    /// missing a value, or holding one that doesn't parse, declines.
+    /// (the resolver was dropped or the turn ended) cancels; a required value
+    /// missing, one that doesn't parse, or nothing answered declines. An
+    /// optional field left blank is left out.
     pub(super) fn response(&self, answers: &[UserInputAnswer]) -> Value {
         if answers.is_empty() {
             return cancel();
         }
         let mut content = Map::new();
         for field in &self.fields {
-            let labels = answers
+            let labels: Vec<&str> = answers
                 .iter()
                 .find(|answer| answer.question_id == field.question.id)
-                .map(|answer| answer.labels.as_slice())
+                .map(|answer| {
+                    answer
+                        .labels
+                        .iter()
+                        .map(|label| label.trim())
+                        .filter(|label| !label.is_empty())
+                        .collect()
+                })
                 .unwrap_or_default();
-            let mut labels = labels
-                .iter()
-                .map(|label| label.trim())
-                .filter(|label| !label.is_empty());
-            // Free text keeps every label: files attached to an answer ride
-            // as a second one. A choice or typed value is just the first.
-            let label = if field.kind == Kind::Text && field.question.options.is_empty() {
-                labels.collect::<Vec<_>>().join("\n\n")
-            } else {
-                labels.next().unwrap_or_default().to_owned()
-            };
-            if label.is_empty() {
+            if !field.fill(&labels, &mut content) {
                 return json!({ "action": "decline" });
             }
-            let Some(value) = field.kind.parse(&label) else {
-                return json!({ "action": "decline" });
-            };
-            content.insert(field.key.clone(), value);
+        }
+        if content.is_empty() {
+            return json!({ "action": "decline" });
         }
         json!({ "action": "accept", "content": content })
+    }
+}
+
+impl Field {
+    /// Put this field's answer into `content`; false when it can't be sent.
+    fn fill(&self, labels: &[&str], content: &mut Map<String, Value>) -> bool {
+        let Some(&first) = labels.first() else {
+            return !self.required;
+        };
+        if self.choices.is_empty() {
+            // Free text keeps every label: files attached to an answer ride
+            // as a second one. A typed value is just the first.
+            let value = if self.kind == Kind::Text {
+                Some(Value::String(labels.join("\n\n")))
+            } else {
+                self.kind.parse(first)
+            };
+            let Some(value) = value else {
+                return false;
+            };
+            content.insert(self.key.clone(), value);
+            return true;
+        }
+        let choice = |label: &str| {
+            self.choices
+                .iter()
+                .find(|choice| choice.label == label)
+                .map(|choice| choice.value.clone())
+        };
+        if self.question.multi_select {
+            let (picked, typed): (Vec<&str>, Vec<&str>) = labels
+                .iter()
+                .copied()
+                .partition(|label| choice(label).is_some());
+            if !typed.is_empty() {
+                let Some(key) = &self.write_in else {
+                    return false;
+                };
+                content.insert(key.clone(), Value::String(typed.join("\n\n")));
+            }
+            if !picked.is_empty() {
+                let values = picked.into_iter().filter_map(&choice).collect();
+                content.insert(self.key.clone(), Value::Array(values));
+            }
+            return true;
+        }
+        // A pick is the first label; typed text goes to the write-in whole,
+        // or, without one, is sent as typed.
+        if let Some(value) = choice(first) {
+            content.insert(self.key.clone(), value);
+            return true;
+        }
+        if let Some(key) = &self.write_in {
+            content.insert(key.clone(), Value::String(labels.join("\n\n")));
+            return true;
+        }
+        let Some(value) = self.kind.parse(first) else {
+            return false;
+        };
+        content.insert(self.key.clone(), value);
+        true
     }
 }
 
@@ -125,28 +200,60 @@ pub(super) fn form(params: &Value, new_id: impl Fn() -> String) -> Option<Form> 
         .and_then(Value::as_array)
         .map(|keys| keys.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    let single = properties.len() == 1;
+    // agy's write-in: an optional choice-less string `K_other` beside choice `K`.
+    let write_in_of = |key: &str| {
+        let other = format!("{key}_other");
+        let property = properties.get(&other)?;
+        (property.get("type").and_then(Value::as_str) == Some("string")
+            && choices(property).is_empty()
+            && !required.contains(&other.as_str()))
+        .then_some(other)
+    };
+    let has_choices = |property: &Value| {
+        kind_of(property)
+            .is_some_and(|(kind, choices, _)| kind == Kind::Text && !choices.is_empty())
+    };
+    let absorbed: Vec<String> = properties
+        .iter()
+        .filter(|(_, property)| has_choices(property))
+        .filter_map(|(key, _)| write_in_of(key))
+        .collect();
+    let mut keys: Vec<&String> = properties
+        .keys()
+        .filter(|key| !absorbed.contains(*key))
+        .collect();
+    keys.sort_by(|a, b| natural(a).cmp(&natural(b)));
+    let single = keys.len() == 1;
     let mut fields = Vec::new();
-    for (key, property) in properties {
-        let Some((kind, options)) = kind_of(property) else {
+    for key in keys {
+        let property = &properties[key];
+        let Some((kind, choices, multi_select)) = kind_of(property) else {
             if required.contains(&key.as_str()) {
                 return None;
             }
             continue;
         };
-        let title = property
-            .get("title")
-            .or_else(|| property.get("description"))
-            .and_then(Value::as_str)
-            .unwrap_or(key);
-        let question = if single {
-            message.to_owned()
-        } else {
-            format!("{message}\n\n{title}")
+        let write_in = has_choices(property).then(|| write_in_of(key)).flatten();
+        let title = property.get("title").and_then(Value::as_str);
+        // A question with its own write-in stands alone (agy's shape): its
+        // title is the question, and the shared message only counts them.
+        let question = match title {
+            Some(title) if write_in.is_some() => title.to_owned(),
+            _ if single => message.to_owned(),
+            _ => {
+                let title = title
+                    .or_else(|| property.get("description").and_then(Value::as_str))
+                    .unwrap_or(key);
+                format!("{message}\n\n{title}")
+            }
         };
+        let options = choices.iter().map(|choice| choice.label.clone()).collect();
         fields.push(Field {
             key: key.clone(),
             kind,
+            choices,
+            required: required.contains(&key.as_str()),
+            write_in,
             question: UserInputQuestion {
                 id: new_id(),
                 header: "Agent question".into(),
@@ -154,7 +261,7 @@ pub(super) fn form(params: &Value, new_id: impl Fn() -> String) -> Option<Form> 
                 options,
                 prefill: None,
                 multiline: false,
-                multi_select: false,
+                multi_select,
                 requires_human_ui: false,
             },
         });
@@ -162,27 +269,83 @@ pub(super) fn form(params: &Value, new_id: impl Fn() -> String) -> Option<Form> 
     (!fields.is_empty()).then_some(Form { fields })
 }
 
-fn kind_of(property: &Value) -> Option<(Kind, Vec<String>)> {
+/// The kind, the choices, and whether several may be picked.
+fn kind_of(property: &Value) -> Option<(Kind, Vec<Choice>, bool)> {
     match property.get("type").and_then(Value::as_str)? {
-        "string" => {
-            let options = property
-                .get("enum")
-                .and_then(Value::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default();
-            Some((Kind::Text, options))
+        "string" => Some((Kind::Text, choices(property), false)),
+        // Several picks: an array whose items list the choices.
+        "array" => {
+            let choices = choices(property.get("items")?);
+            (!choices.is_empty()).then_some((Kind::Text, choices, true))
         }
-        "boolean" => Some((Kind::Bool, vec!["Yes".into(), "No".into()])),
-        "integer" => Some((Kind::Integer, Vec::new())),
-        "number" => Some((Kind::Number, Vec::new())),
+        "boolean" => Some((
+            Kind::Bool,
+            vec![
+                Choice {
+                    label: "Yes".into(),
+                    value: Value::Bool(true),
+                },
+                Choice {
+                    label: "No".into(),
+                    value: Value::Bool(false),
+                },
+            ],
+            false,
+        )),
+        "integer" => Some((Kind::Integer, Vec::new(), false)),
+        "number" => Some((Kind::Number, Vec::new(), false)),
         _ => None,
     }
+}
+
+/// Choices as an `enum` (labelled by `enumNames` when given), or as titled
+/// `oneOf` / `anyOf` `{const, title}` entries.
+fn choices(schema: &Value) -> Vec<Choice> {
+    if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+        let names = schema.get("enumNames").and_then(Value::as_array);
+        return values
+            .iter()
+            .enumerate()
+            .filter_map(|(i, value)| {
+                let value = value.as_str()?;
+                let label = names
+                    .and_then(|names| names.get(i))
+                    .and_then(Value::as_str)
+                    .unwrap_or(value);
+                Some(Choice {
+                    label: label.to_owned(),
+                    value: Value::String(value.to_owned()),
+                })
+            })
+            .collect();
+    }
+    ["oneOf", "anyOf"]
+        .iter()
+        .find_map(|key| schema.get(*key).and_then(Value::as_array))
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let value = entry.get("const")?;
+                    let label = entry
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .or_else(|| value.as_str())?;
+                    Some(Choice {
+                        label: label.to_owned(),
+                        value: value.clone(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `q2` before `q10`: agy numbers its questions, and the schema's keys arrive
+/// sorted as text.
+fn natural(key: &str) -> (&str, Option<u64>) {
+    let stem = key.trim_end_matches(|c: char| c.is_ascii_digit());
+    (stem, key[stem.len()..].parse().ok())
 }
 
 #[cfg(test)]

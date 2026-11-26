@@ -2620,6 +2620,10 @@ fn initialize_params_with_subagents(harness: HarnessId, graff_subagents: bool) -
             capabilities["subagents"] = json!({});
             capabilities["_meta"] = json!({ "graff/backgroundSubagents": true });
         }
+    } else if harness == HarnessId::Antigravity {
+        // agy (verified 1.5.14) sends ask_question as a form elicitation, and
+        // writes the questions into its reply as text for clients that don't.
+        capabilities["elicitation"] = elicitation::capability();
     }
     json!({
         "protocolVersion": 1,

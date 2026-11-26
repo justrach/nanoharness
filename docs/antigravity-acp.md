@@ -59,6 +59,18 @@ agy 1.5.17 sends the Google OAuth URL to `$BROWSER` rather than stdout. Headless
 
 Settings live in `$GEMINI_HOME/antigravity-cli/settings.json` (agy 1.5.17) with `$GEMINI_HOME/antigravity-acp/settings.json` as the older ACP path (`GEMINI_HOME` defaults to `~/.gemini`).
 
+## Questions
+
+Harness advertises `clientCapabilities.elicitation.form` to Antigravity at `initialize`. With it, `agy` sends its `ask_question` tool as an `elicitation/create` form, and the question opens Harness's question picker. Without it, `agy` writes the questions into its reply as `- [1] …` rows.
+
+The form shape was verified with `agy` 1.5.14:
+
+- Each question is a property `qN` titled with the question. A single choice is a string with titled `oneOf` `{const, title}` entries. A multiple choice is an `array` whose `items` are titled `anyOf` entries.
+- Each question also has an optional `qN_other` write-in, and the form has no `required` list.
+- In the picker, each question is one page. A pick answers `qN` with the choice's `const`; typed text answers `qN_other`.
+
+Older CLIs and the legacy `agy_acp_server` that don't read the capability keep asking in chat.
+
 ## Update checklist
 
 - Resolve the exact executable used by sessions before checking its version.
