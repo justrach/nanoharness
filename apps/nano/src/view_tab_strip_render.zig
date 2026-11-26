@@ -93,11 +93,16 @@ pub fn trailingModeButtonsWidth(a: *const App) f32 {
 }
 
 pub fn utilityWidth(a: *const App) f32 {
+    const caption_controls = usesWindowedChatCaption(a);
+    const collapsed = a.view.sidebar_width <= 1;
     const widths = [_]f32{
         if (@import("view_sandbox_strip.zig").toolbarVisible(a)) @import("view_sandbox_strip.zig").toolbar_width else 0,
         @import("view_updates.zig").topbarUpdatesWidth(a),
         trailingModeButtonsWidth(a),
         if (showSidePanelToggle(a)) 28 else 0,
+        if (caption_controls and collapsed) 24 else 0,
+        if (caption_controls and collapsed) 24 else 0,
+        if (caption_controls) 24 else 0,
     };
     var total: f32 = 0;
     for (widths) |w| if (w > 0) {
@@ -683,6 +688,11 @@ pub fn singleSpec(a: *const App) SingleSpec {
     };
 }
 
+pub fn usesWindowedChatCaption(a: *const App) bool {
+    return a.settings.uiMode() == .zen and !a.view.full_screen and !a.view.settings_open and
+        a.selected != null and strip.count(a) == 1 and singleSpec(a).n == 1;
+}
+
 pub fn singleItemChat(a: *const App, spec: SingleSpec, ix: usize) ?[]const u8 {
     return switch (spec.itemAt(ix)) {
         .global => |ws| workspaceChatId(a, ws),
@@ -726,7 +736,16 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     const spec = singleSpec(a);
     const n = spec.n;
     const selected = spec.selected;
-    const lane_x = if (zen) zenTabStartX(a) else a.view.sidebar_width + left;
+    // One windowed Zen conversation reads as a caption, not a selected tab in an empty strip.
+    const lone_caption = usesWindowedChatCaption(a);
+    const caption_text: ui.TextStyle = .{ .size = 11.5, .line_height = 15, .weight = .semibold, .color = k.text };
+    const caption_dot_w: f32 = 5;
+    const lane_x = if (lone_caption)
+        @max(caption.leading, a.view.chrome.x + 16) - 8
+    else if (zen)
+        zenTabStartX(a)
+    else
+        a.view.sidebar_width + left;
     const available = if (zen)
         @max(0, c.size.w - lane_x - dev_room - caption.trailing - right_extra - 12)
     else
@@ -748,7 +767,8 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     ui.key(c, "panel-tabs");
     const lane = ui.div(c).fixed().offset(lane_x, chrome.tab_top).size(available, chrome.tab_height + chrome.tab_top).clip().layer(2);
     defer lane.end();
-    const row = ui.div(c).absolute().offset(0, 0).row().h(chrome.tab_height).gap(3).itemsCenter();
+    var row = ui.div(c).absolute().offset(0, 0).row().h(chrome.tab_height).gap(3).itemsCenter();
+    if (lone_caption) row = row.wFull().justifyEnd();
     defer row.end();
     for (win_start..win_end) |ix| {
         const item = spec.itemAt(ix);
@@ -759,14 +779,16 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
         };
         const ch = if (chat) |id| a.findChat(id) else null;
         const label = if (ch) |v| @import("view_sidebar.zig").chatLabel(v) else "New tab";
-        const pill_w: f32 = if (zen and n == 1)
+        const pill_w: f32 = if (lone_caption)
+            @min(slot_w, @ceil(c.text.width(label, caption_text)) + 16 + caption_dot_w + 6 + 14 + 6 + 22)
+        else if (zen and n == 1)
             @min(slot_w, @max(140, c.text.width(label, .{ .size = 12.5, .weight = .medium }) + 58))
         else
             slot_w;
         ui.key(c, c.print("panel-tab-{d}", .{ix}));
         const active = ix == selected;
         var cap = ui.div(c).row().size(pill_w, if (zen) @as(f32, 28) else 30).px(8).gap(6).itemsCenter().rounded(7).clip().control();
-        cap = applyTabBox(cap, k, tabStyle(k, active, false), active);
+        if (!lone_caption) cap = applyTabBox(cap, k, tabStyle(k, active, false), active);
         defer cap.end();
         if (active) {
             if (c.rects.get(c.node(cap.index).id)) |r| a.view.strip.active_tab_anchor = r;
@@ -778,16 +800,19 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
             .panel => chatNeedsInput(a, chat),
         };
         const show_close = !settings_open and (hot or (n > 1 and active));
-        const show_spacer = !show_close and !zen;
+        const show_spacer = !show_close and (!zen or lone_caption);
         const has_trailing = show_close or show_spacer;
-        const show_monogram = !pending_question and zen and panes_n == 1 and ch != null;
-        const lead_w: f32 = if (show_monogram) 16 else 14;
+        const show_monogram = !lone_caption and !pending_question and zen and panes_n == 1 and ch != null;
+        const lead_w: f32 = if (lone_caption) caption_dot_w + 6 + 14 else if (show_monogram) 16 else 14;
         const split_badge_text: ?[]const u8 = if (zen and panes_n > 1) c.print("{d}", .{panes_n}) else null;
         const split_badge_w: f32 = if (split_badge_text) |txt| @max(16, @ceil(c.text.width(txt, .{ .size = 10, .weight = .medium })) + 8) else 0;
         const trail_w: f32 = (if (split_badge_w > 0) 6 + split_badge_w else 0) + (if (has_trailing) @as(f32, 22) else 0);
         const label_w: f32 = @max(0, pill_w - (16 + lead_w + 6 + trail_w));
+        if (lone_caption) ui.div(c).size(caption_dot_w, caption_dot_w).rounded(caption_dot_w / 2).bg(k.accent.alpha(0.92)).end();
         if (!questionMark(c, k, pending_question)) {
-            if (show_monogram) {
+            if (lone_caption) {
+                icons.icon(c, if (ch != null) .folder else .@"chat-round-line", 14, k.muted, 0);
+            } else if (show_monogram) {
                 @import("view_sidebar.zig").zenMonogram(c, a, k, ch.?, 16);
             } else {
                 icons.icon(c, if (panes_n > 1) .widget else .@"chat-round-line", 14, vis.icon, 0);
@@ -796,7 +821,9 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
         {
             const labels = ui.div(c).column().grow().w(0).clip();
             defer labels.end();
-            if (zen) {
+            if (lone_caption) {
+                kit.ellipsisText(c, label, caption_text, label_w);
+            } else if (zen) {
                 kit.ellipsisText(c, label, .{ .size = 12.5, .line_height = 16, .weight = vis.weight, .color = vis.fg }, label_w);
             } else {
                 kit.ellipsisText(c, label, .{ .size = 12, .line_height = 14, .weight = vis.weight, .color = vis.fg }, label_w);

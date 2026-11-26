@@ -1201,36 +1201,46 @@ fn closeOnlyPressed(c: *ui.Context, a: *App) bool {
 fn titlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     // In Settings the navigation column sits in a non-collapsible card under
     // traffic lights, so avoid floating an orphaned sidebar toggle above it.
-    if (a.view.settings_open) return;
+    if (a.view.settings_open or strip.rendering.usesWindowedChatCaption(a)) return;
     const bar = ui.div(c).fixed().offset(cluster_x, 4 + (34 - 24) / 2).row().itemsCenter().layer(3);
     defer bar.end();
-    ui.key(c, "workspace-sidebar-toggle");
-    if (kit.iconButton(c, k, .@"sidebar-minimalistic-left", .{ .tip = .{ .text = "Toggle sidebar" } })) toggleSidebar(c, a, true);
+    sidebarToggle(c, a, k);
     // The history control arrives when the seam finishes collapsing rather
     // than on the ⌘B press, so it never pops over the still-sliding sidebar.
-    if (a.view.sidebar_width <= 1) {
-        ui.div(c).w(4).end();
-        ui.key(c, "titlebar-chat-history");
-        const history = ui.div(c).row().size(24, 24).center().rounded(6).hover(k.hover).control();
-        icons.icon(c, .@"clock-circle", 16, k.muted, 0);
-        if (history.clicked()) strip.open(a, .history, strip.active(a), c.rects.get(c.node(history.index).id));
-        history.end();
-        ui.div(c).w(4).end();
-        const dev = a.settings.uiMode() == .developer;
-        const shortcuts = @import("shortcuts.zig");
-        var shortcut_buf: [64]u8 = undefined;
-        ui.key(c, "titlebar-ui-mode-pill");
-        if (kit.iconButton(c, k, if (dev) .terminal else .@"magic-stick-3", .{
-            .on = dev,
-            .tip = .{ .text = c.print("Toggle Zen / Developer mode ({s})", .{shortcuts.chordBadge(&shortcut_buf, shortcuts.cycle_ui_mode)}) },
-        })) {
-            const was_design = a.settings.uiMode() == .design;
-            a.settings.toggleUiMode();
-            if (was_design and a.settings.uiMode() != .design) @import("app_panels.zig").closeDesignCanvas(a);
-            a.redraw();
-        }
-    }
+    if (a.view.sidebar_width <= 1) historyAndMode(c, a, k, true);
     @import("view_updates.zig").titlebarControl(c, a, k);
+}
+
+fn sidebarToggle(c: *ui.Context, a: *App, k: theme.Colors) void {
+    ui.key(c, "workspace-sidebar-toggle");
+    if (kit.iconButton(c, k, .@"sidebar-minimalistic-left", .{
+        .size = 24,
+        .tip = .{ .text = "Toggle sidebar" },
+    })) toggleSidebar(c, a, true);
+}
+
+fn historyAndMode(c: *ui.Context, a: *App, k: theme.Colors, left_cluster: bool) void {
+    if (left_cluster) ui.div(c).w(4).end();
+    ui.key(c, "titlebar-chat-history");
+    const history = ui.div(c).row().size(24, 24).center().rounded(6).hover(k.hover).control();
+    icons.icon(c, .@"clock-circle", 16, k.muted, 0);
+    if (history.clicked()) strip.open(a, .history, strip.active(a), c.rects.get(c.node(history.index).id));
+    history.end();
+    if (left_cluster) ui.div(c).w(4).end();
+    const dev = a.settings.uiMode() == .developer;
+    const shortcuts = @import("shortcuts.zig");
+    var shortcut_buf: [64]u8 = undefined;
+    ui.key(c, "titlebar-ui-mode-pill");
+    if (kit.iconButton(c, k, if (dev) .terminal else .@"magic-stick-3", .{
+        .size = 24,
+        .on = dev,
+        .tip = .{ .text = c.print("Toggle Zen / Developer mode ({s})", .{shortcuts.chordBadge(&shortcut_buf, shortcuts.cycle_ui_mode)}) },
+    })) {
+        const was_design = a.settings.uiMode() == .design;
+        a.settings.toggleUiMode();
+        if (was_design and a.settings.uiMode() != .design) @import("app_panels.zig").closeDesignCanvas(a);
+        a.redraw();
+    }
 }
 
 /// The reserved right end of the title bar: live utilities and mode toggles (`Nano.UiMode3`).
@@ -1308,6 +1318,12 @@ fn trailing(c: *ui.Context, a: *App, k: theme.Colors) void {
             .label = "Toggle side panel",
             .tip = .{ .text = c.print("Toggle side panel ({s})", .{pan_k}) },
         })) @import("app_panels.zig").toggleHost(a);
+    }
+    if (strip.rendering.usesWindowedChatCaption(a)) {
+        const controls = ui.div(c).row().h(28).itemsCenter().gap(6);
+        if (a.view.sidebar_width <= 1) historyAndMode(c, a, k, false);
+        sidebarToggle(c, a, k);
+        controls.end();
     }
 }
 

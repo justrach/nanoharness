@@ -47,6 +47,30 @@ pub const Harness = struct {
         };
         return null;
     }
+    fn captionControl(h: *Harness) !u32 {
+        for (h.t.ctx.nodes.items, 0..) |node, i| {
+            if (!node.style.control or node.rect.h != 28) continue;
+            var child = node.first_child;
+            while (child != std.math.maxInt(u32)) : (child = h.t.ctx.nodes.items[child].next) {
+                const dot = h.t.ctx.nodes.items[child];
+                if (dot.rect.w == 5 and dot.rect.h == 5) return @intCast(i);
+            }
+        }
+        return error.MissingChatCaptionControl;
+    }
+    fn button(h: *Harness, comptime name: []const u8) !ui.Rect {
+        for (h.t.ctx.nodes.items, 0..) |node, i| switch (node.content) {
+            .image => |im| if (node.rect.y < chrome.header_height and im.source == .encoded and std.mem.eql(u8, im.source.encoded, @import("icons_svg").get(name))) {
+                var at: u32 = @intCast(i);
+                while (at != std.math.maxInt(u32)) : (at = h.t.ctx.nodes.items[at].parent) {
+                    const parent = h.t.ctx.nodes.items[at];
+                    if (parent.style.control and parent.rect.w == 24 and parent.rect.h == 24) return parent.rect;
+                }
+            },
+            else => {},
+        };
+        return error.MissingTitlebarButton;
+    }
     fn snap(h: *Harness, name: []const u8) void {
         const dir = std.c.getenv("NANO_SNAP_DIR") orelse return;
         var buf: [1024]u8 = undefined;
@@ -58,6 +82,49 @@ fn replace(list: anytype, text: []const u8) !void {
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, text, .{});
     defer parsed.deinit();
     try list.replace(parsed.value);
+}
+
+test "single Zen chat ends beside the device and controls with or without its sidebar" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.items.items.len);
+
+    var flat = true;
+    var sidebar_x: ?f32 = null;
+    for ([_]bool{ true, false }) |sidebar_open| {
+        h.a.view.sidebar_open = sidebar_open;
+        h.t.settle(1);
+        h.snap(if (sidebar_open) "caption-sidebar-open" else "caption-sidebar-closed");
+        const cap = h.t.ctx.nodes.items[try h.captionControl()];
+        flat = flat and (if (cap.style.background) |bg| bg.a == 0 else true) and
+            cap.style.border == null and cap.style.shadows.len == 0;
+
+        const native_caption = @import("window_chrome.zig");
+        const utilities = strip.rendering.utilityWidth(&h.a);
+        const expected_end = h.t.ctx.size.w - native_caption.trailing - utilities - 10 - chrome.device_room - 12;
+        try testing.expectApproxEqAbs(expected_end, cap.rect.x + cap.rect.w, 1);
+        const sidebar = try h.button("sidebar-minimalistic-left");
+        try testing.expectApproxEqAbs(h.t.ctx.size.w - native_caption.trailing - 10, sidebar.x + sidebar.w, 1);
+        try testing.expectApproxEqAbs(@as(f32, 21), sidebar.y + sidebar.h / 2, 0.01);
+        if (sidebar_x) |x| try testing.expectApproxEqAbs(x, sidebar.x, 1) else sidebar_x = sidebar.x;
+        if (sidebar_open) {
+            try testing.expectError(error.MissingTitlebarButton, h.button("clock-circle"));
+        } else {
+            const history = try h.button("clock-circle");
+            const mode = try h.button("magic-stick-3");
+            try testing.expect(history.x < mode.x and mode.x < sidebar.x);
+            try testing.expect(history.x >= cap.rect.x + cap.rect.w);
+            try testing.expectApproxEqAbs(@as(f32, 21), history.y + history.h / 2, 0.01);
+            try testing.expectApproxEqAbs(@as(f32, 21), mode.y + mode.h / 2, 0.01);
+        }
+    }
+    h.a.view.full_screen = true;
+    h.t.settle(1);
+    h.snap("caption-fullscreen");
+    try testing.expect(flat);
+    try testing.expectEqualStrings("a", h.a.selected.?);
 }
 
 test "session navigation parity opens archived history outside a blank split pane" {
