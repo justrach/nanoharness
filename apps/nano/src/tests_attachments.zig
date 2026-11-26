@@ -404,7 +404,7 @@ test "only picture names get a thumbnail, as GPUI's is_image_path" {
 }
 
 fn themedAttachmentView(a: *App, c: *ui.Context) void {
-    const k = @import("theme.zig").colors(a.dark orelse false);
+    const k = @import("theme.zig").builtin(a.dark orelse false);
     const root = ui.div(c).column().wFull().hFull().bg(k.shell).p(16);
     defer root.end();
     const pill = ui.div(c).column().wFull().bg(k.pill()).border(k.border).borderW(1).rounded(12).pb(12);
@@ -427,7 +427,7 @@ test "composer attachment remove button stays opaque on hover in light and dark 
     theme_mod.registerFonts();
 
     for ([_]bool{ false, true }) |dark| {
-        const hover_bg = view_attachments.removeHoverBg(theme_mod.colors(dark));
+        const hover_bg = view_attachments.removeHoverBg(theme_mod.builtin(dark));
         try testing.expect(hover_bg.a >= 0.999);
     }
 
