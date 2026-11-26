@@ -496,7 +496,8 @@ fn hostPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     ui.key(c, "workspace-host-body");
     const host = panel_chrome.bodyForOn(c, k, zen, fs).grow().wFull().h(0);
     defer host.end();
-    if (c.input.pressed and host.interaction().hovered) a.view.strip.focused = .host;
+    const host_hit = host.interaction();
+    if (c.input.pressed and host_hit.hovered) a.view.strip.focused = .host;
     if (!a.view.full_screen and !zen and @import("app_github_repository.zig").surface(a)) {
         if (a.view.strip.host_tab_rect) |tab| if (c.rects.get(c.node(host.index).id)) |body| {
             panel_chrome.join(c, k, a.view.chrome.host_width, @max(0, tab.x - body.x), @min(a.view.chrome.host_width, tab.x + tab.w - body.x));
