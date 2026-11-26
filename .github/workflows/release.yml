@@ -24,10 +24,6 @@ permissions:
   contents: write
 
 jobs:
-  cursor-compatibility:
-    uses: ./.github/workflows/cursor-compatibility.yml
-    secrets: inherit
-
   linux:
     strategy:
       fail-fast: false
@@ -303,7 +299,7 @@ jobs:
     # A tag push, or a dispatch on a tag (cut-release.yml: a tag pushed with the
     # workflow token triggers nothing). A dispatch on a branch never publishes.
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/tags/v') && needs.macos.outputs.signed == 'true'
-    needs: [cursor-compatibility, linux, arch-install-test, macos, windows]
+    needs: [linux, arch-install-test, macos, windows]
     runs-on: ubuntu-latest
     env:
       # `secrets` is not a valid context in step `if:` expressions — surface
