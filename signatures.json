@@ -1,4 +1,14 @@
 {
   "version": 1,
-  "signatures": []
+  "signatures": [
+    {
+      "login": "calebchongc",
+      "user_id": 6571888,
+      "cla_sha256": "93084d45bd1cfbf8b2fa02c7a4f2b1c45e5867b9ffdbf60b046223f87381ba5c",
+      "pr_number": 230,
+      "comment_id": 7197081084,
+      "comment_url": "https://github.com/justrach/nanoharness/pull/230#issuecomment-7197081084",
+      "signed_at": "2026-11-26T16:01:42Z"
+    }
+  ]
 }
