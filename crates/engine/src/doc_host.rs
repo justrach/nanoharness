@@ -4948,7 +4948,7 @@ impl DocHost {
             .client(target)
             .await
             .map_err(|e| format!("peer link: {e}"))?;
-        let params = serde_json::json!({ "chatId": chat_id, "entry": entry });
+        let params = relay_command_params(chat_id, entry, self.device_id());
         let call = client.call(harness_rpc::methods::RELAY_COMMAND, params);
         match tokio::time::timeout(RELAY_CALL_TIMEOUT, call).await {
             Err(_) => {
@@ -5213,9 +5213,12 @@ impl DocHost {
             let mut seq = 0u64;
             loop {
                 let end = (start + TRANSFER_CHUNK_B64).min(b64.len());
-                let params = serde_json::json!({
-                    "uploadId": transfer.upload_id, "seq": seq, "data": &b64[start..end],
-                });
+                let params = upload_chunk_params(
+                    &transfer.upload_id,
+                    seq,
+                    &b64[start..end],
+                    self.device_id(),
+                );
                 let call = client.call(harness_rpc::methods::UPLOAD_CHUNK, params);
                 match tokio::time::timeout(TRANSFER_CHUNK_TIMEOUT, call).await {
                     Err(_) => {
@@ -5241,9 +5244,8 @@ impl DocHost {
                     break;
                 }
             }
-            let params = serde_json::json!({
-                "uploadId": transfer.upload_id, "fileName": transfer.file_name,
-            });
+            let params =
+                upload_commit_params(&transfer.upload_id, &transfer.file_name, self.device_id());
             let call = client.call(harness_rpc::methods::UPLOAD_COMMIT, params);
             match tokio::time::timeout(TRANSFER_COMMIT_TIMEOUT, call).await {
                 Err(_) => {
@@ -6623,6 +6625,49 @@ fn encode_part_segment(part_id: &str) -> String {
     out
 }
 
+/// Pure parameter builder for `RelayCommand`, stamping `relayDeviceId` so the
+/// host relay attributes first-action approval consistently.
+fn relay_command_params(
+    chat_id: &str,
+    entry: &SessionCommandEntry,
+    relay_device_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "chatId": chat_id,
+        "entry": entry,
+        "relayDeviceId": relay_device_id,
+    })
+}
+
+/// Pure parameter builder for `UploadChunk`, stamping `relayDeviceId`.
+fn upload_chunk_params(
+    upload_id: &str,
+    seq: u64,
+    data: &str,
+    relay_device_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "uploadId": upload_id,
+        "seq": seq,
+        "data": data,
+        "relayDeviceId": relay_device_id,
+    })
+}
+
+/// Pure parameter builder for `UploadCommit`, stamping `relayDeviceId` so
+/// approved peer devices are not misattributed as `"unknown"` and parked.
+fn upload_commit_params(
+    upload_id: &str,
+    file_name: &str,
+    relay_device_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "uploadId": upload_id,
+        "fileName": file_name,
+        "relayDeviceId": relay_device_id,
+    })
+}
+
 #[path = "doc_host_branch_drift.rs"]
 mod branch_drift;
 #[path = "doc_host_checkout_isolation.rs"]
@@ -7506,5 +7551,25 @@ mod pending_prompt_tests {
         let json = serde_json::to_value(&prompts[1]).unwrap();
         assert_eq!(json["messageId"], "m-image");
         assert_eq!(json["waitingForAttachments"], true);
+    }
+
+    #[test]
+    fn relay_and_upload_params_stamp_relay_device_id() {
+        let entry = run("r1", "hi", Vec::new(), SessionCommandStatus::Pending);
+        let relay = relay_command_params("c1", &entry, "dev-sender");
+        assert_eq!(relay["chatId"], "c1");
+        assert_eq!(relay["relayDeviceId"], "dev-sender");
+        assert_eq!(relay["entry"]["id"], "r1");
+
+        let chunk = upload_chunk_params("u1", 2, "YWI=", "dev-sender");
+        assert_eq!(chunk["uploadId"], "u1");
+        assert_eq!(chunk["seq"], 2);
+        assert_eq!(chunk["data"], "YWI=");
+        assert_eq!(chunk["relayDeviceId"], "dev-sender");
+
+        let commit = upload_commit_params("u1", "shot.png", "dev-sender");
+        assert_eq!(commit["uploadId"], "u1");
+        assert_eq!(commit["fileName"], "shot.png");
+        assert_eq!(commit["relayDeviceId"], "dev-sender");
     }
 }

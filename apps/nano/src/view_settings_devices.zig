@@ -256,8 +256,10 @@ fn onRemote(a: *App, id: u64, r: rpc.Reply) void {
     p.remote_saving = false;
     switch (r) {
         .ok => |v| {
+            const was_on = p.remote_on;
             p.remote_known = true;
             p.remote_on = if (v == .object) (if (v.object.get("enabled")) |e| e == .bool and e.bool else false) else false;
+            if (!was_on and p.remote_on) p.pending_known = false;
         },
         .err => |e| {
             p.remote_known = true;

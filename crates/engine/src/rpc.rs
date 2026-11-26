@@ -200,7 +200,8 @@ impl RpcService for RelayRpc {
         if let Some(obj) = params.as_object_mut() {
             obj.remove("relayDeviceId");
         }
-        let approved = !caller.is_empty() && self.registry.remote_device_approved(&caller);
+        let approved = self.registry.is_sandbox_host()
+            || (!caller.is_empty() && self.registry.remote_device_approved(&caller));
         match harness_rpc::admit_relay_action(self.registry.remote_control(), method, approved) {
             harness_rpc::RelayAdmit::Allow => self.inner.handle(method, params).await,
             harness_rpc::RelayAdmit::RemoteControlOff => {
@@ -2494,6 +2495,13 @@ impl RpcService for EngineRpc {
                 }
                 let p: SetRemoteControlParams = parse_params(params)?;
                 self.registry.set_remote_control(p.enabled);
+                if p.enabled {
+                    for chat_id in self.registry.take_parked_command_chats() {
+                        if let Ok(handle) = self.doc_host.open(&chat_id) {
+                            self.doc_host.drain_commands(&handle).await;
+                        }
+                    }
+                }
                 RpcReply::value(&remote_control_reply(&self.registry))
             }
             methods::GET_REMOTE_APPROVALS => RpcReply::value(&serde_json::json!({

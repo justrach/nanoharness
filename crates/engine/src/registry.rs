@@ -326,6 +326,9 @@ pub struct HarnessRegistry {
     one_shot_commands: Mutex<HashSet<String>>,
     /// Per-device Ed25519 + X25519, loaded from `{data_dir}/device-keys.json`.
     device_keys: Mutex<Option<harness_sync::DeviceKeypair>>,
+    /// Whether this engine runs inside a headless cloud sandbox
+    /// (`HARNESS_SANDBOX_TOKEN_FILE`), never persisted to `harness-prefs.json`.
+    sandbox_host: AtomicBool,
     /// Where the prefs persist; `None` (tests, bare registries) skips writes.
     prefs_path: Mutex<Option<PathBuf>>,
 }
@@ -351,6 +354,7 @@ impl HarnessRegistry {
             remote_approvals: tokio::sync::watch::Sender::new(Vec::new()),
             one_shot_commands: Mutex::new(HashSet::new()),
             device_keys: Mutex::new(None),
+            sandbox_host: AtomicBool::new(false),
             prefs_path: Mutex::new(None),
         }
     }
@@ -627,10 +631,22 @@ impl HarnessRegistry {
         self.persist_prefs();
     }
 
+    /// Mark this engine as a headless cloud sandbox (`HARNESS_SANDBOX_TOKEN_FILE`).
+    /// Cloud sandboxes have no local desktop UI and exist solely to serve the
+    /// owner's remote devices; remote control is enabled in memory without
+    /// persisting to `harness-prefs.json`, while `LocalOnly` RPCs stay blocked.
+    pub fn set_sandbox_host(&self, enabled: bool) {
+        self.sandbox_host.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn is_sandbox_host(&self) -> bool {
+        self.sandbox_host.load(Ordering::Relaxed)
+    }
+
     /// Whether this computer serves ControlRpc over its device-room host
-    /// relay. Off until the user opts in.
+    /// relay. Off until the user opts in (always on for cloud sandboxes).
     pub fn remote_control(&self) -> bool {
-        self.prefs().remote_control
+        self.is_sandbox_host() || self.prefs().remote_control
     }
 
     /// Persist the host-relay opt-in. Live host sockets pick this up on the
@@ -786,6 +802,36 @@ impl HarnessRegistry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(command_id.to_string());
+    }
+
+    /// Drain parked `kind == "command"` approvals once remote control is
+    /// enabled, returning deduplicated `chat_id`s to re-drain.
+    pub fn take_parked_command_chats(&self) -> Vec<String> {
+        let mut pending = self
+            .pending_remote
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut chats = Vec::new();
+        let mut removed = false;
+        pending.retain(|item| {
+            if item.kind == "command" {
+                removed = true;
+                if let Some(chat_id) = &item.chat_id
+                    && !chats.contains(chat_id)
+                {
+                    chats.push(chat_id.clone());
+                }
+                false
+            } else {
+                true
+            }
+        });
+        let snapshot = removed.then(|| pending.clone());
+        drop(pending);
+        if let Some(snapshot) = snapshot {
+            self.remote_approvals.send_replace(snapshot);
+        }
+        chats
     }
 
     /// The setting's live value, for the task that holds the assertion.
@@ -2232,5 +2278,65 @@ mod title_tests {
         let prefs: HarnessPrefsFile = serde_json::from_str(r#"{"disabled":["codex"]}"#).unwrap();
         assert_eq!(prefs.titles, TitleSettings::default());
         assert_eq!(prefs.disabled, vec![HarnessId::Codex]);
+    }
+
+    #[test]
+    fn sandbox_host_enables_remote_control_in_memory_only() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("harness-prefs.json"),
+            r#"{"remoteControl":false}"#,
+        )
+        .unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        assert!(!registry.remote_control());
+
+        registry.set_sandbox_host(true);
+        assert!(registry.is_sandbox_host());
+        assert!(registry.remote_control());
+
+        registry.set_keep_awake(false);
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        assert!(!reloaded.remote_control());
+    }
+
+    #[test]
+    fn take_parked_command_chats_only_clears_command_items_and_dedups() {
+        let registry = HarnessRegistry::new();
+        registry.park_remote_approval(harness_rpc::RemoteApproval {
+            id: "a1".into(),
+            kind: "command".into(),
+            device_id: "phone".into(),
+            chat_id: Some("chat-1".into()),
+            command_id: Some("cmd-1".into()),
+            method: None,
+            summary: "run 1".into(),
+        });
+        registry.park_remote_approval(harness_rpc::RemoteApproval {
+            id: "a2".into(),
+            kind: "command".into(),
+            device_id: "phone".into(),
+            chat_id: Some("chat-1".into()),
+            command_id: Some("cmd-2".into()),
+            method: None,
+            summary: "run 2".into(),
+        });
+        registry.park_remote_approval(harness_rpc::RemoteApproval {
+            id: "a3".into(),
+            kind: "rpc".into(),
+            device_id: "phone".into(),
+            chat_id: Some("chat-2".into()),
+            command_id: None,
+            method: Some("OpenTerminal".into()),
+            summary: "rpc".into(),
+        });
+
+        let chats = registry.take_parked_command_chats();
+        assert_eq!(chats, vec!["chat-1".to_string()]);
+        let remaining = registry.pending_remote_approvals();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "a3");
     }
 }

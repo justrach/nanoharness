@@ -593,6 +593,12 @@ impl Auth {
         self.inner.codegraff.is_some()
     }
 
+    /// True when this auth instance is backed by a lease-bound cloud sandbox
+    /// token file (`HARNESS_SANDBOX_TOKEN_FILE`).
+    pub fn is_sandbox(&self) -> bool {
+        self.inner.config.sandbox_token_file.is_some()
+    }
+
     /// True when construction loaded a parseable persisted CodeGraff session.
     /// The value stays true even if a later refresh revokes that session.
     pub fn loaded_codegraff_session(&self) -> bool {
