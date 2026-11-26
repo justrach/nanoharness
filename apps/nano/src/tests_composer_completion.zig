@@ -660,3 +660,143 @@ test "completion catalog requests use existing scoped camelCase RPC and exclude 
     }
     try testing.expect(commands and skills);
 }
+
+/// A catalog with a provider `/compact`, and a provider `resume` that must not
+/// take the workspace's own `/resume`.
+const bare_scene =
+    \\{"ListCommands":[{"name":"goal","description":"Synthetic goal"},{"name":"compact","description":"Compact the synthetic context"},{"name":"resume","description":"Synthetic provider resume"}],"ListSkills":[],"QueueCommand":{"commandId":"synthetic-command"},"FocusChat":{},"Mutate":{}}
+;
+
+/// The scene's catalog answers once pumped: the first pump delivers both
+/// catalog replies, the second whatever they set off.
+fn answer(h: *Harness) void {
+    _ = h.a.engine.pump();
+    _ = h.a.engine.pump();
+}
+
+fn expectNothingSent(h: *Harness) !void {
+    if (try lastPrompt(h)) |wire| {
+        defer testing.allocator.free(wire);
+        std.debug.print("\nunexpected prompt on the wire: {s}\n", .{wire});
+        return error.UnexpectedPrompt;
+    }
+}
+
+fn expectCommandOnWire(h: *Harness, name: []const u8) !void {
+    const wire = (try lastPrompt(h)) orelse return error.NoQueueCommand;
+    defer testing.allocator.free(wire);
+    const expected = try @import("composer_completion.zig").canonical(testing.allocator, .{ .name = name, .description = "" });
+    defer testing.allocator.free(expected);
+    try testing.expectEqualStrings(expected, std.mem.trim(u8, wire, " "));
+}
+
+fn expectTextOnWire(h: *Harness, text: []const u8) !void {
+    const wire = (try lastPrompt(h)) orelse return error.NoQueueCommand;
+    defer testing.allocator.free(wire);
+    try testing.expectEqualStrings(text, wire);
+}
+
+test "completion bare command sent while its catalog loads waits, then goes out as the command" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    // Requested, not yet answered: Return before the menu has its rows.
+    try replies(&h, bare_scene);
+    h.a.composer.set("/compact");
+    h.a.send();
+    try expectNothingSent(&h);
+    try testing.expectEqualStrings("/compact", h.a.composer.text());
+    answer(&h);
+    try expectCommandOnWire(&h, "compact");
+    try testing.expectEqualStrings("", h.a.composer.text());
+}
+
+test "completion bare command sent without the menu goes out as the command" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try replies(&h, bare_scene);
+    // Loaded catalog, sent with Cmd+Return or the Send button rather than
+    // the menu's Return.
+    h.draft("/compact", 8);
+    h.a.send();
+    try expectCommandOnWire(&h, "compact");
+}
+
+test "completion bare text that is no command still goes out as text" {
+    {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        try replies(&h, bare_scene);
+        h.draft("/shrug", 6);
+        h.a.send();
+        try expectTextOnWire(&h, "/shrug");
+    }
+    {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        try replies(&h, bare_scene);
+        h.a.composer.set("/shrug");
+        h.a.send();
+        try expectNothingSent(&h);
+        answer(&h);
+        try expectTextOnWire(&h, "/shrug");
+    }
+}
+
+test "completion bare command with arguments stays literal unless accepted" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try replies(&h, bare_scene);
+    const text = "/goal explain a synthetic parser";
+    h.draft(text, text.len);
+    h.a.send();
+    try expectTextOnWire(&h, text);
+}
+
+test "completion bare command held while loading is withdrawn when the draft changes" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try replies(&h, bare_scene);
+    h.a.composer.set("/compact");
+    h.a.send();
+    h.a.composer.set("/compact now");
+    answer(&h);
+    try expectNothingSent(&h);
+    try testing.expectEqualStrings("/compact now", h.a.composer.text());
+}
+
+test "completion bare command is not sent when discovery failed, and sending again sends it as text" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try replies(&h,
+        \\{"ListCommands":{"$err":"synthetic unavailable"},"ListSkills":[],"QueueCommand":{"commandId":"synthetic-command"},"FocusChat":{},"Mutate":{}}
+    );
+    h.draw();
+    try testing.expect(h.a.completion.failed);
+    h.a.composer.set("/compact");
+    h.a.send();
+    try expectNothingSent(&h);
+    try testing.expectEqualStrings("/compact", h.a.composer.text());
+    const notice = h.a.noticeText() orelse return error.MissingNotice;
+    try testing.expect(std.mem.indexOf(u8, notice, "Send again") != null);
+    h.a.send();
+    try expectTextOnWire(&h, "/compact");
+}
+
+test "completion bare workspace commands stay the workspace's" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try replies(&h, bare_scene);
+    h.draft("/resume", 7);
+    h.a.send();
+    try expectNothingSent(&h);
+    try testing.expect(h.a.view.palette.open);
+    try testing.expectEqualStrings("", h.a.composer.text());
+}
