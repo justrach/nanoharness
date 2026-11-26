@@ -95,19 +95,29 @@ pub fn view(c: *ui.Context, a: *App, k: theme.Colors) void {
             .activity => activity(c, a, k, current),
         }
     }
-    if (page != null and s.kind != .pull and s.kind != .issue) {
-        const current = page.?;
-        rule(c, k);
-        const footer = ui.div(c).row().wFull().h(44).px(14).gap(8).itemsCenter().bg(k.ink(if (k.dark) 0.016 else 0.012));
-        defer footer.end();
-        if (actionButton(c, k, "Previous", .@"alt-arrow-left", null, ready and current.page > 1 and s.error_text == null, false)) flow.turnPage(a, false);
-        {
-            const status = ui.div(c).row().grow().w(0).justifyCenter().itemsCenter();
-            defer status.end();
-            ui.text(c, if (!ready) "Loading…" else c.print("Page {d}", .{current.page}), .{ .size = 11.5, .weight = .medium, .color = k.muted });
+    if (page) |current| {
+        if (showPagination(s.kind, current)) {
+            rule(c, k);
+            const footer = ui.div(c).row().wFull().h(44).px(14).gap(8).itemsCenter().bg(k.ink(if (k.dark) 0.016 else 0.012));
+            defer footer.end();
+            if (actionButton(c, k, "Previous", .@"alt-arrow-left", null, ready and current.page > 1 and s.error_text == null, false)) flow.turnPage(a, false);
+            {
+                const status = ui.div(c).row().grow().w(0).justifyCenter().itemsCenter();
+                defer status.end();
+                ui.text(c, if (!ready) "Loading…" else c.print("Page {d}", .{current.page}), .{ .size = 11.5, .weight = .medium, .color = k.muted });
+            }
+            if (actionButton(c, k, "Next", null, .@"alt-arrow-right", ready and current.hasNextPage and s.error_text == null, false)) flow.turnPage(a, true);
         }
-        if (actionButton(c, k, "Next", null, .@"alt-arrow-right", ready and current.hasNextPage and s.error_text == null, false)) flow.turnPage(a, true);
     }
+}
+
+/// Whether the footer divider and pagination controls should appear for `kind` on `page`.
+pub fn showPagination(kind: flow.Kind, page: flow.Page) bool {
+    return switch (kind) {
+        .pull, .issue => false,
+        .activity => page.page > 1 or page.hasNextPage,
+        .pulls, .issues, .files => true,
+    };
 }
 
 fn scopePill(c: *ui.Context, k: theme.Colors) void {
