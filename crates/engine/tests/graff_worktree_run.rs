@@ -185,8 +185,13 @@ async fn graff_chats_run_and_resume_in_graffs_own_worktree() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(FakeGraff { seen: seen.clone() }));
-    let core = EngineCore::assemble(&tmp_path.join("data"), Arc::new(registry), HarnessId::Graff, None)
-        .expect("engine core assembles");
+    let core = EngineCore::assemble(
+        &tmp_path.join("data"),
+        Arc::new(registry),
+        HarnessId::Graff,
+        None,
+    )
+    .expect("engine core assembles");
     let client = harness_rpc::memory_client(core.rpc_service());
     client
         .call(
@@ -208,7 +213,7 @@ async fn graff_chats_run_and_resume_in_graffs_own_worktree() {
         .expect("queue first run");
     wait_for(|| completed_turns(&core) == 1, "first turn").await;
 
-    let name = "fix-login-redirect-after-sign-in-1a7188e911beeb31".to_string();
+    let name = "1a7188e911beeb31".to_string();
     let tree = GraffWorktree::path_in(&repo_path, &name);
     let first = seen.lock().unwrap()[0].clone();
     assert_eq!(first.cwd, repo_path, "Graff launches from the repo");
@@ -578,4 +583,79 @@ async fn mid_turn_session_cwd_change_reroots_show_image_and_workspace() {
     .await;
     wait_for(|| completed_turns(&core) == 1, "turn completes").await;
     core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn graff_default_worktree_name_omits_prompt_while_explicit_name_stays_intact() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp_path = tmp.path().canonicalize().unwrap();
+    let repo_a = tmp_path.join("repo-a");
+    let repo_a_path = init_repo(&repo_a);
+    let repo_b = tmp_path.join("repo-b");
+    let repo_b_path = init_repo(&repo_b);
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(FakeGraff { seen: seen.clone() }));
+    let core = EngineCore::assemble(
+        &tmp_path.join("data"),
+        Arc::new(registry),
+        HarnessId::Graff,
+        None,
+    )
+    .expect("engine core assembles");
+
+    let mut default_run = run(
+        "msg-default",
+        &repo_a_path,
+        Some(WorktreeSpec {
+            repo_path: repo_a_path.clone(),
+            base: "main".into(),
+            space_id: None,
+            agent_name: None,
+        }),
+    );
+    if let SessionCommandPayload::Run { request, .. } = &mut default_run {
+        request.prompt = "The blue button still does nothing after I click it twice.".into();
+    }
+    core.doc_host.queue_command(CHAT, default_run).unwrap();
+    wait_for(|| completed_turns(&core) == 1, "default worktree turn").await;
+
+    let explicit_chat = "chat-graff-explicit";
+    core.doc_host
+        .queue_command(
+            explicit_chat,
+            run(
+                "msg-explicit",
+                &repo_b_path,
+                Some(WorktreeSpec {
+                    repo_path: repo_b_path.clone(),
+                    base: "main".into(),
+                    space_id: None,
+                    agent_name: Some("custom-tree".into()),
+                }),
+            ),
+        )
+        .unwrap();
+    wait_for(
+        || {
+            core.doc_host
+                .open(explicit_chat)
+                .ok()
+                .and_then(|h| h.doc().read_entries().ok())
+                .unwrap_or_default()
+                .iter()
+                .any(|e| {
+                    e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete)
+                })
+        },
+        "explicit worktree turn",
+    )
+    .await;
+    core.shutdown().await;
+
+    let calls = seen.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].agent_name.as_deref(), Some("1a7188e911beeb31"));
+    assert_eq!(calls[1].agent_name.as_deref(), Some("custom-tree"));
 }

@@ -5833,10 +5833,7 @@ impl DocHost {
                                     .map(|tree| tree.name)
                                     .or_else(|| spec.agent_name.clone())
                                     .unwrap_or_else(|| {
-                                        harness_proto::graff_worktree::name_for_task(
-                                            chat_id,
-                                            &request.prompt,
-                                        )
+                                        harness_proto::graff_worktree::default_name(chat_id)
                                     }),
                             ),
                             ..spec.clone()
