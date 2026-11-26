@@ -166,6 +166,7 @@ fn ensure(a: *App) void {
         s.clearSelections(a.gpa);
         if (s.held_send) |held| a.gpa.free(held.text);
         s.held_send = null;
+        clearLoadingNotice(a);
         s.plain_ok.clearRetainingCapacity();
         s.commands.clearRetainingCapacity();
         s.skills.clearRetainingCapacity();
@@ -520,6 +521,10 @@ pub fn sendGate(a: *App, explicit: ?FollowUp) Gate {
         s.held_send = null;
         const copy_ = a.gpa.dupe(u8, text) catch return .proceed;
         s.held_send = .{ .text = copy_, .explicit = explicit };
+        // Otherwise nothing shows the send is pending, and the draft that
+        // stays in the composer looks like a send that never happened.
+        var buf: [200]u8 = undefined;
+        a.setNotice(std.fmt.bufPrint(&buf, loading_notice ++ " /{s} goes out as soon as they're in.", .{name}) catch loading_notice ++ " Your command goes out as soon as they're in.");
         return .held;
     }
     // As in `entries`: a skill that claims the command speaks for it.
@@ -556,6 +561,13 @@ fn mint(a: *App, range: rules.Range, entry: Entry) !void {
     }.less);
 }
 
+const loading_notice = "Loading this agent's commands.";
+
+/// The held send's notice, and no one else's.
+fn clearLoadingNotice(a: *App) void {
+    if (a.noticeText()) |notice| if (std.mem.startsWith(u8, notice, loading_notice)) a.clearNotice();
+}
+
 /// Both catalog answers are in: a send that waited for them goes now, if the
 /// draft is still the one it was asked for.
 fn releaseHeld(a: *App) void {
@@ -563,6 +575,7 @@ fn releaseHeld(a: *App) void {
     if (!s.commands_done or !s.skills_done) return;
     const held = s.held_send orelse return;
     s.held_send = null;
+    clearLoadingNotice(a);
     defer a.gpa.free(held.text);
     if (std.mem.eql(u8, held.text, a.composer.text())) a.sendFollowUp(held.explicit);
 }
