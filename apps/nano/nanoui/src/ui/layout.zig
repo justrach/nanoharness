@@ -40,7 +40,9 @@ pub fn measure(c: *Context, index: u32, avail_w: f32) types.Size {
     var content: types.Size = .{};
     var flexible = false;
     switch (n.content) {
-        .text => |*t| {
+        .text => |*t| measure_text: {
+            // Positioned selection overlays are sized by their parent.
+            if (t.positioned_lines.len > 0) break :measure_text;
             if (!c.text_warmed) {
                 text.warmCaches(c.text);
                 c.text_warmed = true;

@@ -190,8 +190,8 @@ fn action(c: *ui.Context, a: *App, k: theme.Colors, rows: *const Rows, box: u64)
     const pick = picked(c, a, rows, box) orelse return;
     const view = c.rects.get(box) orelse return;
     const parent = c.rects.get(c.nodes.items[c.stack.items[c.stack.items.len - 1]].id) orelse return;
-    const lo = line(c, pick.lo) orelse return;
-    const hi = line(c, pick.hi) orelse return;
+    const lo = line(c, pick.lo, false) orelse return;
+    const hi = line(c, pick.hi, true) orelse return;
     // Both were laid out before this frame's scroll.
     const moved = (c.scroll.get(box) orelse 0) - (c.scroll_seen.get(box) orelse (c.scroll.get(box) orelse 0));
     const top = view.y + moved;
@@ -234,12 +234,16 @@ fn action(c: *ui.Context, a: *App, k: theme.Colors, rows: *const Rows, box: u64)
 }
 
 /// The line of text `end` is on as last laid out, its x the end's.
-fn line(c: *ui.Context, end: End) ?ui.Rect {
+fn line(c: *ui.Context, end: End, is_end: bool) ?ui.Rect {
     const n = c.nodes.items[end.node];
     const r = c.rects.get(n.id) orelse return null;
     const tx = n.content.text;
-    const lh = c.text.lineHeight(tx.style);
     const byte = @min(end.byte, tx.str.len);
+    for (tx.positioned_lines, 0..) |row, i| {
+        if (i + 1 < tx.positioned_lines.len and (byte > row.end or (byte == row.end and !is_end))) continue;
+        return .{ .x = r.x + row.xAt(byte), .y = r.y + row.y, .w = 0, .h = row.height };
+    }
+    const lh = c.text.lineHeight(tx.style);
     const lines = if (tx.spans.len > 0)
         c.text.wrapAttributed(tx.str, tx.style, tx.spans, r.w)
     else if (tx.style.wrap)
@@ -309,8 +313,8 @@ fn reveal(c: *ui.Context, a: *App, rows: *const Rows, t: *const tr.Transcript, b
     if (found != null and !r.shown) highlight(c, a, box, lo, hi);
     r.shown = found != null;
     const view = c.rects.get(box) orelse return;
-    const top = line(c, .{ .node = lo.leaf.node, .byte = lo.byte }) orelse return;
-    const end = line(c, .{ .node = hi.leaf.node, .byte = hi.byte }) orelse return;
+    const top = line(c, .{ .node = lo.leaf.node, .byte = lo.byte }, false) orelse return;
+    const end = line(c, .{ .node = hi.leaf.node, .byte = hi.byte }, true) orelse return;
     const h = end.y + end.h - top.y;
     r.moves = r.moves or top.y < view.y + 28 or end.y + end.h > view.y + view.h - 8;
     if (!r.moves) return;

@@ -308,6 +308,54 @@ test "retention selection four clicks select the complete wrapped paragraph" {
     try testing.expectEqualStrings(multi_click_prose, h.t.clipboard.items);
 }
 
+const math_sentence = "The synthetic estimate $x=0.5$ is only a starting point, and the next observation gives us enough evidence to verify whether the estimate remains stable.";
+const math_paragraph = "First sentence. " ++ math_sentence ++ " Last sentence.";
+
+fn multiClickInlineMath(count: u32, expected: []const u8, screenshot: []const u8) !void {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const frame = try std.json.Stringify.valueAlloc(testing.allocator, .{ .reset = &.{.{
+        .id = "math-multi-click",
+        .role = "assistant",
+        .status = "complete",
+        .parts = &.{.{
+            .id = "p",
+            .kind = "text",
+            .text = math_paragraph ++ "\n\nA separate paragraph must stay unselected.",
+        }},
+    }} }, .{});
+    defer testing.allocator.free(frame);
+    try Harness.apply(&h.a.transcript, frame);
+    h.t.resize(760, 780);
+    h.t.settle(0.3);
+    const first = h.t.ctx.nodes.items[textNode(&h.t.ctx, "First ") orelse return error.TextNodeMissing].rect;
+    const word = h.t.ctx.nodes.items[textNode(&h.t.ctx, "verify ") orelse return error.TextNodeMissing].rect;
+    try testing.expect(word.y > first.y);
+    const x = word.x + word.w / 2;
+    const y = word.y + word.h / 2;
+    h.t.moveTo(x, y);
+    h.t.ctx.input.click_count = count;
+    h.t.ctx.pointerDown();
+    h.t.frame();
+    h.t.advance(0.2);
+    h.t.up();
+    h.t.settle(0.1);
+    try h.snap(screenshot);
+    copy(&h);
+    try testing.expectEqualStrings(expected, h.t.clipboard.items);
+    const selection = h.t.ctx.selection;
+    try testing.expect(selection.start_rect.?.y < selection.end_rect.?.y);
+}
+
+test "retention selection inline math triple click selects the complete wrapped sentence" {
+    try multiClickInlineMath(3, math_sentence, "inline-math-triple-click");
+}
+
+test "retention selection inline math four clicks select the complete wrapped paragraph" {
+    try multiClickInlineMath(4, math_paragraph, "inline-math-four-click");
+}
+
 test "retention selection held multi click does not collapse to the pointer" {
     for ([_]u32{ 2, 3, 4, 5, 8 }) |count| {
         var h: Harness = undefined;

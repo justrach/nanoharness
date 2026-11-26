@@ -64,6 +64,7 @@ pub const Length = types.Length;
 pub const Style = types.Style;
 pub const Pulse = types.Pulse;
 pub const TextStyle = types.TextStyle;
+pub const PositionedTextLine = ctx_mod.Content.PositionedLine;
 pub const WrapRule = types.WrapRule;
 pub const BaselineRule = types.BaselineRule;
 pub const GlyphSnap = types.GlyphSnap;

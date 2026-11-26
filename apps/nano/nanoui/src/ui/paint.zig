@@ -343,6 +343,19 @@ fn paintText(c: *Context, out: *std.ArrayList(metal.Instance), index: u32, n: *c
     const sel: ?Sel = if (selectable) .{ .id = n.id, .index = index, .x0 = n.rect.x, .x1 = n.rect.x + n.rect.w } else null;
     const inner = n.rect.inset(n.style.padding);
     const inner_right = n.rect.x + n.rect.w;
+    if (t.positioned_lines.len > 0) {
+        const s = sel orelse return;
+        for (t.positioned_lines) |row| {
+            const y = inner.y + row.y;
+            if (y > clip4[3]) break;
+            if (y + row.height < clip4[1]) {
+                if (y + row.height <= c.input.mouse.y) c.selection.below = .{ .id = s.id, .at = row.end };
+                continue;
+            }
+            @import("selection.zig").line(c, out, s.id, s.index, t.str, row.start, row.end, row.layout, inner.x, y, row.height, s.x0, s.x1, clip4);
+        }
+        return;
+    }
     const f = c.text.font(t.style);
     const lh = c.text.lineHeight(t.style);
     if (t.style.wrap) {

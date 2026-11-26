@@ -1740,6 +1740,12 @@ fn hitLeafIndex(c: *ui.Context, ix: u32, r: ui.Rect, visible: ui.Rect, pointer: 
         .text => |t| t,
         else => return 0,
     };
+    if (tx.positioned_lines.len > 0) {
+        for (tx.positioned_lines) |line| {
+            if (p.y < r.y + line.y + line.height) return line.byteAt(p.x - r.x);
+        }
+        return tx.positioned_lines[tx.positioned_lines.len - 1].end;
+    }
     const lh = c.text.lineHeight(tx.style);
     const lines = if (tx.lines.len > 0)
         tx.lines
