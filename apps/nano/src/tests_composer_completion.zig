@@ -757,6 +757,35 @@ test "completion bare command with arguments stays literal unless accepted" {
     try expectTextOnWire(&h, text);
 }
 
+test "completion bare command says it is waiting while the catalog loads" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try replies(&h, bare_scene);
+    h.a.composer.set("/compact");
+    h.a.send();
+    try expectNothingSent(&h);
+    // A held send is visible: the draft stays, and nothing else says why.
+    const notice = h.a.noticeText() orelse return error.MissingNotice;
+    try testing.expect(std.mem.indexOf(u8, notice, "/compact") != null);
+    answer(&h);
+    try expectCommandOnWire(&h, "compact");
+    try testing.expect(h.a.noticeText() == null);
+
+    // Withdrawn by an edit: the wait is over, so is the notice.
+    var g: Harness = undefined;
+    try g.init();
+    defer g.deinit();
+    try replies(&g, bare_scene);
+    g.a.composer.set("/compact");
+    g.a.send();
+    try testing.expect(g.a.noticeText() != null);
+    g.a.composer.set("/compact now");
+    answer(&g);
+    try expectNothingSent(&g);
+    try testing.expect(g.a.noticeText() == null);
+}
+
 test "completion bare command held while loading is withdrawn when the draft changes" {
     var h: Harness = undefined;
     try h.init();
