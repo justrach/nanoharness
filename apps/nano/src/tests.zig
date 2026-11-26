@@ -119,6 +119,7 @@ test {
     _ = @import("release.zig");
     _ = @import("perf_stats.zig");
     _ = @import("perf_transport.zig");
+    _ = @import("privacy.zig");
     _ = @import("tests_performance.zig");
     _ = @import("view.zig");
     _ = @import("native_menu.zig");

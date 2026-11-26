@@ -40,10 +40,10 @@ link stops while idle/backgrounded or sharing is disabled. Existing operation an
 
 The receiver accepts only the fixed iOS meter, metric names, units, histogram bounds and coarse resource attributes;
 it rejects extra attributes/exemplars or cumulative histograms before storing anything. Metadata is app/OS version,
-architecture, hardware model and maximum refresh rate, plus a random per-launch `service.instance.id`. No account,
+architecture and maximum refresh rate, plus a random per-launch `service.instance.id` while sharing is allowed. No account,
 persistent device/session identifier, process ID, raw uptime, chat content or paths are exported. Aggregates retain
 90 days. Uploads happen periodically in the foreground and on backgrounding, no more than once per ten minutes,
-subject to the sharing setting, power, thermal and network restrictions.
+subject to the sharing setting, `DO_NOT_TRACK` / `HARNESS_OFFLINE`, power, thermal and network restrictions.
 
 Legacy format (Android and iOS compatibility tests):
 
@@ -54,8 +54,8 @@ Legacy format (Android and iOS compatibility tests):
   accepts (the version is limited to letters, digits and `.+-`, and a window never reaches back more than six days),
   so one odd value cannot get every batch of a launch refused. The server's own validator is tested against these
   exact bodies.
-- **Identity:** `install_id` is a random v4 UUID made fresh for every launch, so one launch's batches can be joined but
-  never linked to a person or to the next launch. The desktop app keeps one per install instead, in its own file. No
+- **Identity:** `install_id` is a random v4 UUID made fresh for every launch **while sharing is allowed**, so one launch's batches can be joined but
+  never linked to a person or to the next launch. Opt-out and `DO_NOT_TRACK` do not create one. The desktop app does not keep an install-id file. No
   account, device or session identifier, and no chat content.
 - **Metrics:** `app_launch_ms` and `conversation_load_ms` mean the same as on desktop. The rest are mobile's own:
   `transcript_rows_ms`, `markdown_parse_ms`, `home_group_ms`, `send_apply_ms`, `main_stall_ms`, and one frame measure:
@@ -73,6 +73,8 @@ Legacy format (Android and iOS compatibility tests):
 
 The remaining legacy batch details above describe Android and the compatibility vectors. iOS uses the same bounded
 aggregation/transport policy with its OTLP encoder; resource samples have their own units rather than milliseconds.
+iOS OTLP does **not** export `device.model.identifier`. `DO_NOT_TRACK=1` and `HARNESS_OFFLINE=1` stop collection
+and never mint `service.instance.id`. The desktop app has no install-id file.
 
 How the app treats the server's answer:
 

@@ -367,7 +367,7 @@ fn switchRow(c: *ui.Context, a: *App, k: theme.Colors, comptime flag: settings.F
     words(c, k, title, meta, 40);
     if (toggle(c, k, a.settings.get(flag), enabled) or (enabled and r.clicked())) {
         a.settings.toggle(flag);
-        if (comptime flag == .share_desktop_responsiveness) a.performance.consent(a.performance.available and a.settings.get(flag), a.nowMs());
+        if (comptime flag == .share_desktop_responsiveness) a.performance.consent(a.performance.available and @import("privacy.zig").productTelemetryAllowed(a.settings.get(flag), a.env), a.nowMs());
         a.redraw();
     }
 }
@@ -421,7 +421,7 @@ fn notifications(c: *ui.Context, a: *App, k: theme.Colors) void {
     fieldLabel(c, k, "Privacy");
     const cd = card(c, k);
     defer cd.end();
-    switchRow(c, a, k, .share_desktop_responsiveness, .@"fast-tier", "Share anonymous responsiveness stats", "Opt in to aggregated CPU frame costs and active scroll/animation intervals, grouped by OS, architecture, app version, renderer and pane-count range. No account, content, paths or installation ID. Off by default; release app only.", true, true);
+    switchRow(c, a, k, .share_desktop_responsiveness, .@"fast-tier", "Share anonymous responsiveness stats", "Opt in to aggregated CPU frame costs and active scroll/animation intervals, grouped by OS, architecture, app version, renderer and pane-count range. No account, content, paths or installation ID. Off by default; release app only. Honors DO_NOT_TRACK=1 and HARNESS_OFFLINE=1.", true, true);
 }
 
 fn browsing(c: *ui.Context, a: *App, k: theme.Colors) void {

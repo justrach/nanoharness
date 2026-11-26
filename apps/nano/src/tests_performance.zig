@@ -15,6 +15,26 @@ fn count(w: *const stats.Window, metric: stats.Metric) u32 {
     return result;
 }
 
+test "DO_NOT_TRACK=1 blocks desktop performance even when the user opted in" {
+    var env = std.process.Environ.Map.init(testing.allocator);
+    defer env.deinit();
+    try env.put("DO_NOT_TRACK", "1");
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.env = &env;
+    a.performance.available = true;
+    a.settings.set(.share_desktop_responsiveness, true);
+    @import("theme.zig").registerFonts();
+    var view = ui.View.init(&a, @import("view.zig").view);
+    view.after_frame = perf.completed;
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, view, .{ .width = 900, .height = 700 });
+    defer t.deinit();
+    t.frame();
+    try testing.expect(a.performance.window.empty());
+    try testing.expect(!a.performance.enabled.load(.acquire));
+}
+
 test "desktop performance consent defaults off and invalidates buffered work" {
     var a: App = .init(testing.allocator, testing.io, 1);
     defer a.deinit();

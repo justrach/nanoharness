@@ -57,7 +57,7 @@ final class PerfOTLPTests: XCTestCase {
         let r = try resource(json)
         let resourceObject = try XCTUnwrap(r["resource"] as? [String: Any])
         let attributes = try XCTUnwrap(resourceObject["attributes"] as? [[String: Any]])
-        XCTAssertEqual(attributes.count, 8)
+        XCTAssertEqual(attributes.count, 7)
         let keyed = Dictionary(uniqueKeysWithValues: try attributes.map {
             (try XCTUnwrap($0["key"] as? String), try XCTUnwrap($0["value"] as? [String: String]))
         })
@@ -68,9 +68,9 @@ final class PerfOTLPTests: XCTestCase {
             "os.type": ["stringValue": "ios"],
             "os.version": ["stringValue": "27.0--test-"],
             "host.arch": ["stringValue": "aarch64"],
-            "device.model.identifier": ["stringValue": "iPhone18,1"],
             "display.refresh_rate": ["intValue": "240"],
         ])
+        XCTAssertNil(keyed["device.model.identifier"], "hardware model must not leave the device")
         let encoded = try metrics(json)
         let expectedNames = ["harness.ios.app_launch", "harness.ios.cpu.utilization", "harness.ios.memory.footprint",
                              "harness.ios.disk.write", "harness.ios.disk.write_rate", "harness.ios.scroll.callback_delay",
@@ -272,5 +272,17 @@ final class PerfOTLPTests: XCTestCase {
         XCTAssertFalse(PerfSharing.isEnabled(in: defaults))
         XCTAssertEqual(PerfSharing.key, "share-performance-consent-v2")
         XCTAssertEqual(PerfSharing.otlpEndpoint, "https://otel.codegraff.com/v1/metrics")
+    }
+
+    func testDoNotTrackBlocksSharingAndSkipsAnInstallId() {
+        XCTAssertFalse(PrivacyKillswitch.decide(consent: true, crashConsent: true, env: ["DO_NOT_TRACK": "1"]).productTelemetry)
+        XCTAssertFalse(PrivacyKillswitch.decide(consent: true, crashConsent: true, env: ["DO_NOT_TRACK": "1"]).createTelemetryId)
+        XCTAssertFalse(PrivacyKillswitch.decide(consent: true, crashConsent: true, env: ["HARNESS_OFFLINE": "1"]).crashUpload)
+        let omitted = PerfOTLPBatch(meta: PerfBatchMeta(installId: "", os: "ios", arch: "aarch64",
+                                                        appVersion: "1", osVersion: "27", device: "iPhone18,1", refreshHz: 60),
+                                    window: PerfWindow(startMs: 0, endMs: 1, metrics: [])).body()
+        XCTAssertFalse(omitted.contains("service.instance.id"))
+        XCTAssertFalse(omitted.contains("device.model.identifier"))
+        XCTAssertFalse(omitted.contains("iPhone18,1"))
     }
 }

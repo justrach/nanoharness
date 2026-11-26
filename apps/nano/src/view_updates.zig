@@ -440,6 +440,7 @@ pub fn updateSummary(buf: []u8, a: *const App, now_ms: i64) UpdateSummary {
 /// Returns seconds until another tick is needed, or null for fixtures/tests.
 pub fn tick(a: *App) ?f32 {
     if (a.offscreen or builtin.is_test) return null;
+    if (!@import("privacy.zig").backgroundNetworkAllowed(a.env)) return null;
     initialize(a);
     if (a.release.startIfDue()) {
         a.updates.app_checking = a.release.schedule.in_flight;
@@ -454,6 +455,10 @@ pub fn tick(a: *App) ?f32 {
 
 pub fn checkForUpdates(a: *App) void {
     a.updates.app_failed_len = 0;
+    if (!@import("privacy.zig").backgroundNetworkAllowed(a.env)) {
+        a.redraw();
+        return;
+    }
     if (!a.offscreen and !builtin.is_test) {
         initialize(a);
         a.release.start();

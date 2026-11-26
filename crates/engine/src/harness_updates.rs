@@ -437,6 +437,9 @@ impl HarnessUpdateCoordinator {
     }
 
     pub fn start(&self) {
+        if !crate::privacy::background_network_from_os() {
+            return;
+        }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };

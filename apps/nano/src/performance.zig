@@ -144,7 +144,7 @@ pub const State = struct {
 
 fn reconcile(a: *App) bool {
     const s = &a.performance;
-    const on = s.available and !a.offscreen and a.settings.get(.share_desktop_responsiveness);
+    const on = s.available and !a.offscreen and @import("privacy.zig").productTelemetryAllowed(a.settings.get(.share_desktop_responsiveness), a.env);
     if (s.enabled.load(.acquire) != on) s.consent(on, a.nowMs());
     return on;
 }

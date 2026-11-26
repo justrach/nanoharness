@@ -271,6 +271,9 @@ fn claim_check() -> bool {
 /// session starts and when graff itself was just updated. At most one check
 /// every ten minutes; never blocks, and does nothing without a tokio runtime.
 pub fn maybe_check_soon() {
+    if !harness_proto::privacy::background_network_from_os() {
+        return;
+    }
     if !auto_install_enabled() {
         return;
     }
@@ -294,6 +297,9 @@ pub fn maybe_check_soon() {
 /// Keep codedb installed and current for the life of the process, on the
 /// current tokio runtime. Never blocks start-up.
 pub async fn keep_current() {
+    if !harness_proto::privacy::background_network_from_os() {
+        return;
+    }
     if !auto_install_enabled() {
         return;
     }

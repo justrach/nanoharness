@@ -1,3 +1,11 @@
+# Shared protocol vectors
+
+`privacy-killswitch.json` pins when product telemetry, crash uploads, background
+update/catalog pings, and telemetry IDs are allowed (`DO_NOT_TRACK`,
+`HARNESS_OFFLINE`, and consent). Rust (`crates/proto/src/privacy.rs` and
+`crates/engine/src/privacy.rs`), Zig (`apps/nano/src/privacy.zig`) and Swift
+(`apps/ios/Harness/App/PrivacyKillswitch.swift`, `ParityTests`) each run it.
+
 # chat2 sync protocol vectors
 
 `chat2-vectors.json` pins the parts of the chat2 sync protocol that every implementation has to agree on, as data.

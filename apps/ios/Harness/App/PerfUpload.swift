@@ -150,7 +150,7 @@ final class PerfHistograms: @unchecked Sendable {
     }
 }
 
-/// What identifies the batch: the app, the OS and the hardware model, never a person.
+/// What identifies the batch: the app and OS, never a person or a hardware model.
 struct PerfBatchMeta: Sendable {
     /// Random and fresh for every launch, in the `install_id` field the desktop format already has.
     let installId: String
@@ -356,7 +356,7 @@ enum PerfSharing {
         return defaultEnabled
     }
 
-    private static let installId = UUID().uuidString.lowercased()
+    private static var generatedInstallId: String?
     private static let uploader = PerfUploader(endpoint: otlpEndpoint, enabled: { collectingEnabled }, source: Perf.shared.histograms,
                                                body: { PerfOTLPBatch(meta: $0, window: $1).body() },
                                                post: { await PerfTransport.post($0, $1) })
@@ -370,7 +370,9 @@ enum PerfSharing {
         #endif
     }()
 
-    static var collectingEnabled: Bool { available && enabled && !isDevelopmentBuild }
+    static var collectingEnabled: Bool {
+        available && PrivacyKillswitch.decide(consent: enabled, crashConsent: false).productTelemetry && !isDevelopmentBuild
+    }
 
     @MainActor
     static func consentChanged() {
@@ -390,6 +392,15 @@ enum PerfSharing {
         Task.detached(priority: .utility) { _ = await uploader.flush(meta: meta) }
     }
 
+    /// A per-launch id is minted only while sharing is allowed. Opt-out and
+    /// DO_NOT_TRACK never create one.
+    static func installIdIfAllowed() -> String? {
+        guard PrivacyKillswitch.decide(consent: enabled, crashConsent: false).createTelemetryId,
+              !isDevelopmentBuild else { return nil }
+        if generatedInstallId == nil { generatedInstallId = UUID().uuidString.lowercased() }
+        return generatedInstallId
+    }
+
     @MainActor
     private static func batchMeta() -> PerfBatchMeta {
         let info = Bundle.main.infoDictionary
@@ -403,18 +414,8 @@ enum PerfSharing {
         #else
         let arch = "other"
         #endif
-        return PerfBatchMeta(installId: installId, os: "ios", arch: arch, appVersion: "\(short)+\(build)",
-                             osVersion: UIDevice.current.systemVersion, device: modelIdentifier(),
+        return PerfBatchMeta(installId: installIdIfAllowed() ?? "", os: "ios", arch: arch, appVersion: "\(short)+\(build)",
+                             osVersion: UIDevice.current.systemVersion, device: "",
                              refreshHz: screen?.maximumFramesPerSecond ?? 60)
-    }
-
-    /// The hardware model ("iPhone18,1"), not the name the owner gave the phone.
-    private static func modelIdentifier() -> String {
-        if let simulated = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] { return simulated }
-        var size = 0
-        sysctlbyname("hw.machine", nil, &size, nil, 0)
-        var machine = [CChar](repeating: 0, count: size)
-        sysctlbyname("hw.machine", &machine, &size, nil, 0)
-        return String(cString: machine)
     }
 }

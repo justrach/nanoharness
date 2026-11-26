@@ -19,6 +19,8 @@ This is a new, **off-by-default opt-in**, independent of the old, unwired Nano
 performance preference. Debug, hidden, screenshot, replay and test applications
 do not upload. Opting out clears the in-memory window and invalidates a queued
 upload. An HTTP request already in progress cannot be retracted.
+`DO_NOT_TRACK=1` and `HARNESS_OFFLINE=1` also stop collection, even if the
+toggle is on. See [PRIVACY.md](../PRIVACY.md).
 
 The release desktop app counts completed CPU frames into fixed histograms. The
 collector callback runs once after NanoUI's CPU build/layout/paint work, including

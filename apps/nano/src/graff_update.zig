@@ -112,6 +112,7 @@ pub fn startManual(a: *App) void {
 
 fn check(a: *App, manual: bool, force_install: bool) bool {
     if (a.offscreen or builtin.os.tag != .macos) return false;
+    if (!@import("privacy.zig").backgroundNetworkAllowed(a.env)) return false;
     if (a.env) |env| {
         if (env.get("GRAFF_EXECUTABLE")) |v| if (v.len > 0) return false;
     }

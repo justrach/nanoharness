@@ -48,6 +48,7 @@ pub mod mcp_servers;
 mod model_catalogs;
 pub mod native_extensions;
 pub mod preview_bridge;
+pub mod privacy;
 pub mod profile;
 pub mod project_actions;
 pub mod registry;
@@ -1077,10 +1078,10 @@ impl Engine {
         core.harness_updates.start();
         // Installed desktop bundles and managed servers use a public stable
         // release feed, so update checks also run for local-only, signed-out
-        // workspaces.
+        // workspaces. DO_NOT_TRACK=1 / HARNESS_OFFLINE=1 skip the GitHub ping.
         let install = update_bridge::detect_install();
-        let check_updates =
-            edge_enabled || install.supports_desktop_update() || install.checks_releases();
+        let check_updates = privacy::background_network_from_os()
+            && (edge_enabled || install.supports_desktop_update() || install.checks_releases());
         if check_updates {
             // Release checker: polls the release feed hourly on the wall clock; managed
             // headless installs apply + restart themselves (HARNESS_AUTO_UPDATE=0 opts

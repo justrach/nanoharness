@@ -1119,6 +1119,9 @@ fn sign_in_url(line: &str) -> Option<String> {
 /// (`shell_env`, an interactive shell start that can take seconds), and the
 /// caller is the engine's Ready path, so they run on the blocking pool.
 pub fn prewarm_managed_adapters() {
+    if !harness_proto::privacy::background_network_from_os() {
+        return;
+    }
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
     };

@@ -396,6 +396,9 @@ fn maybe_check_soon_inner(run: impl FnOnce()) {
 /// check runs on the current tokio runtime, and with no runtime it does
 /// nothing. The session in flight keeps the binary it already resolved.
 pub fn maybe_check_soon() {
+    if !harness_proto::privacy::background_network_from_os() {
+        return;
+    }
     if !auto_update_enabled() {
         return;
     }

@@ -158,7 +158,7 @@ harness daemon start
 
 Harness sync uses CodeGraff OAuth; signing in to the `graff` agent is a separate step. Coding agents keep their own provider credentials on the host device. Synced chat content and workspace metadata go to the Harness edge service. A trusted remote device can ask an online host to read and write workspace files; **Show ignored files** also exposes ignored files such as `.env`. Sign in only devices you trust with those files. To return to the local profile on a headless device, stop the daemon, run `harness logout`, and restart it.
 
-For the internals, see [architecture](ARCHITECTURE.md). For appearance and theme import, see [the theme guide](docs/theme-system.md).
+For the internals, see [architecture](ARCHITECTURE.md). For appearance and theme import, see [the theme guide](docs/theme-system.md). For every outbound network call, see [privacy](PRIVACY.md). Set `DO_NOT_TRACK=1` or `HARNESS_OFFLINE=1` to stop product telemetry, crash uploads, and background update/catalog pings.
 
 ## License
 
