@@ -13,6 +13,7 @@ use std::sync::{
     Arc, Mutex, MutexGuard, PoisonError,
     atomic::{AtomicBool, AtomicU8, Ordering},
 };
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -306,6 +307,33 @@ enum Slot {
     },
 }
 
+/// The exact upload finalization the owner approved. Never granted to an unknown caller.
+#[derive(PartialEq, Eq, Hash)]
+pub(crate) struct RemoteUploadCommit {
+    pub device_id: String,
+    pub upload_id: String,
+    pub file_name: String,
+}
+
+struct ParkedRemoteApproval {
+    item: harness_rpc::RemoteApproval,
+    upload: Option<RemoteUploadCommit>,
+}
+
+#[derive(Default)]
+struct RemoteApprovalState {
+    pending: Vec<ParkedRemoteApproval>,
+    upload_retries: HashMap<RemoteUploadCommit, Instant>,
+}
+
+impl RemoteApprovalState {
+    fn snapshot(&self) -> Vec<harness_rpc::RemoteApproval> {
+        self.pending.iter().map(|p| p.item.clone()).collect()
+    }
+}
+
+const UPLOAD_RETRY_APPROVAL_TTL: Duration = Duration::from_secs(300);
+
 pub struct HarnessRegistry {
     pub(crate) installs: crate::rpc::Installations,
     slots: Mutex<HashMap<HarnessId, Slot>>,
@@ -320,7 +348,7 @@ pub struct HarnessRegistry {
     /// Live view of `keep_awake` for the engine's power-assertion task.
     keep_awake: tokio::sync::watch::Sender<bool>,
     /// Parked remote actions (chat2 drain + first ControlRpc).
-    pending_remote: Mutex<Vec<harness_rpc::RemoteApproval>>,
+    pending_remote: Mutex<RemoteApprovalState>,
     remote_approvals: tokio::sync::watch::Sender<Vec<harness_rpc::RemoteApproval>>,
     /// Command ids the user approved once (not persisted).
     one_shot_commands: Mutex<HashSet<String>>,
@@ -350,7 +378,7 @@ impl HarnessRegistry {
             graff_compact_at: Arc::new(AtomicU8::new(0)),
             graff_native_flint: Arc::new(std::sync::RwLock::new(None)),
             keep_awake: tokio::sync::watch::Sender::new(false),
-            pending_remote: Mutex::new(Vec::new()),
+            pending_remote: Mutex::default(),
             remote_approvals: tokio::sync::watch::Sender::new(Vec::new()),
             one_shot_commands: Mutex::new(HashSet::new()),
             device_keys: Mutex::new(None),
@@ -654,6 +682,13 @@ impl HarnessRegistry {
     /// peer-link probe still need it).
     pub fn set_remote_control(&self, enabled: bool) {
         self.prefs().remote_control = enabled;
+        if !enabled {
+            self.pending_remote
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .upload_retries
+                .clear();
+        }
         self.persist_prefs();
     }
 
@@ -721,6 +756,11 @@ impl HarnessRegistry {
         self.prefs()
             .approved_remote_devices
             .retain(|id| id != device_id);
+        self.pending_remote
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .upload_retries
+            .retain(|upload, _| upload.device_id != device_id);
         self.persist_prefs();
     }
 
@@ -728,7 +768,7 @@ impl HarnessRegistry {
         self.pending_remote
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+            .snapshot()
     }
 
     pub fn watch_remote_approvals(
@@ -738,35 +778,63 @@ impl HarnessRegistry {
     }
 
     pub fn park_remote_approval(&self, item: harness_rpc::RemoteApproval) {
-        let mut pending = self
+        self.consume_upload_approval_or_park(item, None);
+    }
+
+    /// Called only after relay admission returns NeedsApproval. Consume an exact
+    /// retry or park it under the same lock used to approve it.
+    pub(crate) fn consume_upload_approval_or_park(
+        &self,
+        item: harness_rpc::RemoteApproval,
+        upload: Option<RemoteUploadCommit>,
+    ) -> bool {
+        let mut state = self
             .pending_remote
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if pending.iter().any(|p| {
-            p.command_id == item.command_id
-                && p.method == item.method
-                && p.device_id == item.device_id
-        }) {
-            return;
+        if let Some(upload) = &upload
+            && state
+                .upload_retries
+                .remove(upload)
+                .is_some_and(|deadline| deadline > Instant::now())
+        {
+            return true;
         }
-        pending.push(item);
-        let snapshot = pending.clone();
-        drop(pending);
-        self.remote_approvals.send_replace(snapshot);
+        if state.pending.iter().any(|p| {
+            p.item.command_id == item.command_id
+                && p.item.method == item.method
+                && p.item.device_id == item.device_id
+                && p.upload == upload
+        }) {
+            return false;
+        }
+        state.pending.push(ParkedRemoteApproval { item, upload });
+        self.remote_approvals.send_replace(state.snapshot());
+        false
     }
 
     pub fn resolve_remote_approval(&self, id: &str, allow: bool, always: bool) -> bool {
-        let mut pending = self
+        let mut state = self
             .pending_remote
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let Some(idx) = pending.iter().position(|p| p.id == id) else {
+        let Some(idx) = state.pending.iter().position(|p| p.item.id == id) else {
             return false;
         };
-        let item = pending.remove(idx);
-        let snapshot = pending.clone();
-        drop(pending);
-        self.remote_approvals.send_replace(snapshot);
+        let ParkedRemoteApproval { item, upload } = state.pending.remove(idx);
+        if allow
+            && !always
+            && let Some(upload) = upload
+            && self.remote_control()
+        {
+            let now = Instant::now();
+            state.upload_retries.retain(|_, deadline| *deadline > now);
+            state
+                .upload_retries
+                .insert(upload, now + UPLOAD_RETRY_APPROVAL_TTL);
+        }
+        self.remote_approvals.send_replace(state.snapshot());
+        drop(state);
         if allow {
             if always {
                 self.approve_remote_device(&item.device_id);
@@ -794,10 +862,11 @@ impl HarnessRegistry {
             .pending_remote
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        pending.retain(|p| p.command_id.as_deref() != Some(command_id));
-        let snapshot = pending.clone();
+        pending
+            .pending
+            .retain(|p| p.item.command_id.as_deref() != Some(command_id));
+        self.remote_approvals.send_replace(pending.snapshot());
         drop(pending);
-        self.remote_approvals.send_replace(snapshot);
         self.one_shot_commands
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -813,7 +882,8 @@ impl HarnessRegistry {
             .unwrap_or_else(PoisonError::into_inner);
         let mut chats = Vec::new();
         let mut removed = false;
-        pending.retain(|item| {
+        pending.pending.retain(|p| {
+            let item = &p.item;
             if item.kind == "command" {
                 removed = true;
                 if let Some(chat_id) = &item.chat_id
@@ -826,10 +896,8 @@ impl HarnessRegistry {
                 true
             }
         });
-        let snapshot = removed.then(|| pending.clone());
-        drop(pending);
-        if let Some(snapshot) = snapshot {
-            self.remote_approvals.send_replace(snapshot);
+        if removed {
+            self.remote_approvals.send_replace(pending.snapshot());
         }
         chats
     }

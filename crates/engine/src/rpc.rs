@@ -211,29 +211,49 @@ impl RpcService for RelayRpc {
                 Err(RpcError::Failed(harness_rpc::RELAY_LOCAL_ONLY.into()))
             }
             harness_rpc::RelayAdmit::NeedsApproval => {
-                let device_id = if caller.is_empty() {
-                    "unknown".into()
+                let upload = if method == methods::UPLOAD_COMMIT
+                    && !caller.is_empty()
+                    && caller != "unknown"
+                {
+                    UploadCommitParams::deserialize(&params).ok().map(|p| {
+                        crate::registry::RemoteUploadCommit {
+                            device_id: caller.clone(),
+                            upload_id: p.upload_id,
+                            file_name: p.file_name,
+                        }
+                    })
                 } else {
-                    caller.clone()
+                    None
                 };
-                self.registry
-                    .park_remote_approval(harness_rpc::RemoteApproval {
-                        id: crate::new_id(),
-                        kind: "rpc".into(),
-                        device_id,
-                        chat_id: params
-                            .get("chatId")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string),
-                        command_id: None,
-                        method: Some(method.to_string()),
-                        summary: if caller.is_empty() {
-                            format!("{method} from another device")
-                        } else {
-                            format!("{method} from {caller}")
-                        },
-                    });
-                Err(RpcError::Failed(harness_rpc::RELAY_NEEDS_APPROVAL.into()))
+                let summary = if let Some(upload) = &upload {
+                    let name: String = upload.file_name.escape_debug().take(80).collect();
+                    format!("Upload {name} from {caller}")
+                } else if caller.is_empty() {
+                    format!("{method} from another device")
+                } else {
+                    format!("{method} from {caller}")
+                };
+                let item = harness_rpc::RemoteApproval {
+                    id: crate::new_id(),
+                    kind: "rpc".into(),
+                    device_id: if caller.is_empty() {
+                        "unknown".into()
+                    } else {
+                        caller
+                    },
+                    chat_id: params
+                        .get("chatId")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    command_id: None,
+                    method: Some(method.to_string()),
+                    summary,
+                };
+                if self.registry.consume_upload_approval_or_park(item, upload) {
+                    self.inner.handle(method, params).await
+                } else {
+                    Err(RpcError::Failed(harness_rpc::RELAY_NEEDS_APPROVAL.into()))
+                }
             }
         }
     }

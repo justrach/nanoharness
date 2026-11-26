@@ -88,6 +88,75 @@ async fn relay_rpc_refuses_queue_command_until_remote_control_is_on() {
 }
 
 #[tokio::test]
+async fn relay_upload_allow_once_authorizes_only_the_matching_retry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let core = EngineCore::assemble(
+        dir.path(),
+        Arc::new(HarnessRegistry::new()),
+        HarnessId::Mock,
+        None,
+    )
+    .expect("engine assembles");
+    core.registry.set_remote_control(true);
+    let local = harness_rpc::memory_client(core.rpc_service());
+    let relay =
+        harness_rpc::memory_client(RelayRpc::wrap(core.rpc_service(), core.registry.clone()));
+
+    let upload = json!({
+        "relayDeviceId": "phone-1", "uploadId": "image-1", "fileName": "shot.png",
+    });
+    relay
+        .call(
+            methods::UPLOAD_CHUNK,
+            json!({ "relayDeviceId": "phone-1", "uploadId": "image-1", "seq": 0, "data": "YWJj" }),
+        )
+        .await
+        .expect("stage synthetic bytes");
+    let denied = relay
+        .call(methods::UPLOAD_COMMIT, upload.clone())
+        .await
+        .expect_err("first commit needs approval even while remote control is on");
+    assert!(denied.to_string().contains("needs approval"), "{denied}");
+    let pending = core.registry.pending_remote_approvals();
+    assert_eq!(pending.len(), 1);
+    local
+        .call(
+            methods::APPROVE_REMOTE_ACTION,
+            json!({ "id": pending[0].id }),
+        )
+        .await
+        .expect("Allow once on the host");
+    assert!(!core.registry.remote_device_approved("phone-1"));
+
+    for (field, value) in [
+        ("uploadId", "image-2"),
+        ("fileName", "other.png"),
+        ("relayDeviceId", "phone-2"),
+    ] {
+        let mut different = upload.clone();
+        different[field] = json!(value);
+        let denied = relay
+            .call(methods::UPLOAD_COMMIT, different)
+            .await
+            .expect_err("approval does not apply to another upload or device");
+        assert!(denied.to_string().contains("needs approval"), "{denied}");
+    }
+    let committed = relay
+        .call(methods::UPLOAD_COMMIT, upload.clone())
+        .await
+        .expect("retry the locally approved upload");
+    let path = committed["path"].as_str().expect("committed file path");
+    assert_eq!(std::fs::read(path).expect("read uploaded file"), b"abc");
+
+    let denied = relay
+        .call(methods::UPLOAD_COMMIT, upload)
+        .await
+        .expect_err("the one-time approval was consumed");
+    assert!(denied.to_string().contains("needs approval"), "{denied}");
+    core.shutdown().await;
+}
+
+#[tokio::test]
 async fn relay_rpc_never_lets_the_edge_flip_the_gate() {
     let registry = Arc::new(HarnessRegistry::new());
     registry.set_remote_control(true);
