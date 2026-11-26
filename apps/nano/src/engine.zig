@@ -12,6 +12,19 @@ const rpc = @import("rpc.zig");
 const Allocator = std.mem.Allocator;
 
 pub const default_port: u16 = 27664;
+pub const cold_retry_ms: u32 = 50;
+pub const cold_retry_attempts: usize = 40;
+pub const fast_retry_ms: u32 = 200;
+pub const steady_retry_ms: u32 = 2000;
+
+/// Returns how long the engine socket thread waits before the next dial
+/// attempt: 50ms during the initial 2s cold-start window, 200ms after
+/// replacing an older engine process, and 2000ms steady-state thereafter.
+pub fn retryDelayMs(ever_connected: bool, cold_attempts: usize, fast_restart: bool) u32 {
+    if (fast_restart) return fast_retry_ms;
+    if (!ever_connected and cold_attempts < cold_retry_attempts) return cold_retry_ms;
+    return steady_retry_ms;
+}
 
 pub const State = enum { connecting, connected, disconnected };
 
@@ -176,14 +189,19 @@ pub const Engine = struct {
     fn run(e: *Engine) void {
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(e.gpa);
+        var ever_connected = false;
+        var cold_attempts: usize = 0;
         while (!e.stopping.load(.acquire)) {
             const tok = ws.resolveIpcToken(e.gpa, e.io, e.explicit_token, e.data_dir, e.port, false);
             defer if (tok) |t| e.gpa.free(t);
             const c = ws.Client.connectWithBearer(e.gpa, e.io, e.port, "/", tok) catch {
+                const delay_ms = retryDelayMs(ever_connected, cold_attempts, e.reconnect_fast.swap(false, .acq_rel));
+                if (!ever_connected) cold_attempts +|= 1;
                 e.post(.{ .state = .disconnected });
-                e.pause();
+                e.pauseMs(delay_ms);
                 continue;
             };
+            ever_connected = true;
             e.live.store(c, .release);
             e.post(.{ .state = .connected, .client = c });
             while (true) {
@@ -194,15 +212,17 @@ pub const Engine = struct {
             if (e.stopping.load(.acquire)) return;
             e.live.store(null, .release);
             e.post(.{ .state = .disconnected, .client = c });
-            e.pause();
+            e.pauseMs(retryDelayMs(ever_connected, cold_attempts, e.reconnect_fast.swap(false, .acq_rel)));
         }
     }
 
-    fn pause(e: *Engine) void {
-        // Two seconds normally, or 200ms after replacing an older engine.
-        var left: usize = if (e.reconnect_fast.swap(false, .acq_rel)) 2 else 20;
-        while (left > 0 and !e.stopping.load(.acquire)) : (left -= 1)
-            std.Io.sleep(e.io, .fromMilliseconds(100), .awake) catch return;
+    fn pauseMs(e: *Engine, total_ms: u32) void {
+        var remaining: u32 = total_ms;
+        while (remaining > 0 and !e.stopping.load(.acquire)) {
+            const step = @min(remaining, cold_retry_ms);
+            std.Io.sleep(e.io, .fromMilliseconds(step), .awake) catch return;
+            remaining -= step;
+        }
     }
 
     const Delivery = struct {
@@ -284,4 +304,101 @@ test "worker engine deliveries use the UI dispatcher and release rejected frames
     try std.testing.expectEqual(State.disconnected, e.state);
     Engine.post_to_main = Fixture.reject;
     e.post(.{ .message = try std.testing.allocator.dupe(u8, "discarded") });
+}
+
+test "engine cold startup connects promptly after the listener is ready" {
+    const testing = std.testing;
+    const net = std.Io.net;
+
+    const addr0 = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var probe = try addr0.listen(testing.io, .{ .reuse_address = true });
+    const port = probe.socket.address.getPort();
+    probe.deinit(testing.io);
+
+    const Tracker = struct {
+        disconnected: std.Io.Event = .unset,
+        connected: std.Io.Event = .unset,
+
+        fn syncDispatch(ctx: ?*anyopaque, func: *const fn (?*anyopaque) callconv(.c) void) bool {
+            func(ctx);
+            return true;
+        }
+
+        fn onState(ctx: ?*anyopaque, s: State) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            switch (s) {
+                .disconnected => self.disconnected.set(testing.io),
+                .connected => self.connected.set(testing.io),
+                .connecting => {},
+            }
+        }
+    };
+
+    const WsServer = struct {
+        server: net.Server,
+        release: std.Io.Event = .unset,
+        thread: ?std.Thread = null,
+
+        fn acceptOne(self: *@This()) void {
+            var stream = self.server.accept(testing.io) catch return;
+            defer stream.close(testing.io);
+            var rbuf: [4096]u8 = undefined;
+            var rd = net.Stream.Reader.init(stream, testing.io, &rbuf);
+            while (true) {
+                const line = rd.interface.takeDelimiterInclusive('\n') catch return;
+                if (std.mem.trim(u8, line, "\r\n").len == 0) break;
+            }
+            var wbuf: [256]u8 = undefined;
+            var wr = net.Stream.Writer.init(stream, testing.io, &wbuf);
+            wr.interface.writeAll(
+                "HTTP/1.1 101 Switching Protocols\r\n" ++
+                    "Upgrade: websocket\r\n" ++
+                    "Connection: Upgrade\r\n" ++
+                    "Sec-WebSocket-Accept: synthetic\r\n\r\n",
+            ) catch return;
+            wr.interface.flush() catch return;
+            self.release.waitTimeout(testing.io, .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } }) catch {};
+        }
+
+        fn stop(self: *@This()) void {
+            self.release.set(testing.io);
+            if (self.thread) |t| t.join();
+            self.server.deinit(testing.io);
+        }
+    };
+
+    var srv_holder: ?WsServer = null;
+    defer if (srv_holder) |*s| s.stop();
+
+    var tracker: Tracker = .{};
+    const original = Engine.post_to_main;
+    Engine.post_to_main = Tracker.syncDispatch;
+    defer Engine.post_to_main = original;
+
+    var e = Engine.init(testing.allocator, testing.io, port);
+    e.events = .{ .ctx = &tracker, .state = Tracker.onState };
+    defer e.deinit();
+    try e.start();
+
+    try tracker.disconnected.waitTimeout(testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+
+    const listen_addr = try net.IpAddress.parseIp4("127.0.0.1", port);
+    srv_holder = .{ .server = try listen_addr.listen(testing.io, .{ .reuse_address = true }) };
+    srv_holder.?.thread = try std.Thread.spawn(.{}, WsServer.acceptOne, .{&srv_holder.?});
+    const listener_ready = std.Io.Clock.awake.now(testing.io);
+
+    try tracker.connected.waitTimeout(testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+    const elapsed_ms = listener_ready.durationTo(std.Io.Clock.awake.now(testing.io)).toMilliseconds();
+    try testing.expect(elapsed_ms < 1_000);
+}
+
+test "engine retryDelayMs uses fast cold-start window then steady backoff" {
+    const testing = std.testing;
+    try testing.expectEqual(cold_retry_ms, retryDelayMs(false, 0, false));
+    try testing.expectEqual(cold_retry_ms, retryDelayMs(false, cold_retry_attempts - 1, false));
+    try testing.expectEqual(steady_retry_ms, retryDelayMs(false, cold_retry_attempts, false));
+    try testing.expectEqual(steady_retry_ms, retryDelayMs(true, 0, false));
+    try testing.expectEqual(steady_retry_ms, retryDelayMs(true, 10, false));
+    try testing.expectEqual(fast_retry_ms, retryDelayMs(false, 0, true));
+    try testing.expectEqual(fast_retry_ms, retryDelayMs(true, 0, true));
 }
