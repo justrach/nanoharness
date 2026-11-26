@@ -47,12 +47,29 @@ test "settings navigation finds GitHub links and toggles the saved preference fr
         h.t.settle(0.1);
         try testing.expect(h.a.settings.get(.open_github_links_in_harness));
         try h.t.clickText("Find a setting");
+        h.t.typeText("trajectory sharing");
+        h.t.settle(0.1);
+        try testing.expect(h.t.hasText("Privacy and future optional NanoHarness run sharing; currently unavailable"));
+        try h.t.clickText("Privacy");
+        h.t.settle(0.2);
+        try testing.expectEqual(Section.privacy, h.a.settings.section);
+        try testing.expect(h.t.hasText("Off · Not available yet"));
+        try testing.expect(h.t.containsText("NanoHarness does not collect or upload any runs for this program."));
+        try testing.expect(h.t.containsText("your own Claude Code or other supported subscriptions"));
+        try testing.expect(h.t.containsText("your company has accepted the Standard Harness Trajectory Sharing Terms"));
+        try testing.expect(h.t.containsText("Do not submit secrets or confidential or third-party material"));
+        try testing.expect(!h.t.hasText("Enable sharing"));
+        try testing.expect(!h.t.hasText("Accept terms"));
+        try snap(&h, if (dark) "privacy-dark" else "privacy-light");
+        try h.t.clickText("Find a setting");
         h.t.typeText("privacy telemetry");
         h.t.settle(0.1);
         try testing.expect(h.t.hasText("Sounds, alerts and anonymous performance sharing"));
         try h.t.clickText("Notifications");
         h.t.settle(0.2);
         try testing.expectEqual(Section.notifications, h.a.settings.section);
+        try testing.expect(h.t.hasText("Share anonymous responsiveness stats"));
+        try snap(&h, if (dark) "notifications-before-dark" else "notifications-before-light");
     }
 }
 

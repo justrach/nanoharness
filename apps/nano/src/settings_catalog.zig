@@ -7,6 +7,7 @@ pub fn description(section: Section) []const u8 {
         .account => "Harness profile, member card and sync",
         .appearance => "Themes, text size, sidebar and motion",
         .notifications => "Sounds, alerts and anonymous performance sharing",
+        .privacy => "Privacy and future optional NanoHarness run sharing; currently unavailable",
         .shortcuts => "Keyboard shortcuts, sending and completion",
         .files => "Autosave, word wrap and project folders",
         .browsing => "Where GitHub PR and issue links open",
@@ -27,6 +28,7 @@ fn keywords(section: Section) []const u8 {
         .account => "profile member card join date sign in out cloud sync avatar",
         .appearance => "font colors dark light compact animation reduce motion before after design preview comparison visual diff switch theme default system auto",
         .notifications => "privacy telemetry metrics responsiveness scroll statistics consent sound volume banner",
+        .privacy => "trajectory trajectories reinforcement learning RL training sharing company agreement terms provider subscription prompt response tool run data",
         .shortcuts => "keys hotkey enter return slash commands suggestions stop escape",
         .files => "hidden ignored directory starting folder editor save wrap",
         .browsing => "browser native internal external GitHub pull request PR issue transcript URL link opening",
@@ -62,6 +64,9 @@ test "settings discovery searches task words across section metadata" {
     try t.expect(matches(.browsing, "GitHub links"));
     try t.expect(matches(.browsing, "external PR"));
     try t.expect(matches(.notifications, "privacy telemetry"));
+    try t.expect(matches(.privacy, "trajectory sharing"));
+    try t.expect(matches(.privacy, "company training"));
+    try t.expect(!matches(.privacy, "telemetry"));
     try t.expect(matches(.devices, "hourly updates"));
     try t.expect(matches(.devices, "automatic updates"));
     try t.expect(matches(.devices, "remote control"));
