@@ -300,6 +300,196 @@ mod tests {
         );
     }
 
+    fn picks(id: &str, labels: &[&str]) -> UserInputAnswer {
+        UserInputAnswer {
+            question_id: id.into(),
+            labels: labels.iter().map(|label| (*label).into()).collect(),
+        }
+    }
+
+    /// The exact shape agy 1.5.14 sends for `ask_question` (captured over
+    /// `agy acp`): each question a titled single (`oneOf`) or multiple
+    /// (`array` of `anyOf`) choice, plus an optional `_other` write-in, and
+    /// no `required` list.
+    fn agy_ask() -> Value {
+        json!({
+            "sessionId": "s1",
+            "toolCallId": "call-1",
+            "mode": "form",
+            "message": "The agent has 2 questions.",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "q1": {
+                        "type": "string",
+                        "title": "Which fruit?",
+                        "oneOf": [
+                            { "const": "1", "title": "Apple" },
+                            { "const": "2", "title": "Banana" },
+                            { "const": "3", "title": "Cherry" },
+                        ],
+                    },
+                    "q1_other": {
+                        "type": "string",
+                        "title": "Other",
+                        "description": "Optional free-form answer to: Which fruit?",
+                    },
+                    "q2": {
+                        "type": "array",
+                        "title": "Which colours?",
+                        "items": { "anyOf": [
+                            { "const": "1", "title": "Red" },
+                            { "const": "2", "title": "Green" },
+                            { "const": "3", "title": "Blue" },
+                        ] },
+                    },
+                    "q2_other": {
+                        "type": "string",
+                        "title": "Other",
+                        "description": "Optional free-form answer to: Which colours?",
+                    },
+                },
+            },
+        })
+    }
+
+    #[test]
+    fn antigravity_questions_are_one_page_each_with_the_write_in_folded_in() {
+        let form = form(&agy_ask(), ids()).unwrap();
+        let questions = form.questions();
+        assert_eq!(questions.len(), 2, "{questions:?}");
+        assert_eq!(questions[0].question, "Which fruit?");
+        assert_eq!(questions[0].options, ["Apple", "Banana", "Cherry"]);
+        assert!(!questions[0].multi_select);
+        assert_eq!(questions[1].question, "Which colours?");
+        assert_eq!(questions[1].options, ["Red", "Green", "Blue"]);
+        assert!(questions[1].multi_select);
+    }
+
+    #[test]
+    fn a_pick_answers_the_select_key_and_a_typed_answer_the_write_in_key() {
+        let form = form(&agy_ask(), ids()).unwrap();
+        // Byte for byte what agy 1.5.14 accepted for each.
+        assert_eq!(
+            form.response(&[answer("q1", "Apple"), picks("q2", &["Red", "Green"])]),
+            json!({ "action": "accept", "content": { "q1": "1", "q2": ["1", "2"] } })
+        );
+        assert_eq!(
+            form.response(&[
+                answer("q1", "Dragonfruit, typed by hand"),
+                picks("q2", &["Red", "Green"]),
+            ]),
+            json!({ "action": "accept", "content": {
+                "q1_other": "Dragonfruit, typed by hand",
+                "q2": ["1", "2"],
+            } })
+        );
+    }
+
+    #[test]
+    fn multi_select_answers_as_a_list() {
+        let form = form(&agy_ask(), ids()).unwrap();
+        assert_eq!(
+            form.response(&[answer("q1", "Banana"), picks("q2", &["Blue"])]),
+            json!({ "action": "accept", "content": { "q1": "2", "q2": ["3"] } })
+        );
+        assert_eq!(
+            form.response(&[answer("q1", "Banana"), answer("q2", "Purple")]),
+            json!({ "action": "accept", "content": { "q1": "2", "q2_other": "Purple" } })
+        );
+    }
+
+    #[test]
+    fn titled_choices_show_titles_and_answer_with_their_values() {
+        let titled = json!({
+            "message": "Which region?",
+            "requestedSchema": {
+                "type": "object",
+                "properties": { "region": { "type": "string", "oneOf": [
+                    { "const": "eu-west-1", "title": "Ireland" },
+                    { "const": "us-east-1", "title": "Virginia" },
+                ] } },
+                "required": ["region"],
+            },
+        });
+        let form = form(&titled, ids()).unwrap();
+        assert_eq!(form.questions()[0].question, "Which region?");
+        assert_eq!(form.questions()[0].options, ["Ireland", "Virginia"]);
+        assert_eq!(
+            form.response(&[answer("q1", "Virginia")]),
+            json!({ "action": "accept", "content": { "region": "us-east-1" } })
+        );
+        let named = json!({
+            "message": "Which tier?",
+            "requestedSchema": {
+                "type": "object",
+                "properties": { "tier": {
+                    "type": "string", "enum": ["a", "b"], "enumNames": ["Alpha", "Beta"],
+                } },
+            },
+        });
+        let form = super::form(&named, ids()).unwrap();
+        assert_eq!(form.questions()[0].options, ["Alpha", "Beta"]);
+        assert_eq!(
+            form.response(&[answer("q1", "Beta")]),
+            json!({ "action": "accept", "content": { "tier": "b" } })
+        );
+    }
+
+    #[test]
+    fn optional_blank_fields_are_left_out_not_declined() {
+        let params = json!({
+            "message": "Profile",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "title": "Name" },
+                    "nickname": { "type": "string", "title": "Nickname" },
+                },
+                "required": ["name"],
+            },
+        });
+        let form = form(&params, ids()).unwrap();
+        assert_eq!(
+            form.response(&[answer("q1", "Ada"), answer("q2", "  ")]),
+            json!({ "action": "accept", "content": { "name": "Ada" } })
+        );
+        assert_eq!(
+            form.response(&[answer("q1", " "), answer("q2", "Countess")]),
+            json!({ "action": "decline" })
+        );
+    }
+
+    #[test]
+    fn numbered_questions_keep_their_order_past_nine() {
+        let mut properties = serde_json::Map::new();
+        for n in 1..=10 {
+            properties.insert(
+                format!("q{n}"),
+                json!({ "type": "string", "title": format!("Question {n}"), "oneOf": [
+                    { "const": "1", "title": "Yes" },
+                    { "const": "2", "title": "No" },
+                ] }),
+            );
+            properties.insert(
+                format!("q{n}_other"),
+                json!({ "type": "string", "title": "Other" }),
+            );
+        }
+        let params = json!({
+            "message": "The agent has 10 questions.",
+            "requestedSchema": { "type": "object", "properties": properties },
+        });
+        let shown: Vec<String> = form(&params, ids())
+            .unwrap()
+            .questions()
+            .into_iter()
+            .map(|question| question.question)
+            .collect();
+        let expected: Vec<String> = (1..=10).map(|n| format!("Question {n}")).collect();
+        assert_eq!(shown, expected);
+    }
+
     #[test]
     fn unshowable_forms_are_refused() {
         let url = json!({ "mode": "url", "url": "https://example.com", "message": "Sign in" });

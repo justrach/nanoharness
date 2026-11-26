@@ -31,6 +31,7 @@ fi
 OPTIONS='[{"id":"model","name":"Model","category":"model","type":"select","currentValue":"gemini-3.7-flash-high","options":[{"value":"gemini-3.7-flash-high","name":"Gemini 3.7 Flash (High)","description":"Gemini 3.7 Flash model with high thinking level"},{"value":"gemini-3.7-flash-medium","name":"Gemini 3.7 Flash (Medium)"},{"value":"gemini-3.7-flash-low","name":"Gemini 3.7 Flash (Low)"},{"value":"gemini-pro-agent","name":"Gemini 3.1 Pro (High)"},{"value":"gemini-3.1-pro-low","name":"Gemini 3.1 Pro (Low)"}]},{"id":"mode","name":"Session Mode","category":"mode","type":"select","currentValue":"default","options":[{"value":"default","name":"Default"},{"value":"auto_edit","name":"Auto Edit"},{"value":"yolo","name":"YOLO"}]}]'
 
 AUTHED=0
+FORM=0
 REJECT_MODEL=0
 SETS=""
 PROMPT_AUTH=0
@@ -39,6 +40,7 @@ while read -r line; do
   has "$line" '"id":' || continue
   id=$(rid "$line")
   if has "$line" '"method":"initialize"'; then
+    if has "$line" '"elicitation":{"form":{}}'; then FORM=1; fi
     emit "{\"id\":$id,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"loadSession\":true},\"authMethods\":[{\"id\":\"oauth-personal\",\"name\":\"Log in with Google\"}]}}"
   elif has "$line" '"method":"session/new"'; then
     if has "$line" 'prompt-auth'; then PROMPT_AUTH=1; fi
@@ -80,6 +82,24 @@ while read -r line; do
     for text in 'Waiting for the build.\n\n<SYSTEM_' 'MESSAGE>\n[Message] timestamp=2026-09-18T10:07:35Z sender=c1/task-156 priority=MESSAGE_PRIORITY_HIGH content=Task id \"c1/task-156\" finished with result:\n\nThe command exited with code 0.\n</SYSTEM_MES' 'SAGE>\n\nThe build finished.'; do
       emit "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"agy-1\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"$text\"}}}}"
     done
+    emit "{\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
+    exit 0
+  elif has "$line" '"method":"session/prompt"' && has "$line" 'ask-question'; then
+    # agy 1.5.14's ask_question: a form when the client offered one, else
+    # the questions as chat rows. The test's bridge picks Banana, Red+Blue.
+    if [ "$FORM" -eq 0 ]; then
+      emit "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"agy-1\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"Which fruit?\\n- [1] Apple\\n- [2] Banana\\n- [3] Cherry\\n\"}}}}"
+      emit "{\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
+      exit 0
+    fi
+    emit '{"jsonrpc":"2.0","id":901,"method":"elicitation/create","params":{"sessionId":"agy-1","toolCallId":"call-1","mode":"form","message":"The agent has 2 questions.","requestedSchema":{"type":"object","properties":{"q1":{"type":"string","title":"Which fruit?","oneOf":[{"const":"1","title":"Apple"},{"const":"2","title":"Banana"},{"const":"3","title":"Cherry"}]},"q1_other":{"type":"string","title":"Other","description":"Optional free-form answer to: Which fruit?"},"q2":{"type":"array","title":"Which colours?","items":{"anyOf":[{"const":"1","title":"Red"},{"const":"2","title":"Green"},{"const":"3","title":"Blue"}]}},"q2_other":{"type":"string","title":"Other","description":"Optional free-form answer to: Which colours?"}}}}}'
+    read -r ans || exit 1
+    if has "$ans" '"id":901' && has "$ans" '"action":"accept"' && has "$ans" '"q1":"2"' && has "$ans" '"q2":["1","3"]'; then
+      text=answered
+    else
+      text=unanswered
+    fi
+    emit "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"agy-1\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"$text\"}}}}"
     emit "{\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
     exit 0
   elif has "$line" '"method":"session/prompt"'; then

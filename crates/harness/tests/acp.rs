@@ -2379,6 +2379,52 @@ async fn antigravity_empty_reply_completes_once() {
 }
 
 #[tokio::test]
+async fn antigravity_questions_round_trip_through_the_input_bridge() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut req = request("scenario ask-question");
+    req.model = None;
+    req.cwd = workspace.path().display().to_string();
+    let (mut controls, _steer, _token) = controls();
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = std::sync::Arc::clone(&asked);
+    controls.request_input = Box::new(move |questions| {
+        let (tx, rx) = oneshot::channel();
+        let answers = questions
+            .iter()
+            .map(|q| UserInputAnswer {
+                question_id: q.id.clone(),
+                labels: if q.multi_select {
+                    vec!["Red".into(), "Blue".into()]
+                } else {
+                    vec!["Banana".into()]
+                },
+            })
+            .collect();
+        seen.lock().unwrap().extend(questions);
+        let _ = tx.send(answers);
+        rx
+    });
+    let events = run_to_end(&antigravity_harness(), req, controls).await;
+    let asked = asked.lock().unwrap();
+    // Without a form offered, agy writes its questions into the reply.
+    assert_eq!(asked.len(), 2, "{events:?}");
+    assert_eq!(asked[0].question, "Which fruit?");
+    assert_eq!(asked[0].options, ["Apple", "Banana", "Cherry"]);
+    assert!(!asked[0].multi_select);
+    assert_eq!(asked[1].question, "Which colours?");
+    assert_eq!(asked[1].options, ["Red", "Green", "Blue"]);
+    assert!(asked[1].multi_select);
+    // The fixture says answered only for q1 "2" and q2 ["1","3"].
+    assert!(
+        events.contains(&AgentEvent::TextDelta {
+            text: "answered".into()
+        }),
+        "{events:?}"
+    );
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
 async fn antigravity_unknown_saved_model_fails_clearly() {
     let events = antigravity_config_sets("unknown-saved-model", None).await;
     let done = dones(&events);
