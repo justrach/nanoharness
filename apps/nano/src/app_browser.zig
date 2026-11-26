@@ -66,6 +66,7 @@ pub const Browser = struct {
     title: nanoui.ui.TextBuffer = .{},
     notice: nanoui.ui.TextBuffer = .{},
     saved_view: ?saved.View = null,
+    mcp_app: ?*@import("app_mcp_apps.zig").Session = null,
     artifact_id: ?[]u8 = null,
     frame_url: ?[]u8 = null,
     native: ?*Native = null,
@@ -74,7 +75,7 @@ pub const Browser = struct {
     editing: bool = false,
     focus_address: bool = true,
 
-    fn create(a: *App, parent: []const u8) !*Browser {
+    pub fn create(a: *App, parent: []const u8) !*Browser {
         const b = try a.gpa.create(Browser);
         errdefer a.gpa.destroy(b);
         b.* = .{ .app = a, .parent = try a.gpa.dupe(u8, parent) };
@@ -87,6 +88,7 @@ pub const Browser = struct {
         @import("text_buffer.zig").deinit(&b.title);
         @import("text_buffer.zig").deinit(&b.notice);
         if (comptime builtin.os.tag == .macos) if (b.native) |n| n.destroy();
+        if (b.mcp_app) |s| s.destroy();
         const gpa = b.app.gpa;
         if (b.artifact_id) |aid| gpa.free(aid);
         if (b.frame_url) |furl| gpa.free(furl);
@@ -96,7 +98,7 @@ pub const Browser = struct {
     }
 
     pub fn usesEmbeddedWebView(b: *const Browser) bool {
-        return b.artifact_id != null or @import("ux_rules.zig").BrowseConnect.routeUrl(b.url) == .local_saved_view;
+        return b.mcp_app != null or b.artifact_id != null or @import("ux_rules.zig").BrowseConnect.routeUrl(b.url) == .local_saved_view;
     }
 
     pub fn belongsTo(b: *const Browser, parent: ?[]const u8) bool {
@@ -136,6 +138,10 @@ pub const Browser = struct {
     }
 
     pub fn ensureNative(b: *Browser) void {
+        if (b.mcp_app) |s| {
+            s.ensureNative();
+            return;
+        }
         if (comptime builtin.os.tag != .macos) return;
         if (b.native != null or b.url.len == 0 or b.app.window == null) return;
         if (!b.usesEmbeddedWebView()) return;
@@ -157,13 +163,17 @@ pub const Browser = struct {
                 .reset => .reset,
             };
             b.zoom = Native.nextZoom(b.zoom, zdir);
-            if (b.native) |n| n.setZoom(b.zoom);
+            if (b.mcp_app) |s| {
+                s.setZoom(b.zoom);
+            } else if (b.native) |n| n.setZoom(b.zoom);
         }
         b.app.redraw();
     }
 
     pub fn reload(b: *Browser) void {
-        if (comptime builtin.os.tag == .macos) if (b.native) |n| n.reload();
+        if (b.mcp_app) |s| {
+            s.reload();
+        } else if (comptime builtin.os.tag == .macos) if (b.native) |n| n.reload();
         b.app.redraw();
     }
 
@@ -365,6 +375,18 @@ pub fn syncNative(a: *App, c: *nanoui.ui.Context) void {
         const is_local = b.usesEmbeddedWebView();
         const visible = is_local and active == b and a.panels.host_open and b.belongsTo(a.selected) and !modal;
         if (visible) b.ensureNative();
+        if (b.mcp_app) |s| {
+            if (visible) {
+                if (c.rects.get(b.body_node)) |rect| {
+                    if (rect.w > 0 and rect.h > 0 and !overlayCovers(c, rect)) {
+                        s.mount(nanoui.objc.msg(nanoui.objc.Object, window.nswindow, "contentView", .{}), rect);
+                        continue;
+                    }
+                } else c.changed = true;
+            }
+            s.hide();
+            continue;
+        }
         const n = b.native orelse continue;
         if (visible) {
             if (c.rects.get(b.body_node)) |rect| {

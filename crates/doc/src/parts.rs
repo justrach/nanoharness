@@ -5,7 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use harness_proto::{AgentEvent, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, ToolView, UserInputQuestion};
+use harness_proto::{
+    AgentEvent, McpAppRef, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, ToolView, UserInputQuestion,
+};
 
 use crate::constants::MSG_INLINE_MAX;
 
@@ -289,6 +291,9 @@ pub enum MessagePart {
         /// chip offers to open it; only kind + id travel (additive).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ToolView>,
+        /// An interactive SEP-1865 MCP App declared by this tool (additive).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mcp_app: Option<McpAppRef>,
     },
     /// Small task diagnostics only: never the task answer or caller context.
     Delegation {
@@ -530,6 +535,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 subagent_status: None,
                 subagent_tail: None,
                 view: None,
+                mcp_app: None,
             });
         }
         AgentEvent::DelegationInfo { id, info } => {
@@ -576,6 +582,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     subagent_status: None,
                     subagent_tail: None,
                     view: None,
+                    mcp_app: None,
                 });
             }
         }
@@ -627,6 +634,19 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     && pid == id
                 {
                     *slot = Some(view.clone());
+                }
+            }
+        }
+        AgentEvent::McpApp { id, app } => {
+            for p in out.iter_mut() {
+                if let MessagePart::Tool {
+                    id: pid,
+                    mcp_app: slot,
+                    ..
+                } = p
+                    && pid == id
+                {
+                    *slot = Some(app.clone());
                 }
             }
         }
@@ -1360,6 +1380,7 @@ mod tests {
                 subagent_status: None,
                 subagent_tail: None,
                 view: None,
+                mcp_app: None,
             },
         ];
         let chunks = split_parts(&parts);
@@ -1479,6 +1500,54 @@ mod tests {
             })
             .collect();
         assert_eq!(views, vec![Some(view), None]);
+    }
+
+    #[test]
+    fn an_mcp_app_event_lands_on_its_own_chip_only() {
+        let app = harness_proto::McpAppRef::new(
+            "standardharness",
+            "ui://standardharness/review-studio.html",
+            "list_screens",
+            Some("Review Studio"),
+            None,
+            None,
+        )
+        .unwrap();
+        let mut parts = Vec::new();
+        for id in ["app-call", "other"] {
+            fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::ToolCall {
+                    id: id.into(),
+                    call: ToolCall::Unknown {
+                        name: "mcp__standardharness__list_screens".into(),
+                        input: None,
+                    },
+                },
+            );
+        }
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::McpApp {
+                id: "app-call".into(),
+                app: app.clone(),
+            },
+        );
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::McpApp {
+                id: "missing".into(),
+                app: app.clone(),
+            },
+        );
+        let apps: Vec<_> = parts
+            .iter()
+            .map(|p| match p {
+                MessagePart::Tool { mcp_app, .. } => mcp_app.clone(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(apps, vec![Some(app), None]);
     }
 
     #[test]

@@ -704,6 +704,34 @@ struct McpServerActionParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct McpAppListParams {
+    server_name: String,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct McpAppFetchResourceParams {
+    server_name: String,
+    resource_uri: String,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct McpAppCallToolParams {
+    server_name: String,
+    tool_name: String,
+    #[serde(default)]
+    arguments: Option<serde_json::Value>,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BotDetailParams {
     bot: String,
@@ -4744,6 +4772,54 @@ impl RpcService for EngineRpc {
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&rows)
             }
+            methods::MCP_APP_LIST => {
+                let p: McpAppListParams = parse_params(params)?;
+                let home = self.agent_accounts.graff_home();
+                let cg_key = crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
+                    .current_key();
+                let apps = crate::mcp_apps::list_apps(
+                    &home,
+                    p.cwd.as_deref().map(std::path::Path::new),
+                    &p.server_name,
+                    cg_key.as_deref(),
+                )
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&apps)
+            }
+            methods::MCP_APP_FETCH_RESOURCE => {
+                let p: McpAppFetchResourceParams = parse_params(params)?;
+                let home = self.agent_accounts.graff_home();
+                let cg_key = crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
+                    .current_key();
+                let resource = crate::mcp_apps::fetch_resource(
+                    &home,
+                    p.cwd.as_deref().map(std::path::Path::new),
+                    &p.server_name,
+                    &p.resource_uri,
+                    cg_key.as_deref(),
+                )
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&resource)
+            }
+            methods::MCP_APP_CALL_TOOL => {
+                let p: McpAppCallToolParams = parse_params(params)?;
+                let home = self.agent_accounts.graff_home();
+                let cg_key = crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
+                    .current_key();
+                let result = crate::mcp_apps::call_tool(
+                    &home,
+                    p.cwd.as_deref().map(std::path::Path::new),
+                    &p.server_name,
+                    &p.tool_name,
+                    p.arguments,
+                    cg_key.as_deref(),
+                )
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&result)
+            }
             methods::BOTS_STATE => {
                 let state = self
                     .bots()
@@ -5487,6 +5563,9 @@ mod tests {
         assert!(!forwardable(methods::SHOW_VISUAL));
         assert!(!forwardable(methods::CREATE_ARTIFACT));
         assert!(!forwardable(methods::UPDATE_ARTIFACT));
+        assert!(!forwardable(methods::MCP_APP_LIST));
+        assert!(!forwardable(methods::MCP_APP_FETCH_RESOURCE));
+        assert!(!forwardable(methods::MCP_APP_CALL_TOOL));
         assert!(!forwardable(methods::FOCUS_CHAT));
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));
@@ -6225,6 +6304,9 @@ mod context_usage_tests {
             methods::OPEN_TERMINAL,
             methods::SET_AUTONOMY,
             methods::WRITE_WORKSPACE_FILE,
+            methods::MCP_APP_LIST,
+            methods::MCP_APP_FETCH_RESOURCE,
+            methods::MCP_APP_CALL_TOOL,
         ] {
             let err = svc
                 .handle(denied, serde_json::json!({}))

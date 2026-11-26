@@ -8,7 +8,9 @@
 //! tagged `sessionUpdate`/snake_case; structs are camelCase; tool kinds and
 //! statuses are snake_case).
 
-use harness_proto::{AgentEvent, SlashCommand, TodoItem, ToolCall, ToolDiff, ToolView, ToolViewKind};
+use harness_proto::{
+    AgentEvent, McpAppRef, SlashCommand, TodoItem, ToolCall, ToolDiff, ToolView, ToolViewKind,
+};
 use serde_json::Value;
 
 /// Byte cap applied to tool output text at the harness boundary. The doc-side
@@ -537,6 +539,7 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
             if let Some(resolved) = resolved_result(update, id.clone()) {
                 events.push(resolved);
                 events.extend(tool_view(update, id.clone()));
+                events.extend(tool_mcp_app(update, id.clone()));
                 events.extend(tool_delegation(update, id));
             }
             events
@@ -562,6 +565,7 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
             if let Some(resolved) = resolved_result(update, id.clone()) {
                 events.push(resolved);
                 events.extend(tool_view(update, id.clone()));
+                events.extend(tool_mcp_app(update, id.clone()));
                 events.extend(tool_delegation(update, id));
             } else if let Some(output) = tool_output(update) {
                 // Content with no terminal status: the tool is still running
@@ -724,6 +728,78 @@ fn tool_view(update: &Value, id: String) -> Option<AgentEvent> {
     };
     let view = ToolView::new(kind, meta.get("id").and_then(Value::as_str)?)?;
     Some(AgentEvent::ToolView { id, view })
+}
+
+fn split_prefixed_mcp_tool(raw: &str) -> Option<(&str, &str)> {
+    let rest = raw.strip_prefix("mcp__")?;
+    let (server, tool) = rest.split_once("__")?;
+    (!server.is_empty() && !tool.is_empty()).then_some((server, tool))
+}
+
+/// SEP-1865 MCP App metadata on a finished tool (`_meta.ui.resourceUri`,
+/// `_meta["ui/resourceUri"]`, or `_meta["graff/mcpApp"]`). Only bounded
+/// identifiers and UI payloads enter the transcript; secrets stay local.
+fn tool_mcp_app(update: &Value, id: String) -> Option<AgentEvent> {
+    let mcp_meta = update.pointer("/_meta/graff~1mcpApp");
+    let resource_uri = mcp_meta
+        .and_then(|m| m.get("resourceUri"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            update
+                .pointer("/_meta/ui/resourceUri")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            update
+                .pointer("/_meta/ui~1resourceUri")
+                .and_then(Value::as_str)
+        })?;
+
+    let raw_name = mcp_meta
+        .and_then(|m| m.get("tool"))
+        .and_then(Value::as_str)
+        .or_else(|| update.pointer("/_meta/mcp/tool").and_then(Value::as_str))
+        .or_else(|| {
+            update
+                .pointer("/_meta/graff~1toolName")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| update.get("toolName").and_then(Value::as_str))
+        .or_else(|| update.get("title").and_then(Value::as_str));
+    let parsed = raw_name.and_then(split_prefixed_mcp_tool);
+
+    let server_name = mcp_meta
+        .and_then(|m| m.get("server"))
+        .and_then(Value::as_str)
+        .or_else(|| update.pointer("/_meta/mcp/server").and_then(Value::as_str))
+        .or_else(|| parsed.map(|(s, _)| s))?;
+    let tool_name = parsed.map(|(_, t)| t).or(raw_name)?;
+
+    let title = mcp_meta
+        .and_then(|m| m.get("title"))
+        .and_then(Value::as_str)
+        .or_else(|| update.get("title").and_then(Value::as_str));
+    let tool_input = update.get("rawInput").filter(|v| !v.is_null()).cloned();
+    let tool_result = update
+        .get("rawOutput")
+        .filter(|v| !v.is_null())
+        .cloned()
+        .or_else(|| {
+            update
+                .pointer("/_meta/structuredContent")
+                .filter(|v| !v.is_null())
+                .cloned()
+        });
+
+    let app = McpAppRef::new(
+        server_name,
+        resource_uri,
+        tool_name,
+        title,
+        tool_input,
+        tool_result,
+    )?;
+    Some(AgentEvent::McpApp { id, app })
 }
 
 /// Graff's MCP diagnostics forwarded on the completed ACP update. Whitelist
@@ -1028,7 +1104,9 @@ mod tests {
             })
         );
         let app = map_update(&update("failed", json!({"kind": "mcp_app", "id": id})));
-        assert!(matches!(app.last(), Some(AgentEvent::ToolView { view, .. }) if view.kind == ToolViewKind::McpApp));
+        assert!(
+            matches!(app.last(), Some(AgentEvent::ToolView { view, .. }) if view.kind == ToolViewKind::McpApp)
+        );
         // Nothing for a running tool, an unknown kind, or an id that isn't
         // 32 lowercase hex (it becomes a file name on the host).
         for (status, meta) in [
@@ -1040,6 +1118,78 @@ mod tests {
             assert!(
                 !map_update(&update(status, meta.clone())).iter().any(|e| matches!(e, AgentEvent::ToolView { .. })),
                 "{status} {meta}"
+            );
+        }
+    }
+
+    #[test]
+    fn sep_1865_meta_on_a_finished_tool_becomes_an_mcp_app_event() {
+        let update = json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "t-app",
+            "title": "mcp__standardharness__list_screens",
+            "status": "completed",
+            "rawInput": { "status": "waiting" },
+            "rawOutput": { "structuredContent": { "view": "queue" } },
+            "_meta": {
+                "ui": { "resourceUri": "ui://standardharness/review-studio.html" }
+            }
+        });
+        let events = map_update(&update);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::McpApp { id, app }
+                if id == "t-app"
+                    && app.server_name == "standardharness"
+                    && app.tool_name == "list_screens"
+                    && app.resource_uri == "ui://standardharness/review-studio.html"
+                    && app.tool_input == Some(json!({ "status": "waiting" }))
+                    && app.tool_result == Some(json!({ "structuredContent": { "view": "queue" } }))
+        )));
+
+        let explicit = json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "t-app-2",
+            "status": "completed",
+            "_meta": {
+                "graff/mcpApp": {
+                    "server": "standardharness",
+                    "tool": "get_screen",
+                    "resourceUri": "ui://standardharness/review-studio.html",
+                    "title": "Review Studio"
+                }
+            }
+        });
+        assert!(map_update(&explicit).iter().any(|e| matches!(
+            e,
+            AgentEvent::McpApp { id, app }
+                if id == "t-app-2"
+                    && app.title.as_deref() == Some("Review Studio")
+                    && app.tool_name == "get_screen"
+        )));
+
+        // In-progress updates and non-ui:// URIs must not emit AgentEvent::McpApp.
+        for bad in [
+            json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "t-running",
+                "title": "mcp__standardharness__list_screens",
+                "status": "in_progress",
+                "_meta": { "ui": { "resourceUri": "ui://standardharness/review-studio.html" } }
+            }),
+            json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "t-https",
+                "title": "mcp__standardharness__list_screens",
+                "status": "completed",
+                "_meta": { "ui": { "resourceUri": "https://evil.example/app.html" } }
+            }),
+        ] {
+            assert!(
+                !map_update(&bad)
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::McpApp { .. })),
+                "{bad}"
             );
         }
     }

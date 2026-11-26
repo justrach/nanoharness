@@ -452,6 +452,150 @@ impl ToolView {
     }
 }
 
+/// Maximum serialized byte length kept per optional payload (`toolInput` / `toolResult`)
+/// on a persisted [`McpAppRef`].
+pub const MCP_APP_MAX_PAYLOAD_BYTES: usize = 256 * 1024;
+
+pub fn is_valid_mcp_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+pub fn is_valid_mcp_tool_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':'))
+}
+
+pub fn is_valid_mcp_ui_uri(uri: &str) -> bool {
+    let Some(rest) = uri.strip_prefix("ui://") else {
+        return false;
+    };
+    !rest.is_empty()
+        && !rest.starts_with('/')
+        && uri.len() >= 6
+        && uri.len() <= 512
+        && uri.bytes().all(|b| b.is_ascii_graphic())
+        && !uri.contains("..")
+        && !uri.contains('#')
+}
+
+fn bounded_mcp_payload(value: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    value.filter(|v| {
+        serde_json::to_vec(v)
+            .map(|bytes| bytes.len() <= MCP_APP_MAX_PAYLOAD_BYTES)
+            .unwrap_or(false)
+    })
+}
+
+/// Bounded reference to an interactive SEP-1865 MCP App attached to a tool call.
+/// Credentials stay in local engine config; only validated identifiers and initial
+/// display metadata/payloads travel in chat documents.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpAppRef {
+    pub server_name: String,
+    pub resource_uri: String,
+    pub tool_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_input: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result: Option<serde_json::Value>,
+}
+
+impl McpAppRef {
+    pub fn new(
+        server_name: &str,
+        resource_uri: &str,
+        tool_name: &str,
+        title: Option<&str>,
+        tool_input: Option<serde_json::Value>,
+        tool_result: Option<serde_json::Value>,
+    ) -> Option<Self> {
+        if !is_valid_mcp_identifier(server_name)
+            || !is_valid_mcp_ui_uri(resource_uri)
+            || !is_valid_mcp_tool_name(tool_name)
+        {
+            return None;
+        }
+        let clean_title = title
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.chars().take(200).collect());
+        Some(Self {
+            server_name: server_name.to_owned(),
+            resource_uri: resource_uri.to_owned(),
+            tool_name: tool_name.to_owned(),
+            title: clean_title,
+            tool_input: bounded_mcp_payload(tool_input),
+            tool_result: bounded_mcp_payload(tool_result),
+        })
+    }
+
+    pub fn is_valid(&self) -> bool {
+        is_valid_mcp_identifier(&self.server_name)
+            && is_valid_mcp_ui_uri(&self.resource_uri)
+            && is_valid_mcp_tool_name(&self.tool_name)
+            && self.tool_input.as_ref().is_none_or(|v| {
+                serde_json::to_vec(v)
+                    .map(|bytes| bytes.len() <= MCP_APP_MAX_PAYLOAD_BYTES)
+                    .unwrap_or(false)
+            })
+            && self.tool_result.as_ref().is_none_or(|v| {
+                serde_json::to_vec(v)
+                    .map(|bytes| bytes.len() <= MCP_APP_MAX_PAYLOAD_BYTES)
+                    .unwrap_or(false)
+            })
+    }
+}
+
+/// Sanitized CSP origin lists extracted from an MCP App resource's `_meta.ui.csp`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpAppCsp {
+    #[serde(default)]
+    pub resource_domains: Vec<String>,
+    #[serde(default)]
+    pub connect_domains: Vec<String>,
+    #[serde(default)]
+    pub frame_domains: Vec<String>,
+}
+
+/// Resolved SEP-1865 MCP App HTML resource returned by `McpAppFetchResource`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpAppResource {
+    pub server_name: String,
+    pub resource_uri: String,
+    pub mime_type: String,
+    pub html: String,
+    pub prefers_border: bool,
+    pub csp: McpAppCsp,
+    #[serde(default)]
+    pub allowed_app_tools: Vec<String>,
+}
+
+/// Summary of an interactive MCP App resource offered by a server (`McpAppList`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpAppSummary {
+    pub server_name: String,
+    pub resource_uri: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub tool_names: Vec<String>,
+}
+
 /// A decoded tool invocation, reduced to the fields each kind renders.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -820,6 +964,12 @@ pub enum AgentEvent {
     ToolView {
         id: String,
         view: ToolView,
+    },
+    /// The finished tool `id` declared a live SEP-1865 MCP App (`_meta.ui.resourceUri`
+    /// or `_meta["graff/mcpApp"]`). Folds onto the tool's chip.
+    McpApp {
+        id: String,
+        app: McpAppRef,
     },
     /// Completed delegated-task diagnostics. Counts are bytes, not parent
     /// context tokens; this event never adds a charge to account totals.
@@ -1328,6 +1478,49 @@ mod generated_image_tests {
         assert_eq!(value["type"], "generatedImage");
         assert_eq!(value["mimeType"], "image/png");
         assert_eq!(serde_json::from_value::<AgentEvent>(value).unwrap(), event);
+    }
+
+    #[test]
+    fn mcp_app_ref_validates_identifiers_uris_and_payload_bounds() {
+        let app = McpAppRef::new(
+            "standardharness",
+            "ui://standardharness/review-studio.html",
+            "list_screens",
+            Some("  Review Studio  "),
+            Some(serde_json::json!({ "status": "waiting" })),
+            Some(serde_json::json!({ "count": 19 })),
+        )
+        .expect("valid app ref");
+        assert!(app.is_valid());
+        assert_eq!(app.title.as_deref(), Some("Review Studio"));
+
+        let oversized = serde_json::json!({ "blob": "x".repeat(MCP_APP_MAX_PAYLOAD_BYTES + 32) });
+        let capped = McpAppRef::new(
+            "standardharness",
+            "ui://standardharness/review-studio.html",
+            "get_screen",
+            None,
+            Some(oversized.clone()),
+            Some(oversized),
+        )
+        .expect("oversized optional payloads drop cleanly");
+        assert_eq!(capped.tool_input, None);
+        assert_eq!(capped.tool_result, None);
+        assert!(capped.is_valid());
+
+        for (srv, uri, tool) in [
+            ("../bad", "ui://ok/app.html", "t"),
+            ("ok", "https://not-ui/app.html", "t"),
+            ("ok", "ui://host/../secret.html", "t"),
+            ("ok", "ui://host/app.html#frag", "t"),
+            ("ok", "ui://", "t"),
+            ("ok", "ui://ok/app.html", "bad tool name"),
+        ] {
+            assert!(
+                McpAppRef::new(srv, uri, tool, None, None, None).is_none(),
+                "expected rejection for {srv} / {uri} / {tool}"
+            );
+        }
     }
 }
 

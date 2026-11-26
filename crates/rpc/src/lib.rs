@@ -364,6 +364,12 @@ pub mod methods {
     pub const INVOKE_NATIVE_EXTENSION: &str = "InvokeNativeExtension";
     pub const LIST_MCP_SERVERS: &str = "ListMcpServers";
     pub const MCP_SERVER_ACTION: &str = "McpServerAction";
+    /// SEP-1865 interactive MCP Apps relay (`McpAppList` / `McpAppFetchResource` /
+    /// `McpAppCallTool`). Local headed/IPC use only: refused on `McpScopedRpc`
+    /// and never relay-forwarded.
+    pub const MCP_APP_LIST: &str = "McpAppList";
+    pub const MCP_APP_FETCH_RESOURCE: &str = "McpAppFetchResource";
+    pub const MCP_APP_CALL_TOOL: &str = "McpAppCallTool";
     // graff's Bots on a device (`graff bot --user …`): standing roles with
     // their own memory and routines; per-device like the MCP servers.
     pub const BOTS_STATE: &str = "BotsState";

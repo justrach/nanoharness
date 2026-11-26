@@ -100,6 +100,7 @@ pub const Part = struct {
     subagent_status: ?@import("agent_link.zig").Status = null,
     subagent_tail: []u8 = &.{},
     saved_view: ?@import("saved_view.zig").View = null,
+    mcp_app: ?@import("app_mcp_apps.zig").PartData = null,
     /// An edit's lines added and removed (`diffStats`, or its inline
     /// `diff`), and the stats' paths one to a line when they name any.
     additions: u64 = 0,
@@ -152,6 +153,7 @@ pub const Part = struct {
         gpa.free(p.artifact_format);
         gpa.free(p.artifact_visibility);
         gpa.free(p.artifact_url);
+        if (p.mcp_app) |*m| m.deinit(gpa);
         p.text.deinit(gpa);
         if (p.arena) |a| {
             a.deinit();
@@ -422,6 +424,7 @@ fn parsePart(gpa: Allocator, o: json.ObjectMap) !Part {
             p.subagent_status = if (std.mem.eql(u8, raw_sub_st, "completed")) .done else std.meta.stringToEnum(@import("agent_link.zig").Status, raw_sub_st);
             if (string(o.get("subagentTail"))) |s| p.subagent_tail = try gpa.dupe(u8, s);
             if (o.get("view")) |v| p.saved_view = @import("saved_view.zig").View.parse(v);
+            if (o.get("mcpApp")) |v| p.mcp_app = try @import("app_mcp_apps.zig").PartData.parse(gpa, v);
             try diffStats(gpa, &p, o);
         },
         .input => {
@@ -690,4 +693,19 @@ test "an error keeps its typed sign-in route, only an allowlisted one" {
     try testing.expect(ps[1].reauth == null);
     try testing.expect(ps[2].reauth == null);
     try testing.expectEqualStrings("plain", ps[2].text.items);
+}
+
+test "a tool part with mcpApp metadata decodes cleanly" {
+    var t: Transcript = .{ .gpa = testing.allocator };
+    defer t.deinit();
+    try applyText(&t,
+        \\{"reset":[{"id":"a","role":"assistant","parts":[{"kind":"tool","id":"m1","resolved":true,"isError":false,
+        \\  "call":{"kind":"exec","command":"mcp__studio__open_studio"},
+        \\  "mcpApp":{"serverName":"studio","resourceUri":"ui://studio/main.html","toolName":"open_studio","title":"Review Studio","toolInput":{"node":"root"}}}]}]}
+    );
+    const p = &t.entries.items[0].parts.items[0];
+    try testing.expect(p.mcp_app != null);
+    try testing.expectEqualStrings("studio", p.mcp_app.?.server_name);
+    try testing.expectEqualStrings("ui://studio/main.html", p.mcp_app.?.resource_uri);
+    try testing.expectEqualStrings("Review Studio", p.mcp_app.?.title.?);
 }

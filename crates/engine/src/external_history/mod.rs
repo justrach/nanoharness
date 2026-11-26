@@ -883,6 +883,7 @@ fn entries_for(msgs: &[Msg], device_id: &str, chat_id: &str) -> Vec<SessionMessa
                             subagent_status: None,
                             subagent_tail: None,
                             view: None,
+                            mcp_app: None,
                         },
                     }
                 })
@@ -1107,6 +1108,7 @@ mod tests {
                         subagent_status: None,
                         subagent_tail: None,
                         view: None,
+                        mcp_app: None,
                     },
                 ],
             ),

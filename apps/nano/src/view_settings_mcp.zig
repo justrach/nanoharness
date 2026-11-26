@@ -367,7 +367,9 @@ fn server(c: *ui.Context, a: *App, k: theme.Colors, s: Server) void {
         // insets, tile, the buttons after and the gaps (at zero, the
         // problem's line took a word a line and the row grew that tall).
         const sign_in = std.mem.eql(u8, s.state, "needs_login");
+        const can_open_app = s.enabled and std.mem.eql(u8, s.transport, "http");
         var trailing: f32 = 14 + 40;
+        if (can_open_app) trailing += 14 + buttonW(c, "Open App");
         if (sign_in) trailing += 14 + buttonW(c, if (busy) "Signing in…" else "Sign in");
         if (s.enabled) trailing += 14 + buttonW(c, if (busy) "Connecting…" else "Reconnect");
         const words_w = @max(set.inner_w - 2 - 2 * 20 - 36 - 14 - trailing, 80);
@@ -403,6 +405,11 @@ fn server(c: *ui.Context, a: *App, k: theme.Colors, s: Server) void {
             if (s.problem) |p| {
                 set.space(c, 4);
                 ui.text(c, p, .{ .size = 12, .line_height = 12 * phi, .wrap = true, .color = k.danger_muted.alpha(0.9) });
+            }
+        }
+        if (can_open_app) {
+            if (button(c, k, .widget, "Open App", !actionable) and actionable) {
+                @import("app_mcp_apps.zig").openServerApp(a, s.name, if (project(a)) |p| p.path else null);
             }
         }
         if (sign_in) {

@@ -140,6 +140,9 @@ struct DocPartJson {
     /// A page the tool saved on the host: `{kind, id}` (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     view: Option<serde_json::Value>,
+    /// Live SEP-1865 MCP App metadata attached to the tool (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mcp_app: Option<serde_json::Value>,
     /// Bounded delegated-task diagnostics; old readers ignore this kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     delegation: Option<harness_proto::DelegationInfo>,
@@ -226,6 +229,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             subagent_status,
             subagent_tail,
             view,
+            mcp_app,
         } => DocPartJson {
             id: id.clone(),
             kind: "tool".into(),
@@ -252,6 +256,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             }),
             subagent_tail: subagent_tail.clone(),
             view: view.as_ref().map(serde_json::to_value).transpose()?,
+            mcp_app: mcp_app.as_ref().map(serde_json::to_value).transpose()?,
             ..Default::default()
         },
         MessagePart::Delegation { id, info } => DocPartJson {
@@ -377,6 +382,10 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                     .view
                     .and_then(|v| serde_json::from_value::<harness_proto::ToolView>(v).ok())
                     .filter(harness_proto::ToolView::is_valid),
+                mcp_app: p
+                    .mcp_app
+                    .and_then(|v| serde_json::from_value::<harness_proto::McpAppRef>(v).ok())
+                    .filter(harness_proto::McpAppRef::is_valid),
             },
             None => MessagePart::Text {
                 id: p.id,
@@ -1207,6 +1216,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(view) = &doc_part.view {
         map.insert("view", loro_value_from_json(view))?;
     }
+    if let Some(mcp_app) = &doc_part.mcp_app {
+        map.insert("mcpApp", loro_value_from_json(mcp_app))?;
+    }
     if let Some(info) = &doc_part.delegation {
         map.insert(
             "delegation",
@@ -1409,6 +1421,10 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
             subagent_status: None,
             subagent_tail: None,
             view: None,
+            mcp_app: obj
+                .get("mcpApp")
+                .and_then(|v| serde_json::from_value::<harness_proto::McpAppRef>(v.clone()).ok())
+                .filter(harness_proto::McpAppRef::is_valid),
         });
     }
     if let Some(message) = obj.get("message").and_then(|x| x.as_str()) {
@@ -1811,6 +1827,9 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     }
     if let Some(view) = &doc_part.view {
         map.insert("view", loro_value_from_json(view))?;
+    }
+    if let Some(mcp_app) = &doc_part.mcp_app {
+        map.insert("mcpApp", loro_value_from_json(mcp_app))?;
     }
     if let Some(info) = &doc_part.delegation {
         map.insert(
@@ -2308,6 +2327,7 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
             view,
+            mcp_app: None,
         };
         let good = ToolView::new(ToolViewKind::McpApp, "0123456789abcdef0123456789abcdef").unwrap();
         // Another device's doc could carry anything; only a valid id is kept.
@@ -2329,6 +2349,63 @@ mod tests {
             })
             .collect();
         assert_eq!(views, vec![Some(good), None]);
+    }
+
+    #[test]
+    fn an_mcp_app_round_trips_and_a_malformed_one_is_dropped() {
+        use harness_proto::McpAppRef;
+        let doc = SessionDoc::init("c1").unwrap();
+        let mut w = SegmentWriter::begin(&doc, "e1", "dev", 1).unwrap();
+        let tool = |id: &str, mcp_app: Option<McpAppRef>| MessagePart::Tool {
+            id: id.into(),
+            call: harness_proto::ToolCall::Unknown {
+                name: "mcp__standardharness__list_screens".into(),
+                input: None,
+            },
+            is_error: false,
+            resolved: true,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+            view: None,
+            mcp_app,
+        };
+        let good = McpAppRef::new(
+            "standardharness",
+            "ui://standardharness/review-studio.html",
+            "list_screens",
+            Some("Review Studio"),
+            Some(serde_json::json!({ "status": "waiting" })),
+            Some(serde_json::json!({ "count": 1 })),
+        )
+        .unwrap();
+        let bad = McpAppRef {
+            server_name: "../evil".into(),
+            resource_uri: "https://evil.example/x.html".into(),
+            tool_name: "list_screens".into(),
+            title: None,
+            tool_input: None,
+            tool_result: None,
+        };
+        let mut parts = vec![tool("a", None), tool("b", None)];
+        w.sync(&parts).unwrap();
+        parts = vec![tool("a", Some(good.clone())), tool("b", Some(bad))];
+        w.sync(&parts).unwrap();
+        let apps: Vec<_> = doc.read_entries().unwrap()[0]
+            .parts
+            .iter()
+            .map(|p| match p {
+                MessagePart::Tool { mcp_app, .. } => mcp_app.clone(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(apps, vec![Some(good), None]);
     }
 
     #[test]
@@ -2356,6 +2433,7 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
             view: None,
+            mcp_app: None,
         };
         w.sync(std::slice::from_ref(&part)).unwrap();
         if let MessagePart::Tool {
@@ -2424,6 +2502,7 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
             view: None,
+            mcp_app: None,
         };
         let parts = vec![
             tool(
@@ -2760,6 +2839,7 @@ mod tests {
                 subagent_status: None,
                 subagent_tail: None,
                 view: None,
+                mcp_app: None,
             }],
             created_at: 1,
             device_id: "dev-a".into(),
