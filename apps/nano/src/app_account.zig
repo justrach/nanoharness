@@ -266,20 +266,26 @@ fn onAuth(a: *App, _: u64, r: rpc.Reply) void {
     a.redraw();
 }
 
-/// The menu opened: the Codegraff sign-in asked again
-/// (`refresh_codegraff_status`).
+/// Refresh the engine's Codegraff identity on connect and from the account menu.
 pub fn refresh(a: *App) void {
     a.request(requests.none("CodegraffAuthStatus"), .of(App, a, onCodegraff));
 }
 
+/// Clear the snapshot when the engine disconnects or the status is unavailable.
+pub fn clearCodegraff(a: *App) void {
+    if (a.account.codegraff.who) |w| a.gpa.free(w);
+    a.account.codegraff = .{};
+}
+
 fn onCodegraff(a: *App, _: u64, r: rpc.Reply) void {
+    clearCodegraff(a);
+    defer a.redraw();
     const v = switch (r) {
         .ok => |v| v,
         else => return,
     };
     const got = readCodegraff(a.gpa, v) catch return;
     var acc = &a.account;
-    if (acc.codegraff.who) |w| a.gpa.free(w);
     // A browser sign-in stays pending here until the engine says it's done.
     const pending = acc.poll_at != null and !got.signed_in;
     acc.codegraff = got;
@@ -291,7 +297,6 @@ fn onCodegraff(a: *App, _: u64, r: rpc.Reply) void {
         @import("app_computer.zig").refresh(a);
     }
     if (got.signed_in) acc.poll_at = null;
-    a.redraw();
 }
 
 /// "Sign in with Codegraff": the engine starts it, the browser finishes it,

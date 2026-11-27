@@ -17,6 +17,10 @@ test "settings navigation finds GitHub links and toggles the saved preference fr
         var h: Harness = undefined;
         try h.init(dark);
         defer h.deinit();
+        h.a.account.codegraff = .{
+            .signed_in = true,
+            .who = try h.a.gpa.dupe(u8, "reviewer@example.invalid"),
+        };
         view.open(&h.a);
         h.t.settle(0.2);
         h.t.typeText("GitHub links");
@@ -47,13 +51,73 @@ test "settings navigation finds GitHub links and toggles the saved preference fr
         h.t.settle(0.1);
         try testing.expect(h.a.settings.get(.open_github_links_in_harness));
         try h.t.clickText("Find a setting");
+        h.t.typeText("trajectory sharing");
+        h.t.settle(0.1);
+        try testing.expect(h.t.hasText("Privacy and future optional NanoHarness run sharing; currently unavailable"));
+        try h.t.clickText("Privacy");
+        h.t.settle(0.2);
+        try testing.expectEqual(Section.privacy, h.a.settings.section);
+        try testing.expect(h.t.hasText("Off · Not available yet"));
+        try testing.expect(h.t.containsText("NanoHarness does not collect or upload any runs for this program."));
+        try testing.expect(h.t.containsText("your own Claude Code or other supported subscriptions"));
+        try testing.expect(h.t.containsText("your company has accepted the Standard Harness Trajectory Sharing Terms"));
+        try testing.expect(h.t.containsText("Do not submit secrets or confidential or third-party material"));
+        try testing.expect(!h.t.hasText("Enable sharing"));
+        try testing.expect(!h.t.hasText("Accept terms"));
+        try snap(&h, if (dark) "privacy-dark" else "privacy-light");
+        try h.t.clickText("Find a setting");
         h.t.typeText("privacy telemetry");
         h.t.settle(0.1);
         try testing.expect(h.t.hasText("Sounds, alerts and anonymous performance sharing"));
         try h.t.clickText("Notifications");
         h.t.settle(0.2);
         try testing.expectEqual(Section.notifications, h.a.settings.section);
+        try testing.expect(h.t.hasText("Share anonymous responsiveness stats"));
+        try snap(&h, if (dark) "notifications-before-dark" else "notifications-before-light");
     }
+}
+
+test "trajectory privacy preview is hidden without current Codegraff sign-in" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+
+    h.a.settings.setSection(.privacy);
+    view.open(&h.a);
+    h.t.settle(0.2);
+    try testing.expectEqual(Section.account, h.a.settings.section);
+    try testing.expect(!h.t.hasText("Privacy"));
+    try testing.expect(!h.t.hasText("Share runs for reinforcement learning"));
+    try snap(&h, "privacy-signedout-light");
+
+    try h.t.clickText("Find a setting");
+    h.t.typeText("trajectory sharing");
+    h.t.settle(0.1);
+    try testing.expect(h.t.hasText("No matching settings"));
+    try testing.expect(!h.t.hasText("Privacy"));
+
+    // Other privacy settings remain discoverable while signed out.
+    h.a.view.settings_search.clear();
+    h.t.typeText("privacy telemetry");
+    h.t.settle(0.1);
+    try testing.expect(h.t.hasText("Sounds, alerts and anonymous performance sharing"));
+    try testing.expect(h.t.hasText("Notifications"));
+
+    // An unresolved credential doesn't unlock the page.
+    h.a.account.codegraff.signed_in = true;
+    h.a.settings.setSection(.privacy);
+    h.t.settle(0.1);
+    try testing.expectEqual(Section.account, h.a.settings.section);
+
+    // Loss of the resolved sign-in while the preview is open hides it again.
+    h.a.account.codegraff.who = try h.a.gpa.dupe(u8, "reviewer@example.invalid");
+    h.a.settings.setSection(.privacy);
+    h.t.settle(0.1);
+    try testing.expect(h.t.hasText("Share runs for reinforcement learning"));
+    @import("app_account.zig").clearCodegraff(&h.a);
+    h.t.settle(0.1);
+    try testing.expectEqual(Section.account, h.a.settings.section);
+    try testing.expect(!h.t.hasText("Share runs for reinforcement learning"));
 }
 
 test "settings audit clicks the visible GitHub switch and its padded target" {

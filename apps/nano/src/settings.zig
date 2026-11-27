@@ -13,6 +13,7 @@ pub const Section = enum {
     account,
     appearance,
     notifications,
+    privacy,
     shortcuts,
     files,
     browsing,
@@ -39,6 +40,7 @@ pub const Section = enum {
             .files => "Files",
             .browsing => "Links & browsing",
             .notifications => "Notifications",
+            .privacy => "Privacy",
             .shortcuts => "Shortcuts",
             .appshots => "Appshots",
             .usage => "Usage",
@@ -53,7 +55,7 @@ pub const Section = enum {
     pub fn group(s: Section) []const u8 {
         return switch (s) {
             .account => "Account",
-            .appearance, .notifications, .shortcuts, .files, .browsing => "General",
+            .appearance, .notifications, .privacy, .shortcuts, .files, .browsing => "General",
             .harnesses, .agents, .mcp, .extensions, .github_ci => "Agents",
             .devices, .appshots, .usage, .archived => "Devices and data",
         };
@@ -70,6 +72,7 @@ pub const Section = enum {
             .files => .folder,
             .browsing => .global,
             .notifications => .bell,
+            .privacy => .@"eye-closed",
             .shortcuts => .keyboard,
             .archived => .@"archive-minimalistic",
             .mcp, .extensions => .@"remote-server",
@@ -1166,11 +1169,15 @@ test "Nano keeps its own settings and starts by project without rewriting Harnes
 test "sections in the GPUI app's order, groups and saved keys" {
     try testing.expectEqual(Section.account, Section.all[0]);
     try testing.expectEqual(Section.appearance, Section.all[1]);
-    try testing.expectEqual(Section.files, Section.all[4]);
-    try testing.expectEqual(Section.browsing, Section.all[5]);
+    try testing.expectEqual(Section.privacy, Section.all[3]);
+    try testing.expectEqual(Section.files, Section.all[5]);
+    try testing.expectEqual(Section.browsing, Section.all[6]);
+    try testing.expectEqualStrings("Privacy", Section.privacy.label());
+    try testing.expectEqualStrings("General", Section.privacy.group());
     try testing.expectEqualStrings("Links & browsing", Section.browsing.label());
     try testing.expectEqualStrings("General", Section.browsing.group());
     try testing.expectEqual(icons.Name.global, Section.browsing.icon());
+    try testing.expectEqual(@as(?Section, .privacy), Section.fromKey("privacy"));
     try testing.expectEqual(@as(?Section, .browsing), Section.fromKey("browsing"));
     try testing.expectEqualStrings("Accounts", Section.agents.label());
     try testing.expectEqualStrings("Agents", Section.harnesses.label());

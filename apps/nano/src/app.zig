@@ -778,6 +778,7 @@ pub const App = struct {
                 a.watchSidebar();
                 change_requests.reconcile(a);
                 account.watch(a);
+                account.refresh(a);
                 // A cloud sandbox left running keeps costing credit: show it
                 // from the start.
                 @import("app_sandboxes.zig").refresh(a);
@@ -793,6 +794,7 @@ pub const App = struct {
             .disconnected, .connecting => {
                 for (a.peers.items) |*p| p.* = .{ .id = p.id, .transcript = p.transcript };
                 a.account.w_auth = null;
+                account.clearCodegraff(a);
                 // Every stream ended with the socket; they open on reconnect.
                 a.w_devices = .{};
                 a.w_spaces = .{};
