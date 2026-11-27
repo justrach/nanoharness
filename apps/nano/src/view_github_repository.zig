@@ -222,8 +222,8 @@ fn detailHeader(c: *ui.Context, a: *App, k: theme.Colors, width: f32, ready: boo
             kit.statusChip(c, k, display.label(state), .{ .tone = kit.roleTone(display.role(kind, state)) });
             const when = ago(c, a, detail.createdAt);
             const words = c.print("#{d} · {s} · opened {s}", .{ detail.number, detail.author, when });
-            const col = ui.div(c).column().grow().w(0);
-            defer col.end();
+            // A wrapping text fills the rest of the row (nanoui sizes a
+            // wrapped text in a zero-width flexible box line by line).
             ui.text(c, words, .{ .size = kit.text_body, .line_height = 16, .tabular = true, .wrap = true, .color = k.muted });
         }
         if (detail.headRef) |head| {
@@ -326,15 +326,13 @@ fn list(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, width: f32, e
             // Labels go first when the row is narrow; the words keep the rest.
             const label_room = inner - used - 8;
             const n = fittingLabels(c, item.labels, label_room);
-            {
-                // Long names wrap rather than lose the age at the end.
-                const col = ui.div(c).column().grow().w(0);
-                defer col.end();
-                var wrapped = st;
-                wrapped.wrap = true;
-                ui.text(c, words, wrapped);
-            }
+            // Long names wrap rather than lose the age at the end; with
+            // labels beside them the words fit on the line by construction.
+            var wrapped = st;
+            wrapped.wrap = n == 0;
+            ui.text(c, words, wrapped);
             if (n > 0) {
+                ui.spacer(c);
                 const chips = ui.div(c).row().gap(4).itemsCenter();
                 defer chips.end();
                 for (item.labels[0..n]) |lbl| kit.statusChip(c, k, lbl, .{ .max_w = label_max_w });
