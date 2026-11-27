@@ -282,6 +282,24 @@ test "windowed chrome: a Zen split draft shows its project and computer once and
     try testing.expectApproxEqAbs(chat.y + chat.h, draft.y + draft.h, 1);
 }
 
+test "windowed chrome: the full screen top peek offers Exit full screen once" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.setFullScreen(true);
+    h.t.settle(1);
+    h.a.view.fs_top_peek = true;
+    h.t.settle(1);
+    var exits: usize = 0;
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .image => |im| if (node.rect.y < chrome.header_height and im.source == .encoded and std.mem.eql(u8, im.source.encoded, @import("icons_svg").get("expand-arrows"))) {
+            exits += 1;
+        },
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 1), exits);
+}
+
 test "session navigation parity opens archived history outside a blank split pane" {
     var h: Harness = undefined;
     try h.init(true);

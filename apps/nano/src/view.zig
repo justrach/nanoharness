@@ -458,7 +458,7 @@ fn chatPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     // Decorative shoulders change node count as the sidebar slides; the
     // writing subtree must keep its identity and keyboard focus.
     ui.key(c, "chat-panel-content");
-    const content = ui.div(c).column().grow().wFull().h(0).rounded(chrome.zen_radius - 1).clip();
+    const content = ui.div(c).column().grow().wFull().h(0).rounded(chrome.zen_content_radius).clip();
     defer content.end();
     focused(c, a, k);
 }
@@ -509,7 +509,7 @@ fn hostPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     // Clip content, not the cap/shoulders extending above the body.
     ui.key(c, "workspace-host-content");
-    const content = ui.div(c).column().wFull().hFull().rounded(chrome.zen_radius - 1).clip();
+    const content = ui.div(c).column().wFull().hFull().rounded(chrome.zen_content_radius).clip();
     defer content.end();
     @import("view_host.zig").host(c, a, k);
 }

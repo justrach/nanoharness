@@ -241,7 +241,7 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, lane: Layout, pane_widths:
                     @min(ws_win.slot_w, @max(120, c.text.width(split_lbl, .{ .size = 11.5, .weight = vis.weight }) + 38))
                 else
                     ws_win.slot_w;
-                var current = ui.div(c).row().size(pill_w, 28).px(8).gap(6).itemsCenter().rounded(8).clip().control();
+                var current = ui.div(c).row().size(pill_w, 28).px(8).gap(6).itemsCenter().rounded(chrome.tab_pill_radius).clip().control();
                 current = applyTabBox(current, k, vis, true);
                 defer current.end();
                 icons.icon(c, .widget, 14, vis.icon, 0);
@@ -252,7 +252,7 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, lane: Layout, pane_widths:
         }
         if (ws_win.hidden_count > 0) {
             ui.key(c, "split-workspace-overflow");
-            var more = ui.div(c).row().size(overflow_pill_w, 28).center().rounded(8)
+            var more = ui.div(c).row().size(overflow_pill_w, 28).center().rounded(chrome.tab_pill_radius)
                 .bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover).control();
             more = tip.on(more, k, .{ .text = c.print("{d} more open tab{s}", .{ ws_win.hidden_count, if (ws_win.hidden_count == 1) "" else "s" }), .look = .tab });
             defer more.end();
@@ -340,7 +340,7 @@ fn topWorkspacePill(c: *ui.Context, a: *App, k: theme.Colors, ws: usize, pill_w:
     const ch = if (cid) |id| a.findChat(id) else null;
     const t_name = if (ch) |v| @import("view_sidebar.zig").chatLabel(v) else "New tab";
     const panes_n = workspacePaneCount(a, ws);
-    var pill = ui.div(c).row().size(pill_w, 28).px(8).gap(6).itemsCenter().rounded(8).clip().control();
+    var pill = ui.div(c).row().size(pill_w, 28).px(8).gap(6).itemsCenter().rounded(chrome.tab_pill_radius).clip().control();
     pill = applyTabBox(pill, k, tabStyle(k, false, false), false);
     defer pill.end();
     const pill_hot = pill.hovered();
@@ -816,7 +816,7 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
             slot_w;
         ui.key(c, c.print("panel-tab-{d}", .{ix}));
         const active = ix == selected;
-        var cap = ui.div(c).row().size(pill_w, if (zen) @as(f32, 28) else 30).px(8).gap(6).itemsCenter().rounded(7).clip().control();
+        var cap = ui.div(c).row().size(pill_w, if (zen) @as(f32, 28) else 30).px(8).gap(6).itemsCenter().rounded(chrome.tab_pill_radius).clip().control();
         if (!lone_caption) cap = applyTabBox(cap, k, tabStyle(k, active, false), active);
         defer cap.end();
         if (active) {
@@ -904,7 +904,7 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     }
     if (hidden_count > 0) {
         ui.key(c, "panel-tabs-overflow");
-        var more = ui.div(c).row().size(overflow_pill_w, if (zen) @as(f32, 28) else 26).center().rounded(if (zen) @as(f32, 7) else 6)
+        var more = ui.div(c).row().size(overflow_pill_w, if (zen) @as(f32, 28) else 26).center().rounded(if (zen) chrome.tab_pill_radius else 6)
             .bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover).control();
         more = @import("view_tooltip.zig").on(more, k, .{ .text = c.print("{d} more open tab{s}", .{ hidden_count, if (hidden_count == 1) "" else "s" }), .look = .tab });
         defer more.end();

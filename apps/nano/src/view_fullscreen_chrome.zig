@@ -654,6 +654,8 @@ fn trailingControls(
     if (darkIconButton(c, p, .@"split-columns", 22, 11.5, "Split pane right (\u{2318}D)", false)) {
         strip.splitChoosingFolder(a, .horizontal);
     }
+    // The open top peek has its own labelled "Exit full screen"; one is enough.
+    if (a.view.fs_top_peek) return;
     ui.key(c, "fullscreen-header-exit");
     if (darkIconButton(c, p, .@"expand-arrows", 22, 11, "Exit full screen", false)) {
         a.setFullScreen(false);
