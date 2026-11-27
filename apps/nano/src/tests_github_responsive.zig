@@ -97,6 +97,13 @@ const Fixture = struct {
         try testing.expect(rect.x >= -0.5 and rect.x + rect.w <= f.t.size.w + 0.5);
         try testing.expect(rect.y >= -0.5 and rect.y + rect.h <= f.t.size.h + 0.5);
     }
+    fn containing(f: *Fixture, needle: []const u8) !ui.Rect {
+        for (f.t.ctx.nodes.items) |node| switch (node.content) {
+            .text => |tx| if (std.mem.indexOf(u8, tx.str, needle) != null) return node.rect,
+            else => {},
+        };
+        return error.MissingResponsiveText;
+    }
     fn control(f: *Fixture, label: []const u8) !void {
         for (f.t.ctx.nodes.items) |node| switch (node.content) {
             .text => |tx| if (std.mem.eql(u8, tx.str, label)) {
@@ -157,11 +164,11 @@ test "github responsive list keeps headers filters wrapped titles and clickable 
         var f: Fixture = undefined;
         try f.init(width, 620, list_page);
         defer f.deinit();
-        for ([_][]const u8{ "Sessions", "Refresh", "Pull requests", "Issues", "Open", "Closed", "All" }) |label| try f.control(label);
+        for ([_][]const u8{ "Session PRs", "Refresh", "Pull requests", "Issues", "Open", "Closed", "All" }) |label| try f.control(label);
         try f.horizontalTextBounds();
         try f.wraps(title);
         const title_rect = try f.text(title);
-        const metadata = try f.text(author ++ " · updated 2026-11-13");
+        const metadata = try f.containing(author ++ " · updated ");
         try testing.expect(metadata.y >= title_rect.y + title_rect.h);
         try f.inViewport(metadata);
         try pagination(&f);
@@ -173,11 +180,11 @@ test "github responsive detail wraps title branches metadata and retains narrow 
         var f: Fixture = undefined;
         try f.init(width, 760, detail_page);
         defer f.deinit();
-        for ([_][]const u8{ "Sessions", "Refresh", "Back to PRs", "Open on GitHub", "Summary", "Code", "Activity" }) |label| try f.control(label);
+        for ([_][]const u8{ "Session PRs", "Refresh", "Pull requests", "Open on GitHub", "Summary", "Code", "Activity" }) |label| try f.control(label);
         try f.horizontalTextBounds();
         try f.wraps(title);
         const title_rect = try f.text(title);
-        const metadata = try f.text(author ++ " · opened 2026-11-12");
+        const metadata = try f.containing(author ++ " · opened ");
         try testing.expect(metadata.y >= title_rect.y + title_rect.h);
         try f.inViewport(metadata);
     }
@@ -212,7 +219,7 @@ test "github responsive short list and activity panes reserve clickable paginati
             var f: Fixture = undefined;
             try f.init(width, 180, page);
             defer f.deinit();
-            try f.control("Sessions");
+            try f.control("Session PRs");
             try f.control("Refresh");
             try pagination(&f);
             // Detail content taller than the viewport scrolls instead of
@@ -295,14 +302,18 @@ test "github activity hides pagination footer on single-page timelines and keeps
     }
 }
 
-test "github showPagination hides only single-page activity and detail pages" {
+test "github showPagination shows only when there is another page to turn to" {
     try testing.expect(!github.showPagination(.pull, .{ .repository = repo, .kind = .pull, .page = 1, .hasNextPage = false }));
     try testing.expect(!github.showPagination(.issue, .{ .repository = repo, .kind = .issue, .page = 1, .hasNextPage = false }));
     try testing.expect(!github.showPagination(.activity, .{ .repository = repo, .kind = .activity, .page = 1, .hasNextPage = false }));
     try testing.expect(github.showPagination(.activity, .{ .repository = repo, .kind = .activity, .page = 1, .hasNextPage = true }));
     try testing.expect(github.showPagination(.activity, .{ .repository = repo, .kind = .activity, .page = 2, .hasNextPage = false }));
     try testing.expect(github.showPagination(.activity, .{ .repository = repo, .kind = .activity, .page = 2, .hasNextPage = true }));
-    try testing.expect(github.showPagination(.pulls, .{ .repository = repo, .kind = .pulls, .page = 1, .hasNextPage = false }));
-    try testing.expect(github.showPagination(.issues, .{ .repository = repo, .kind = .issues, .page = 1, .hasNextPage = false }));
-    try testing.expect(github.showPagination(.files, .{ .repository = repo, .kind = .files, .page = 1, .hasNextPage = false }));
+    // An empty or single-page list has nothing to turn to.
+    try testing.expect(!github.showPagination(.pulls, .{ .repository = repo, .kind = .pulls, .page = 1, .hasNextPage = false }));
+    try testing.expect(!github.showPagination(.issues, .{ .repository = repo, .kind = .issues, .page = 1, .hasNextPage = false }));
+    try testing.expect(!github.showPagination(.files, .{ .repository = repo, .kind = .files, .page = 1, .hasNextPage = false }));
+    try testing.expect(github.showPagination(.pulls, .{ .repository = repo, .kind = .pulls, .page = 1, .hasNextPage = true }));
+    try testing.expect(github.showPagination(.issues, .{ .repository = repo, .kind = .issues, .page = 2, .hasNextPage = false }));
+    try testing.expect(github.showPagination(.files, .{ .repository = repo, .kind = .files, .page = 2, .hasNextPage = true }));
 }

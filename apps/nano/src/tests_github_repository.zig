@@ -74,6 +74,14 @@ fn textRect(h: *Harness, text: []const u8) ?@import("nanoui").ui.Rect {
     return null;
 }
 
+fn containingTextRect(h: *Harness, needle: []const u8) ?@import("nanoui").ui.Rect {
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |tx| if (std.mem.indexOf(u8, tx.str, needle) != null) return node.rect,
+        else => {},
+    };
+    return null;
+}
+
 fn topTextRect(h: *Harness, text: []const u8) ?@import("nanoui").ui.Rect {
     for (h.t.ctx.nodes.items) |node| switch (node.content) {
         .text => |tx| if (std.mem.eql(u8, tx.str, text) and node.rect.y < h.a.view.chrome.y and node.rect.x >= h.a.view.sidebar_width) return node.rect,
@@ -166,7 +174,9 @@ test "github child stays beside its originating split and retains repository on 
     const github = textRect(&h, "demo/fieldnotes") orelse return error.NoRepositoryTitle;
     const beta = topTextRect(&h, "Remote work") orelse return error.NoNeighborTitle;
     try testing.expect(github.x < beta.x);
-    try testing.expect(h.t.hasText("Split from Navigation polish"));
+    // The tab names the chat it was split from; no band in the pane repeats it.
+    try testing.expect(topTextRect(&h, "↳ Navigation polish") != null);
+    try testing.expect(!h.t.hasText("Split from Navigation polish"));
     const calls = try githubCalls(&h);
     h.a.focusPane(1);
     h.t.settle(0.2);
@@ -176,7 +186,7 @@ test "github child stays beside its originating split and retains repository on 
     h.a.panels.host_open = true;
     panels.showTab(&h.a, h.a.panels.active);
     h.t.settle(0.2);
-    try testing.expect(h.t.hasText("Split from Navigation polish"));
+    try testing.expect(topTextRect(&h, "↳ Navigation polish") != null);
     try testing.expect(h.t.hasText("demo/fieldnotes"));
 }
 
@@ -211,7 +221,7 @@ test "github child vertical layout bounds the child to its parent row and hides 
         h.a.newTab();
         h.t.settle(0.2);
         try testing.expect(!@import("view_tab_strip.zig").hasHost(&h.a));
-        try testing.expect(!h.t.hasText("Split from Navigation polish"));
+        try testing.expect(topTextRect(&h, "↳ Navigation polish") == null);
         h.a.showTab(0);
         h.t.settle(0.2);
         try testing.expect(h.t.hasText("demo/fieldnotes"));
@@ -396,7 +406,9 @@ test "repository github browser lists all repository PRs pages filters and issue
         try h.t.clickText("Repository");
         h.t.settle(0.1);
         try testing.expect(h.t.hasText("demo/fieldnotes"));
-        try testing.expect(h.t.hasText("Repository-wide"));
+        // One line counts the loaded page, honestly; the charts stay folded.
+        try testing.expect(h.t.hasText("1 loaded (more on the next page) · 1 open"));
+        try testing.expect(!h.t.hasText("State split"));
         try testing.expect(h.t.hasText("Polish repository navigation"));
         // No session PR was injected: rows really come from repository results.
         try screenshot(&h, if (dark) "repository-dark" else "repository-light");
@@ -463,9 +475,10 @@ test "repository github browser inspects PR summary code and activity natively" 
         const calls = h.a.engine.sent.items.len;
         try h.t.clickText("Summary");
         try testing.expectEqual(calls, h.a.engine.sent.items.len);
-        try h.t.clickText("Back to PRs");
+        try h.t.clickText("Pull requests");
         try testing.expectEqual(calls, h.a.engine.sent.items.len);
         try testing.expect(h.t.hasText("Pull requests"));
+        try testing.expect(h.t.hasText("Polish repository navigation"));
     }
 }
 
@@ -559,11 +572,11 @@ test "repository github list rows keep long titles and metadata inside the card"
     h.t.resize(760, 780);
     h.t.settle(0.2);
     const title = h.t.findText(entries[0].title) orelse return error.MissingLongTitle;
-    const author = h.t.findText("demo-author · updated 2026-11-13") orelse return error.MissingAuthor;
+    const author = containingTextRect(&h, "demo-author · updated ") orelse return error.MissingAuthor;
     try testing.expect(author.y >= title.y + title.h);
     const card = for (h.t.ctx.nodes.items) |node| {
         const r = node.rect;
-        if (node.interactive and node.style.radius == 8 and r.x <= title.x and r.y <= title.y and r.x + r.w >= title.x + title.w) break r;
+        if (node.interactive and node.style.radius == @import("view_kit.zig").radius_control and r.x <= title.x and r.y <= title.y and r.x + r.w >= title.x + title.w) break r;
     } else return error.MissingRepositoryCard;
     try testing.expect(author.y + author.h < card.y + card.h);
     try screenshot(&h, "repository-long-title-narrow");
@@ -720,13 +733,18 @@ test "repository github analytics dashboard renders overview charts and filters 
         try h.t.clickText("Issues");
         h.t.settle(0.1);
 
-        // Split pane view (~500px host width)
+        // Split pane view (~500px host width): one summary line, charts folded.
         h.t.resize(1120, 760);
         h.t.settle(0.1);
-        try testing.expect(h.t.hasText("On This Page"));
-        try testing.expect(h.t.hasText("State Split"));
-        try testing.expect(h.t.hasText("By Label"));
-        try testing.expect(h.t.hasText("Recent Activity"));
+        try testing.expect(h.t.hasText("12 loaded · 5 open · 7 closed"));
+        try testing.expect(!h.t.hasText("State split"));
+        try h.t.clickText("Show charts");
+        h.t.settle(0.1);
+        try testing.expect(h.a.settings.get(.github_charts_expanded));
+        try testing.expect(h.t.hasText("State split"));
+        try testing.expect(h.t.hasText("By label"));
+        try testing.expect(h.t.hasText("Recent activity"));
+        try testing.expect(h.t.hasText("Hide charts"));
         if (dark) try screenshot(&h, "dashboard-split-dark");
 
         // Expanded wide view (~900px host width)
