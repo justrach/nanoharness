@@ -123,11 +123,18 @@ pub fn paneRow(a: *const App) bool {
 /// screen's 28pt header strip above their cards (`view_fullscreen_chrome.
 /// chatHeader`), in place of the split's slot row: each pane of a split,
 /// and the one pane under a strip of two or more tabs. A lone chat's title
-/// bar caption is its header (`usesWindowedChatCaption`).
+/// bar caption is its header (`usesWindowedChatCaption`). A split whose
+/// panes hold tabs of their own keeps the slot row, which shows them.
 pub fn paneHeaders(a: *const App) bool {
     if (a.view.full_screen or a.view.settings_open or a.settings.uiMode() != .zen) return false;
-    if (paneRow(a)) return true;
+    if (paneRow(a)) return !paneTabs(a);
     return strip.count(a) == 1 and singleSpec(a).n > 1;
+}
+
+fn paneTabs(a: *const App) bool {
+    const split = a.tabs.layout() orelse return false;
+    for (split.groups[0..split.panes.items.len]) |*g| if (g.count() > 1) return true;
+    return false;
 }
 
 /// The title bar carries the active pane's computer picker (`devicePicker`).

@@ -473,8 +473,12 @@ pub fn chatHeader(
         const chat = a.findChat(cid);
         const id = identityOf(c, a, chat);
         const title: []const u8 = if (chat) |ch| sidebar.chatLabel(ch) else "Conversation";
-        const room = chipRoom(c, id, pane_w, !bar_device and (id.is_remote or pane_w >= 620), std.math.floatMax(f32));
         const lead_icon_w: f32 = (if (focused) @as(f32, 11) else 0) + 18;
+        // Chips give way before the title drops under `min_title` or the
+        // pane's own controls are pushed out of a narrow header.
+        const min_title: f32 = 96;
+        const chip_budget = @max(0, pane_w - 24 - trailing_w - lead_icon_w - min_title);
+        const room = chipRoom(c, id, pane_w, !bar_device and (id.is_remote or pane_w >= 620), chip_budget);
         const title_max = @max(72, pane_w - 12 - trailing_w - lead_icon_w - room.width() - 12);
 
         {
@@ -507,8 +511,10 @@ pub fn chatHeader(
         const proj = strip.folder(a, target);
         const proj_name = if (proj) |f| f.name else "No project";
         const computer = strip.deviceLabel(a, strip.device(a, target));
-        const avail = @max(80, pane_w - 16 - trailing_w - (if (focused) @as(f32, 11) else 0));
-        const chip_cap = @max(42, (avail - 64) / 2);
+        // Two pills' own chrome (padding, glyphs, gaps) is about 100pt;
+        // their labels share the rest, so the pane's controls stay in view.
+        const avail = @max(0, pane_w - 12 - trailing_w - (if (focused) @as(f32, 11) else 0) - 100);
+        const chip_cap = @max(24, avail / 2);
 
         if (focused) {
             ui.div(c).size(5, 5).rounded(2.5).bg(k.accent.alpha(0.92)).end();

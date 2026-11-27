@@ -258,6 +258,77 @@ test "windowed chrome: each Zen split pane header carries full screen's swap, zo
     try testing.expectEqual(@as(usize, 1), strip.chatCount(&h.a));
 }
 
+test "windowed chrome: three Zen panes each keep one header, its focus cue a dot, its controls inside the pane" {
+    for ([_]f32{ 1340, 1000 }) |width| {
+        var h: Harness = undefined;
+        try h.init(false);
+        defer h.deinit();
+        h.a.settings.applyUiMode(.zen);
+        try replace(&h.a.chats,
+            \\[{"id":"a","deviceId":"local","title":"Alpha layout review with a longer synthetic title","spaceId":"local-project","archived":false},
+            \\ {"id":"b","deviceId":"remote","title":"Beta","spaceId":"remote-project","archived":false},
+            \\ {"id":"c","deviceId":"local","title":"Gamma notes","spaceId":"local-project","archived":false}]
+        );
+        h.a.splitPane(.horizontal);
+        h.a.openChat("b", "remote-project");
+        h.a.splitPane(.horizontal);
+        h.a.openChat("c", "local-project");
+        h.t.resize(width, 780);
+        h.t.settle(1);
+        try testing.expectEqual(@as(usize, 3), strip.chatCount(&h.a));
+        try testing.expectEqual(chrome.titlebar_height + chrome.fs_pane_header_h, h.a.view.chrome.y);
+        const side = h.a.view.sidebar_width;
+        // Each pane's title once; the long one may shorten but is never doubled.
+        try testing.expectEqual(@as(usize, 1), countText(&h, "Beta", side, width, width));
+        try testing.expectEqual(@as(usize, 1), countText(&h, "Gamma notes", side, width, width));
+        // Cards, and in each pane's header its own close control.
+        var cards: [3]ui.Rect = undefined;
+        var n: usize = 0;
+        for (h.t.ctx.nodes.items) |node| {
+            if (node.style.radius == chrome.zen_radius and @abs(node.rect.y - h.a.view.chrome.y) < 0.5 and node.rect.x >= side and node.rect.h > 300) {
+                if (n < cards.len) cards[n] = node.rect;
+                n += 1;
+            }
+        }
+        try testing.expectEqual(@as(usize, 3), n);
+        var dots: usize = 0;
+        for (cards, 0..) |card, i| {
+            const close = try headerIcon(&h, "close", card.x, card.x + card.w);
+            try testing.expect(close.x >= card.x and close.x + close.w <= card.x + card.w + 0.5);
+            for (h.t.ctx.nodes.items) |node| {
+                const r = node.rect;
+                if (r.w == 5 and r.h == 5 and r.y >= card.y - chrome.fs_pane_header_h and r.y < card.y and r.x >= card.x and r.x < card.x + card.w) {
+                    dots += 1;
+                    // The focused pane is the last one opened.
+                    try testing.expectEqual(@as(usize, 2), i);
+                }
+            }
+        }
+        try testing.expectEqual(@as(usize, 1), dots);
+        // No pane caption is drawn as a filled tab above the cards.
+        for (h.t.ctx.nodes.items) |node| {
+            const r = node.rect;
+            if (r.y >= chrome.header_height and r.y < h.a.view.chrome.y and node.style.control) {
+                if (node.style.background) |bg| try testing.expect(bg.a < 0.5);
+            }
+        }
+        h.snap(if (width > 1200) "windowed-zen-three-wide" else "windowed-zen-three-narrow");
+    }
+}
+
+test "windowed chrome: a Zen split whose pane holds tabs keeps the slot row that shows them" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    h.a.splitPane(.horizontal);
+    h.a.addChatTab(false);
+    h.t.settle(1);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.groups[1].count());
+    try testing.expect(!strip.rendering.paneHeaders(&h.a));
+    try testing.expectEqual(chrome.header_height + chrome.tab_height + chrome.zen_gutter, h.a.view.chrome.y);
+}
+
 test "windowed chrome: a Zen split draft shows its project and computer once and its composer lines up with a chat's" {
     var h: Harness = undefined;
     try h.init(true);
