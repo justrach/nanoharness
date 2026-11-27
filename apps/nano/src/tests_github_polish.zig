@@ -149,7 +149,8 @@ test "github list puts the first pull request near the pane top while the charts
     const first = f.node(items[0].title) orelse return error.MissingFirstRow;
     // Header (48), tabs and filter (44), the summary line (36), the row's own inset.
     try testing.expect(first.y <= 160);
-    try testing.expect(f.t.hasText("7 loaded (more on the next page) · 3 open · 1 draft · 2 merged · 2 closed"));
+    // The counts come first; a narrow pane cuts the "more" hint before them.
+    try testing.expect(f.t.containsText("7 loaded · 2 open · 1 draft · 2 merged · 2 closed"));
     try testing.expect(!f.t.hasText("State split"));
     // Unfolding is remembered, and pushes the rows below the charts.
     try f.t.clickText("Show charts");

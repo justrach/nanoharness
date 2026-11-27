@@ -171,7 +171,8 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, width: f3
         const buf = c.alloc().alloc(u8, 192) catch return;
         const line = display.summaryLine(buf, display.Counts.of(page.items), page.page, page.hasNextPage);
         const toggle = if (expanded) "Hide charts" else "Show charts";
-        const toggle_w = 12 + 12 + 6 + c.text.width(toggle, .{ .size = kit.text_body, .weight = .medium });
+        // Its padding, the words, the gap and the chevron.
+        const toggle_w = 12 + c.text.width(toggle, .{ .size = kit.text_body, .weight = .medium }) + 6 + 12 + 12;
         kit.ellipsisText(c, line, .{ .size = kit.text_body, .line_height = 16, .tabular = true, .color = k.muted }, @max(40, width - toggle_w - 8));
         ui.spacer(c);
         if (kit.actionButton(c, k, toggle, .{ .kind = .quiet, .trailing = if (expanded) .@"alt-arrow-down" else .@"alt-arrow-right", .key = "github-charts-toggle" })) {
@@ -267,7 +268,7 @@ fn drawStateCard(c: *ui.Context, a: *App, k: theme.Colors, stats: Stats, card_w:
         defer label_layer.end();
         const resolved_pct = if (stats.total > 0) (stats.resolved * 100) / stats.total else 0;
         ui.text(c, c.print("{d}%", .{resolved_pct}), .{ .size = kit.text_title, .weight = .medium, .tabular = true, .color = k.text });
-        ui.text(c, if (kind == .pull) "merged or closed" else "closed", .{ .size = kit.text_caption, .color = k.muted });
+        ui.text(c, if (kind == .pull) "done" else "closed", .{ .size = kit.text_caption, .color = k.muted });
     }
 
     // Legend rows filter the loaded page without a request.

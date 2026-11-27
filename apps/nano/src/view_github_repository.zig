@@ -165,15 +165,17 @@ fn errorBanner(c: *ui.Context, a: *App, k: theme.Colors, text: []const u8, ready
     const colors = kit.chipColors(k, .warning);
     const wrap = ui.div(c).column().wFull().px(inset).pt(12);
     defer wrap.end();
-    const box = ui.div(c).row().wFull().pl(12).pr(4).py(4).gap(8).itemsCenter().rounded(kit.radius_card).bg(colors.fill);
+    const box = ui.div(c).column().wFull().pl(12).pr(4).pt(10).pb(4).gap(2).rounded(kit.radius_card).bg(colors.fill);
     defer box.end();
-    icons.icon(c, .@"danger-triangle", 14, colors.ink, 0);
     {
-        const words = ui.div(c).column().grow().w(0).py(4);
-        defer words.end();
+        const line = ui.div(c).row().wFull().pr(8).gap(8);
+        defer line.end();
+        icons.icon(c, .@"danger-triangle", 14, colors.ink, 0);
         ui.text(c, text, .{ .size = kit.text_body, .line_height = 17, .wrap = true, .color = k.text });
     }
-    if (kit.actionButton(c, k, "Retry", .{ .kind = .quiet, .enabled = ready, .key = "github-error-retry" })) flow.refresh(a);
+    const actions = ui.div(c).row().wFull().justifyEnd();
+    defer actions.end();
+    if (kit.actionButton(c, k, "Retry", .{ .kind = .quiet, .icon = .refresh, .enabled = ready, .key = "github-error-retry" })) flow.refresh(a);
 }
 
 /// Four rows' worth of placeholder bars while the first page loads, so the
@@ -220,8 +222,9 @@ fn detailHeader(c: *ui.Context, a: *App, k: theme.Colors, width: f32, ready: boo
             kit.statusChip(c, k, display.label(state), .{ .tone = kit.roleTone(display.role(kind, state)) });
             const when = ago(c, a, detail.createdAt);
             const words = c.print("#{d} · {s} · opened {s}", .{ detail.number, detail.author, when });
-            const room = @max(40, width - 2 * inset - kit.statusChipWidth(c, display.label(state), .{}) - 8);
-            kit.ellipsisText(c, words, .{ .size = kit.text_body, .line_height = 16, .tabular = true, .color = k.muted }, room);
+            const col = ui.div(c).column().grow().w(0);
+            defer col.end();
+            ui.text(c, words, .{ .size = kit.text_body, .line_height = 16, .tabular = true, .wrap = true, .color = k.muted });
         }
         if (detail.headRef) |head| {
             const branch = ui.div(c).row().wFull().gap(6).itemsCenter().clip();
@@ -323,9 +326,15 @@ fn list(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, width: f32, e
             // Labels go first when the row is narrow; the words keep the rest.
             const label_room = inner - used - 8;
             const n = fittingLabels(c, item.labels, label_room);
-            kit.ellipsisText(c, words, st, @max(40, inner - kit.statusChipWidth(c, state_label, .{}) - 8));
+            {
+                // Long names wrap rather than lose the age at the end.
+                const col = ui.div(c).column().grow().w(0);
+                defer col.end();
+                var wrapped = st;
+                wrapped.wrap = true;
+                ui.text(c, words, wrapped);
+            }
             if (n > 0) {
-                ui.spacer(c);
                 const chips = ui.div(c).row().gap(4).itemsCenter();
                 defer chips.end();
                 for (item.labels[0..n]) |lbl| kit.statusChip(c, k, lbl, .{ .max_w = label_max_w });
@@ -355,7 +364,7 @@ fn emptyList(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, enabled:
         .closed => c.print("No closed {s}", .{noun}),
         .all => c.print("No {s} yet", .{noun}),
     };
-    ui.text(c, title, .{ .size = kit.text_title, .weight = .medium, .color = k.text, .wrap = true });
+    ui.text(c, title, .{ .size = kit.text_title, .weight = .medium, .color = k.text });
     if (page.hasNextPage) {
         if (kit.actionButton(c, k, "Next page", .{ .trailing = .@"alt-arrow-right", .enabled = enabled })) flow.turnPage(a, true);
     } else if (s.filter != .all) {
@@ -471,15 +480,17 @@ fn activity(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page) void {
         ui.key(c, c.print("{s}-{d}", .{ event.id, i }));
         const last = i + 1 == page.events.len;
         const kind = display.eventOf(event.event);
-        const row = ui.div(c).row().wFull().gap(12).itemsStretch();
+        const row = ui.div(c).row().wFull().gap(12).itemsStart();
         defer row.end();
+        // The hairline joining this glyph to the next runs the row's height
+        // as last laid out; a flexible child would grow the row instead.
+        if (!last) if (c.rects.get(row.id())) |r| {
+            if (r.h > 24) ui.div(c).absolute().offset(11.5, 24).w(1).h(r.h - 24).bg(k.border).end();
+        } else c.animationFrame();
         {
-            const rail = ui.div(c).column().w(24).itemsCenter();
-            defer rail.end();
             const dot = ui.div(c).size(24, 24).center().roundedFull().circular().bg(k.hover);
+            defer dot.end();
             icons.icon(c, eventIcon(kind), 12, eventColor(k, kind), 0);
-            dot.end();
-            if (!last) ui.div(c).w(1).grow().bg(k.border).end();
         }
         const body = ui.div(c).column().grow().w(0).pb(if (last) 0 else 16).gap(6);
         defer body.end();

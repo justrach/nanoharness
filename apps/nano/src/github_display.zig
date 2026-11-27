@@ -68,17 +68,18 @@ pub const Counts = struct {
 };
 
 /// The line above the list, honest that it counts only the loaded page:
-/// "30 loaded · 3 open · 1 draft · 3 merged · 2 closed", with "(more on
-/// the next page)" when the host has another page and "Page 2 · " past the
-/// first. States with no items are left out. Empty for an empty page.
+/// "30 loaded · 3 open · 1 draft · 3 merged · 2 closed", then "· more on
+/// next page" when the host has another (last, so a narrow pane cuts it
+/// before the counts), and "Page 2 · " first past page one. States with no
+/// items are left out. Empty for an empty page.
 pub fn summaryLine(buf: []u8, n: Counts, page: usize, has_next: bool) []const u8 {
     if (n.loaded == 0) return "";
     var w: std.Io.Writer = .fixed(buf);
     if (page > 1) w.print("Page {d} · ", .{page}) catch return "";
     w.print("{d} loaded", .{n.loaded}) catch return "";
-    if (has_next) w.writeAll(" (more on the next page)") catch return "";
     const parts = [_]struct { usize, []const u8 }{ .{ n.open, "open" }, .{ n.draft, "draft" }, .{ n.merged, "merged" }, .{ n.closed, "closed" } };
     for (parts) |p| if (p[0] > 0) w.print(" · {d} {s}", .{ p[0], p[1] }) catch return "";
+    if (has_next) w.writeAll(" · more on next page") catch return "";
     return w.buffered();
 }
 
@@ -228,7 +229,7 @@ test "the summary line counts only the loaded page and says when more may exist"
     try testing.expectEqual(Counts{ .loaded = 6, .open = 2, .draft = 1, .merged = 2, .closed = 1 }, n);
     var buf: [160]u8 = undefined;
     try testing.expectEqualStrings("6 loaded · 2 open · 1 draft · 2 merged · 1 closed", summaryLine(&buf, n, 1, false));
-    try testing.expectEqualStrings("6 loaded (more on the next page) · 2 open · 1 draft · 2 merged · 1 closed", summaryLine(&buf, n, 1, true));
+    try testing.expectEqualStrings("6 loaded · 2 open · 1 draft · 2 merged · 1 closed · more on next page", summaryLine(&buf, n, 1, true));
     try testing.expectEqualStrings("Page 3 · 6 loaded · 2 open · 1 draft · 2 merged · 1 closed", summaryLine(&buf, n, 3, false));
     // Issues have no merged or draft items: those parts are left out.
     try testing.expectEqualStrings("4 loaded · 3 open · 1 closed", summaryLine(&buf, .{ .loaded = 4, .open = 3, .closed = 1 }, 1, false));

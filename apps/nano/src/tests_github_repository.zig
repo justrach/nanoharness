@@ -407,7 +407,7 @@ test "repository github browser lists all repository PRs pages filters and issue
         h.t.settle(0.1);
         try testing.expect(h.t.hasText("demo/fieldnotes"));
         // One line counts the loaded page, honestly; the charts stay folded.
-        try testing.expect(h.t.hasText("1 loaded (more on the next page) · 1 open"));
+        try testing.expect(h.t.hasText("1 loaded · 1 open · more on next page"));
         try testing.expect(!h.t.hasText("State split"));
         try testing.expect(h.t.hasText("Polish repository navigation"));
         // No session PR was injected: rows really come from repository results.

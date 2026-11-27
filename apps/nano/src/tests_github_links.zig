@@ -147,7 +147,9 @@ test "github links default real Markdown click opens another repository closed P
     try clickPull(&h, false);
     try nativeOnly(&h);
     try testing.expect(h.t.hasText(pull.detail.?.title));
-    try testing.expect(h.t.hasText("#42 · closed"));
+    // The state chip and the number, as the list and footer badge show them.
+    try testing.expect(h.t.hasText("Closed"));
+    try testing.expect(h.t.containsText("#42 · "));
     try testing.expect(h.t.hasText("Summary"));
     try testing.expect(h.t.hasText("Code"));
     try testing.expect(h.t.hasText("Activity"));
@@ -225,7 +227,7 @@ test "github links second transcript click reuses the native panel for an issue"
     try nativeOnly(&h);
     try request(&h, "issue", 51);
     try testing.expect(h.t.hasText(issue.detail.?.title));
-    try testing.expect(h.t.hasText("Back to issues"));
+    try testing.expect(h.t.hasText("Issues"));
     try testing.expect(!h.t.hasText("Code"));
 }
 
