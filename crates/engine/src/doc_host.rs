@@ -5841,9 +5841,7 @@ impl DocHost {
                         None
                     }
                     Some(spec) => {
-                        let (cwd, fresh) = self
-                            .materialize_worktree(chat_id, &spec, &request.prompt)
-                            .await?;
+                        let (cwd, fresh) = self.materialize_worktree(chat_id, &spec).await?;
                         request.cwd = cwd;
                         fresh
                     }
@@ -5855,8 +5853,7 @@ impl DocHost {
                     ws.claim_chat(chat_id, Some(&request.cwd))?;
                     // A pre-existing row (the client's createChat raced ahead)
                     // still carries the repo folder — repoint it at the fresh
-                    // worktree, and stamp the actual task branch so
-                    // the footer and the title-rename flow see it.
+                    // worktree, and stamp the actual task branch for the footer.
                     if let Some(wt) = &fresh_worktree {
                         if let Err(err) = ws.set_chat_cwd(chat_id, &wt.path) {
                             tracing::warn!(chat = %chat_id, error = %err, "worktree cwd stamp failed");
@@ -6381,7 +6378,6 @@ impl DocHost {
         &self,
         chat_id: &str,
         spec: &harness_proto::WorktreeSpec,
-        task: &str,
     ) -> Result<(String, Option<harness_proto::Worktree>), EngineError> {
         if let Some(ws) = self.workspace()
             && let Ok(Some(chat)) = ws.chat(chat_id)
@@ -6399,7 +6395,7 @@ impl DocHost {
             .get()
             .ok_or_else(|| EngineError::Other("repos engine not wired".into()))?;
         let worktree = repos
-            .create_worktree_for_task(std::path::Path::new(&spec.repo_path), &spec.base, task)
+            .create_worktree_for_chat(std::path::Path::new(&spec.repo_path), &spec.base, chat_id)
             .await?;
         tracing::info!(
             chat = %chat_id,

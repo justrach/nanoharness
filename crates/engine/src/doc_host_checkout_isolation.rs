@@ -133,13 +133,8 @@ impl DocHost {
                 .repos
                 .get()
                 .ok_or_else(|| EngineError::Other("repositories unavailable".into()))?;
-            let task = chat
-                .title
-                .as_deref()
-                .filter(|title| !title.trim().is_empty())
-                .unwrap_or(&request.prompt);
             let tree = repos
-                .create_worktree_for_task(Path::new(&previous.repo_root), base, task)
+                .create_worktree_for_chat(Path::new(&previous.repo_root), base, &handle.chat_id)
                 .await?;
             let source = self
                 .capture_source_context(&tree.path)

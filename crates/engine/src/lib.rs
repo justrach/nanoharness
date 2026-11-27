@@ -372,11 +372,7 @@ impl EngineCore {
             data_dir.to_path_buf(),
             registry.clone(),
         ));
-        sessions.set_titles(TitleGenerator::new(
-            workspace.clone(),
-            registry.clone(),
-            repos.clone(),
-        ));
+        sessions.set_titles(TitleGenerator::new(workspace.clone(), registry.clone()));
         let diff_sync = CheckoutDiffSync::start(repos.clone(), workspace.clone(), &device_id, edge);
         // Turn starts snapshot the checkout tree — the "Latest turn" diff base.
         let turn_diff = diff_sync.clone();

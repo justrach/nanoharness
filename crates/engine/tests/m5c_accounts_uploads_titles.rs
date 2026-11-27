@@ -669,7 +669,7 @@ async fn uploads_chunk_commit_readback_and_jail() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn titling_e2e_names_chat_and_renames_worktree_branch() {
+async fn titling_e2e_names_chat_without_renaming_worktree_branch() {
     let tmp = tempfile::tempdir().expect("tempdir");
     // Worktree root must be inside the tempdir (EngineCore reads the env-less
     // default otherwise) — create the worktree with a dedicated Repos handle.
@@ -772,13 +772,13 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
     })
     .await;
     assert_eq!(chat.title.as_deref(), Some("Fix Login Flow"));
-    // Branch renamed from the title, chat row updated to match.
-    assert_eq!(chat.branch.as_deref(), Some("task/fix-login-flow"));
+    // Chat titles may be derived from the prompt. They must not become refs.
+    assert_eq!(chat.branch.as_deref(), Some(worktree.branch.as_str()));
     let context = chat
         .source_context
         .as_ref()
-        .expect("renamed source context");
-    assert_eq!(context.branch, "task/fix-login-flow");
+        .expect("worktree source context");
+    assert_eq!(context.branch, worktree.branch);
     assert_eq!(context.cwd, original_context.cwd);
     assert_eq!(context.repo_root, original_context.repo_root);
     assert_eq!(context.checkout_id, original_context.checkout_id);
@@ -793,7 +793,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         .expect("git");
     assert_eq!(
         String::from_utf8_lossy(&head.stdout).trim(),
-        "task/fix-login-flow"
+        worktree.branch
     );
 
     // A titled chat is never re-titled: rename, run again, title sticks.

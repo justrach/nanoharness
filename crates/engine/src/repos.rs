@@ -1316,8 +1316,7 @@ impl Repos {
         })
     }
 
-    /// Create a worktree before a task is available (the legacy RPC path).
-    /// Session runs use `create_worktree_for_task` so their branches describe work.
+    /// Create a worktree with no associated chat (the legacy RPC path).
     pub async fn create_worktree(
         &self,
         repo_path: &Path,
@@ -1327,9 +1326,22 @@ impl Repos {
             .await
     }
 
-    /// `git worktree add` an isolated checkout named for the first task request,
-    /// on a fresh `task/<slug>` branch off `branch`. Repeated tasks get a numeric
-    /// suffix rather than an unrelated random label.
+    /// Create a host-owned chat worktree. Share Graff's stable opaque label so
+    /// neither the checkout directory nor its Git branch contains chat text.
+    pub(crate) async fn create_worktree_for_chat(
+        &self,
+        repo_path: &Path,
+        branch: &str,
+        chat_id: &str,
+    ) -> Result<Worktree, EngineError> {
+        let label = harness_proto::graff_worktree::default_name(chat_id);
+        self.create_worktree_for_task(repo_path, branch, &label)
+            .await
+    }
+
+    /// Create an isolated checkout on `task/<slug>` from an explicit label.
+    /// Collisions get a numeric suffix. Automatic chat creation must use
+    /// `create_worktree_for_chat`, not pass a prompt or title here.
     pub async fn create_worktree_for_task(
         &self,
         repo_path: &Path,
@@ -1496,8 +1508,8 @@ impl Repos {
         })
     }
 
-    /// Rename a newly created worktree branch after its chat's generated title
-    /// (port of harness's `renameWorktreeBranch`). Guards:
+    /// Rename an owned worktree branch to an explicitly requested label.
+    /// Automatic chat titles must not be passed here. Guards:
     /// - respect an external checkout/rename: only act while the worktree is still
     ///   on `expected_branch` AND that branch is the original managed branch;
     /// - a title-slug collision gets a stable 6-hex suffix (hash of the worktree
