@@ -93,16 +93,11 @@ pub fn trailingModeButtonsWidth(a: *const App) f32 {
 }
 
 pub fn utilityWidth(a: *const App) f32 {
-    const caption_controls = usesWindowedChatCaption(a);
-    const collapsed = a.view.sidebar_width <= 1;
     const widths = [_]f32{
         if (@import("view_sandbox_strip.zig").toolbarVisible(a)) @import("view_sandbox_strip.zig").toolbar_width else 0,
         @import("view_updates.zig").topbarUpdatesWidth(a),
         trailingModeButtonsWidth(a),
         if (showSidePanelToggle(a)) 28 else 0,
-        if (caption_controls and collapsed) 24 else 0,
-        if (caption_controls and collapsed) 24 else 0,
-        if (caption_controls) 24 else 0,
     };
     var total: f32 = 0;
     for (widths) |w| if (w > 0) {
@@ -114,6 +109,37 @@ pub fn utilityWidth(a: *const App) f32 {
 fn trailingReserve(a: *const App) f32 {
     const width = utilityWidth(a);
     return if (width > 0) width + 10 else 0;
+}
+
+/// A horizontal split shows its panes side by side under the title bar, each
+/// with its own header row (`Layout.pane_row`).
+pub fn paneRow(a: *const App) bool {
+    if (a.view.settings_open or strip.count(a) <= 1) return false;
+    const split = a.tabs.layout() orelse return false;
+    return split.axis == .horizontal and !split.zoomed and strip.layoutExpanded(a) == null and split.panes.items.len > 1;
+}
+
+/// Windowed Zen panes the title bar does not already name wear full
+/// screen's 28pt header strip above their cards (`view_fullscreen_chrome.
+/// chatHeader`), in place of the split's slot row: each pane of a split,
+/// and the one pane under a strip of two or more tabs. A lone chat's title
+/// bar caption is its header (`usesWindowedChatCaption`). A split whose
+/// panes hold tabs of their own keeps the slot row, which shows them.
+pub fn paneHeaders(a: *const App) bool {
+    if (a.view.full_screen or a.view.settings_open or a.settings.uiMode() != .zen) return false;
+    if (paneRow(a)) return !paneTabs(a);
+    return strip.count(a) == 1 and singleSpec(a).n > 1;
+}
+
+fn paneTabs(a: *const App) bool {
+    const split = a.tabs.layout() orelse return false;
+    for (split.groups[0..split.panes.items.len]) |*g| if (g.count() > 1) return true;
+    return false;
+}
+
+/// The title bar carries the active pane's computer picker (`devicePicker`).
+pub fn showsTitlebarDevice(a: *const App) bool {
+    return !a.view.settings_open and showDevicePicker(a);
 }
 
 pub fn layout(c: *ui.Context, a: *const App) Layout {
@@ -163,7 +189,7 @@ pub fn layout(c: *ui.Context, a: *const App) Layout {
         .columns = columns,
         // Horizontal splits always have a pane row, even on wide windows.
         // Opening a utility must not move the pane headers between rows.
-        .pane_row = in_row and (if (split) |s| s.panes.items.len > 1 else false),
+        .pane_row = paneRow(a),
     };
 }
 
@@ -196,11 +222,15 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, lane: Layout, pane_widths:
     const other_pill_w: f32 = if (other_shown > 0) @min(128, @max(72, max_other_budget / @as(f32, @floatFromInt(other_shown)) - 4)) else 0;
     const other_reserve: f32 = if (other_shown > 0) @as(f32, @floatFromInt(other_shown)) * (other_pill_w + 4) else 0;
     if (lane.pane_row) {
-        {
+        // Windowed Zen panes draw their own headers above their cards.
+        if (!paneHeaders(a)) {
             ui.key(c, "instrument-strip");
             const row = ui.div(c).fixed().offset(a.view.chrome.x, chrome.header_height)
                 .size(a.view.chrome.width, chrome.tab_height).row().gap(ws_gutter).itemsCenter().layer(2);
             defer row.end();
+            // Pane captions mark the focused pane as full screen's headers do.
+            pane_captions = !a.view.full_screen;
+            defer pane_captions = false;
             for (lane.targets[0..n], widths[0..n], 0..) |target, width, ix| slot(c, a, k, target, ix, width);
         }
         ui.key(c, "instrument-workspaces");
@@ -221,7 +251,7 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, lane: Layout, pane_widths:
                     @min(ws_win.slot_w, @max(120, c.text.width(split_lbl, .{ .size = 11.5, .weight = vis.weight }) + 38))
                 else
                     ws_win.slot_w;
-                var current = ui.div(c).row().size(pill_w, 28).px(8).gap(6).itemsCenter().rounded(8).clip().control();
+                var current = ui.div(c).row().size(pill_w, 28).px(8).gap(6).itemsCenter().rounded(chrome.tab_pill_radius).clip().control();
                 current = applyTabBox(current, k, vis, true);
                 defer current.end();
                 icons.icon(c, .widget, 14, vis.icon, 0);
@@ -232,7 +262,7 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, lane: Layout, pane_widths:
         }
         if (ws_win.hidden_count > 0) {
             ui.key(c, "split-workspace-overflow");
-            var more = ui.div(c).row().size(overflow_pill_w, 28).center().rounded(8)
+            var more = ui.div(c).row().size(overflow_pill_w, 28).center().rounded(chrome.tab_pill_radius)
                 .bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover).control();
             more = tip.on(more, k, .{ .text = c.print("{d} more open tab{s}", .{ ws_win.hidden_count, if (ws_win.hidden_count == 1) "" else "s" }), .look = .tab });
             defer more.end();
@@ -320,7 +350,7 @@ fn topWorkspacePill(c: *ui.Context, a: *App, k: theme.Colors, ws: usize, pill_w:
     const ch = if (cid) |id| a.findChat(id) else null;
     const t_name = if (ch) |v| @import("view_sidebar.zig").chatLabel(v) else "New tab";
     const panes_n = workspacePaneCount(a, ws);
-    var pill = ui.div(c).row().size(pill_w, 28).px(8).gap(6).itemsCenter().rounded(8).clip().control();
+    var pill = ui.div(c).row().size(pill_w, 28).px(8).gap(6).itemsCenter().rounded(chrome.tab_pill_radius).clip().control();
     pill = applyTabBox(pill, k, tabStyle(k, false, false), false);
     defer pill.end();
     const pill_hot = pill.hovered();
@@ -419,9 +449,18 @@ fn inactiveTabPill(c: *ui.Context, a: *App, k: theme.Colors, slot_ix: usize, pan
     }
 }
 
+/// The slots being drawn are a windowed split's pane captions, one over
+/// each card. There the focused pane is marked as in full screen's header
+/// strip, by an accent dot and stronger text, not by a filled tab.
+var pane_captions = false;
+
 fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize, width: f32, group_hot: bool) void {
     ui.key(c, c.print("instrument-slot-{d}", .{ix}));
-    const on = strip.same(strip.active(a), target);
+    const focused = strip.same(strip.active(a), target);
+    const quiet = pane_captions;
+    // Filled like a selected tab only outside the pane captions.
+    const github_child_tab = target == .host and @import("app_github_repository.zig").surface(a);
+    const on = focused and (!quiet or github_child_tab);
     const name = strip.title(a, target);
     const github_child = target == .host and @import("app_github_repository.zig").surface(a);
     const computer = if (github_child) c.print("↳ {s}", .{@import("app_github_repository.zig").ownerTitle(a)}) else strip.deviceLabel(a, strip.device(a, target));
@@ -450,7 +489,14 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
         if (c.rects.get(c.node(box.index).id)) |r| a.view.strip.anchor = r;
     }
     const hot = box.hovered() or group_hot;
-    const vis = tabStyle(k, on, hot);
+    var vis = tabStyle(k, on, hot);
+    if (quiet and focused) {
+        vis.fg = k.text;
+        vis.icon = k.text;
+        vis.weight = .medium;
+        // In the slot's left padding, so the labels keep their room.
+        ui.div(c).absolute().offset(1, (chrome.tab_height - 5) / 2).size(5, 5).rounded(2.5).bg(k.accent.alpha(0.92)).end();
+    }
     const show_controls = hot or c.focus == c.node(box.index).id;
     const menu_count = strip.tabCount(a, target);
     var handled = false;
@@ -736,13 +782,14 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     const spec = singleSpec(a);
     const n = spec.n;
     const selected = spec.selected;
-    // One windowed Zen conversation reads as a caption, not a selected tab in an empty strip.
+    // One windowed Zen conversation reads as a caption, not a selected tab
+    // in an empty strip: full screen's pane header, in the title bar. It
+    // starts where the strip's first tab does, flush with its card, so a
+    // second tab, Settings or the sidebar never moves it sideways.
     const lone_caption = usesWindowedChatCaption(a);
     const caption_text: ui.TextStyle = .{ .size = 11.5, .line_height = 15, .weight = .semibold, .color = k.text };
     const caption_dot_w: f32 = 5;
-    const lane_x = if (lone_caption)
-        @max(caption.leading, a.view.chrome.x + 16) - 8
-    else if (zen)
+    const lane_x = if (zen)
         zenTabStartX(a)
     else
         a.view.sidebar_width + left;
@@ -768,8 +815,16 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     const lane = ui.div(c).fixed().offset(lane_x, chrome.tab_top).size(available, chrome.tab_height + chrome.tab_top).clip().layer(2);
     defer lane.end();
     var row = ui.div(c).absolute().offset(0, 0).row().h(chrome.tab_height).gap(3).itemsCenter();
-    if (lone_caption) row = row.wFull().justifyEnd();
+    if (lone_caption) row = row.wFull();
     defer row.end();
+    // The caption's project, branch and remote computer, as full screen's
+    // header shows them, at the lane's far end beside the computer picker.
+    const fs_chrome = @import("view_fullscreen_chrome.zig");
+    const lone_id: fs_chrome.Identity = if (lone_caption) fs_chrome.identityOf(c, a, a.findChat(a.selected.?)) else .{};
+    const lone_room: fs_chrome.ChipRoom = if (lone_caption)
+        fs_chrome.chipRoom(c, lone_id, a.view.chrome.chat_width, !show_dev and lone_id.is_remote, @max(0, available - 160 - 8))
+    else
+        .{};
     for (win_start..win_end) |ix| {
         const item = spec.itemAt(ix);
         const chat = singleItemChat(a, spec, ix);
@@ -780,14 +835,14 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
         const ch = if (chat) |id| a.findChat(id) else null;
         const label = if (ch) |v| @import("view_sidebar.zig").chatLabel(v) else "New tab";
         const pill_w: f32 = if (lone_caption)
-            @min(slot_w, @ceil(c.text.width(label, caption_text)) + 16 + caption_dot_w + 6 + 14 + 6 + 22)
+            @min(@min(slot_w, @max(0, available - lone_room.width() - 8)), @ceil(c.text.width(label, caption_text)) + 16 + caption_dot_w + 6 + 14 + 6 + 22)
         else if (zen and n == 1)
             @min(slot_w, @max(140, c.text.width(label, .{ .size = 12.5, .weight = .medium }) + 58))
         else
             slot_w;
         ui.key(c, c.print("panel-tab-{d}", .{ix}));
         const active = ix == selected;
-        var cap = ui.div(c).row().size(pill_w, if (zen) @as(f32, 28) else 30).px(8).gap(6).itemsCenter().rounded(7).clip().control();
+        var cap = ui.div(c).row().size(pill_w, if (zen) @as(f32, 28) else 30).px(8).gap(6).itemsCenter().rounded(chrome.tab_pill_radius).clip().control();
         if (!lone_caption) cap = applyTabBox(cap, k, tabStyle(k, active, false), active);
         defer cap.end();
         if (active) {
@@ -867,9 +922,15 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
         }
         if (kit.secondaryClicked(cap)) strip.open(a, .panel, .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 }, c.rects.get(c.node(cap.index).id));
     }
+    if (lone_caption and lone_room.width() > 0) {
+        ui.div(c).grow().end();
+        const chips = ui.div(c).row().gap(6).itemsCenter();
+        defer chips.end();
+        fs_chrome.identityChips(c, a, k, if (a.tabs.layout()) |s| s.focus else 0, lone_id, lone_room, true);
+    }
     if (hidden_count > 0) {
         ui.key(c, "panel-tabs-overflow");
-        var more = ui.div(c).row().size(overflow_pill_w, if (zen) @as(f32, 28) else 26).center().rounded(if (zen) @as(f32, 7) else 6)
+        var more = ui.div(c).row().size(overflow_pill_w, if (zen) @as(f32, 28) else 26).center().rounded(if (zen) chrome.tab_pill_radius else 6)
             .bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover).control();
         more = @import("view_tooltip.zig").on(more, k, .{ .text = c.print("{d} more open tab{s}", .{ hidden_count, if (hidden_count == 1) "" else "s" }), .look = .tab });
         defer more.end();

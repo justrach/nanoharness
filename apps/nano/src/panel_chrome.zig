@@ -6,14 +6,29 @@ const std = @import("std");
 pub const gutter: f32 = 8;
 pub const zen_gutter: f32 = 6;
 pub const zen_radius: f32 = 12;
+/// What sits inside a rounded surface is rounded concentrically with it
+/// (DESIGN.md rule 5, `popover::nested_radius`): outer - border - padding,
+/// square at zero.
+pub fn nestedRadius(outer: f32, border: f32, padding: f32) f32 {
+    return @max(0, outer - border - padding);
+}
+/// A card's clipped content: `zen_radius` less the card's 1pt hairline and
+/// its 1pt inset (`view_panel_chrome.zenBodyOn`).
+pub const zen_content_radius: f32 = nestedRadius(zen_radius, 1, 1);
 pub const fs_handle_h: f32 = 10;
 pub const fs_pane_header_h: f32 = 28;
 pub const fs_top_inset: f32 = fs_handle_h + fs_pane_header_h;
 pub const titlebar_height: f32 = 38;
 pub const top_pad: f32 = 4;
 pub const header_height: f32 = titlebar_height + top_pad;
+/// A windowed card under full screen's 28pt pane header: the header takes
+/// the title bar's bottom pad, as it takes the bezel handle's place in full
+/// screen (`fs_top_inset`).
+pub const windowed_pane_top: f32 = titlebar_height + fs_pane_header_h;
 pub const tab_height: f32 = 32;
 pub const tab_top: f32 = (header_height - tab_height) / 2;
+/// Every 28pt title-bar pill (tab, caption, workspace, overflow) rounds alike.
+pub const tab_pill_radius: f32 = 7;
 pub const body_radius: f32 = 10;
 pub const shoulder: f32 = 8;
 pub const slot_min: f32 = 72;
@@ -207,6 +222,11 @@ test "a side panel gets the old width when the others can spare it" {
     const tight = 1136.0 - 8.0 * 3.0;
     try std.testing.expectApproxEqAbs(@as(f32, (tight - 660.0) / tight), sidePanelShare(1136, 3, 520), 0.001);
     try std.testing.expectEqual(@as(f32, 0.25), sidePanelShare(600, 3, 520));
+}
+
+test "a card's content clip is concentric with the card" {
+    try std.testing.expectEqual(@as(f32, 10), zen_content_radius);
+    try std.testing.expectEqual(@as(f32, 0), nestedRadius(4, 1, 4));
 }
 
 test "zen frame geometry aligns cards below 42pt header with symmetric 6pt gutters" {

@@ -178,7 +178,10 @@ fn computeFooterLayout(c: *ui.Context, a: *const App, w: f32, model_w: f32) Foot
     const strip = @import("view_tab_strip.zig");
     const space = a.newChatSpace();
     const git_chrome = a.settings.hierarchyProfile().shows_git_checkout_chrome;
-    const show_computer = git_chrome or a.devices.items.len > 0 or a.view.full_screen;
+    // A windowed pane header already holds this draft's project and
+    // computer pickers; each is shown once (`paneHeaders`).
+    const header_pickers = strip.rendering.paneHeaders(a);
+    const show_computer = !header_pickers and (git_chrome or a.devices.items.len > 0 or a.view.full_screen);
     var labels: [control_count]?[]const u8 = @splat(null);
     labels[ix(.mode)] = modeLabel(a.new_chat_mode);
     if (composer.followUpShown(a)) labels[ix(.follow)] = composer.followUpLabel(a);
@@ -187,7 +190,7 @@ fn computeFooterLayout(c: *ui.Context, a: *const App, w: f32, model_w: f32) Foot
         labels[ix(.computer)] = if (git_chrome) c.print("Run on: {s}", .{dev}) else dev;
     }
     // Desktop exposes project choice only before sending a coding session.
-    if (!a.new_chat_mode) labels[ix(.project)] = if (space) |s| s.name else "No project";
+    if (!a.new_chat_mode and !header_pickers) labels[ix(.project)] = if (space) |s| s.name else "No project";
     if (git_chrome) if (space) |s| if (s.git) {
         labels[ix(.checkout)] = checkoutLabel(a.new_checkout_local);
         labels[ix(.branch)] = if (a.new_ref) |ref| (if (a.new_checkout_local) ref else c.print("From {s}", .{ref})) else "Select ref";

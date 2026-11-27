@@ -71,6 +71,23 @@ pub const Harness = struct {
         };
         return error.MissingTitlebarButton;
     }
+    /// The main column's rounded-12 card.
+    fn zenCard(h: *Harness) !ui.Rect {
+        for (h.t.ctx.nodes.items) |node| {
+            if (node.style.radius == chrome.zen_radius and node.rect.x >= h.a.view.sidebar_width and node.rect.w > 400 and node.rect.h > 400) return node.rect;
+        }
+        return error.MissingZenCard;
+    }
+    /// The 28pt title-bar control holding `text`.
+    fn pillAround(h: *Harness, text: []const u8) ?ui.Rect {
+        const label = h.topText(text) orelse return null;
+        for (h.t.ctx.nodes.items) |node| {
+            const r = node.rect;
+            if (!node.style.control or @abs(r.h - 28) > 0.5) continue;
+            if (r.x <= label.x and label.x + label.w <= r.x + r.w + 0.5 and r.y <= label.y and label.y + label.h <= r.y + r.h) return r;
+        }
+        return null;
+    }
     fn snap(h: *Harness, name: []const u8) void {
         const dir = std.c.getenv("NANO_SNAP_DIR") orelse return;
         var buf: [1024]u8 = undefined;
@@ -84,47 +101,307 @@ fn replace(list: anytype, text: []const u8) !void {
     try list.replace(parsed.value);
 }
 
-test "single Zen chat ends beside the device and controls with or without its sidebar" {
+test "windowed chrome: a lone Zen caption starts where its tab strip would and slides with the sidebar instead of jumping" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
     h.a.settings.applyUiMode(.zen);
+    h.t.settle(1);
     try testing.expectEqual(@as(usize, 1), h.a.tabs.items.items.len);
+    const leading = @import("window_chrome.zig").leading;
 
-    var flat = true;
-    var sidebar_x: ?f32 = null;
-    for ([_]bool{ true, false }) |sidebar_open| {
-        h.a.view.sidebar_open = sidebar_open;
-        h.t.settle(1);
-        h.snap(if (sidebar_open) "caption-sidebar-open" else "caption-sidebar-closed");
-        const cap = h.t.ctx.nodes.items[try h.captionControl()];
-        flat = flat and (if (cap.style.background) |bg| bg.a == 0 else true) and
-            cap.style.border == null and cap.style.shadows.len == 0;
+    // Open: flat, flush with its card, as full screen's pane header is.
+    h.snap("caption-sidebar-open");
+    var cap = h.t.ctx.nodes.items[try h.captionControl()];
+    try testing.expect((if (cap.style.background) |bg| bg.a == 0 else true) and cap.style.border == null and cap.style.shadows.len == 0);
+    const card = try h.zenCard();
+    try testing.expectApproxEqAbs(card.x, cap.rect.x, 0.5);
+    try testing.expectApproxEqAbs(@as(f32, 42), card.y, 0.5);
+    // The sidebar toggle keeps its one home, right of the traffic lights.
+    const toggle_open = try h.button("sidebar-minimalistic-left");
+    try testing.expectApproxEqAbs(leading, toggle_open.x, 0.5);
 
-        const native_caption = @import("window_chrome.zig");
-        const utilities = strip.rendering.utilityWidth(&h.a);
-        const expected_end = h.t.ctx.size.w - native_caption.trailing - utilities - 10 - chrome.device_room - 12;
-        try testing.expectApproxEqAbs(expected_end, cap.rect.x + cap.rect.w, 1);
-        const sidebar = try h.button("sidebar-minimalistic-left");
-        try testing.expectApproxEqAbs(h.t.ctx.size.w - native_caption.trailing - 10, sidebar.x + sidebar.w, 1);
-        try testing.expectApproxEqAbs(@as(f32, 21), sidebar.y + sidebar.h / 2, 0.01);
-        if (sidebar_x) |x| try testing.expectApproxEqAbs(x, sidebar.x, 1) else sidebar_x = sidebar.x;
-        if (sidebar_open) {
-            try testing.expectError(error.MissingTitlebarButton, h.button("clock-circle"));
-        } else {
-            const history = try h.button("clock-circle");
-            const mode = try h.button("magic-stick-3");
-            try testing.expect(history.x < mode.x and mode.x < sidebar.x);
-            try testing.expect(history.x >= cap.rect.x + cap.rect.w);
-            try testing.expectApproxEqAbs(@as(f32, 21), history.y + history.h / 2, 0.01);
-            try testing.expectApproxEqAbs(@as(f32, 21), mode.y + mode.h / 2, 0.01);
-        }
+    // Collapsing: the caption glides with its card, never a step bigger than the seam's.
+    h.a.view.sidebar_open = false;
+    var last_x = cap.rect.x;
+    var last_side = h.a.view.sidebar_width;
+    for (0..40) |_| {
+        h.t.advance(1.0 / 60.0);
+        cap = h.t.ctx.nodes.items[try h.captionControl()];
+        try testing.expect(@abs(cap.rect.x - last_x) <= @abs(h.a.view.sidebar_width - last_side) + 0.5);
+        last_x = cap.rect.x;
+        last_side = h.a.view.sidebar_width;
     }
+    h.t.settle(1);
+    try testing.expectEqual(@as(f32, 0), h.a.view.sidebar_width);
+    h.snap("caption-sidebar-closed");
+    cap = h.t.ctx.nodes.items[try h.captionControl()];
+    try testing.expectApproxEqAbs(last_x, cap.rect.x, 0.5);
+    const toggle_closed = try h.button("sidebar-minimalistic-left");
+    try testing.expectApproxEqAbs(leading, toggle_closed.x, 0.5);
+    const history = try h.button("clock-circle");
+    const mode = try h.button("magic-stick-3");
+    try testing.expect(toggle_closed.x < history.x and history.x < mode.x);
+    try testing.expect(mode.x + mode.w + 14 <= cap.rect.x + 0.5);
+
+    // A second tab starts where the caption was: the strip does not move it.
+    const lone_x = cap.rect.x;
+    h.a.openChatInTab("b");
+    h.t.settle(1);
+    const first_tab = h.pillAround("Alpha") orelse return error.MissingFirstTab;
+    try testing.expectApproxEqAbs(lone_x, first_tab.x, 0.5);
     h.a.view.full_screen = true;
     h.t.settle(1);
     h.snap("caption-fullscreen");
-    try testing.expect(flat);
-    try testing.expectEqualStrings("a", h.a.selected.?);
+}
+
+/// The control around the `name` glyph in the header band above the cards, between `left` and `right`.
+fn headerIcon(h: *Harness, comptime name: []const u8, left: f32, right: f32) !ui.Rect {
+    const top = h.a.view.chrome.y - chrome.fs_pane_header_h;
+    for (h.t.ctx.nodes.items, 0..) |node, i| switch (node.content) {
+        .image => |im| if (im.source == .encoded and std.mem.eql(u8, im.source.encoded, @import("icons_svg").get(name)) and
+            node.rect.y >= top - 0.5 and node.rect.y + node.rect.h <= h.a.view.chrome.y + 0.5 and
+            node.rect.x >= left and node.rect.x < right)
+        {
+            var at: u32 = @intCast(i);
+            while (at != std.math.maxInt(u32)) : (at = h.t.ctx.nodes.items[at].parent) {
+                const parent = h.t.ctx.nodes.items[at];
+                if (parent.style.control) return parent.rect;
+            }
+        },
+        else => {},
+    };
+    return error.MissingPaneHeaderControl;
+}
+
+fn firstText(h: *Harness, text: []const u8, left: f32) ?ui.Rect {
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |tx| if (std.mem.eql(u8, tx.str, text) and node.rect.x >= left) return node.rect,
+        else => {},
+    };
+    return null;
+}
+
+fn countText(h: *Harness, text: []const u8, left: f32, right: f32, below: f32) usize {
+    var n: usize = 0;
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |tx| if (std.mem.eql(u8, tx.str, text) and node.rect.x >= left and node.rect.x < right and node.rect.y < below) {
+            n += 1;
+        },
+        else => {},
+    };
+    return n;
+}
+
+test "windowed chrome: a Zen split names each pane's chat, project and computer once, in one header above its card" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    h.a.splitPane(.horizontal);
+    h.a.openChat("b", "remote-project");
+    h.t.settle(1);
+    h.snap("windowed-zen-split");
+
+    // Cards start under the title bar and one 28pt header, as full screen's start under the bezel handle and one.
+    const card_top = chrome.titlebar_height + chrome.fs_pane_header_h;
+    try testing.expectEqual(card_top, h.a.view.chrome.y);
+    const side = h.a.view.sidebar_width;
+    const right = h.t.ctx.size.w;
+    for ([_][]const u8{ "Alpha", "Beta" }) |title| {
+        try testing.expectEqual(@as(usize, 1), countText(&h, title, side, right, right));
+        const r = firstText(&h, title, side) orelse return error.MissingPaneTitle;
+        try testing.expect(r.y >= card_top - chrome.fs_pane_header_h and r.y + r.h <= card_top);
+    }
+    // Above each card's content: one project chip and at most one computer per pane.
+    const near_top = card_top + 40;
+    try testing.expectEqual(@as(usize, 1), countText(&h, "fieldnotes", side, right, near_top));
+    try testing.expectEqual(@as(usize, 1), countText(&h, "remote-project", side, right, near_top));
+    try testing.expectEqual(@as(usize, 1), countText(&h, "Build box", side, right, near_top));
+    try testing.expect(countText(&h, "Studio", side, right, near_top) <= 1);
+}
+
+test "windowed chrome: each Zen split pane header carries full screen's swap, zoom and close" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    h.a.splitPane(.horizontal);
+    h.a.openChat("b", "remote-project");
+    h.t.settle(1);
+    const mid = h.a.view.chrome.x + h.a.view.chrome.chat_width / 2;
+    const w = h.t.ctx.size.w;
+    // Same glyphs and handlers as full screen's (`trailingControls`).
+    _ = try headerIcon(&h, "alt-arrow-left", mid, w);
+    _ = try headerIcon(&h, "expand-arrows", 0, mid);
+    _ = try headerIcon(&h, "close", 0, mid);
+    _ = try headerIcon(&h, "close", mid, w);
+
+    const swap = try headerIcon(&h, "alt-arrow-right", 0, mid);
+    h.t.click(swap.x + swap.w / 2, swap.y + swap.h / 2);
+    h.t.settle(1);
+    try testing.expectEqualStrings("b", h.a.tabs.layout().?.panes.items[0].?);
+
+    const zoom = try headerIcon(&h, "expand-arrows", mid, w);
+    h.t.click(zoom.x + zoom.w / 2, zoom.y + zoom.h / 2);
+    h.t.settle(1);
+    try testing.expect(h.a.view.strip.expanded != null);
+    try testing.expect(h.a.tabs.layout().?.zoomed);
+    // Restore the panes as the zoomed tab's own control would.
+    strip.queue(&h.a, .{ .zoom = .{ .chat = 1 } });
+    h.t.settle(1);
+    try testing.expect(!h.a.tabs.layout().?.zoomed);
+
+    const close = try headerIcon(&h, "close", mid, w);
+    h.t.click(close.x + close.w / 2, close.y + close.h / 2);
+    h.t.settle(1);
+    try testing.expectEqual(@as(usize, 1), strip.chatCount(&h.a));
+}
+
+test "windowed chrome: three Zen panes each keep one header, its focus cue a dot, its controls inside the pane" {
+    for ([_]f32{ 1340, 1000 }) |width| {
+        var h: Harness = undefined;
+        try h.init(false);
+        defer h.deinit();
+        h.a.settings.applyUiMode(.zen);
+        try replace(&h.a.chats,
+            \\[{"id":"a","deviceId":"local","title":"Alpha layout review with a longer synthetic title","spaceId":"local-project","archived":false},
+            \\ {"id":"b","deviceId":"remote","title":"Beta","spaceId":"remote-project","archived":false},
+            \\ {"id":"c","deviceId":"local","title":"Gamma notes","spaceId":"local-project","archived":false}]
+        );
+        h.a.splitPane(.horizontal);
+        h.a.openChat("b", "remote-project");
+        h.a.splitPane(.horizontal);
+        h.a.openChat("c", "local-project");
+        h.t.resize(width, 780);
+        h.t.settle(1);
+        try testing.expectEqual(@as(usize, 3), strip.chatCount(&h.a));
+        try testing.expectEqual(chrome.titlebar_height + chrome.fs_pane_header_h, h.a.view.chrome.y);
+        const side = h.a.view.sidebar_width;
+        // Each pane's title once; the long one may shorten but is never doubled.
+        try testing.expectEqual(@as(usize, 1), countText(&h, "Beta", side, width, width));
+        try testing.expectEqual(@as(usize, 1), countText(&h, "Gamma notes", side, width, width));
+        // Cards, and in each pane's header its own close control.
+        var cards: [3]ui.Rect = undefined;
+        var n: usize = 0;
+        for (h.t.ctx.nodes.items) |node| {
+            if (node.style.radius == chrome.zen_radius and @abs(node.rect.y - h.a.view.chrome.y) < 0.5 and node.rect.x >= side and node.rect.h > 300) {
+                if (n < cards.len) cards[n] = node.rect;
+                n += 1;
+            }
+        }
+        try testing.expectEqual(@as(usize, 3), n);
+        var dots: usize = 0;
+        for (cards, 0..) |card, i| {
+            const close = try headerIcon(&h, "close", card.x, card.x + card.w);
+            try testing.expect(close.x >= card.x and close.x + close.w <= card.x + card.w + 0.5);
+            for (h.t.ctx.nodes.items) |node| {
+                const r = node.rect;
+                if (r.w == 5 and r.h == 5 and r.y >= card.y - chrome.fs_pane_header_h and r.y < card.y and r.x >= card.x and r.x < card.x + card.w) {
+                    dots += 1;
+                    // The focused pane is the last one opened.
+                    try testing.expectEqual(@as(usize, 2), i);
+                }
+            }
+        }
+        try testing.expectEqual(@as(usize, 1), dots);
+        // No pane caption is drawn as a filled tab above the cards.
+        for (h.t.ctx.nodes.items) |node| {
+            const r = node.rect;
+            if (r.y >= chrome.header_height and r.y < h.a.view.chrome.y and node.style.control) {
+                if (node.style.background) |bg| try testing.expect(bg.a < 0.5);
+            }
+        }
+        h.snap(if (width > 1200) "windowed-zen-three-wide" else "windowed-zen-three-narrow");
+    }
+}
+
+test "windowed chrome: three Developer pane captions mark the focused pane with a dot, not a filled tab" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.developer);
+    h.a.splitPane(.horizontal);
+    h.a.openChat("b", "remote-project");
+    h.a.splitPane(.horizontal);
+    h.t.resize(1340, 780);
+    h.t.settle(1);
+    try testing.expectEqual(@as(usize, 3), strip.chatCount(&h.a));
+    const top = chrome.header_height - 0.5;
+    var slots: usize = 0;
+    var dots: usize = 0;
+    var dot_x: f32 = 0;
+    for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (r.y < top or r.y >= h.a.view.chrome.y) continue;
+        if (node.style.control and @abs(r.h - chrome.tab_height) < 0.5 and r.w > 100) {
+            slots += 1;
+            if (node.style.background) |bg| try testing.expect(bg.a < 0.5);
+        }
+        if (r.w == 5 and r.h == 5) {
+            dots += 1;
+            dot_x = r.x;
+        }
+    }
+    try testing.expectEqual(@as(usize, 3), slots);
+    try testing.expectEqual(@as(usize, 1), dots);
+    // The third pane, just split off, has focus.
+    try testing.expect(dot_x > h.a.view.chrome.x + h.a.view.chrome.chat_width * 2 / 3);
+}
+
+test "windowed chrome: a Zen split whose pane holds tabs keeps the slot row that shows them" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    h.a.splitPane(.horizontal);
+    h.a.addChatTab(false);
+    h.t.settle(1);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.groups[1].count());
+    try testing.expect(!strip.rendering.paneHeaders(&h.a));
+    try testing.expectEqual(chrome.header_height + chrome.tab_height + chrome.zen_gutter, h.a.view.chrome.y);
+}
+
+test "windowed chrome: a Zen split draft shows its project and computer once and its composer lines up with a chat's" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    h.a.splitPane(.horizontal);
+    h.t.settle(1);
+    try testing.expect(h.a.selected == null);
+    h.snap("windowed-zen-split-draft");
+    const mid = h.a.view.chrome.x + h.a.view.chrome.chat_width / 2;
+    const w = h.t.ctx.size.w;
+    const target = strip.active(&h.a);
+    const computer = strip.deviceLabel(&h.a, strip.device(&h.a, target));
+    const project = if (strip.folder(&h.a, target)) |f| f.name else "No project";
+    try testing.expectEqual(@as(usize, 1), countText(&h, computer, mid, w, w));
+    try testing.expectEqual(@as(usize, 1), countText(&h, project, mid, w, w));
+    const draft = h.a.view.composer_anchor orelse return error.MissingDraftComposer;
+
+    h.a.openChat("b", "remote-project");
+    h.t.settle(1);
+    const chat = h.a.view.composer_anchor orelse return error.MissingChatComposer;
+    try testing.expectApproxEqAbs(chat.y + chat.h, draft.y + draft.h, 1);
+}
+
+test "windowed chrome: the full screen top peek offers Exit full screen once" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.setFullScreen(true);
+    h.t.settle(1);
+    h.a.view.fs_top_peek = true;
+    h.t.settle(1);
+    var exits: usize = 0;
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .image => |im| if (node.rect.y < chrome.header_height and im.source == .encoded and std.mem.eql(u8, im.source.encoded, @import("icons_svg").get("expand-arrows"))) {
+            exits += 1;
+        },
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 1), exits);
 }
 
 test "session navigation parity opens archived history outside a blank split pane" {
@@ -1322,7 +1599,7 @@ test "narrow side panel picker cards stay unclipped and topbar plus never overla
     try testing.expect(plus.x + plus.w <= toggle.x - 2);
 }
 
-test "collapsed-sidebar horizontal split keeps tabs aligned to panes" {
+test "collapsed-sidebar horizontal split keeps pane headers aligned to panes" {
     var h: Harness = undefined;
     try h.init(false);
     defer h.deinit();
@@ -1367,7 +1644,8 @@ fn expectSplitTabsAligned(h: *Harness) !void {
     var pane_rects: [4]ui.Rect = undefined;
     for (h.t.ctx.nodes.items) |node| {
         const r = node.rect;
-        if (r.y < h.a.view.chrome.y and @abs(r.h - chrome.tab_height) < 0.5 and @abs(node.style.radius - 6) < 0.5 and node.style.control and r.w >= 40) {
+        // Zen panes' own header strips (`paneHeaders`), one above each card.
+        if (@abs(r.y - (h.a.view.chrome.y - chrome.fs_pane_header_h)) < 0.5 and @abs(r.h - chrome.fs_pane_header_h) < 0.5 and node.style.clip and r.w >= 40) {
             try testing.expect(tabs_found < tab_rects.len);
             tab_rects[tabs_found] = r;
             tabs_found += 1;
@@ -1533,14 +1811,18 @@ test "browse-style top tab bar highlights only the active tab in stable index or
     var top_inactive: usize = 0;
     var active_x: f32 = 0;
     var rightmost_tab_right: f32 = 0;
-    var pane_active: usize = 0;
-    var pane_inactive: usize = 0;
-    var pane_active_x: f32 = 0;
-    var pane_inactive_x: f32 = 0;
+    // Each Zen pane names itself in its own header above its card
+    // (`paneHeaders`); only the focused one carries the accent dot.
+    var pane_dots: usize = 0;
+    var pane_dot_x: f32 = 0;
     for (h.t.ctx.nodes.items) |node| {
         const r = node.rect;
+        if (r.w == 5 and r.h == 5 and r.y >= h.a.view.chrome.y - chrome.fs_pane_header_h and r.y < h.a.view.chrome.y) {
+            pane_dots += 1;
+            pane_dot_x = r.x;
+        }
         if (!node.style.control) continue;
-        if (r.y < chrome.header_height and @abs(r.h - 28) < 0.5 and r.w >= 72) {
+        if (r.y + r.h <= chrome.header_height and @abs(r.h - 28) < 0.5 and r.w >= 72) {
             rightmost_tab_right = @max(rightmost_tab_right, r.x + r.w);
             const bg = node.style.background orelse return error.MissingTabBackground;
             if (bg.a > 0.5) {
@@ -1554,26 +1836,13 @@ test "browse-style top tab bar highlights only the active tab in stable index or
                 try testing.expectEqual(@as(usize, 0), node.style.shadows.len);
                 top_inactive += 1;
             }
-        } else if (r.y >= chrome.header_height - 0.5 and r.y < h.a.view.chrome.y and @abs(r.h - chrome.tab_height) < 0.5 and @abs(node.style.radius - 6) < 0.5) {
-            const bg = node.style.background orelse return error.MissingPaneHeaderBackground;
-            if (bg.a > 0.5) {
-                try testing.expect(node.style.border != null);
-                pane_active += 1;
-                pane_active_x = r.x;
-            } else {
-                try testing.expectEqual(@as(f32, 0), bg.a);
-                try testing.expect(node.style.border == null);
-                pane_inactive += 1;
-                pane_inactive_x = r.x;
-            }
         }
     }
     try testing.expectEqual(@as(usize, 1), top_active);
     try testing.expectEqual(@as(usize, 5), top_inactive);
     try testing.expect(active_x > t1.x and active_x < t3.x);
-    try testing.expectEqual(@as(usize, 1), pane_active);
-    try testing.expectEqual(@as(usize, 1), pane_inactive);
-    try testing.expect(pane_active_x > pane_inactive_x);
+    try testing.expectEqual(@as(usize, 1), pane_dots);
+    try testing.expect(pane_dot_x > h.a.view.chrome.x + h.a.view.chrome.chat_width / 2);
 
     // 3. New-tab (+) button sits immediately after the tab run instead of pinned far right.
     var plus_rect: ?ui.Rect = null;
@@ -1605,7 +1874,7 @@ test "browse-style top tab bar highlights only the active tab in stable index or
     for (h.t.ctx.nodes.items) |node| {
         const r = node.rect;
         if (!node.style.control) continue;
-        if (r.y < chrome.header_height and @abs(r.h - 28) < 0.5 and r.w >= 72) {
+        if (r.y + r.h <= chrome.header_height and @abs(r.h - 28) < 0.5 and r.w >= 72) {
             const bg = node.style.background orelse return error.MissingSingleTabBackground;
             if (bg.a > 0.5) {
                 try testing.expect(node.style.border != null);

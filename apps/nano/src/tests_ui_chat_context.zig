@@ -71,7 +71,7 @@ fn seedTranscript(h: *Harness) !void {
     try h.a.transcript.apply(parsed.value);
 }
 
-test "Zen mode shows full project, chat title, and git branch inside the card and footer with 6 collapsed-sidebar tabs" {
+test "Zen mode shows full project, chat title, and git branch in the header above the card and footer with 6 collapsed-sidebar tabs" {
     var h: Harness = undefined;
     try h.init(false);
     defer h.deinit();
@@ -90,13 +90,16 @@ test "Zen mode shows full project, chat title, and git branch inside the card an
     const card_top = h.a.view.chrome.y;
     const pill = h.a.view.composer_anchor orelse return error.MissingComposer;
 
-    // Context header inside card (below header_height, within the first 32pt of card).
+    // Under a strip of tabs the pane wears full screen's 28pt header strip
+    // directly above its card (`paneHeaders`), not a second header inside it.
+    try testing.expectEqual(@as(f32, chrome.windowed_pane_top), card_top);
+    const band = card_top - chrome.fs_pane_header_h;
     const hdr_proj = h.t.findText("fieldnotes") orelse return error.MissingHeaderProject;
-    try testing.expect(hdr_proj.y >= card_top and hdr_proj.y + hdr_proj.h <= card_top + 32);
+    try testing.expect(hdr_proj.y >= band and hdr_proj.y + hdr_proj.h <= card_top);
     const hdr_title = h.t.findText("Cedar layout audit for desktop shell") orelse return error.MissingHeaderTitle;
-    try testing.expect(hdr_title.y >= card_top and hdr_title.y + hdr_title.h <= card_top + 32);
+    try testing.expect(hdr_title.y >= band and hdr_title.y + hdr_title.h <= card_top);
     const hdr_branch = h.t.findText("feat/context-bar") orelse return error.MissingHeaderBranch;
-    try testing.expect(hdr_branch.y >= card_top and hdr_branch.y + hdr_branch.h <= card_top + 32);
+    try testing.expect(hdr_branch.y >= band and hdr_branch.y + hdr_branch.h <= card_top);
     // Zen footer breadcrumb sits under the composer pill.
     var footer_proj = false;
     var footer_branch = false;
