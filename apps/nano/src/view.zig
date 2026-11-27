@@ -1202,13 +1202,13 @@ fn closeOnlyPressed(c: *ui.Context, a: *App) bool {
 fn titlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     // In Settings the navigation column sits in a non-collapsible card under
     // traffic lights, so avoid floating an orphaned sidebar toggle above it.
-    if (a.view.settings_open or strip.rendering.usesWindowedChatCaption(a)) return;
+    if (a.view.settings_open) return;
     const bar = ui.div(c).fixed().offset(cluster_x, 4 + (34 - 24) / 2).row().itemsCenter().layer(3);
     defer bar.end();
     sidebarToggle(c, a, k);
     // The history control arrives when the seam finishes collapsing rather
     // than on the ⌘B press, so it never pops over the still-sliding sidebar.
-    if (a.view.sidebar_width <= 1) historyAndMode(c, a, k, true);
+    if (a.view.sidebar_width <= 1) historyAndMode(c, a, k);
     @import("view_updates.zig").titlebarControl(c, a, k);
 }
 
@@ -1220,14 +1220,14 @@ fn sidebarToggle(c: *ui.Context, a: *App, k: theme.Colors) void {
     })) toggleSidebar(c, a, true);
 }
 
-fn historyAndMode(c: *ui.Context, a: *App, k: theme.Colors, left_cluster: bool) void {
-    if (left_cluster) ui.div(c).w(4).end();
+fn historyAndMode(c: *ui.Context, a: *App, k: theme.Colors) void {
+    ui.div(c).w(4).end();
     ui.key(c, "titlebar-chat-history");
     const history = ui.div(c).row().size(24, 24).center().rounded(6).hover(k.hover).control();
     icons.icon(c, .@"clock-circle", 16, k.muted, 0);
     if (history.clicked()) strip.open(a, .history, strip.active(a), c.rects.get(c.node(history.index).id));
     history.end();
-    if (left_cluster) ui.div(c).w(4).end();
+    ui.div(c).w(4).end();
     const dev = a.settings.uiMode() == .developer;
     const shortcuts = @import("shortcuts.zig");
     var shortcut_buf: [64]u8 = undefined;
@@ -1319,12 +1319,6 @@ fn trailing(c: *ui.Context, a: *App, k: theme.Colors) void {
             .label = "Toggle side panel",
             .tip = .{ .text = c.print("Toggle side panel ({s})", .{pan_k}) },
         })) @import("app_panels.zig").toggleHost(a);
-    }
-    if (strip.rendering.usesWindowedChatCaption(a)) {
-        const controls = ui.div(c).row().h(28).itemsCenter().gap(6);
-        if (a.view.sidebar_width <= 1) historyAndMode(c, a, k, false);
-        sidebarToggle(c, a, k);
-        controls.end();
     }
 }
 

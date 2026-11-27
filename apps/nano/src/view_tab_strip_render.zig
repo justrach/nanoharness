@@ -93,16 +93,11 @@ pub fn trailingModeButtonsWidth(a: *const App) f32 {
 }
 
 pub fn utilityWidth(a: *const App) f32 {
-    const caption_controls = usesWindowedChatCaption(a);
-    const collapsed = a.view.sidebar_width <= 1;
     const widths = [_]f32{
         if (@import("view_sandbox_strip.zig").toolbarVisible(a)) @import("view_sandbox_strip.zig").toolbar_width else 0,
         @import("view_updates.zig").topbarUpdatesWidth(a),
         trailingModeButtonsWidth(a),
         if (showSidePanelToggle(a)) 28 else 0,
-        if (caption_controls and collapsed) 24 else 0,
-        if (caption_controls and collapsed) 24 else 0,
-        if (caption_controls) 24 else 0,
     };
     var total: f32 = 0;
     for (widths) |w| if (w > 0) {
@@ -761,13 +756,14 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     const spec = singleSpec(a);
     const n = spec.n;
     const selected = spec.selected;
-    // One windowed Zen conversation reads as a caption, not a selected tab in an empty strip.
+    // One windowed Zen conversation reads as a caption, not a selected tab
+    // in an empty strip: full screen's pane header, in the title bar. It
+    // starts where the strip's first tab does, flush with its card, so a
+    // second tab, Settings or the sidebar never moves it sideways.
     const lone_caption = usesWindowedChatCaption(a);
     const caption_text: ui.TextStyle = .{ .size = 11.5, .line_height = 15, .weight = .semibold, .color = k.text };
     const caption_dot_w: f32 = 5;
-    const lane_x = if (lone_caption)
-        @max(caption.leading, a.view.chrome.x + 16) - 8
-    else if (zen)
+    const lane_x = if (zen)
         zenTabStartX(a)
     else
         a.view.sidebar_width + left;
@@ -793,8 +789,16 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     const lane = ui.div(c).fixed().offset(lane_x, chrome.tab_top).size(available, chrome.tab_height + chrome.tab_top).clip().layer(2);
     defer lane.end();
     var row = ui.div(c).absolute().offset(0, 0).row().h(chrome.tab_height).gap(3).itemsCenter();
-    if (lone_caption) row = row.wFull().justifyEnd();
+    if (lone_caption) row = row.wFull();
     defer row.end();
+    // The caption's project, branch and remote computer, as full screen's
+    // header shows them, at the lane's far end beside the computer picker.
+    const fs_chrome = @import("view_fullscreen_chrome.zig");
+    const lone_id: fs_chrome.Identity = if (lone_caption) fs_chrome.identityOf(c, a, a.findChat(a.selected.?)) else .{};
+    const lone_room: fs_chrome.ChipRoom = if (lone_caption)
+        fs_chrome.chipRoom(c, lone_id, a.view.chrome.chat_width, !show_dev and lone_id.is_remote, @max(0, available - 160 - 8))
+    else
+        .{};
     for (win_start..win_end) |ix| {
         const item = spec.itemAt(ix);
         const chat = singleItemChat(a, spec, ix);
@@ -805,7 +809,7 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
         const ch = if (chat) |id| a.findChat(id) else null;
         const label = if (ch) |v| @import("view_sidebar.zig").chatLabel(v) else "New tab";
         const pill_w: f32 = if (lone_caption)
-            @min(slot_w, @ceil(c.text.width(label, caption_text)) + 16 + caption_dot_w + 6 + 14 + 6 + 22)
+            @min(@min(slot_w, @max(0, available - lone_room.width() - 8)), @ceil(c.text.width(label, caption_text)) + 16 + caption_dot_w + 6 + 14 + 6 + 22)
         else if (zen and n == 1)
             @min(slot_w, @max(140, c.text.width(label, .{ .size = 12.5, .weight = .medium }) + 58))
         else
@@ -891,6 +895,12 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
             };
         }
         if (kit.secondaryClicked(cap)) strip.open(a, .panel, .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 }, c.rects.get(c.node(cap.index).id));
+    }
+    if (lone_caption and lone_room.width() > 0) {
+        ui.div(c).grow().end();
+        const chips = ui.div(c).row().gap(6).itemsCenter();
+        defer chips.end();
+        fs_chrome.identityChips(c, a, k, if (a.tabs.layout()) |s| s.focus else 0, lone_id, lone_room, true);
     }
     if (hidden_count > 0) {
         ui.key(c, "panel-tabs-overflow");

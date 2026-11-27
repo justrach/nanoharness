@@ -71,6 +71,23 @@ pub const Harness = struct {
         };
         return error.MissingTitlebarButton;
     }
+    /// The main column's rounded-12 card.
+    fn zenCard(h: *Harness) !ui.Rect {
+        for (h.t.ctx.nodes.items) |node| {
+            if (node.style.radius == chrome.zen_radius and node.rect.x >= h.a.view.sidebar_width and node.rect.w > 400 and node.rect.h > 400) return node.rect;
+        }
+        return error.MissingZenCard;
+    }
+    /// The 28pt title-bar control holding `text`.
+    fn pillAround(h: *Harness, text: []const u8) ?ui.Rect {
+        const label = h.topText(text) orelse return null;
+        for (h.t.ctx.nodes.items) |node| {
+            const r = node.rect;
+            if (!node.style.control or @abs(r.h - 28) > 0.5) continue;
+            if (r.x <= label.x and label.x + label.w <= r.x + r.w + 0.5 and r.y <= label.y and label.y + label.h <= r.y + r.h) return r;
+        }
+        return null;
+    }
     fn snap(h: *Harness, name: []const u8) void {
         const dir = std.c.getenv("NANO_SNAP_DIR") orelse return;
         var buf: [1024]u8 = undefined;
@@ -84,47 +101,58 @@ fn replace(list: anytype, text: []const u8) !void {
     try list.replace(parsed.value);
 }
 
-test "single Zen chat ends beside the device and controls with or without its sidebar" {
+test "windowed chrome: a lone Zen caption starts where its tab strip would and slides with the sidebar instead of jumping" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
     h.a.settings.applyUiMode(.zen);
+    h.t.settle(1);
     try testing.expectEqual(@as(usize, 1), h.a.tabs.items.items.len);
+    const leading = @import("window_chrome.zig").leading;
 
-    var flat = true;
-    var sidebar_x: ?f32 = null;
-    for ([_]bool{ true, false }) |sidebar_open| {
-        h.a.view.sidebar_open = sidebar_open;
-        h.t.settle(1);
-        h.snap(if (sidebar_open) "caption-sidebar-open" else "caption-sidebar-closed");
-        const cap = h.t.ctx.nodes.items[try h.captionControl()];
-        flat = flat and (if (cap.style.background) |bg| bg.a == 0 else true) and
-            cap.style.border == null and cap.style.shadows.len == 0;
+    // Open: flat, flush with its card, as full screen's pane header is.
+    h.snap("caption-sidebar-open");
+    var cap = h.t.ctx.nodes.items[try h.captionControl()];
+    try testing.expect((if (cap.style.background) |bg| bg.a == 0 else true) and cap.style.border == null and cap.style.shadows.len == 0);
+    const card = try h.zenCard();
+    try testing.expectApproxEqAbs(card.x, cap.rect.x, 0.5);
+    try testing.expectApproxEqAbs(@as(f32, 42), card.y, 0.5);
+    // The sidebar toggle keeps its one home, right of the traffic lights.
+    const toggle_open = try h.button("sidebar-minimalistic-left");
+    try testing.expectApproxEqAbs(leading, toggle_open.x, 0.5);
 
-        const native_caption = @import("window_chrome.zig");
-        const utilities = strip.rendering.utilityWidth(&h.a);
-        const expected_end = h.t.ctx.size.w - native_caption.trailing - utilities - 10 - chrome.device_room - 12;
-        try testing.expectApproxEqAbs(expected_end, cap.rect.x + cap.rect.w, 1);
-        const sidebar = try h.button("sidebar-minimalistic-left");
-        try testing.expectApproxEqAbs(h.t.ctx.size.w - native_caption.trailing - 10, sidebar.x + sidebar.w, 1);
-        try testing.expectApproxEqAbs(@as(f32, 21), sidebar.y + sidebar.h / 2, 0.01);
-        if (sidebar_x) |x| try testing.expectApproxEqAbs(x, sidebar.x, 1) else sidebar_x = sidebar.x;
-        if (sidebar_open) {
-            try testing.expectError(error.MissingTitlebarButton, h.button("clock-circle"));
-        } else {
-            const history = try h.button("clock-circle");
-            const mode = try h.button("magic-stick-3");
-            try testing.expect(history.x < mode.x and mode.x < sidebar.x);
-            try testing.expect(history.x >= cap.rect.x + cap.rect.w);
-            try testing.expectApproxEqAbs(@as(f32, 21), history.y + history.h / 2, 0.01);
-            try testing.expectApproxEqAbs(@as(f32, 21), mode.y + mode.h / 2, 0.01);
-        }
+    // Collapsing: the caption glides with its card, never a step bigger than the seam's.
+    h.a.view.sidebar_open = false;
+    var last_x = cap.rect.x;
+    var last_side = h.a.view.sidebar_width;
+    for (0..40) |_| {
+        h.t.advance(1.0 / 60.0);
+        cap = h.t.ctx.nodes.items[try h.captionControl()];
+        try testing.expect(@abs(cap.rect.x - last_x) <= @abs(h.a.view.sidebar_width - last_side) + 0.5);
+        last_x = cap.rect.x;
+        last_side = h.a.view.sidebar_width;
     }
+    h.t.settle(1);
+    try testing.expectEqual(@as(f32, 0), h.a.view.sidebar_width);
+    h.snap("caption-sidebar-closed");
+    cap = h.t.ctx.nodes.items[try h.captionControl()];
+    try testing.expectApproxEqAbs(last_x, cap.rect.x, 0.5);
+    const toggle_closed = try h.button("sidebar-minimalistic-left");
+    try testing.expectApproxEqAbs(leading, toggle_closed.x, 0.5);
+    const history = try h.button("clock-circle");
+    const mode = try h.button("magic-stick-3");
+    try testing.expect(toggle_closed.x < history.x and history.x < mode.x);
+    try testing.expect(mode.x + mode.w + 14 <= cap.rect.x + 0.5);
+
+    // A second tab starts where the caption was: the strip does not move it.
+    const lone_x = cap.rect.x;
+    h.a.openChatInTab("b");
+    h.t.settle(1);
+    const first_tab = h.pillAround("Alpha") orelse return error.MissingFirstTab;
+    try testing.expectApproxEqAbs(lone_x, first_tab.x, 0.5);
     h.a.view.full_screen = true;
     h.t.settle(1);
     h.snap("caption-fullscreen");
-    try testing.expect(flat);
-    try testing.expectEqualStrings("a", h.a.selected.?);
 }
 
 /// The control around the `name` glyph in the header band above the cards, between `left` and `right`.
