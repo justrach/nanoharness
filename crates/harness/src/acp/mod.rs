@@ -2245,6 +2245,61 @@ impl Harness for AcpHarness {
         Ok(commands)
     }
 
+    async fn run_title(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        if self.id() != HarnessId::Graff {
+            return Err(HarnessError::Protocol(
+                "title generation is not supported by this harness".into(),
+            ));
+        }
+        // Use Graff's single model request, not an ACP coding session. Quote
+        // the bounded argument so prompt text cannot be parsed as CLI flags.
+        let prompt = &request.prompt[..request.prompt.floor_char_boundary(4096)];
+        let prompt = serde_json::to_string(prompt)
+            .map_err(|_| HarnessError::Protocol("could not encode title prompt".into()))?;
+        let (exe, _) = self.resolve_program(false).await?;
+        let mut cmd = Command::new(&exe);
+        crate::apply_run_environment(&mut cmd, None);
+        crate::compose_child_path(&mut cmd, &exe);
+        self.configure_adapter_environment(&mut cmd, &exe);
+        cmd.arg("--json")
+            .args(graff_models::launch_args(request.model.as_deref()))
+            .args(["title", &prompt])
+            .current_dir(&request.cwd)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let output = tokio::select! {
+            _ = controls.interrupt.cancelled() => {
+                return Err(HarnessError::Protocol("title generation was cancelled".into()));
+            }
+            output = cmd.output() => output?,
+        };
+        let result = output
+            .status
+            .success()
+            .then(|| serde_json::from_slice::<Value>(&output.stdout).ok())
+            .flatten();
+        let text = result
+            .as_ref()
+            .filter(|result| result["type"] == "title_result")
+            .and_then(|result| result["title"].as_str())
+            .ok_or_else(|| HarnessError::Protocol("Graff did not generate a title".into()))?;
+        Ok(futures::stream::iter([
+            Ok(AgentEvent::TextDelta { text: text.into() }),
+            Ok(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: None,
+            }),
+        ])
+        .boxed())
+    }
+
     async fn run(
         &self,
         mut request: RunRequest,
