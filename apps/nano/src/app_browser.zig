@@ -208,7 +208,17 @@ pub fn openInternalLink(a: *App, parent: []const u8, url: []const u8) void {
 
 pub fn openExternalLink(a: *App, parent: []const u8, url: []const u8) void {
     if (linkOwner(a, parent, url) == null) return;
-    _ = open_external_url(url);
+    // Restore logical focus without activating Harness. The composer already
+    // hides its caret while the OS browser has the key window.
+    if (open_external_url(url) and focusSourceComposer(a, parent)) a.redraw();
+}
+
+pub fn focusSourceComposer(a: *App, parent: []const u8) bool {
+    const selected = a.selected orelse return false;
+    if (!std.mem.eql(u8, selected, parent) or source(a, parent) == null) return false;
+    if (@import("view.zig").menuKeepsKeys(a) or @import("view_chat_menu.zig").anyDialog(a) or a.view.close_choice) return false;
+    a.view.focus_composer = true;
+    return true;
 }
 
 /// Transcript links are explicit HTTP(S), not address-bar guesses. A bad

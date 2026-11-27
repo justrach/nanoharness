@@ -65,6 +65,85 @@ test "link actions 348 internal open retains the conversation and a hidden sourc
     try testing.expect(!h.t.hasText("Copy link"));
 }
 
+test "transcript link return focuses the prompt after closing the in-app page" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try load(&h, false);
+    try rightClickLink(&h);
+    try h.t.clickText("Open in Harness");
+    h.t.settle(0.2);
+    try testing.expect(h.a.panels.host_open);
+    try testing.expect(h.a.view.strip.focused == .host);
+    try testing.expect(h.t.ctx.focus != h.a.view.composer_id);
+
+    h.press(.{ .key = 'w', .cmd = true });
+    try testing.expect(!h.a.panels.host_open);
+    try testing.expectEqualStrings("a", h.a.selected.?);
+    try testing.expectEqual(h.a.view.composer_id, h.t.ctx.focus);
+    h.t.typeText("Follow-up");
+    try testing.expectEqualStrings("Follow-up", h.a.composer.text());
+}
+
+test "transcript link return focuses the prompt after using the external browser" {
+    const browser = @import("app_browser.zig");
+    const saved = browser.open_external_url;
+    defer browser.open_external_url = saved;
+    browser.open_external_url = struct {
+        fn open(destination: []const u8) bool {
+            return std.mem.eql(u8, destination, url);
+        }
+    }.open;
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try load(&h, false);
+    try rightClickLink(&h);
+    try testing.expect(h.t.ctx.focus != h.a.view.composer_id);
+    try h.t.clickText("Open in browser");
+    h.t.ctx.input.window_active = false;
+    h.t.ctx.window_focused = false;
+    h.t.settle(0.2);
+    h.t.ctx.input.window_active = true;
+    h.t.ctx.window_focused = true;
+    h.t.settle(0.2);
+
+    try testing.expectEqualStrings("a", h.a.selected.?);
+    try testing.expectEqual(h.a.view.composer_id, h.t.ctx.focus);
+    h.t.typeText("Follow-up");
+    try testing.expectEqualStrings("Follow-up", h.a.composer.text());
+}
+
+test "transcript link return does not redirect focus from another chat" {
+    const browser = @import("app_browser.zig");
+    const saved = browser.open_external_url;
+    defer browser.open_external_url = saved;
+    browser.open_external_url = struct {
+        fn open(destination: []const u8) bool {
+            return std.mem.eql(u8, destination, url);
+        }
+    }.open;
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    browser.openInternalLink(&h.a, "a", url);
+    h.t.settle(0.2);
+    h.a.splitOpening(.horizontal, "b");
+    h.t.settle(0.2);
+    try testing.expectEqualStrings("b", h.a.selected.?);
+    try testing.expect(browser.linkOwner(&h.a, "a", url) != null);
+    h.t.ctx.focus = 0;
+
+    browser.openExternalLink(&h.a, "a", url);
+    h.t.settle(0.2);
+    try testing.expectEqual(@as(u64, 0), h.t.ctx.focus);
+    h.a.view.strip.focused = .host;
+    @import("app_panels.zig").closeTab(&h.a, 0);
+    h.t.settle(0.2);
+    try testing.expectEqual(@as(u64, 0), h.t.ctx.focus);
+    try testing.expectEqualStrings("b", h.a.selected.?);
+}
+
 test "link actions 348 browser action validates its source and keyboard Copy never navigates" {
     const browser = @import("app_browser.zig");
     const Opener = struct {

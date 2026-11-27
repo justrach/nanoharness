@@ -1445,14 +1445,7 @@ pub const App = struct {
         if (!browser.belongsTo(a.selected)) return null;
         const native = browser.native orelse return null;
         if (!native.visible) return null;
-        const objc = nanoui.objc;
-        if (objc.msg(?objc.Object, native.view, "window", .{})) |window| {
-            if (objc.msg(?objc.Object, window, "firstResponder", .{})) |responder| {
-                if (objc.msg(objc.BOOL, responder, "isKindOfClass:", .{objc.class("NSView")})) {
-                    if (objc.msg(objc.BOOL, responder, "isDescendantOf:", .{native.view})) return browser;
-                }
-            }
-        }
+        if (native.hasKeyboardFocus()) return browser;
         return if (@import("view_tab_strip.zig").active(a) == .host) browser else null;
     }
 

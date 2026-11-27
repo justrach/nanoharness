@@ -289,18 +289,37 @@ pub fn closeTab(a: *App, i: usize) void {
         @import("app_git.zig").reset(a);
         @import("app_git_workflow.zig").reset(a);
     }
+    const link_parent = if (t.browser) |b| b.parent else if (t.kind == .github and p.github_repository.linked != null) p.github_repository.owner else null;
+    const link_in_active_chat = if (link_parent) |parent| std.mem.eql(u8, a.selected orelse "", parent) else false;
     if (t.kind == .github) @import("app_github_repository.zig").reset(a);
     if (t.agent) |s| s.stop();
-    if (comptime @import("builtin").os.tag == .macos) if (t.browser) |b| if (b.native) |n| n.show(false);
+    var native_had_keys = false;
+    if (comptime @import("builtin").os.tag == .macos) if (t.browser) |b| if (b.native) |n| {
+        native_had_keys = n.hasKeyboardFocus();
+        n.show(false);
+    };
     p.retired.appendAssumeCapacity(t);
     if (p.tabs.items.len == 0) {
         p.host_open = false;
         p.active = 0;
         const chat_panel: @import("view_tab_strip.zig").Panel = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
-        if (a.view.strip.focused == .host) a.view.strip.focused = chat_panel;
+        const host_had_keys = a.view.strip.focused == .host;
+        if (host_had_keys) a.view.strip.focused = chat_panel;
         if (a.view.strip.expanded) |ex| if (ex == .host) {
             a.view.strip.expanded = null;
         };
+        if ((host_had_keys or native_had_keys) and link_in_active_chat and
+            @import("app_browser.zig").focusSourceComposer(a, a.selected.?))
+        {
+            // A click inside WebKit bypasses NanoUI's logical focus entirely.
+            // Put AppKit's keyboard responder back on the canvas as well.
+            if (comptime @import("builtin").os.tag == .macos) if (native_had_keys) {
+                if (a.window) |w| if (w.surface) |s| {
+                    const objc = @import("nanoui").objc;
+                    _ = objc.msg(objc.BOOL, w.nswindow, "makeFirstResponder:", .{s.nsview});
+                };
+            };
+        }
         return a.redraw();
     }
     var stamps: [64]u64 = undefined;

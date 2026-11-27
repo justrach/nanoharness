@@ -125,6 +125,14 @@ pub const Native = struct {
         s.show(true);
     }
 
+    pub fn hasKeyboardFocus(s: *const Native) bool {
+        if (!s.visible) return false;
+        const window = objc.msg(?objc.Object, s.view, "window", .{}) orelse return false;
+        const responder = objc.msg(?objc.Object, window, "firstResponder", .{}) orelse return false;
+        return objc.msg(objc.BOOL, responder, "isKindOfClass:", .{objc.class("NSView")}) and
+            objc.msg(objc.BOOL, responder, "isDescendantOf:", .{s.view});
+    }
+
     pub fn show(s: *Native, visible: bool) void {
         if (s.visible == visible) return;
         objc.msg(void, s.view, "setHidden:", .{if (visible) objc.NO else objc.YES});
