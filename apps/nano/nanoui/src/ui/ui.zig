@@ -33,6 +33,12 @@ pub const frame_log = @import("frame_log.zig");
 pub const scroll_glide = @import("scroll_glide.zig");
 /// What each refresh applied before (`scroll_glide`'s baseline).
 pub const ScrollPacing = @import("pacing.zig").Scroll;
+/// The display link's decisions (its tick, what keeps it running, its period).
+pub const link_pacing = @import("pacing.zig");
+/// A refresh's glide applied to the box under the pointer, and the check
+/// after layout (`scroll.glideFrame`, `scroll.glideLaidOut`).
+pub const glideFrame = @import("scroll.zig").glideFrame;
+pub const glideLaidOut = @import("scroll.zig").glideLaidOut;
 pub const FrameLog = frame_log.FrameLog;
 pub const Surface = if (@import("builtin").os.tag == .macos) @import("surface.zig").Surface else void;
 pub const surface_drop = if (@import("builtin").os.tag == .macos) @import("surface_drop.zig") else struct {};
@@ -387,6 +393,7 @@ test {
     _ = @import("tests_images.zig");
     _ = @import("pacing.zig");
     _ = @import("scroll_glide.zig");
+    _ = @import("tests_scroll_glide.zig");
     _ = @import("svg.zig");
     _ = @import("tests_svg.zig");
     _ = @import("tests_truncate.zig");

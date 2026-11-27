@@ -177,6 +177,43 @@ pub fn applyStep(c: *Context, dy: f32) void {
     if (dy != 0 and !applyScroll(c, dy) and (c.wants_wheel or wheelAt(c))) c.input.scroll.y += dy;
 }
 
+/// What a refresh's glide did to the box under the pointer, for `glideLaidOut`.
+pub const GlideFrame = struct {
+    step: glide.Step = .{},
+    box: u64 = 0,
+    offset: f32 = 0,
+};
+
+/// A refresh's scroll from the glide, applied before the frame is built
+/// (the macOS surface's link frames and the transcript tests both call it).
+/// A momentum delta keeps its phase: `applyScroll`'s one bounded impact at
+/// the bottom reads it, and a frame drawn between the event and this
+/// refresh has cleared `input.scroll_phase`.
+pub fn glideFrame(c: *Context, g: *glide.Glide, b: glide.Beat) GlideFrame {
+    const room = glideRoom(c);
+    return applyGlideStep(c, g.beat(b, room), room.box);
+}
+
+/// `glide.Glide.flush`'s step (a hidden window, a link with no drawable).
+pub fn glideFlush(c: *Context, g: *glide.Glide) GlideFrame {
+    return applyGlideStep(c, g.flush(), glideRoom(c).box);
+}
+
+fn applyGlideStep(c: *Context, step: glide.Step, box: u64) GlideFrame {
+    if (step.momentum and c.input.scroll_phase == .none) c.input.scroll_phase = .momentum;
+    applyStep(c, @floatCast(step.dy));
+    return .{ .step = step, .box = box, .offset = c.scroll.get(box) orelse 0 };
+}
+
+/// After layout: if the layout moved the offset the glide left (the content
+/// shrank under it, or a followed end caught up), the box keeps no lead a
+/// later settle or hold could act on.
+pub fn glideLaidOut(c: *const Context, g: *glide.Glide, f: GlideFrame) void {
+    if (f.box == 0 or f.box != g.box) return;
+    const now = c.scroll.get(f.box) orelse return;
+    if (@abs(now - f.offset) > 0.01) g.keepLead();
+}
+
 /// Resolves vertical scroll and rubber-band overscroll for box `n` in `layout.arrange`.
 pub fn arrangeScrollY(c: *Context, n: *const ctx_mod.Node, inner_main: f32, used: f32) f32 {
     const st = n.style;

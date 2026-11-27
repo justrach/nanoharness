@@ -6,6 +6,8 @@ const std = @import("std");
 const objc = @import("../objc.zig");
 const cf = @import("cf.zig");
 const Surface = @import("surface.zig").Surface;
+const pacing = @import("pacing.zig");
+const scroll = @import("scroll.zig");
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 extern "c" const NSRunLoopCommonModes: objc.Object;
@@ -91,28 +93,58 @@ pub fn resizeInTransaction(self: *Surface) bool {
 pub fn metalDisplayLinkNeedsUpdate(obj: objc.Object, _: objc.SEL, _: objc.Object, update: objc.Object) callconv(.c) void {
     const s = objc.getZig(Surface, obj) orelse return;
     if (s.dead or s.in_frame) return;
-    s.wake.last_tick = cf.CACurrentMediaTime();
+    const wall = cf.CACurrentMediaTime();
+    s.wake.last_tick = wall;
     const target = objc.msg(f64, update, "targetPresentationTimestamp", .{});
-    const frame_in_due = s.ctx.frame_in != null and target >= s.frame_in_due - 0.001;
-    // A scroll in motion has a new position for every refresh, events or not.
-    const glide_due = s.glide.wants(target, s.ctx.glideRoom());
-    if (!s.full_pending and !frame_in_due and !glide_due and !s.ctx.animating and !s.geometry_changed and !s.retained_ready and !s.pending_sync and s.ctx.time_driven == .none) {
-        if (s.glide.moving(target)) {
-            s.scroll_skipped +|= 1;
-            s.skipped_total +|= 1;
-        }
-        s.updatePacing(target, false);
-        return;
-    }
-    const drawable = objc.msg(?objc.Object, update, "drawable", .{}) orelse return;
+    s.period_meter.observe(target);
     const duration: f64 = if (s.link_fps > 0) 1.0 / @as(f64, s.link_fps) else 1.0 / @as(f64, @max(60.0, s.max_fps));
-    s.renderer.given_drawable = drawable;
-    defer s.renderer.given_drawable = null;
-    if (!s.full_pending and !frame_in_due and !glide_due and !s.ctx.animating and !s.geometry_changed and (s.retained_ready or (!s.pending_sync and s.ctx.time_driven != .none))) {
-        s.redrawRetained(target, duration);
-        return;
+    // A scroll in motion has a new position for every refresh, events or not.
+    const beat = s.beatAt(target, duration);
+    var in: pacing.TickIn = .{
+        .full_pending = s.full_pending,
+        .frame_in_due = s.ctx.frame_in != null and target >= s.frame_in_due - 0.001,
+        .glide_wants = s.glide.wants(beat, s.ctx.glideRoom()),
+        .animating = s.ctx.animating,
+        .geometry_changed = s.geometry_changed,
+        .retained_ready = s.retained_ready,
+        .pending_sync = s.pending_sync,
+        .time_driven = s.ctx.time_driven != .none,
+    };
+    // The drawable is asked for only when there is something to draw.
+    const drawable = if (pacing.tick(in) == .idle) null else objc.msg(?objc.Object, update, "drawable", .{});
+    in.drawable = drawable != null;
+    switch (pacing.tick(in)) {
+        .idle => {
+            if (s.glide.moving(wall)) {
+                s.scroll_skipped +|= 1;
+                s.skipped_total +|= 1;
+            }
+            s.updatePacing(target, false);
+        },
+        .no_drawable => {
+            // Nowhere to draw (a window gone from the screen mid-scroll): the
+            // scroll lands at once, owed to the frame drawn when it's back,
+            // and the link may pause. Anything else wanted waits for a
+            // drawable as it always has.
+            if (!in.glide_wants) return;
+            const landed = scroll.glideFlush(&s.ctx, &s.glide);
+            if (landed.step.dy != 0) s.pending = true;
+            var others = in;
+            others.glide_wants = false;
+            others.drawable = true;
+            if (pacing.tick(others) == .idle) s.updatePacing(target, false);
+        },
+        .retained => {
+            s.renderer.given_drawable = drawable;
+            defer s.renderer.given_drawable = null;
+            s.redrawRetained(target, duration);
+        },
+        .frame => {
+            s.renderer.given_drawable = drawable;
+            defer s.renderer.given_drawable = null;
+            s.frameAt(.link, target, duration);
+        },
     }
-    s.frameAt(.link, target, duration);
 }
 
 pub fn liveResizeStart(obj: objc.Object, _: objc.SEL) callconv(.c) void {

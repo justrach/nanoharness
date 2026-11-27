@@ -26,6 +26,7 @@ pub const KeysReleased = struct { ctx: ?*anyopaque, func: *const fn (ctx: ?*anyo
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 const pacing = @import("pacing.zig");
 const glide_mod = @import("scroll_glide.zig");
+const scroll_mod = @import("scroll.zig");
 const link_pace = @import("surface_pacing.zig");
 pub const Surface = struct {
     gpa: std.mem.Allocator,
@@ -110,6 +111,8 @@ pub const Surface = struct {
     pacing_log: pacing.FrameLog = .{},
     /// A scrolling box's scroll, a position for each refresh (`scroll_glide`).
     glide: glide_mod.Glide = .{},
+    /// The link's interval, read off its own target timestamps.
+    period_meter: pacing.PeriodMeter = .{},
     /// The frame-rate range last asked of the link.
     link_range: pacing.Range = .{ .minimum = -1, .maximum = -1, .preferred = -1 },
     /// The window server's nudge a scroll's frames owe (`surface_wake.Nudge`).
@@ -345,8 +348,8 @@ pub const Surface = struct {
         c.applyScrollStep(raw);
         // A scrolling box's: this refresh's position (`scroll_glide`). A frame
         // off the beat, with the link running, leaves it to the link's next.
-        const step: glide_mod.Step = if (!vis) self.glide.flush() else if (kind == .link or self.display_link == null) self.glide.beat(now, dur, c.glideRoom()) else .{};
-        c.applyScrollStep(@floatCast(step.dy));
+        const gf: scroll_mod.GlideFrame = if (!vis) scroll_mod.glideFlush(c, &self.glide) else if (kind == .link or self.display_link == null) scroll_mod.glideFrame(c, &self.glide, self.beatAt(now, dur)) else .{};
+        const step = gf.step;
         const dy = raw + @as(f32, @floatCast(step.dy));
         if (step.source == .glide) self.glide_total +|= 1;
         c.scroll_pace = .{ .source = step.source, .skipped_total = self.skipped_total, .glide_total = self.glide_total };
@@ -354,6 +357,7 @@ pub const Surface = struct {
         self.scroll_skipped = 0;
         const r = frame_mod.run(c, self.view, &self.text, &self.instances, self.size, self.scale, a11y.themed(self, self.theme()), dt, now - self.start_time);
         if (self.dead) return;
+        scroll_mod.glideLaidOut(c, &self.glide, gf);
         a11y.afterFrame(self);
         @import("../play.zig").paint(self.gpa, &self.instances);
         self.frame_in_due = if (c.frame_in) |fi| now + @as(f64, fi) else 0;
@@ -412,11 +416,21 @@ pub const Surface = struct {
         const c = &self.ctx;
         const refresh = if (self.link_duration > 0) self.link_duration else 1.0 / @as(f64, @max(60.0, self.max_fps));
         const due_soon = pacing.keepLinkForFrameIn(c.frame_in, refresh);
-        const scrolling = self.glide.active(now);
-        const more = self.resizeStepping() or c.animating or hot_changed or c.input.down or self.scroll.active(now) or scrolling or due_soon;
+        // The glide's times are the events' clock, not the target's.
+        const wall = cf.CACurrentMediaTime();
+        const scrolling = self.glide.active(wall);
+        const more = pacing.keepRunning(.{
+            .resize_stepping = self.resizeStepping(),
+            .animating = c.animating,
+            .hot_changed = hot_changed,
+            .pointer_down = c.input.down,
+            .wheel_view = self.scroll.active(now),
+            .glide_active = scrolling,
+            .frame_in_soon = due_soon,
+        });
         // The scroll's floor on the link's rate goes with it.
         if (!scrolling and self.link_fps == 0) self.setRate(null);
-        wake.settled(self, now);
+        wake.settled(self, wall);
         if (self.display_link != null) {
             if (more) {
                 self.setRate(null);
@@ -511,7 +525,7 @@ pub const Surface = struct {
             presented = self.renderer.drawLogged(self.instances.items, self.atlasTexture(), self.size, clear, null, 0).presented;
         }
         if (presented) self.last_present_target = present_at;
-        if (presented) wake.presented(self, now);
+        if (presented) wake.presented(self, cf.CACurrentMediaTime());
         return presented;
     }
 
@@ -524,6 +538,12 @@ pub const Surface = struct {
     /// Places `stage_view` behind `self.nsview` inside a flipped host contentView,
     /// enabling transparent viewport holes over live WKWebView panes.
     pub const attachBackdrop = events.attachBackdrop;
+
+    /// The refresh presented at `target`, for the glide: the tick's own time
+    /// (the events' clock) and the link's measured interval.
+    pub fn beatAt(self: *Surface, target: f64, fallback: f64) glide_mod.Beat {
+        return .{ .target = target, .now = cf.CACurrentMediaTime(), .period = self.period_meter.period(fallback) };
+    }
 
     fn takeSkipped(self: *Surface) u32 {
         const n = self.scroll_skipped;

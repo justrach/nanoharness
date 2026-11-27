@@ -367,9 +367,14 @@ fn paceRun(panes: Panes, rule: Rule) !PaceRun {
         const at = 1 + refresh + @as(f64, @floatFromInt(i)) * refresh;
         var fresh = false;
         while (next < events.len and events[next].t < at - refresh) : (next += 1) {
+            const e = events[next];
             switch (rule) {
-                .old => old.add(@floatCast(events[next].dy), events[next].t),
-                .glide => g.event(events[next]),
+                .old => old.add(@floatCast(e.dy), e.t),
+                // Routed as `surface_events.scrollWheel` routes it.
+                .glide => switch (glide.route(e.dy, e.phase, e.dy != 0 and t.ctx.applyScroll(0), false, g.active(e.t))) {
+                    .glide => g.event(e),
+                    .wheel_view, .none => {},
+                },
             }
             fresh = true;
         }
@@ -381,21 +386,26 @@ fn paceRun(panes: Panes, rule: Rule) !PaceRun {
                 t.ctx.applyScrollStep(dy);
                 break :blk true;
             },
+            // The macOS surface's tick: `link_pacing.tick` on `Glide.wants`,
+            // then `glideFrame` before the frame and `glideLaidOut` after.
             .glide => blk: {
-                const room = t.ctx.glideRoom();
-                if (!g.wants(at, room)) break :blk false;
-                t.ctx.applyScrollStep(@floatCast(g.beat(at, refresh, room).dy));
+                const b: glide.Beat = .{ .target = at, .now = at - refresh, .period = refresh };
+                const act = ui.link_pacing.tick(.{ .glide_wants = g.wants(b, t.ctx.glideRoom()) });
+                if (act != .frame) break :blk false;
+                const f = ui.glideFrame(&t.ctx, &g, b);
+                t.frame();
+                ui.glideLaidOut(&t.ctx, &g, f);
                 break :blk true;
             },
         };
         if (!drew) continue;
-        t.frame();
+        if (rule == .old) t.frame();
         if (i < refreshes) frames += 1;
     }
     return .{ .refreshes = refreshes, .frames = frames, .start = start, .end = t.ctx.scroll.get(box).?, .sum = 4 * events.len };
 }
 
-test "transcript scroll draws a new position on every refresh, one pane or split" {
+test "transcript scroll draws a new position on every refresh, one pane or split, and ends within a refresh of the sum" {
     @import("theme.zig").registerFonts();
     for ([_]Panes{ .single, .split }) |panes| {
         const old = try paceRun(panes, .old);
@@ -405,9 +415,10 @@ test "transcript scroll draws a new position on every refresh, one pane or split
         try testing.expectEqual(new.refreshes, new.frames);
         try testing.expect((old.refreshes - old.frames) * 8 >= old.refreshes);
         try testing.expect(new.frames * 7 >= old.frames * 8);
-        // Where the scroll ends doesn't change: the system's sum, exactly.
+        // Where the scroll ends: the old rule at the system's sum; the glide
+        // within one refresh's travel (4 points) past it, never short of it.
         try testing.expectApproxEqAbs(old.start - old.sum, old.end, 0.01);
-        try testing.expectApproxEqAbs(new.start - new.sum, new.end, 0.01);
-        try testing.expectApproxEqAbs(old.end, new.end, 0.01);
+        try testing.expect(new.end <= new.start - new.sum + 0.01);
+        try testing.expect(new.end >= new.start - new.sum - 4 - 0.01);
     }
 }
