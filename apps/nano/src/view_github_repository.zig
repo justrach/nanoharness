@@ -72,7 +72,7 @@ pub fn view(c: *ui.Context, a: *App, k: theme.Colors) void {
             .activity => {
                 const content = ui.div(c).column().wFull().px(inset).py(12);
                 defer content.end();
-                activity(c, a, k, current);
+                activity(c, a, k, current, width - 2 * inset);
             },
         }
     }
@@ -467,7 +467,7 @@ fn fileStatusTone(status: []const u8) kit.Tone {
 /// The timeline: a rail of small glyphs, one per event kind, joined by a
 /// hairline; "author verb" and its age on one line; a comment's or a
 /// review's words under it, unboxed.
-fn activity(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page) void {
+fn activity(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, inner: f32) void {
     if (page.events.len == 0) {
         const empty = ui.div(c).column().wFull().py(24).itemsCenter();
         defer empty.end();
@@ -475,23 +475,32 @@ fn activity(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page) void {
         return;
     }
     for (page.events, 0..) |event, i| {
+        // The hairline to the next glyph is as tall as this entry's words
+        // were last laid out: it never sizes the row, so it can't grow it.
+        const rail = c.state(Rail, c.print("github-rail-{s}-{d}", .{ event.id, i }));
         ui.key(c, c.print("{s}-{d}", .{ event.id, i }));
         const last = i + 1 == page.events.len;
         const kind = display.eventOf(event.event);
         const row = ui.div(c).row().wFull().gap(12).itemsStart();
         defer row.end();
-        // The hairline joining this glyph to the next runs the row's height
-        // as last laid out; a flexible child would grow the row instead.
-        if (!last) if (c.rects.get(row.id())) |r| {
-            if (r.h > 24) ui.div(c).absolute().offset(11.5, 24).w(1).h(r.h - 24).bg(k.border).end();
-        } else c.animationFrame();
         {
+            const col = ui.div(c).column().w(24).itemsCenter();
+            defer col.end();
             const dot = ui.div(c).size(24, 24).center().roundedFull().circular().bg(k.hover);
-            defer dot.end();
             icons.icon(c, eventIcon(kind), 12, eventColor(k, kind), 0);
+            dot.end();
+            if (!last and rail.h > 24) ui.div(c).w(1).h(rail.h - 24).bg(k.border).end();
         }
-        const body = ui.div(c).column().grow().w(0).pb(if (last) 0 else 16).gap(6);
+        // A definite width: wrapped words in a zero-width flexible box are
+        // measured a word per line.
+        const body = ui.div(c).column().w(@max(80, inner - 24 - 12)).pb(if (last) 0 else 16).gap(6);
         defer body.end();
+        if (c.rects.get(body.id())) |r| {
+            if (r.h != rail.h) {
+                rail.h = r.h;
+                c.animationFrame();
+            }
+        } else c.animationFrame();
         {
             const head = ui.div(c).row().wFull().h(24).gap(8).itemsCenter();
             defer head.end();
@@ -514,6 +523,8 @@ fn activity(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page) void {
         }
     }
 }
+
+const Rail = struct { h: f32 = 0 };
 
 fn eventIcon(e: display.Event) icons.Name {
     return switch (e) {

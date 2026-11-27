@@ -261,3 +261,17 @@ test "github error shows one banner with Retry and the checkout's name, not a pl
     // The tabs would only repeat the failed request.
     try testing.expect(!f.t.hasText("Issues"));
 }
+
+test "github activity timeline keeps every event in reach with a glyph rail, not one card per event" {
+    var f: Fixture = undefined;
+    try f.init(520, 1200, many, activity_page);
+    defer f.deinit();
+    f.t.settle(0.2);
+    const first = f.node("jonas-berg · commented") orelse return error.MissingFirstEvent;
+    const last = f.node("priya-n · reviewed: approved") orelse return error.MissingLastEvent;
+    // Three short entries sit within a few lines of each other.
+    try testing.expect(last.y > first.y);
+    try testing.expect(last.y - first.y < 220);
+    try testing.expect(f.t.hasText("Approved"));
+    try testing.expect(f.t.hasText("9f3c2a1"));
+}
