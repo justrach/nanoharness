@@ -1668,7 +1668,7 @@ test "session footer renders account usage ring alongside context ring, opens ac
     try testing.expect(h.t.hasText("Context"));
 }
 
-test "zen topbar session pill left edge aligns flush with the right rounded-12 card in both chat and settings" {
+test "zen topbar session pill is a right-aligned caption in chat and flush with the settings card" {
     const Find = struct {
         fn rightCard(ctx: *ui.Context, side_w: f32) ?ui.Rect {
             for (ctx.nodes.items) |n| {
@@ -1686,6 +1686,16 @@ test "zen topbar session pill left edge aligns flush with the right rounded-12 c
             }
             return null;
         }
+        fn captionEnd(h: *Harness) f32 {
+            const native = @import("window_chrome.zig");
+            const render = @import("view_tab_strip_render.zig");
+            const panel = @import("panel_chrome.zig");
+            const utilities = render.utilityWidth(&h.a);
+            const reserve: f32 = if (utilities > 0) utilities + 10 else 0;
+            const show_dev = !h.a.view.settings_open and !(h.a.settings.uiMode() == .zen and h.a.devices.items.len <= 1);
+            const device: f32 = if (show_dev) panel.device_room else 0;
+            return h.t.ctx.size.w - native.trailing - reserve - device - 12;
+        }
     };
 
     var h: Harness = undefined;
@@ -1695,36 +1705,41 @@ test "zen topbar session pill left edge aligns flush with the right rounded-12 c
     h.a.openChatInTab("synthetic-chat");
     h.t.settle(1);
 
-    // Default sidebarWidth (224): pill left edge is flush with right card (sidebar_width + 3 = 227) and clears [⋯].
+    // Windowed Zen, one chat: the caption sits at the trailing group, not flush with the page card, and still clears [⋯].
     {
         const card = Find.rightCard(&h.t.ctx, h.a.view.sidebar_width) orelse return error.MissingRightCard;
         const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
         const more = h.a.view.more_anchor orelse return error.MissingMoreAnchor;
-        try testing.expectApproxEqAbs(card.x, pill.x, 0.5);
+        try testing.expect(@import("view_tab_strip_render.zig").usesWindowedChatCaption(&h.a));
+        try testing.expectApproxEqAbs(@as(f32, 227), card.x, 0.5);
+        try testing.expect(pill.x > card.x + 8);
+        try testing.expectApproxEqAbs(Find.captionEnd(&h), pill.x + pill.w, 1);
         try testing.expect(more.x + more.w + 12 <= pill.x);
     }
 
-    // Wider sidebar (300): pill follows right card edge (303) instead of pinning near left sidebar controls.
+    // Wider sidebar: the page card moves; the caption stays pinned to the trailing group.
     h.a.settings.setNumber("sidebarWidth", 300);
     h.t.settle(0.5);
     {
         const card = Find.rightCard(&h.t.ctx, h.a.view.sidebar_width) orelse return error.MissingRightCard;
         const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
         try testing.expectApproxEqAbs(@as(f32, 303), card.x, 0.5);
-        try testing.expectApproxEqAbs(card.x, pill.x, 0.5);
+        try testing.expectApproxEqAbs(Find.captionEnd(&h), pill.x + pill.w, 1);
+        try testing.expect(pill.x > card.x + 8);
     }
 
-    // Settings open: pill stays flush with the Zen Settings right rounded-12 card.
+    // Settings open: the caption is a selected tab again, flush with the Zen Settings card.
     try h.t.clickText("Sign in");
     h.t.settle(0.4);
     try testing.expect(h.a.view.settings_open);
     {
         const card = Find.rightCard(&h.t.ctx, h.a.view.sidebar_width) orelse return error.MissingRightCard;
         const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
+        try testing.expect(!@import("view_tab_strip_render.zig").usesWindowedChatCaption(&h.a));
         try testing.expectApproxEqAbs(card.x, pill.x, 0.5);
     }
 
-    // Return to chats and collapse sidebar: pill clears traffic lights, toggle, history, and mode controls.
+    // Return to chats and collapse sidebar: the caption stays on the trailing side, clear of left chrome.
     try h.t.clickText("Back to chats");
     h.t.settle(0.4);
     _ = h.t.shortcut(.{ .key = 'b', .cmd = true });
@@ -1733,6 +1748,8 @@ test "zen topbar session pill left edge aligns flush with the right rounded-12 c
     {
         const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
         const min_x = @import("window_chrome.zig").leading + 24 + 56 + 14;
+        try testing.expect(@import("view_tab_strip_render.zig").usesWindowedChatCaption(&h.a));
+        try testing.expectApproxEqAbs(Find.captionEnd(&h), pill.x + pill.w, 1);
         try testing.expect(pill.x >= min_x - 0.5);
     }
 }
