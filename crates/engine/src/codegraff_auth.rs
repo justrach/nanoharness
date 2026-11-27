@@ -209,7 +209,7 @@ impl CodegraffAuth {
     }
 
     /// The key graff would use: its credential file, else `CODEGRAFF_API_KEY`.
-    fn current_key(&self) -> Option<String> {
+    pub(crate) fn current_key(&self) -> Option<String> {
         self.key_file
             .as_deref()
             .and_then(read_key_file)

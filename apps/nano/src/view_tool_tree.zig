@@ -107,7 +107,7 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
     const ag_state = if (p.agent) aw.resolveAgentState(if (live_prog) |lp| lp.state else null, p.subagent_status, p.resolved, p.is_error, e.status == .streaming) else .completed;
     const ag_running = p.agent and ag_state == .running;
     const agent_linked = p.agent and p.subagent_ref.len > 0 and p.subagent_title.len > 0 and parent != null;
-    const view_linked = p.saved_view != null and parent != null;
+    const view_linked = (p.saved_view != null or p.mcp_app != null) and parent != null;
     const linked = agent_linked or view_linked;
     const ordinary = p.kind == .tool and !p.agent and !view_linked;
     const detail_key = c.print("detail/{s}/{s}/{s}", .{ parent orelse "", e.id, p.id });
@@ -124,7 +124,12 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
     if (linked) r = kit.pressFeedback(r.control().rounded(4).hover(k.ink(0.04)));
     defer r.end();
     if (linked and r.clicked()) {
-        if (agent_linked) @import("app_subagents.zig").open(a, parent.?, p) else @import("app_browser.zig").openSaved(a, parent.?, p.saved_view.?);
+        if (agent_linked)
+            @import("app_subagents.zig").open(a, parent.?, p)
+        else if (p.mcp_app) |*m|
+            @import("app_mcp_apps.zig").openFromPart(a, parent.?, m)
+        else
+            @import("app_browser.zig").openSaved(a, parent.?, p.saved_view.?);
     }
     const previous = c.rects.get(c.node(r.index).id);
     const height = if (previous) |rect| @max(rect.h, rules.row_height) else rules.row_height;

@@ -537,6 +537,8 @@ pub const App = struct {
     cloud_sandboxes: @import("app_sandboxes.zig").State = .{},
     /// Hosted CodeGraff artifacts (`artifact.codegraff.com`) cache & auto-open state.
     hosted_artifacts: @import("app_artifacts.zig").State = .{},
+    /// Active interactive SEP-1865 MCP App sessions & pending RPC calls (app_mcp_apps.zig).
+    mcp_apps: @import("app_mcp_apps.zig").State = .{},
     /// Dedicated Node D Cloud Computer offer/live state (app_computer.zig).
     cloud_computer: @import("app_computer.zig").State = .{},
     /// What the window shows that isn't the engine's: the sidebar, its
@@ -658,6 +660,7 @@ pub const App = struct {
         question.deinit(a);
         queue_mod.deinit(a);
         a.panels.deinit();
+        a.mcp_apps.deinit(a.gpa);
         if (a.browse_conn) |bc| {
             bc.deinit();
             a.gpa.destroy(bc);

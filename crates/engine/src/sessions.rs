@@ -2597,6 +2597,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<std::borrow::Cow<'_, MessagePart>>
                 subagent_status,
                 subagent_tail,
                 view,
+                mcp_app,
             } => std::borrow::Cow::Owned(MessagePart::Tool {
                 id: id.clone(),
                 call: sanitize_tool_call(call),
@@ -2617,6 +2618,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<std::borrow::Cow<'_, MessagePart>>
                 subagent_tail: subagent_tail.clone(),
                 // Kind + id only: the host resolves them to its own files.
                 view: view.clone(),
+                mcp_app: mcp_app.clone(),
             }),
             other => std::borrow::Cow::Borrowed(other),
         })

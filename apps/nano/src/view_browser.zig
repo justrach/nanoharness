@@ -14,6 +14,11 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, b: *Browser) void {
     if (c.shortcut(.{ .key = '-', .cmd = true })) b.applyZoom(.out);
     if (c.shortcut(.{ .key = '=', .cmd = true }) or c.shortcut(.{ .key = '+', .cmd = true, .shift = true })) b.applyZoom(.in);
     if (c.shortcut(.{ .key = '0', .cmd = true })) b.applyZoom(.reset);
+    if (b.mcp_app) |s| {
+        s.syncTheme(k);
+        drawMcpApp(c, a, k, b, s);
+        return;
+    }
     {
         const bar = ui.div(c).row().wFull().h(38).px(8).gap(4).itemsCenter().border(k.border).borderW(1);
         defer bar.end();
@@ -100,6 +105,66 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, b: *Browser) void {
     } else if (a.window == null) {
         // ui.Tester renders native chrome without launching a browser process.
         ui.text(c, "Integrated browser", .{ .size = 12, .color = k.faint });
+    }
+}
+
+fn drawMcpApp(c: *ui.Context, a: *App, k: theme.Colors, b: *Browser, s: *@import("app_mcp_apps.zig").Session) void {
+    {
+        const bar = ui.div(c).row().wFull().h(38).px(10).gap(6).itemsCenter().border(k.border).borderW(1);
+        defer bar.end();
+        icons.icon(c, .widget, 13, k.accent, 0);
+        kit.fadeText(c, s.title, .{ .size = 12, .weight = .medium, .color = k.text }, 220);
+        {
+            const pill = ui.div(c).row().h(20).px(6).itemsCenter().rounded(5).bg(k.ink(0.06));
+            defer pill.end();
+            ui.text(c, s.server_name, .{ .size = 10.5, .color = k.muted });
+        }
+        {
+            const acct = @import("app_mcp_apps.zig").resolveHostAccount(a, s.parent);
+            const who_label = if (acct.codegraff_email) |em|
+                c.print("CodeGraff · {s}", .{em})
+            else if (acct.harness_email) |em|
+                c.print("Harness · {s}", .{em})
+            else
+                "Sign in with CodeGraff";
+            const signed_in = acct.codegraff_email != null or acct.harness_email != null;
+            const acct_pill = ui.div(c).row().h(20).px(6).itemsCenter().rounded(5).bg(if (signed_in) k.accent.alpha(0.14) else k.warning.alpha(0.14));
+            defer acct_pill.end();
+            ui.text(c, who_label, .{ .size = 10.5, .weight = .medium, .color = if (signed_in) k.accent else k.warning });
+        }
+        if (s.context_note != null) {
+            const ctx_pill = ui.div(c).row().h(20).px(6).itemsCenter().rounded(5).bg(k.success.alpha(0.14));
+            defer ctx_pill.end();
+            ui.text(c, "Context synced", .{ .size = 10.5, .weight = .medium, .color = k.success });
+        }
+        ui.spacer(c);
+        const fullscreen = s.display_mode == .fullscreen;
+        if (kit.iconButton(c, k, .@"expand-arrows", .{
+            .size = 24,
+            .icon = 13,
+            .tip = .{ .text = if (fullscreen) "Restore inline view" else "Expand fullscreen" },
+        })) s.toggleDisplayMode();
+        if (kit.iconButton(c, k, .refresh, .{
+            .size = 24,
+            .icon = 13,
+            .tip = .{ .text = "Reload MCP App" },
+        })) s.reload();
+    }
+    const err_msg = s.err orelse if (b.notice.text().len > 0) b.notice.text() else null;
+    if (err_msg) |msg| {
+        const notice = ui.div(c).column().wFull().px(12).py(8);
+        defer notice.end();
+        ui.text(c, msg, .{ .size = 12, .wrap = true, .color = k.danger });
+    }
+    const body = ui.div(c).column().wFull().grow().h(0).center().gap(8);
+    defer body.end();
+    b.body_node = c.node(body.index).id;
+    if (s.loading) {
+        ui.text(c, "Loading MCP App…", .{ .size = 12, .color = k.muted });
+    } else if (builtin.os.tag != .macos) {
+        ui.text(c, "Interactive MCP Apps require macOS WebKit.", .{ .size = 12, .color = k.muted });
+    } else if (a.window == null) {
+        ui.text(c, "MCP App surface", .{ .size = 12, .color = k.faint });
     }
 }
 

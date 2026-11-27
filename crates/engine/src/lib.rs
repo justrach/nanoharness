@@ -44,6 +44,7 @@ pub mod keep_awake;
 pub mod local_import;
 pub mod local_token_usage;
 pub mod localhost_view;
+pub mod mcp_apps;
 pub mod mcp_servers;
 mod model_catalogs;
 pub mod native_extensions;

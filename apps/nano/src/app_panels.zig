@@ -291,7 +291,10 @@ pub fn closeTab(a: *App, i: usize) void {
     }
     if (t.kind == .github) @import("app_github_repository.zig").reset(a);
     if (t.agent) |s| s.stop();
-    if (comptime @import("builtin").os.tag == .macos) if (t.browser) |b| if (b.native) |n| n.show(false);
+    if (comptime @import("builtin").os.tag == .macos) if (t.browser) |b| {
+        if (b.mcp_app) |s| s.hide();
+        if (b.native) |n| n.show(false);
+    };
     p.retired.appendAssumeCapacity(t);
     if (p.tabs.items.len == 0) {
         p.host_open = false;

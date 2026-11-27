@@ -180,6 +180,9 @@ test {
     _ = @import("surface_palette.zig");
     _ = @import("tests_ui_surfaces.zig");
     _ = @import("tests_browser_native.zig");
+    _ = @import("mcp_app_host.zig");
+    _ = @import("app_mcp_apps.zig");
+    _ = @import("tests_mcp_app_host.zig");
     _ = @import("tests_browser_ownership_deep.zig");
     _ = @import("window_lifecycle.zig");
     _ = @import("theme.zig");

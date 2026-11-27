@@ -187,6 +187,7 @@ mod tests {
                     subagent_status: None,
                     subagent_tail: None,
                     view: None,
+                    mcp_app: None,
                 },
             ],
             created_at: 5,
