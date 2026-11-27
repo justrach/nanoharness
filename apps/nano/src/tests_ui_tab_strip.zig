@@ -258,6 +258,30 @@ test "windowed chrome: each Zen split pane header carries full screen's swap, zo
     try testing.expectEqual(@as(usize, 1), strip.chatCount(&h.a));
 }
 
+test "windowed chrome: a Zen split draft shows its project and computer once and its composer lines up with a chat's" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    h.a.splitPane(.horizontal);
+    h.t.settle(1);
+    try testing.expect(h.a.selected == null);
+    h.snap("windowed-zen-split-draft");
+    const mid = h.a.view.chrome.x + h.a.view.chrome.chat_width / 2;
+    const w = h.t.ctx.size.w;
+    const target = strip.active(&h.a);
+    const computer = strip.deviceLabel(&h.a, strip.device(&h.a, target));
+    const project = if (strip.folder(&h.a, target)) |f| f.name else "No project";
+    try testing.expectEqual(@as(usize, 1), countText(&h, computer, mid, w, w));
+    try testing.expectEqual(@as(usize, 1), countText(&h, project, mid, w, w));
+    const draft = h.a.view.composer_anchor orelse return error.MissingDraftComposer;
+
+    h.a.openChat("b", "remote-project");
+    h.t.settle(1);
+    const chat = h.a.view.composer_anchor orelse return error.MissingChatComposer;
+    try testing.expectApproxEqAbs(chat.y + chat.h, draft.y + draft.h, 1);
+}
+
 test "session navigation parity opens archived history outside a blank split pane" {
     var h: Harness = undefined;
     try h.init(true);
