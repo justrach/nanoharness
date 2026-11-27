@@ -113,6 +113,49 @@ const Harness = struct {
         return error.ChipNotInFocusOrder;
     }
 
+    fn clickChip(h: *Harness) !void {
+        const chip_rect = h.a.view.chip_anchor orelse return error.MissingChip;
+        h.t.click(chip_rect.x + chip_rect.w / 2, chip_rect.y + chip_rect.h / 2);
+        h.t.settle(1);
+    }
+
+    /// `label` drawn in the card, above the chip.
+    fn inCard(h: *Harness, label: []const u8) ?ui.Rect {
+        const chip_rect = h.a.view.chip_anchor orelse return null;
+        for (h.t.ctx.nodes.items) |n| switch (n.content) {
+            .text => |t| if (std.mem.eql(u8, t.str, label) and n.rect.y + n.rect.h < chip_rect.y) return n.rect,
+            else => {},
+        };
+        return null;
+    }
+
+    fn clickInCard(h: *Harness, label: []const u8) !void {
+        const r = h.inCard(label) orelse return error.MissingCardText;
+        h.t.click(r.x + r.w / 2, r.y + r.h / 2);
+        h.t.settle(1);
+    }
+
+    /// The card is closed, the message box has the keys, and typing goes
+    /// into the draft.
+    fn expectKeysInDraft(h: *Harness) !void {
+        try testing.expectEqual(.none, h.a.picker);
+        h.t.settle(1);
+        try testing.expectEqual(h.a.view.composer_id, h.t.ctx.focus);
+        try testing.expect(h.t.ctx.focus != try h.chipId());
+        h.t.typeText("hi");
+        h.t.settle(1);
+        try testing.expectEqualStrings("hi", h.a.composer.text());
+    }
+
+    fn chatModel(h: *Harness) []const u8 {
+        const ch = h.a.findChat("cedar") orelse return "";
+        return ch.model orelse "";
+    }
+
+    fn chipRing(h: *Harness) !bool {
+        return h.t.ctx.node(try h.chip()).style.border != null;
+    }
+
     fn snap(h: *Harness, name: []const u8) void {
         const dir = std.c.getenv("NANO_SNAP_DIR") orelse return;
         var buf: [1024]u8 = undefined;
@@ -340,4 +383,89 @@ test "model picker entry: the chip opens the same card in a window, full screen,
         h.press(.{ .key = '/', .cmd = true });
         try testing.expectEqual(.none, h.a.picker);
     };
+}
+
+test "model picker entry: picking a model by pointer, the card closes and typing goes into the draft" {
+    var h: Harness = undefined;
+    try h.init(no_model_commands);
+    defer h.deinit();
+    try h.clickChip();
+    try testing.expect(h.a.view.model_picker.stage.?.compact);
+    // The compact card's model row expands to the list; a model there is
+    // picked live and the compact card comes back showing it.
+    try h.clickInCard("Synthetic Fast");
+    try testing.expect(h.a.view.model_picker.stage == null);
+    try h.clickInCard("Synthetic Max");
+    try testing.expect(h.a.view.model_picker.stage.?.compact);
+    try testing.expectEqualStrings("openai/synthetic-max", h.chatModel());
+    // Closed by a click outside it.
+    h.t.click(1100, 200);
+    h.t.settle(1);
+    try h.expectKeysInDraft();
+}
+
+test "model picker entry: picking a model by keyboard, the card closes and typing goes into the draft" {
+    var h: Harness = undefined;
+    try h.init(no_model_commands);
+    defer h.deinit();
+    try h.tabToChip();
+    h.t.key(.enter);
+    h.t.settle(1);
+    try testing.expect(h.a.view.model_picker.stage.?.compact);
+    // Return expands to the list, the arrows move, Return picks.
+    h.press(.{ .key = S.enter });
+    try testing.expect(h.a.view.model_picker.stage == null);
+    h.press(.{ .key = S.down });
+    h.press(.{ .key = S.enter });
+    try testing.expect(h.a.view.model_picker.stage.?.compact);
+    try testing.expect(!std.mem.eql(u8, "openai/synthetic-fast", h.chatModel()));
+    h.press(.{ .key = S.escape });
+    try h.expectKeysInDraft();
+}
+
+test "model picker entry: a click outside the card gives the keys to the message box, not the chip" {
+    for ([_]bool{ false, true }) |keyboard| {
+        var h: Harness = undefined;
+        try h.init(no_model_commands);
+        defer h.deinit();
+        if (keyboard) {
+            try h.tabToChip();
+            h.t.key(.enter);
+            h.t.settle(1);
+        } else try h.clickChip();
+        try testing.expect(h.a.picker == .model);
+        h.t.click(1100, 200);
+        h.t.settle(1);
+        try h.expectKeysInDraft();
+    }
+}
+
+test "model picker entry: Space on the focused chip closes its card and gives the keys to the message box" {
+    var h: Harness = undefined;
+    try h.init(no_model_commands);
+    defer h.deinit();
+    try h.tabToChip();
+    h.t.key(.enter);
+    h.t.settle(1);
+    try testing.expect(h.a.picker == .model);
+    h.t.typeText(" ");
+    h.t.settle(1);
+    try h.expectKeysInDraft();
+}
+
+test "model picker entry: a pointer click on the chip never paints the keyboard focus ring" {
+    var h: Harness = undefined;
+    try h.init(no_model_commands);
+    defer h.deinit();
+    try h.clickChip();
+    try testing.expect(h.a.picker == .model);
+    try testing.expect(!try h.chipRing());
+    h.press(.{ .key = S.escape });
+    try testing.expect(!try h.chipRing());
+    // Keyboard focus paints it; a click afterwards takes it off again.
+    try h.tabToChip();
+    try testing.expect(try h.chipRing());
+    try h.clickChip();
+    try testing.expect(h.a.picker == .model);
+    try testing.expect(!try h.chipRing());
 }
