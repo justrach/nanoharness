@@ -112,6 +112,8 @@ pub const Surface = struct {
     glide: glide_mod.Glide = .{},
     /// The frame-rate range last asked of the link.
     link_range: pacing.Range = .{ .minimum = -1, .maximum = -1, .preferred = -1 },
+    /// The window server's nudge a scroll's frames owe (`surface_wake.Nudge`).
+    shadow_nudge: wake.Nudge = .{},
     pub fn create(window: *Window, view: ui.View, theme_override: ?Theme) !*Surface {
         const gpa = window.app.gpa;
         const self = try gpa.create(Surface);
@@ -403,6 +405,7 @@ pub const Surface = struct {
         const more = self.resizeStepping() or c.animating or hot_changed or c.input.down or self.scroll.active(now) or scrolling or due_soon;
         // The scroll's floor on the link's rate goes with it.
         if (!scrolling and self.link_fps == 0) self.setRate(null);
+        wake.settled(self, now);
         if (self.display_link != null) {
             if (more) {
                 self.setRate(null);
@@ -496,7 +499,7 @@ pub const Surface = struct {
             presented = self.renderer.drawLogged(self.instances.items, self.atlasTexture(), self.size, clear, null, 0).presented;
         }
         if (presented) self.last_present_target = present_at;
-        if (presented) wake.presented(self);
+        if (presented) wake.presented(self, now);
         return presented;
     }
 
