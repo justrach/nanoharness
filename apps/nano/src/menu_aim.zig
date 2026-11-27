@@ -1,4 +1,5 @@
 //! Pointer submenu "safe triangle" (menu-aim): a pure geometry helper.
+//! Always on for nested desktop menus; tests may flip `enabled`.
 //!
 //! The triangle's apex is the pointer; the other vertices are the submenu's
 //! near top and bottom corners. While the pointer stays inside the triangle
@@ -21,6 +22,26 @@ pub const default_idle_s: f64 = 0.300;
 pub const default_padding: f32 = 4;
 
 pub const trail_cap: usize = 24;
+
+/// Always on in the app. Tests set this false to exercise the old steal path.
+pub var enabled: bool = true;
+/// Tests, or `NANO_MENU_AIM_DEBUG=1`. Never a user-facing setting.
+pub var debug: bool = false;
+
+pub fn debugOn() bool {
+    if (debug) return true;
+    const v = std.c.getenv("NANO_MENU_AIM_DEBUG") orelse return false;
+    return std.mem.eql(u8, std.mem.span(v), "1");
+}
+
+pub fn resetHook() void {
+    enabled = true;
+    debug = false;
+}
+
+pub fn options() Options {
+    return .{};
+}
 
 pub const Options = struct {
     padding: f32 = default_padding,
@@ -292,6 +313,19 @@ test "menu-aim moving away from a left-hand submenu cancels the hold" {
     const away: Point = .{ .x = 190, .y = 50 };
     try testing.expectEqual(Hold.hold, decide(aim_opts, toward, from, 1.0, 0.95, left_sub, false));
     try testing.expectEqual(Hold.release, decide(aim_opts, away, from, 1.0, 0.95, left_sub, false));
+}
+
+test "menu-aim is on unless a test flips the internal hook" {
+    try testing.expect(enabled);
+    try testing.expect(!debug);
+    try testing.expect(!debugOn());
+    enabled = false;
+    debug = true;
+    try testing.expect(!enabled);
+    try testing.expect(debugOn());
+    resetHook();
+    try testing.expect(enabled);
+    try testing.expect(!debug);
 }
 
 test "menu-aim the tracker records movement, idle time and a ring of trail points" {

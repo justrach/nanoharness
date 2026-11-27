@@ -1,11 +1,11 @@
 //! Nested-menu pointer aim: diagonal travel, idle fallthrough, and the
-//! off-by-default setting. Synthetic workspace only.
+//! off path via the internal hook. Synthetic workspace only.
 const std = @import("std");
 const ui = @import("nanoui").ui;
 const App = @import("app.zig").App;
 const theme = @import("theme.zig");
 const menus = @import("view_sidebar_menus.zig");
-const settings_view = @import("view_settings.zig");
+const menu_aim = @import("menu_aim.zig");
 const testing = std.testing;
 
 const Harness = struct {
@@ -86,11 +86,12 @@ fn diagonalTowardOrganizeSubmenu(h: *Harness) !void {
     slide(&h.t, mid_x, mid_y, x1, y1, 10);
 }
 
-test "menu-aim defaults off so a diagonal into a nested menu opens the wrong submenu" {
+test "menu-aim off via the internal hook lets a diagonal open the wrong submenu" {
     var h: Harness = undefined;
     try h.init(false);
     defer h.deinit();
-    try testing.expect(!h.a.settings.get(.menu_aim_enabled));
+    menu_aim.enabled = false;
+    defer menu_aim.resetHook();
     try openOrganize(&h);
     try diagonalTowardOrganizeSubmenu(&h);
     h.snap("menu-aim-before");
@@ -100,12 +101,12 @@ test "menu-aim defaults off so a diagonal into a nested menu opens the wrong sub
     try testing.expect(!h.t.hasText("By status"));
 }
 
-test "menu-aim on holds Organize while the pointer crosses Sort toward its submenu" {
+test "menu-aim holds Organize while the pointer crosses Sort toward its submenu" {
     var h: Harness = undefined;
     try h.init(false);
     defer h.deinit();
-    h.a.settings.set(.menu_aim_enabled, true);
-    h.a.settings.set(.menu_aim_debug, true);
+    try testing.expect(menu_aim.enabled);
+    try testing.expect(!menu_aim.debugOn());
     try openOrganize(&h);
     try diagonalTowardOrganizeSubmenu(&h);
     h.snap("menu-aim-after");
@@ -114,12 +115,10 @@ test "menu-aim on holds Organize while the pointer crosses Sort toward its subme
     try testing.expect(!h.t.hasText("Created"));
 }
 
-test "menu-aim idle fallthrough lets hover switching resume after the configured delay" {
+test "menu-aim idle fallthrough lets hover switching resume after 300ms" {
     var h: Harness = undefined;
     try h.init(false);
     defer h.deinit();
-    h.a.settings.set(.menu_aim_enabled, true);
-    h.a.settings.setNumber("menuAimIdleMs", 80);
     try openOrganize(&h);
     const sort = h.t.findText("Sort") orelse return error.NoSort;
     const organize = h.t.findText("Organize") orelse return error.NoOrganize;
@@ -129,26 +128,9 @@ test "menu-aim idle fallthrough lets hover switching resume after the configured
     const y1 = sort.y + sort.h / 2;
     slide(&h.t, x0, y0, x1, y1, 8);
     try testing.expectEqual(@as(?usize, 0), h.a.view.menus.open);
-    h.t.advance(0.12);
+    h.t.advance(0.25);
+    try testing.expectEqual(@as(?usize, 0), h.a.view.menus.open);
+    h.t.advance(0.10);
     try testing.expectEqual(@as(?usize, 1), h.a.view.menus.open);
     try testing.expect(h.t.hasText("Created"));
-}
-
-test "Settings › Appearance exposes the off-by-default menu-aim switches" {
-    var h: Harness = undefined;
-    try h.init(false);
-    defer h.deinit();
-    h.a.settings.setSection(.appearance);
-    settings_view.open(&h.a);
-    h.t.settle(0.3);
-    // The Pointer card sits below the theme studio; wheel the page itself
-    // (not the studio's inner scroller) until the switches are in view.
-    h.t.scroll(520, 90, -1e9);
-    h.t.settle(0.2);
-    const label = h.t.findText("Predict nested menu aim") orelse return error.MissingAimSwitch;
-    try testing.expect(label.y > 40 and label.y < 740);
-    try testing.expect(h.t.hasText("Show menu-aim debug overlay"));
-    try testing.expect(!h.a.settings.get(.menu_aim_enabled));
-    try testing.expect(!h.a.settings.get(.menu_aim_debug));
-    h.snap("menu-aim-settings");
 }

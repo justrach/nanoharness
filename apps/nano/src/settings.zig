@@ -134,10 +134,6 @@ pub const Prefs = struct {
     restart_to_install_updates: bool = true,
     // Sidebar `#star-banner` dismissal.
     star_banner_dismissed: bool = false,
-    /// Nested-menu pointer aim (safe triangle). Off until explicitly enabled.
-    menu_aim_enabled: bool = false,
-    /// Grey triangle outline and pointer trail while a submenu is open.
-    menu_aim_debug: bool = false,
 };
 
 /// One of `Prefs`'s switches.
@@ -174,8 +170,6 @@ pub const Flag = enum {
     automatically_install_updates,
     restart_to_install_updates,
     star_banner_dismissed,
-    menu_aim_enabled,
-    menu_aim_debug,
 };
 
 pub const sidebar_min: f32 = 224;
@@ -493,19 +487,6 @@ pub const Store = struct {
     pub fn clearText(s: *Store, key: []const u8) void {
         _ = s.doc.orderedRemove(key);
         s.write(key, .null);
-    }
-
-    /// Seconds a still pointer keeps a submenu before hover switching resumes.
-    /// Override with `menuAimIdleMs` in nano-ui-settings.json (50–2000, default 300).
-    pub fn menuAimIdleS(s: *const Store) f64 {
-        const ms = s.number("menuAimIdleMs") orelse 300;
-        return std.math.clamp(if (std.math.isFinite(ms)) ms else 300, 50, 2000) / 1000.0;
-    }
-
-    /// Extra points around the aim triangle. Override with `menuAimPadding` (0–24, default 4).
-    pub fn menuAimPadding(s: *const Store) f32 {
-        const p = s.number("menuAimPadding") orelse 4;
-        return @floatCast(std.math.clamp(if (std.math.isFinite(p)) p else 4, 0, 24));
     }
 
     pub fn setNumber(s: *Store, key: []const u8, value: f64) void {
@@ -1501,14 +1482,6 @@ test "star banner dismissal and skipped updates persist per row version token" {
     try testing.expect(!s.get(.star_banner_dismissed));
     s.set(.star_banner_dismissed, true);
     try testing.expect(s.get(.star_banner_dismissed));
-    try testing.expect(!s.get(.menu_aim_enabled));
-    try testing.expect(!s.get(.menu_aim_debug));
-    try testing.expectApproxEqAbs(@as(f64, 0.300), s.menuAimIdleS(), 1e-9);
-    try testing.expectEqual(@as(f32, 4), s.menuAimPadding());
-    s.setNumber("menuAimIdleMs", 120);
-    s.setNumber("menuAimPadding", 8);
-    try testing.expectApproxEqAbs(@as(f64, 0.120), s.menuAimIdleS(), 1e-9);
-    try testing.expectEqual(@as(f32, 8), s.menuAimPadding());
 
     try testing.expect(!s.isUpdateSkipped("agent:local:codex", "0.169.0"));
     s.skipUpdate("agent:local:codex", "0.169.0");

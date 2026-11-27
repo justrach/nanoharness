@@ -154,7 +154,7 @@ pub fn menus(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (a.view.filter_menu) if (a.view.filter_anchor) |r| projects(c, a, k, r);
     if (a.view.filter_menu and a.view.menus.ctx_at != null) spaceMenu(c, a, k);
     if (a.view.more_menu) if (a.view.more_anchor) |r| view(c, a, k, r);
-    if (a.settings.get(.menu_aim_debug) and a.view.more_menu) debugOverlay(c, a);
+    if (menu_aim.debugOn() and a.view.more_menu) debugOverlay(c, a);
 }
 
 // The project menu.
@@ -808,7 +808,7 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
         var row = ui.div(c).row().wFull().h(29).px(8).gap(8).itemsCenter().rounded(7);
         row = if (m.group == groups.len) row.bg(k.selected) else row.hover(k.selected);
         defer row.end();
-        if (row.hovered() and stealHover(a, hold, m.open, c.input.mouse.x, x, w)) {
+        if (row.hovered() and stealHover(hold, m.open, c.input.mouse.x, x, w)) {
             m.group = groups.len;
             m.open = null;
             m.sub_rect = null;
@@ -832,7 +832,7 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
         var row = ui.div(c).row().wFull().h(29).px(8).gap(8).itemsCenter().rounded(7);
         row = if (m.group == index) row.bg(k.selected) else row.hover(k.selected);
         defer row.end();
-        if (row.hovered() and stealHover(a, hold, m.open, c.input.mouse.x, x, w)) {
+        if (row.hovered() and stealHover(hold, m.open, c.input.mouse.x, x, w)) {
             m.group = index;
             m.open = null;
             m.sub_rect = null;
@@ -868,12 +868,12 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
     }
 }
 
-/// When menu-aim is off, the right strip of the parent card still lets a
-/// diagonal reach the submenu (v0.2.182). When it is on, the triangle is
-/// the only hold: idle or a move away falls through to ordinary hover.
-fn stealHover(a: *const App, hold: bool, open: ?usize, mouse_x: f32, x: f32, w: f32) bool {
+/// When the test hook turns aim off, the right strip of the parent card
+/// still lets a diagonal reach the submenu (v0.2.182). Otherwise the
+/// triangle is the only hold: idle or a move away falls through to hover.
+fn stealHover(hold: bool, open: ?usize, mouse_x: f32, x: f32, w: f32) bool {
     if (open == null) return true;
-    if (a.settings.get(.menu_aim_enabled)) return !hold;
+    if (menu_aim.enabled) return !hold;
     return mouse_x <= x + w - 28;
 }
 
@@ -886,13 +886,10 @@ fn updateAim(c: *ui.Context, a: *App) bool {
     }
     const p = c.input.mouse;
     m.aim.note(.{ .x = p.x, .y = p.y }, c.time);
-    if (!a.settings.get(.menu_aim_enabled)) return false;
+    if (!menu_aim.enabled) return false;
     const sub = m.sub_rect orelse return false;
     const inside = sub.contains(p);
-    const opts = menu_aim.Options{
-        .padding = a.settings.menuAimPadding(),
-        .idle_s = a.settings.menuAimIdleS(),
-    };
+    const opts = menu_aim.options();
     const d = menu_aim.decide(opts, .{ .x = p.x, .y = p.y }, m.aim.previous(), c.time, m.aim.last_move_s, sub, inside);
     if (d != .hold) return false;
     const remain = opts.idle_s - (c.time - m.aim.last_move_s);

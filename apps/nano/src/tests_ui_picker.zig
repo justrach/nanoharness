@@ -218,7 +218,9 @@ test "picker detail without menu-aim switches after the pointer rests on another
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
-    try testing.expect(!h.a.settings.get(.menu_aim_enabled));
+    const menu_aim = @import("menu_aim.zig");
+    menu_aim.enabled = false;
+    defer menu_aim.resetHook();
     const fast = inPicker(&h, "Synthetic Fast") orelse return error.MissingModel;
     const max = inPicker(&h, "Synthetic Max") orelse return error.MissingMax;
     h.t.moveTo(fast.x + 4, fast.y + 4);
@@ -235,8 +237,7 @@ test "picker detail with menu-aim holds the card while moving toward it across a
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
-    h.a.settings.set(.menu_aim_enabled, true);
-    h.a.settings.set(.menu_aim_debug, true);
+    try testing.expect(@import("menu_aim.zig").enabled);
     const fast = inPicker(&h, "Synthetic Fast") orelse return error.MissingModel;
     const max = inPicker(&h, "Synthetic Max") orelse return error.MissingMax;
     h.t.moveTo(fast.x + 8, fast.y + fast.h / 2);

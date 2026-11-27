@@ -106,8 +106,6 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     caption(c, k, "Motion");
     motionCard(c, a, k);
-    caption(c, k, "Pointer");
-    pointerCard(c, a, k);
     fonts(c, a, k);
     import_view.warning(c, a, k);
 }
@@ -610,33 +608,6 @@ fn motionCard(c: *ui.Context, a: *App, k: theme.Colors) void {
     set.tile(c, k, .@"action-play");
     words(c, k, "Pause animations in background", "Hold animations still while Harness isn't the focused window. Saves CPU and battery.", 42);
     if (switch_(c, k, a.settings.get(.pause_animations_in_background), 10)) a.settings.toggle(.pause_animations_in_background);
-}
-
-fn pointerCard(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const cd = card(c, k);
-    defer cd.end();
-    {
-        const r = set.row(c, k, true, false).control();
-        defer r.end();
-        set.tile(c, k, .@"alt-arrow-right");
-        words(c, k, "Predict nested menu aim", "Keep a submenu open while the pointer travels toward it, instead of switching as it crosses other rows. Off by default.", 42);
-        const switched = switch_(c, k, a.settings.get(.menu_aim_enabled), 10);
-        if (switched or r.clicked()) {
-            a.settings.toggle(.menu_aim_enabled);
-            a.redraw();
-        }
-    }
-    {
-        const r = set.row(c, k, false, false).control();
-        defer r.end();
-        set.tile(c, k, .@"danger-triangle");
-        words(c, k, "Show menu-aim debug overlay", "Draw the aim triangle and a trail of the recent pointer path while a nested submenu is open.", 42);
-        const switched = switch_(c, k, a.settings.get(.menu_aim_debug), 10);
-        if (switched or r.clicked()) {
-            a.settings.toggle(.menu_aim_debug);
-            a.redraw();
-        }
-    }
 }
 
 // Fonts and the conversation's width.

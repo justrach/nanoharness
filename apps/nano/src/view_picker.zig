@@ -524,7 +524,7 @@ pub fn popover(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (is_compact and p.account_submenu and open) {
         compactAccountMenu(c, a, k, .{ .x = x, .y = y, .w = w, .h = h }, motion);
     }
-    if (a.settings.get(.menu_aim_debug) and open) pickerAimOverlay(c, a);
+    if (menu_aim.debugOn() and open) pickerAimOverlay(c, a);
 }
 
 fn keycap(c: *ui.Context, k: theme.Colors, text: []const u8) void {
@@ -658,14 +658,11 @@ fn hoverDetail(c: *ui.Context, a: *App, hovered: ?usize) void {
 }
 
 fn holdPickerAim(c: *ui.Context, a: *App, inside: bool) bool {
-    if (!a.settings.get(.menu_aim_enabled)) return false;
+    if (!menu_aim.enabled) return false;
     const p = &a.view.model_picker;
     const sub = p.detail_rect orelse return false;
     const mouse = c.input.mouse;
-    const opts = menu_aim.Options{
-        .padding = a.settings.menuAimPadding(),
-        .idle_s = a.settings.menuAimIdleS(),
-    };
+    const opts = menu_aim.options();
     const d = menu_aim.decide(opts, .{ .x = mouse.x, .y = mouse.y }, p.aim.previous(), c.time, p.aim.last_move_s, sub, inside);
     if (d != .hold) return false;
     const remain = opts.idle_s - (c.time - p.aim.last_move_s);
