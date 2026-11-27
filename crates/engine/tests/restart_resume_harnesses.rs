@@ -250,6 +250,7 @@ fn send(core: &EngineCore, harness: HarnessId, prompt: &str, message_id: &str) {
                     attachments: Vec::new(),
                     worktree: None,
                     resume: None,
+                    prompt_quotes: Vec::new(),
                 },
                 message_id: message_id.into(),
             },
@@ -533,6 +534,7 @@ fn manufacture_crash(
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         },
         SessionMessageEntry {
             id: "msg-assistant-1".into(),
@@ -543,6 +545,7 @@ fn manufacture_crash(
             status: Some(MessageStatus::Streaming),
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         },
     ] {
         doc.push_message(&entry).unwrap();

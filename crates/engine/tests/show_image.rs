@@ -49,6 +49,7 @@ fn run_request(cwd: &std::path::Path) -> RunRequest {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        prompt_quotes: Vec::new(),
     }
 }
 

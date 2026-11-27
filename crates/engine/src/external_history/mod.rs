@@ -896,6 +896,7 @@ fn entries_for(msgs: &[Msg], device_id: &str, chat_id: &str) -> Vec<SessionMessa
                 status: (msg.role == MessageRole::Assistant).then_some(MessageStatus::Complete),
                 continuation_of: None,
                 duration_ms: None,
+                prompt_quotes: Vec::new(),
             }
         })
         .collect()
@@ -1066,6 +1067,7 @@ mod tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         }
     }
 

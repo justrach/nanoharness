@@ -320,6 +320,8 @@ struct QueueMessageParams {
     turn_origin: harness_proto::TurnOrigin,
     #[serde(default)]
     peer_chat_id: Option<String>,
+    #[serde(default)]
+    prompt_quotes: Vec<harness_proto::PromptQuote>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3131,6 +3133,7 @@ impl RpcService for EngineRpc {
                         p.hold_for_turn_end,
                         p.turn_origin,
                         p.peer_chat_id,
+                        p.prompt_quotes,
                     )
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "id": id }))
@@ -5325,6 +5328,7 @@ mod tests {
                 status: None,
                 continuation_of: None,
                 duration_ms: None,
+                prompt_quotes: Vec::new(),
             })
             .unwrap();
         // Hold publication blocked: the opening must not await the full mirror.
@@ -5754,6 +5758,7 @@ mod context_usage_tests {
                     status: Some(harness_doc::MessageStatus::Streaming),
                     continuation_of: None,
                     duration_ms: None,
+                    prompt_quotes: Vec::new(),
                 })
                 .unwrap()
         };
@@ -5875,6 +5880,7 @@ mod context_usage_tests {
             status: Some(harness_doc::MessageStatus::Streaming),
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         };
         handle.doc().push_message(&entry("local-before")).unwrap();
         source.update_context_usage(Some(10), Some(100)).unwrap();
@@ -6139,6 +6145,7 @@ mod context_usage_tests {
                 status: Some(harness_doc::MessageStatus::Complete),
                 continuation_of: None,
                 duration_ms: None,
+                prompt_quotes: Vec::new(),
             };
             doc.push_message(&entry).unwrap();
             held.push(entry);
@@ -6160,6 +6167,7 @@ mod context_usage_tests {
             status: Some(harness_doc::MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         };
         doc.push_message(&newest).unwrap();
         let snapshot = doc.export_snapshot().unwrap();

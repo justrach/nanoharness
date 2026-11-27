@@ -147,6 +147,7 @@ fn run(core: &EngineCore, id: &str, prompt: &str, cwd: &str, attachments: Vec<St
                     attachments,
                     worktree: None,
                     resume: None,
+                    prompt_quotes: Vec::new(),
                 },
             },
             issued_by: "viewer".into(),

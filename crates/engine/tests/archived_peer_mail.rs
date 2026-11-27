@@ -185,6 +185,7 @@ fn run(prompt: &str) -> SessionCommandPayload {
             attachments: Vec::new(),
             worktree: None,
             resume: None,
+            prompt_quotes: Vec::new(),
         },
         message_id: uuid::Uuid::new_v4().to_string(),
     }

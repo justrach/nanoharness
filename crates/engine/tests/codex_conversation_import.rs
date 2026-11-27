@@ -93,6 +93,7 @@ fn request(cwd: &str, prompt: &str) -> RunRequest {
         attachments: vec![],
         worktree: None,
         resume: None,
+        prompt_quotes: Vec::new(),
     }
 }
 

@@ -79,6 +79,7 @@ async fn nano_watch_observes_graff_text_before_prompt_completion() {
             attachments: Vec::new(),
             worktree: None,
             resume: None,
+            prompt_quotes: Vec::new(),
         },
     };
     client

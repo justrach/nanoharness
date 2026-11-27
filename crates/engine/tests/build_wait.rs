@@ -109,6 +109,7 @@ fn request(cwd: &std::path::Path, prompt: &str) -> RunRequest {
         attachments: Vec::new(),
         resume: None,
         worktree: None,
+        prompt_quotes: Vec::new(),
     }
 }
 

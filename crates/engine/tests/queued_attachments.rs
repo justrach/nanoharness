@@ -132,6 +132,7 @@ fn run_payload(message_id: &str, pending_ref: &str) -> SessionCommandPayload {
             attachments: vec![pending_ref.to_string()],
             worktree: None,
             resume: None,
+            prompt_quotes: Vec::new(),
         },
         message_id: message_id.into(),
     }
@@ -323,6 +324,7 @@ async fn run_attachments_outside_uploads_never_reach_the_harness() {
             attachments: vec![outside.to_string(), inside.to_string()],
             worktree: None,
             resume: None,
+            prompt_quotes: Vec::new(),
         },
         message_id: "msg-jail-1".into(),
     };

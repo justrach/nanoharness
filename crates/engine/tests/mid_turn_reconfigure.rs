@@ -123,6 +123,7 @@ fn run(core: &EngineCore, id: &str, prompt: &str, model: Option<&str>, cwd: &str
                     attachments: Vec::new(),
                     worktree: None,
                     resume: None,
+                    prompt_quotes: Vec::new(),
                 },
             },
             issued_by: "viewer".into(),

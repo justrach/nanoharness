@@ -167,10 +167,10 @@ pub fn submitSubagentSteer(a: *App, s: *const @import("app_subagents.zig").Agent
     const prompt = std.fmt.allocPrint(a.gpa, "For subagent \"{s}\": {s}", .{ s.title, text }) catch return;
     defer a.gpa.free(prompt);
     if (selected_parent and q.steerBlocker(a, true, false) == null) {
-        q.steer(a, prompt);
+        q.steer(a, prompt, &.{});
     } else {
         // Queue against the owning parent, even when this surface came from a split peer.
-        a.request(@import("requests.zig").queueMessage(s.parent, prompt), .of(App, a, App.onNotice));
+        a.request(@import("requests.zig").queueMessage(s.parent, prompt, &.{}), .of(App, a, App.onNotice));
     }
     a.view.subagent_steer.clear();
     a.redraw();

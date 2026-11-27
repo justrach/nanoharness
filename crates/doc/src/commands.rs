@@ -401,6 +401,7 @@ mod tests {
             attachments: Vec::new(),
             worktree: None,
             resume: None,
+            prompt_quotes: Vec::new(),
         }
     }
 }

@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::{SESSION_SCHEMA_VERSION, TAIL_MESSAGE_COUNT};
 use crate::parts::{MessagePart, MessageStatus, SubagentStatus};
+use harness_proto::PromptQuote;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DocError {
@@ -62,6 +63,9 @@ pub struct SessionMessageEntry {
     /// Absent on user rows, live streams, and docs written before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<i64>,
+    /// Source links for blockquotes in this user's prompt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt_quotes: Vec<PromptQuote>,
 }
 
 /// The doc-resident flat part map (`DocMessagePart` in TS). Distinct from the app-layer
@@ -1117,6 +1121,12 @@ fn write_entry_scalar_fields(map: &LoroMap, entry: &SessionMessageEntry) -> Resu
     if let Some(duration_ms) = entry.duration_ms {
         map.insert("durationMs", duration_ms)?;
     }
+    if !entry.prompt_quotes.is_empty() {
+        map.insert(
+            "promptQuotes",
+            loro_value_from_json(&serde_json::to_value(&entry.prompt_quotes)?),
+        )?;
+    }
     Ok(())
 }
 
@@ -1256,6 +1266,8 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
         continuation_of: Option<String>,
         #[serde(default)]
         duration_ms: Option<i64>,
+        #[serde(default)]
+        prompt_quotes: Vec<PromptQuote>,
     }
     match RawEntry::deserialize(&v) {
         Ok(raw) => Ok(SessionMessageEntry {
@@ -1267,6 +1279,7 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
             status: raw.status,
             continuation_of: raw.continuation_of,
             duration_ms: raw.duration_ms,
+            prompt_quotes: raw.prompt_quotes,
         }),
         // 2026-08-10 incident rule: a missing field must cost AT MOST what
         // the field carried — never the entry, never the transcript. Rooms
@@ -1332,6 +1345,10 @@ fn salvage_entry(
             .and_then(|s| serde_json::from_value(s.clone()).ok()),
         continuation_of: str_field("continuationOf"),
         duration_ms: obj.get("durationMs").and_then(|x| x.as_i64()),
+        prompt_quotes: obj
+            .get("promptQuotes")
+            .and_then(|x| serde_json::from_value(x.clone()).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -1529,6 +1546,7 @@ impl<'a> SegmentWriter<'a> {
                 status: Some(MessageStatus::Streaming),
                 continuation_of: None,
                 duration_ms: None,
+                prompt_quotes: Vec::new(),
             },
         )?;
         map.insert_container("parts", LoroList::new())?;
@@ -1961,6 +1979,7 @@ mod tests {
                 status: Some(MessageStatus::Complete),
                 continuation_of: None,
                 duration_ms: None,
+                prompt_quotes: Vec::new(),
             })
             .unwrap();
             let peer = SessionDoc::init("viewer").unwrap();
@@ -2001,6 +2020,7 @@ mod tests {
                 status: Some(MessageStatus::Complete),
                 continuation_of: (segment > 0).then(|| "segment-0".into()),
                 duration_ms: None,
+                prompt_quotes: Vec::new(),
             })
             .unwrap();
         }
@@ -2041,6 +2061,7 @@ mod tests {
             status: Some(MessageStatus::Streaming),
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         };
         for index in 0..20 {
             doc.push_message(&message(&format!("m{index}"), "hello")).unwrap();
@@ -2265,6 +2286,7 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         }
     }
 
@@ -2283,6 +2305,36 @@ mod tests {
             }]
         );
         assert_eq!(doc.chat_id().as_deref(), Some("chat-1"));
+    }
+
+    #[test]
+    fn prompt_quote_provenance_survives_snapshot_and_missing_metadata_defaults_empty() {
+        use harness_proto::PromptQuote;
+        let doc = SessionDoc::init("quote-chat").unwrap();
+        let mut entry = user_entry("follow-up", "> selected text\n\nwhy?");
+        entry.prompt_quotes.push(PromptQuote {
+            entry: "source-reply".into(),
+            part: "source-part".into(),
+            nth: 1,
+            text: "selected text".into(),
+            start: 0,
+            end: 15,
+        });
+        doc.push_message(&entry).unwrap();
+        let imported = loro::LoroDoc::new();
+        imported.import(&doc.export_snapshot().unwrap()).unwrap();
+        assert_eq!(
+            SessionDoc::from_doc(imported).read_entries().unwrap()[0].prompt_quotes,
+            entry.prompt_quotes
+        );
+        assert!(
+            serde_json::from_str::<SessionMessageEntry>(
+                r#"{"id":"legacy","role":"user","parts":[],"createdAt":1,"deviceId":"d"}"#
+            )
+            .unwrap()
+            .prompt_quotes
+            .is_empty()
+        );
     }
 
     #[test]
@@ -2497,6 +2549,7 @@ mod tests {
             status: Some(MessageStatus::Aborted),
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         })
         .unwrap();
         assert!(!doc.resolve_input("nope").unwrap());
@@ -2766,6 +2819,7 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         })
         .unwrap();
         let entries = doc.read_entries().unwrap();
@@ -2965,6 +3019,7 @@ mod context_usage_tests {
                 status: Some(MessageStatus::Complete),
                 continuation_of: None,
                 duration_ms: None,
+                prompt_quotes: Vec::new(),
             })
             .unwrap();
         }
@@ -2981,6 +3036,7 @@ mod context_usage_tests {
             status: Some(MessageStatus::Complete),
             continuation_of: Some("m5".into()),
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         })
         .unwrap();
 

@@ -89,6 +89,7 @@ for line in sys.stdin:
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        prompt_quotes: Vec::new(),
     };
     let mut events = harness.run(request, controls).await.unwrap();
     let observed = tokio::time::timeout(Duration::from_secs(10), async {

@@ -2086,12 +2086,13 @@ pub const App = struct {
         defer if (completed) |p| a.gpa.free(p);
         const text = std.mem.trim(u8, completed orelse a.composer.text(), " \n\t");
         const quotes = @import("app_quotes.zig");
-        const quoted = quotes.prompt(a, text) catch {
+        const quote_result = quotes.promptWithQuotes(a, text) catch {
             a.setNotice("Couldn't prepare the quoted passages. Your draft is preserved.");
             return a.redraw();
         };
-        defer if (quoted) |p| a.gpa.free(p);
-        const message = quoted orelse text;
+        defer if (quote_result) |result| result.deinit(a.gpa);
+        const message = if (quote_result) |result| result.text else text;
+        const prompt_quotes = if (quote_result) |result| result.quotes else &.{};
         const attached = attachments.prompt(a, message) catch {
             a.setNotice("Wait for the attachments to finish, or remove/retry the failed file.");
             return a.redraw();
@@ -2139,10 +2140,10 @@ pub const App = struct {
                     a.setNotice(why);
                     return a.redraw();
                 }
-                queue_mod.steer(a, prompt);
+                queue_mod.steer(a, prompt, prompt_quotes);
                 // It lands in the transcript, as a prompt does: show it.
                 a.view.stick_end = true;
-            } else queue_mod.queueMessage(a, prompt);
+            } else queue_mod.queueMessage(a, prompt, prompt_quotes);
             attachments.clear(a);
             quotes.clear(a);
             a.composer.clear();
@@ -2201,12 +2202,13 @@ pub const App = struct {
             break :blk id;
         };
         const feedback = @import("app_send_feedback.zig");
-        const pending = feedback.begin(a, chat_id, message_id, prompt) catch {
+        const pending = feedback.begin(a, chat_id, message_id, prompt, prompt_quotes) catch {
             a.setNotice("Couldn't prepare the message. Please try again.");
             return a.redraw();
         };
         a.request(requests.run(chat_id, message_id, .{
             .prompt = prompt,
+            .promptQuotes = if (prompt_quotes.len == 0) null else prompt_quotes,
             .harness = harness,
             .model = model,
             .reasoning = reasoning,

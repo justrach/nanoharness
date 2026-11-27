@@ -39,6 +39,7 @@ async fn exercise(mode: &str) -> (Vec<AgentEvent>, Vec<Value>) {
         attachments: Vec::new(),
         worktree: None,
         resume: Some("fixture".into()),
+        prompt_quotes: Vec::new(),
     };
     let stream = AcpHarness::graff()
         .with_executable(exe)

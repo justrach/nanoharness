@@ -6,6 +6,7 @@
 //! `error.Desync`: the caller resubscribes for a fresh reset, as
 //! `apply_transcript_frame` asks of the GPUI app.
 const std = @import("std");
+const requests = @import("requests.zig");
 const json = std.json;
 const Allocator = std.mem.Allocator;
 
@@ -165,6 +166,7 @@ pub const Entry = struct {
     role: Role,
     status: EntryStatus,
     parts: std.ArrayList(Part) = .empty,
+    prompt_quotes: []requests.PromptQuote = &.{},
     /// How long the turn worked (`durationMs`), once it has said.
     duration_ms: ?i64 = null,
     /// When it was made (`createdAt`); 0 for one that hasn't said.
@@ -192,6 +194,12 @@ pub const Entry = struct {
         gpa.free(e.id);
         for (e.parts.items) |*p| p.deinit(gpa);
         e.parts.deinit(gpa);
+        for (e.prompt_quotes) |quote| {
+            gpa.free(@constCast(quote.entry));
+            gpa.free(@constCast(quote.part));
+            gpa.free(@constCast(quote.text));
+        }
+        if (e.prompt_quotes.len > 0) gpa.free(e.prompt_quotes);
     }
 };
 
@@ -392,6 +400,33 @@ fn parseEntry(gpa: Allocator, v: json.Value) !Entry {
     };
     if (o.get("createdAt")) |d| if (d == .integer) {
         e.created_ms = d.integer;
+    };
+    if (o.get("promptQuotes")) |raw| if (raw == .array) {
+        var quotes: std.ArrayList(requests.PromptQuote) = .empty;
+        errdefer {
+            for (quotes.items) |quote| {
+                gpa.free(@constCast(quote.entry));
+                gpa.free(@constCast(quote.part));
+                gpa.free(@constCast(quote.text));
+            }
+            quotes.deinit(gpa);
+        }
+        for (raw.array.items) |item| {
+            if (item != .object) continue;
+            const entry = string(item.object.get("entry")) orelse continue;
+            const part = string(item.object.get("part")) orelse continue;
+            const text = string(item.object.get("text")) orelse continue;
+            const nth = std.math.cast(usize, uint(item.object.get("nth")) orelse continue) orelse continue;
+            const start = std.math.cast(usize, uint(item.object.get("start")) orelse continue) orelse continue;
+            const end = std.math.cast(usize, uint(item.object.get("end")) orelse continue) orelse continue;
+            const owned_entry = try gpa.dupe(u8, entry);
+            errdefer gpa.free(owned_entry);
+            const owned_part = try gpa.dupe(u8, part);
+            errdefer gpa.free(owned_part);
+            const owned_text = try gpa.dupe(u8, text);
+            try quotes.append(gpa, .{ .entry = owned_entry, .part = owned_part, .nth = nth, .text = owned_text, .start = start, .end = end });
+        }
+        e.prompt_quotes = try quotes.toOwnedSlice(gpa);
     };
     for (array(o.get("parts"))) |p| if (p == .object) try e.parts.append(gpa, try parsePart(gpa, p.object));
     return e;

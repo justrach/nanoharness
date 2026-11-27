@@ -258,9 +258,16 @@ fn line(c: *ui.Context, end: End) ?ui.Rect {
 
 /// Shows a chip's passage: its click.
 fn show(c: *ui.Context, a: *App, item: *const quotes.Item) void {
+    showSource(c, a, item.owner, .{ .entry = item.entry, .part = item.part, .nth = item.nth }, item.text, true, item.id);
+}
+
+pub fn showSource(c: *ui.Context, a: *App, chat: []const u8, source: quotes.Source, text: []const u8, focus_composer: bool, item_id: u64) void {
     @import("view_write.zig").close(a);
-    a.quotes.reveal = .{ .item = item.id, .started = c.time };
-    a.view.focus_composer = true;
+    quotes.beginReveal(a, chat, source, text, focus_composer, c.time, item_id) catch {
+        a.setNotice("Couldn't return to the quoted passage.");
+        return;
+    };
+    if (focus_composer) a.view.focus_composer = true;
     c.changed = true;
     a.redraw();
 }
@@ -269,8 +276,7 @@ fn show(c: *ui.Context, a: *App, item: *const quotes.Item) void {
 /// passage is in it.
 pub fn wants(a: *const App, entry: []const u8) bool {
     const r = a.quotes.reveal orelse return false;
-    const item = a.quotes.find(r.item) orelse return false;
-    return item.active(a) and std.mem.eql(u8, item.entry, entry);
+    return a.selected != null and std.mem.eql(u8, r.chat, a.selected.?) and std.mem.eql(u8, r.entry, entry);
 }
 
 /// Whether folded `work` of reply `entry` is to be opened, once: a chip's
@@ -279,8 +285,7 @@ pub fn opens(a: *App, entry: []const u8, work: []const tr.Part) bool {
     if (!wants(a, entry)) return false;
     const r = &a.quotes.reveal.?;
     if (r.opened) return false;
-    const item = a.quotes.find(r.item).?;
-    for (work) |p| if (std.mem.eql(u8, p.id, item.part)) {
+    for (work) |p| if (std.mem.eql(u8, p.id, r.part)) {
         r.opened = true;
         return true;
     };
@@ -289,25 +294,30 @@ pub fn opens(a: *App, entry: []const u8, work: []const tr.Part) bool {
 
 fn reveal(c: *ui.Context, a: *App, rows: *const Rows, t: *const tr.Transcript, box: u64) void {
     const r = if (a.quotes.reveal) |*r| r else return;
-    const item = a.quotes.find(r.item) orelse return done(a);
     const here = for (t.entries.items) |*e| {
-        if (std.mem.eql(u8, e.id, item.entry)) break true;
+        if (std.mem.eql(u8, e.id, r.entry)) break true;
     } else false;
-    if (!item.active(a) or !here or c.time - r.started > reveal_s) return done(a);
+    if (a.selected == null or !std.mem.eql(u8, r.chat, a.selected.?)) return done(a);
+    if (!here) return unavailable(a);
+    if (c.time - r.started > reveal_s) return if (r.shown) done(a) else unavailable(a);
     const seen = c.scroll_seen.get(box) orelse (c.scroll.get(box) orelse 0);
     const at = c.scroll.get(box) orelse seen;
     if (at != seen and r.frame != c.frame) return done(a);
     if (r.shown and (c.selection.anchor == null or c.selection.dragging)) return done(a);
     c.animationFrame();
-    // From the part it was taken from; from the reply's start if that is
-    // gone.
-    const from = spanOf(rows, item.entry, item.part) orelse spanOf(rows, item.entry, null) orelse return;
+    const from = spanOf(rows, r.entry, r.part) orelse {
+        if (c.time - r.started > reveal_s) unavailable(a);
+        return;
+    };
     const passage = Passage.init(c, rows, from) catch return done(a);
-    const found = passage.find(item.text, item.nth) orelse passage.find(item.text, 0);
-    const lo = (if (found) |f| passage.place(f[0], false) else passage.place(0, false)) orelse return;
-    const hi = (if (found) |f| passage.place(f[1], true) else null) orelse lo;
-    if (found != null and !r.shown) highlight(c, a, box, lo, hi);
-    r.shown = found != null;
+    const found = passage.find(r.text, r.nth) orelse {
+        if (c.time - r.started > reveal_s) unavailable(a);
+        return;
+    };
+    const lo = passage.place(found[0], false) orelse return;
+    const hi = passage.place(found[1], true) orelse return;
+    if (!r.shown) highlight(c, a, box, lo, hi);
+    r.shown = true;
     const view = c.rects.get(box) orelse return;
     const top = line(c, .{ .node = lo.leaf.node, .byte = lo.byte }) orelse return;
     const end = line(c, .{ .node = hi.leaf.node, .byte = hi.byte }) orelse return;
@@ -331,7 +341,13 @@ fn reveal(c: *ui.Context, a: *App, rows: *const Rows, t: *const tr.Transcript, b
     c.changed = true;
 }
 
+fn unavailable(a: *App) void {
+    a.setNotice("The quoted passage is no longer available in this conversation.");
+    done(a);
+}
+
 fn done(a: *App) void {
+    if (a.quotes.reveal) |r| r.destroy(a.gpa);
     a.quotes.reveal = null;
 }
 

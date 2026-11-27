@@ -169,6 +169,7 @@ fn send_full(
             attachments,
             resume: None,
             worktree: None,
+            prompt_quotes: Vec::new(),
         },
         message_id: id.into(),
     };
@@ -340,6 +341,7 @@ fn seed_old_question(core: &EngineCore, held: &str, options: &[&str]) -> String 
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         })
         .unwrap();
     request_id
@@ -375,7 +377,7 @@ fn seed_held_question(
                     attachments: attachments.clone(),
                     resume: None,
                     worktree: None,
-                },
+            prompt_quotes: Vec::new(),},
                 "message_id": id,
             })
         })

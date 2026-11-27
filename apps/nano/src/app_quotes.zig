@@ -4,6 +4,7 @@
 //! and last as long as the window does.
 const std = @import("std");
 const App = @import("app.zig").App;
+const requests = @import("requests.zig");
 const Allocator = std.mem.Allocator;
 
 /// Where a passage was read: the reply, the part of it the passage starts
@@ -47,7 +48,13 @@ pub const Item = struct {
 
 /// A chip's passage being brought into view (view_quotes.zig).
 pub const Reveal = struct {
-    item: u64,
+    item: u64 = 0,
+    chat: []u8,
+    entry: []u8,
+    part: []u8,
+    text: []u8,
+    nth: usize,
+    focus_composer: bool,
     started: f64,
     /// The folded work holding the passage was opened for it.
     opened: bool = false,
@@ -57,6 +64,13 @@ pub const Reveal = struct {
     moves: bool = false,
     /// The frame that moved it last: another's move is the reader's.
     frame: u64 = 0,
+
+    pub fn destroy(r: Reveal, gpa: Allocator) void {
+        gpa.free(r.chat);
+        gpa.free(r.entry);
+        gpa.free(r.part);
+        gpa.free(r.text);
+    }
 };
 
 pub const State = struct {
@@ -71,6 +85,7 @@ pub const State = struct {
     pub fn deinit(s: *State, gpa: Allocator) void {
         for (s.items.items) |item| item.destroy(gpa);
         s.items.deinit(gpa);
+        if (s.reveal) |r| r.destroy(gpa);
         s.* = .{};
     }
 
@@ -121,6 +136,20 @@ pub fn add(a: *App, text: []const u8, source: Source) !void {
     a.quotes.next_id += 1;
 }
 
+pub fn beginReveal(a: *App, chat: []const u8, source: Source, text: []const u8, focus_composer: bool, started: f64, item_id: u64) !void {
+    if (a.quotes.reveal) |r| r.destroy(a.gpa);
+    a.quotes.reveal = .{
+        .item = item_id,
+        .chat = try a.gpa.dupe(u8, chat),
+        .entry = try a.gpa.dupe(u8, source.entry),
+        .part = try a.gpa.dupe(u8, source.part),
+        .text = try a.gpa.dupe(u8, text),
+        .nth = source.nth,
+        .focus_composer = focus_composer,
+        .started = started,
+    };
+}
+
 pub fn clear(a: *App) void {
     for (a.quotes.items.items) |item| if (item.active(a)) {
         item.removed = true;
@@ -139,24 +168,68 @@ pub fn reap(a: *App) void {
     }
 }
 
+pub const PromptResult = struct {
+    text: []u8,
+    quotes: []requests.PromptQuote,
+
+    pub fn deinit(result: PromptResult, gpa: Allocator) void {
+        gpa.free(result.text);
+        gpa.free(result.quotes);
+    }
+};
+
 /// The draft's quotes as Markdown blockquotes ahead of `text`; null when it
-/// has none. A slash command keeps the message's start, where the agents
-/// look for it, with the quotes under it.
-pub fn prompt(a: *App, text: []const u8) !?[]u8 {
+/// has none. The references point to exact quote blocks in the resulting prompt.
+pub fn promptWithQuotes(a: *App, text: []const u8) !?PromptResult {
     if (count(a) == 0) return null;
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(a.gpa);
+    var refs: std.ArrayList(requests.PromptQuote) = .empty;
+    errdefer refs.deinit(a.gpa);
     const command = isCommand(text);
     if (command) try out.appendSlice(a.gpa, text);
     for (a.quotes.items.items) |item| if (item.active(a)) {
         if (out.items.len > 0) try out.appendSlice(a.gpa, "\n\n");
+        const start = out.items.len;
         try blockquote(a.gpa, &out, item.text);
+        try refs.append(a.gpa, .{ .entry = item.entry, .part = item.part, .nth = item.nth, .text = item.text, .start = start, .end = out.items.len });
     };
     if (!command and text.len > 0) {
         try out.appendSlice(a.gpa, "\n\n");
         try out.appendSlice(a.gpa, text);
     }
-    return try out.toOwnedSlice(a.gpa);
+    return .{ .text = try out.toOwnedSlice(a.gpa), .quotes = try refs.toOwnedSlice(a.gpa) };
+}
+
+pub fn prompt(a: *App, text: []const u8) !?[]u8 {
+    const result = (try promptWithQuotes(a, text)) orelse return null;
+    a.gpa.free(result.quotes);
+    return result.text;
+}
+
+/// Remove only verified quote blocks, preserving the rest of the stored prompt.
+pub fn displayText(gpa: Allocator, prompt_text: []const u8, refs: []const requests.PromptQuote) !?[]u8 {
+    if (refs.len == 0) return try gpa.dupe(u8, prompt_text);
+    var previous_end: usize = 0;
+    for (refs, 0..) |ref, i| {
+        if (ref.start > ref.end or ref.end > prompt_text.len or ref.start < previous_end or ref.entry.len == 0 or ref.part.len == 0 or ref.text.len == 0) return null;
+        if (!std.unicode.utf8ValidateSlice(prompt_text[ref.start..ref.end])) return null;
+        if (i > 0 and !std.mem.eql(u8, prompt_text[previous_end..ref.start], "\n\n")) return null;
+        var expected: std.ArrayList(u8) = .empty;
+        defer expected.deinit(gpa);
+        try blockquote(gpa, &expected, ref.text);
+        if (!std.mem.eql(u8, prompt_text[ref.start..ref.end], expected.items)) return null;
+        previous_end = ref.end;
+    }
+    var start = refs[0].start;
+    var end = refs[refs.len - 1].end;
+    if (start >= 2 and std.mem.eql(u8, prompt_text[start - 2 .. start], "\n\n")) start -= 2;
+    if (end + 2 <= prompt_text.len and std.mem.eql(u8, prompt_text[end .. end + 2], "\n\n")) end += 2;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.appendSlice(gpa, prompt_text[0..start]);
+    try out.appendSlice(gpa, prompt_text[end..]);
+    return try out.toOwnedSlice(gpa);
 }
 
 fn blockquote(gpa: Allocator, out: *std.ArrayList(u8), text: []const u8) !void {

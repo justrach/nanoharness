@@ -49,6 +49,7 @@ fn run_request(prompt: &str, cwd: &str) -> RunRequest {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        prompt_quotes: Vec::new(),
     }
 }
 
@@ -346,6 +347,7 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         })
         .unwrap();
         doc.push_message(&SessionMessageEntry {
@@ -360,6 +362,7 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
             status: Some(MessageStatus::Streaming),
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         })
         .unwrap();
         store
@@ -606,6 +609,7 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
                     status: Some(MessageStatus::Complete),
                     continuation_of: None,
                     duration_ms: None,
+                    prompt_quotes: Vec::new(),
                 })
                 .unwrap();
                 doc.push_message(&SessionMessageEntry {
@@ -620,6 +624,7 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
                     status: Some(MessageStatus::Streaming),
                     continuation_of: None,
                     duration_ms: None,
+                    prompt_quotes: Vec::new(),
                 })
                 .unwrap();
                 store
@@ -899,6 +904,7 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        prompt_quotes: Vec::new(),
     };
     let assemble_real = || {
         EngineCore::assemble(

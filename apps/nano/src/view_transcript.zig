@@ -785,12 +785,23 @@ fn user(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, col: f32, 
         const bubble = ui.div(c).column().maxW(col * 0.8).bg(k.user_bubble).rounded(16).px(16).py(10).gap(6);
         defer bubble.end();
         const st = kit.style(c, 14, 22, .{ .wrap = true, .color = k.text });
+        var sent_quotes_drawn = false;
         for (e.parts.items) |*p| switch (p.kind) {
             .text => {
                 const parsed = attachment_refs.parse(c.alloc(), p.text.items) catch attachment_refs.Parsed{ .text = p.text.items };
-                if (parsed.text.len > 0) {
-                    ui.key(c, c.print("user-text-{s}-{s}-{x}", .{ chat_id orelse "", p.id, std.hash.Wyhash.hash(0, parsed.text) }));
-                    ui.text(c, parsed.text, st);
+                var shown_text = parsed.text;
+                var projected: ?[]u8 = null;
+                if (!sent_quotes_drawn and e.prompt_quotes.len > 0) {
+                    projected = (@import("app_quotes.zig").displayText(c.alloc(), parsed.text, e.prompt_quotes) catch null) orelse null;
+                    if (projected) |value| {
+                        shown_text = value;
+                        sent_quotes_drawn = true;
+                        sentQuoteChips(c, a, k, e.prompt_quotes, chat_id);
+                    }
+                }
+                if (shown_text.len > 0) {
+                    ui.key(c, c.print("user-text-{s}-{s}-{x}", .{ chat_id orelse "", p.id, std.hash.Wyhash.hash(0, shown_text) }));
+                    ui.text(c, shown_text, st);
                 }
                 for (parsed.paths, 0..) |path, index| {
                     ui.key(c, c.print("user-attachment-{s}-{d}", .{ p.id, index }));
@@ -816,6 +827,26 @@ fn peerMessage(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, mes
     @import("view_markdown.zig").markdown(c, k, message.body, &a.view.copy_feedback);
     lane(c, a, k, e, box.hovered(), false);
     return c.rects.get(c.node(box.index).id);
+}
+
+fn sentQuoteChips(c: *ui.Context, a: *App, k: theme.Colors, refs: []const @import("requests.zig").PromptQuote, chat_id: ?[]const u8) void {
+    const chat = chat_id orelse return;
+    const st = kit.style(c, 12, 16, .{ .color = k.muted });
+    const row = ui.div(c).column().wFull().gap(4).itemsStart();
+    defer row.end();
+    for (refs, 0..) |ref, i| {
+        ui.key(c, c.print("sent-quote-{s}-{d}", .{ ref.entry, i }));
+        const label = c.print("Show quoted passage: {s}", .{ref.text});
+        const chip = ui.div(c).row().h(28).maxW(280).pr(8).gap(6).itemsCenter().rounded(8).border(k.border).borderW(1).bg(k.hover).control();
+        defer chip.end();
+        const body = ui.div(c).row().h(26).pl(8).gap(6).itemsCenter().rounded(7);
+        defer body.end();
+        if (@import("control_behavior.zig").activate(c, body, k, label, true, false)) {
+            @import("view_quotes.zig").showSource(c, a, chat, .{ .entry = ref.entry, .part = ref.part, .nth = ref.nth }, ref.text, false, 0);
+        }
+        icons.icon(c, .@"chat-round-line", 12, k.muted, 0);
+        kit.ellipsisText(c, ref.text, if (c.hot == c.node(body.index).id) kit.style(c, 12, 16, .{ .color = k.text }) else st, 240);
+    }
 }
 
 fn sentAttachment(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, path: []const u8) void {

@@ -116,9 +116,9 @@ pub fn queues(a: *const App) bool {
     return s == .working or s == .awaiting_input;
 }
 
-pub fn queueMessage(a: *App, text: []const u8) void {
+pub fn queueMessage(a: *App, text: []const u8, prompt_quotes: []const requests.PromptQuote) void {
     const chat = a.selected orelse return;
-    a.request(requests.queueMessage(chat, text), .of(App, a, App.onNotice));
+    a.request(requests.queueMessage(chat, text, prompt_quotes), .of(App, a, App.onNotice));
 }
 
 // Messages while the agent is working (crates/ui/src/composer/follow_up.rs):
@@ -316,9 +316,9 @@ pub const PendingSteer = struct {
 
 /// A steer: queued like any follow-up, then promoted into the live turn
 /// by its row's id (`STEER_QUEUED_MESSAGE_NOW`).
-pub fn steer(a: *App, text: []const u8) void {
+pub fn steer(a: *App, text: []const u8, prompt_quotes: []const requests.PromptQuote) void {
     const chat = a.selected orelse return;
-    const id = a.send_(requests.queueMessage(chat, text), .of(App, a, onQueuedSteer)) orelse return a.setNotice("Send failed: not connected");
+    const id = a.send_(requests.queueMessage(chat, text, prompt_quotes), .of(App, a, onQueuedSteer)) orelse return a.setNotice("Send failed: not connected");
     const owned = a.gpa.dupe(u8, chat) catch return;
     const h = if (host(a)) |d| a.gpa.dupe(u8, d) catch null else null;
     a.steers.append(a.gpa, .{ .req = id, .chat = owned, .host = h }) catch {

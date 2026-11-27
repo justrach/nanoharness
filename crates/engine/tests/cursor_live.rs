@@ -86,6 +86,7 @@ fn start(core: &EngineCore, cwd: &std::path::Path, prompt: String) {
                     attachments: vec![],
                     worktree: None,
                     resume: None,
+                    prompt_quotes: Vec::new(),
                 },
             },
         )

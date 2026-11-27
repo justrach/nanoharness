@@ -54,6 +54,7 @@ async fn main() {
         attachments: Vec::new(),
         resume: None,
         worktree: None,
+        prompt_quotes: Vec::new(),
     };
     let mut harness = OpencodeHarness::new();
     if let Some(exe) = exe {

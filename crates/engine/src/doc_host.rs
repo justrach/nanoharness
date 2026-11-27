@@ -539,6 +539,8 @@ pub struct PendingPrompt {
     pub issued_at: i64,
     pub issued_by: String,
     pub waiting_for_attachments: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt_quotes: Vec<harness_proto::PromptQuote>,
 }
 
 /// Run commands still pending, oldest first. One whose message already
@@ -561,6 +563,7 @@ pub(crate) fn pending_prompts(commands: &[SessionCommandEntry]) -> Vec<PendingPr
                     .attachments
                     .iter()
                     .any(|a| crate::uploads::is_pending_ref(a)),
+                prompt_quotes: request.prompt_quotes.clone(),
             }),
             _ => None,
         })
@@ -864,6 +867,16 @@ impl ChatDocHandle {
         text: &str,
         created_at: i64,
     ) -> Result<(), DocError> {
+        self.write_user_message_with_quotes(message_id, text, created_at, &[])
+    }
+
+    pub fn write_user_message_with_quotes(
+        &self,
+        message_id: &str,
+        text: &str,
+        created_at: i64,
+        prompt_quotes: &[harness_proto::PromptQuote],
+    ) -> Result<(), DocError> {
         if self.doc.read_entries()?.iter().any(|e| e.id == message_id) {
             return Ok(());
         }
@@ -879,6 +892,7 @@ impl ChatDocHandle {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: prompt_quotes.to_vec(),
         })
     }
 
@@ -3449,6 +3463,7 @@ impl DocHost {
                     true,
                     TurnOrigin::Peer,
                     None,
+                    Vec::new(),
                 ) {
                     // Left unacked: the next nudge retries it.
                     tracing::warn!(chat = %chat_id, %err, "room wake: queue failed");
@@ -3833,6 +3848,7 @@ impl DocHost {
             hold_for_turn_end,
             TurnOrigin::Human,
             None,
+            Vec::new(),
         )
     }
 
@@ -3845,6 +3861,7 @@ impl DocHost {
         hold_for_turn_end: bool,
         turn_origin: TurnOrigin,
         peer_chat_id: Option<String>,
+        prompt_quotes: Vec<harness_proto::PromptQuote>,
     ) -> Result<String, EngineError> {
         let turn_origin = if peer_chat_id.is_some() {
             TurnOrigin::Peer
@@ -3866,6 +3883,7 @@ impl DocHost {
             turn_origin,
             peer_chat_id,
             attachments,
+            prompt_quotes,
             hold_for_turn_end,
             issued_by: self.inner.config.device_id.clone(),
             issued_at: now_ms(),
@@ -4633,12 +4651,13 @@ impl DocHost {
         };
         if send == QueueSend::Steer {
             match sessions
-                .steer_with_origin(
+                .steer_with_origin_and_quotes(
                     chat_id,
                     &prompt,
                     Some(message_id.clone()),
                     attachments.clone(),
                     turn_origin,
+                    &item.prompt_quotes,
                 )
                 .await?
             {
@@ -4670,6 +4689,7 @@ impl DocHost {
             ));
         };
         request.prompt = prompt;
+        request.prompt_quotes = item.prompt_quotes.clone();
         request.turn_origin = turn_origin;
         request.resume = None; // dispatch re-derives the harness session
         request.attachments = item.attachments.clone();
@@ -5917,10 +5937,11 @@ impl DocHost {
                 // host got around to draining a queued command. Idempotent by
                 // id, so the dispatch path's own execution-time write dedupes
                 // to a no-op.
-                if let Err(err) = handle.write_user_message(
+                if let Err(err) = handle.write_user_message_with_quotes(
                     message_id,
                     &request.prompt,
                     entry.issued_at.min(now_ms()),
+                    &request.prompt_quotes,
                 ) {
                     tracing::warn!(chat = %chat_id, error = %err, "canonical user-message write failed");
                 }
@@ -6177,6 +6198,7 @@ impl DocHost {
                     ));
                 };
                 request.prompt = prompt;
+                request.prompt_quotes.clear();
                 request.turn_origin = turn_origin;
                 request.resume = None; // dispatch re-derives the harness session
                 // A reused config must not re-inline the PREVIOUS turn's
@@ -6232,6 +6254,7 @@ impl DocHost {
             turn_origin,
             peer_chat_id: None,
             attachments: Vec::new(),
+            prompt_quotes: Vec::new(),
             hold_for_turn_end: false,
             issued_by: self.inner.config.device_id.clone(),
             issued_at: now_ms(),
@@ -6267,6 +6290,7 @@ impl DocHost {
         handle.doc.push_queued(&QueuedMessage {
             id: message_id.to_string(),
             text: request.prompt.clone(),
+            prompt_quotes: request.prompt_quotes.clone(),
             turn_origin: request.turn_origin,
             peer_chat_id: None,
             attachments: request.attachments.clone(),
@@ -6348,6 +6372,7 @@ impl DocHost {
                 turn_origin: TurnOrigin::Peer,
                 peer_chat_id: None,
                 attachments: request.attachments,
+                prompt_quotes: request.prompt_quotes,
                 hold_for_turn_end: false,
                 issued_by: self.inner.config.device_id.clone(),
                 issued_at: now_ms(),
@@ -6529,6 +6554,7 @@ impl DocHost {
             attachments: Vec::new(),
             resume: None,
             worktree: None,
+            prompt_quotes: Vec::new(),
         })
     }
 
@@ -6710,6 +6736,7 @@ mod transfer_progress_tests {
                     status: None,
                     continuation_of: None,
                     duration_ms: None,
+                    prompt_quotes: Vec::new(),
                 })
                 .unwrap();
         }
@@ -6791,6 +6818,7 @@ mod transfer_progress_tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         })
         .unwrap();
         peer.doc().commit();
@@ -7488,6 +7516,7 @@ mod pending_prompt_tests {
                     attachments,
                     resume: None,
                     worktree: None,
+                    prompt_quotes: Vec::new(),
                 },
                 message_id: format!("m-{id}"),
             },
@@ -7538,6 +7567,7 @@ mod pending_prompt_tests {
                     issued_at: 1_000,
                     issued_by: "phone".into(),
                     waiting_for_attachments: false,
+                    prompt_quotes: Vec::new(),
                 },
                 PendingPrompt {
                     message_id: "m-image".into(),
@@ -7545,6 +7575,7 @@ mod pending_prompt_tests {
                     issued_at: 1_000,
                     issued_by: "phone".into(),
                     waiting_for_attachments: true,
+                    prompt_quotes: Vec::new(),
                 },
             ]
         );

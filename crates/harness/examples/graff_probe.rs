@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        prompt_quotes: Vec::new(),
     };
     println!("Running real graff ACP with {model}");
     let mut stream = harness.run(request, controls).await?;

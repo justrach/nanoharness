@@ -146,6 +146,7 @@ fn request(root: &Path, level: ReasoningLevel) -> RunRequest {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        prompt_quotes: Vec::new(),
     }
 }
 
