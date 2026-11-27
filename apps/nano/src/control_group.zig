@@ -11,10 +11,19 @@ const State = struct {
     recover: bool = false,
 };
 
+/// How a group draws: `segmented` is a row of 32-point pills, the chosen
+/// one on the selection wash (the sidebar's 24h / Wk / Any); `tabs` is a
+/// row of words, the chosen one in primary ink over a 2-point accent rule.
+pub const Look = enum { segmented, tabs };
+
 pub fn choices(c: *ui.Context, k: theme.Colors, key: []const u8, labels: []const []const u8, selected: usize, enabled: bool, role: ui.A11yRole) ?usize {
+    return choicesLook(c, k, key, labels, selected, enabled, role, .segmented);
+}
+
+pub fn choicesLook(c: *ui.Context, k: theme.Colors, key: []const u8, labels: []const []const u8, selected: usize, enabled: bool, role: ui.A11yRole, look: Look) ?usize {
     std.debug.assert(labels.len > 0 and labels.len <= 3 and selected < labels.len);
     ui.key(c, key);
-    const group = ui.div(c).row().p(2).gap(2).itemsCenter().rounded(8).bg(k.ink(if (k.dark) 0.045 else 0.04)).border(k.border).borderW(1);
+    const group = ui.div(c).row().gap(if (look == .tabs) 8 else 2).itemsCenter();
     defer group.end();
     c.addA11y(group.index, .group, key, "", false, true);
     const s = c.state(State, "roving-focus");
@@ -45,17 +54,17 @@ pub fn choices(c: *ui.Context, k: theme.Colors, key: []const u8, labels: []const
     for (labels, 0..) |label, i| {
         ui.key(c, label);
         const is_selected = i == selected;
-        var b = ui.div(c).row().h(24).px(10).itemsCenter().rounded(6).control();
-        if (is_selected) {
-            b = b.bg(if (k.dark) k.wash(0.11) else k.background).border(if (k.dark) k.ink(0.08) else k.border).borderW(1);
-        } else {
-            b = b.bg(.transparent);
-        }
+        var b = ui.div(c).row().h(32).itemsCenter().control();
+        b = switch (look) {
+            .segmented => b.px(10).rounded(6).bg(if (is_selected) k.selected else .transparent),
+            // 4 either side keeps even "Code" a 32-point target.
+            .tabs => b.px(4),
+        };
         defer b.end();
         s.ids[i] = b.id();
         c.addA11y(b.index, role, label, "", is_selected, enabled);
         if (enabled) {
-            if (!is_selected) _ = b.hover(k.ink(if (k.dark) 0.05 else 0.045));
+            if (!is_selected and look == .segmented) _ = b.hover(k.hover);
             const interaction = c.interact(b.index, .{ .focusable = i == s.active });
             behavior.indicate(c, b, k, interaction.focused);
             if (interaction.clicked) {
@@ -65,11 +74,19 @@ pub fn choices(c: *ui.Context, k: theme.Colors, key: []const u8, labels: []const
                 c.changed = true;
             }
         }
-        ui.text(c, label, .{
-            .size = 11.5,
-            .weight = if (is_selected) .medium else .regular,
-            .color = if (!enabled) k.faint else if (is_selected) k.text else k.muted,
-        });
+        const hot = enabled and b.hovered();
+        const st: ui.TextStyle = .{
+            .size = if (look == .tabs) 13 else 12,
+            .line_height = 16,
+            .weight = .medium,
+            .color = if (!enabled) k.faint else if (is_selected or (hot and look == .tabs)) k.text else k.muted,
+        };
+        ui.text(c, label, st);
+        if (look == .tabs and is_selected) {
+            // A 2-point accent rule along the bottom of the 32-point target.
+            const rule = ui.div(c).absolute().offset(4, 30).w(@ceil(c.text.width(label, st))).h(2).rounded(1).bg(if (enabled) k.accent else k.faint);
+            rule.end();
+        }
     }
     return chosen;
 }

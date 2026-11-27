@@ -16,24 +16,36 @@ const cr = @import("change_requests.zig");
 const merging = @import("app_change_requests.zig");
 const workspace = @import("workspace.zig");
 const App = @import("app.zig").App;
+const display = @import("github_display.zig");
 
 const phi: f32 = 1.618;
 
 /// `ChangeRequestBadgeSurface`.
 pub const Surface = enum { sidebar, composer };
 
-/// `ChangeRequestBadgeTone::color`.
+/// `ChangeRequestBadgeTone::color`, through the one state mapping the
+/// repository list, detail header and charts use (`github_display.role`).
 pub fn toneColor(k: theme.Colors, tone: cr.Tone) ui.Color {
-    return switch (tone) {
-        .open => k.success,
-        .merged => k.accent,
-        .closed => k.danger,
-    };
+    return kit.roleColor(k, toneRole(tone));
 }
 
-/// The badge's colour: the tone's, or muted (`render_pull_request_badge`).
+pub fn toneRole(tone: cr.Tone) display.Role {
+    return display.role(.pull, switch (tone) {
+        .open => .open,
+        .merged => .merged,
+        .closed => .closed,
+    });
+}
+
+/// The badge's role: the tone's, or muted for a shared branch's settled PR
+/// (`render_pull_request_badge`).
+pub fn badgeRole(s: cr.Summary, p: cr.Provenance) display.Role {
+    return if (p.mutes(s)) .muted else toneRole(cr.toneOf(s.state));
+}
+
+/// The badge's colour (`render_pull_request_badge`).
 pub fn badgeColor(k: theme.Colors, s: cr.Summary, p: cr.Provenance) ui.Color {
-    return if (p.mutes(s)) k.muted else toneColor(k, cr.toneOf(s.state));
+    return kit.roleColor(k, badgeRole(s, p));
 }
 
 /// The badge; `interactive` false is the drag preview's
@@ -105,9 +117,18 @@ const Card = struct {
     }
 };
 
+/// Where the merge controls sit: the composer footer's 20-point row keeps
+/// its quiet chips; a pane uses the panes' 32-point buttons.
+pub const MergeSurface = enum { footer, pane };
+
 /// Merge, "Merge #N?" and Cancel, "Merging #N…", then the host's answer;
 /// nothing for a PR that isn't open with no merge of it running or answered.
 pub fn mergeControls(c: *ui.Context, a: *App, k: theme.Colors, chat: workspace.Chat, s: cr.Summary) void {
+    mergeControlsIn(c, a, k, chat, s, .footer);
+}
+
+pub fn mergeControlsIn(c: *ui.Context, a: *App, k: theme.Colors, chat: workspace.Chat, s: cr.Summary, surface: MergeSurface) void {
+    if (surface == .pane) return paneMergeControls(c, a, k, chat, s);
     const st = &a.change_requests;
     const busy = st.isBusy(chat.id);
     const status = st.statusFor(chat.id);
@@ -135,6 +156,33 @@ pub fn mergeControls(c: *ui.Context, a: *App, k: theme.Colors, chat: workspace.C
         const d = ui.div(c).row().px(6);
         defer d.end();
         kit.ellipsisText(c, v.message, t, 320 - 12);
+    };
+}
+
+/// The pane's merge controls: Merge as a secondary button; once armed,
+/// "Merge #N" with primary weight and Cancel beside it, 8 apart; the
+/// host's answer under them with a glyph.
+fn paneMergeControls(c: *ui.Context, a: *App, k: theme.Colors, chat: workspace.Chat, s: cr.Summary) void {
+    const st = &a.change_requests;
+    const busy = st.isBusy(chat.id);
+    const status = st.statusFor(chat.id);
+    const open = s.state == .open;
+    if (!open and !busy and status == null) return;
+    const armed = st.isArmed(chat.id, s.number);
+    const cluster = ui.div(c).row().gap(8).itemsCenter();
+    defer cluster.end();
+    if (busy) {
+        ui.text(c, c.print("Merging #{d}…", .{s.number}), .{ .size = kit.text_body, .color = k.muted });
+    } else if (open and armed) {
+        if (kit.actionButton(c, k, c.print("Merge #{d}", .{s.number}), .{ .kind = .primary, .key = "pane-merge-confirm" })) merging.merge(a, chat.id, s.number);
+        if (kit.actionButton(c, k, "Cancel", .{ .key = "pane-merge-cancel" })) merging.cancel(a);
+    } else if (open) {
+        if (kit.actionButton(c, k, "Merge", .{ .key = "pane-merge" })) merging.arm(a, chat.id, s.number);
+    }
+    if (!busy) if (status) |v| {
+        const tone: kit.Tone = if (v.merged) .success else .danger;
+        icons.icon(c, if (v.merged) .check else .@"danger-triangle", 12, kit.chipColors(k, tone).ink, 0);
+        kit.ellipsisText(c, v.message, .{ .size = kit.text_body, .color = kit.chipColors(k, tone).ink }, 320);
     };
 }
 
