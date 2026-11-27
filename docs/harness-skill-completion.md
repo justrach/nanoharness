@@ -8,7 +8,6 @@ are shown only in an existing chat.
 
 | Command | Action |
 | --- | --- |
-| `/model` | Choose agent, model, and reasoning |
 | `/new` | Start a new conversation |
 | `/resume` | Search and open conversations |
 | `/settings` | Open Harness settings |
@@ -18,9 +17,12 @@ are shown only in an existing chat.
 | `/rename` | Open the conversation rename dialog |
 | `/stop` | Interrupt the current run |
 
+There is no workspace `/model`: the model picker opens only from the model chip
+under the composer, and `/model` is the agent's own command where it has one.
+
 Provider commands remain available alongside these actions. When a provider owns
 the same name, its command keeps the name and the Harness action gets a `harness:`
-prefix, for example `/harness:model`. A provider command and a workspace action are
+prefix, for example `/harness:resume`. A provider command and a workspace action are
 distinct entries, even when they have the same purpose. `/` completion works at
 any word boundary in the draft, including later lines, just like `@` and `$`.
 Code, URLs and paths remain literal.

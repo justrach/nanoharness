@@ -264,15 +264,15 @@ test "completion skill acceptance preserves suffix and exact catalog identity on
     try testing.expect(std.mem.endsWith(u8, wire, " prompt remains"));
 }
 
-test "completion local model action removes only its trigger and never sends the remaining draft" {
+test "completion local action removes only its trigger and never sends the remaining draft" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
-    h.draft("/modelprompt remains", 6);
+    h.draft("/resumeprompt remains", 7);
     _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
     h.draw();
     try testing.expectEqualStrings("prompt remains", h.a.composer.text());
-    try testing.expect(h.a.picker != .none);
+    try testing.expect(h.a.view.palette.open);
     try testing.expect(try lastPrompt(&h) == null);
 }
 
@@ -603,25 +603,25 @@ test "completion exact skill wins in slash and dollar menus while partial querie
     try testing.expect(std.mem.startsWith(u8, encoded, expected));
 }
 
-test "completion provider collisions keep native command identity and namespace local model action" {
+test "completion provider collisions keep native command identity and namespace local resume action" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
     try replies(&h,
-        \\{"ListCommands":[{"name":"model","description":"Provider model command"}],"ListSkills":[]}
+        \\{"ListCommands":[{"name":"resume","description":"Provider resume command"}],"ListSkills":[]}
     );
-    h.draft("/model", 6);
+    h.draft("/resume", 7);
     _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
     h.draw();
-    try testing.expectEqualStrings("/model ", h.a.composer.text());
-    try testing.expectEqual(.none, h.a.picker);
+    try testing.expectEqualStrings("/resume ", h.a.composer.text());
+    try testing.expect(!h.a.view.palette.open);
     const encoded = (try @import("composer_completion.zig").prompt(&h.a)) orelse return error.MissingProviderSelection;
     defer testing.allocator.free(encoded);
-    h.draft("/harness:modeltail", 14);
+    h.draft("/harness:resumetail", 15);
     _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
     h.draw();
     try testing.expectEqualStrings("tail", h.a.composer.text());
-    try testing.expect(h.a.picker != .none);
+    try testing.expect(h.a.view.palette.open);
 }
 
 test "completion failed discovery offers actual RPC retry and recovers without sending" {

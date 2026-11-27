@@ -10,7 +10,7 @@ const rules = @import("completion_rules.zig");
 const App = @import("app.zig").App;
 const Allocator = std.mem.Allocator;
 
-pub const Action = enum { model, new, resume_chat, settings, diff, files, terminal, rename, stop, help, custom_theme, zen_mode, design_mode };
+pub const Action = enum { new, resume_chat, settings, diff, files, terminal, rename, stop, help, custom_theme, zen_mode, design_mode };
 pub const SkillCommand = struct { name: []const u8, harness: []const u8 };
 pub const Entry = struct {
     name: []const u8,
@@ -278,10 +278,10 @@ pub fn refresh(a: *App, caret: usize) ?rules.Token {
     return tok;
 }
 
-/// `chat`: needs an open chat; `run`: needs its run to be going.
+/// `chat`: needs an open chat; `run`: needs its run to be going. No `model`:
+/// the model picker opens from its chip only, and `/model` is the agent's.
 const Native = struct { action: Action, name: []const u8, description: []const u8, chat: bool = false, run: bool = false };
 const native = [_]Native{
-    .{ .action = .model, .name = "model", .description = "Choose agent, model and reasoning" },
     .{ .action = .new, .name = "new", .description = "Start a new session" },
     .{ .action = .resume_chat, .name = "resume", .description = "Resume a Harness session" },
     .{ .action = .settings, .name = "settings", .description = "Open Harness settings" },
@@ -456,7 +456,6 @@ pub fn accept(a: *App, c: *ui.Context, tok: rules.Token, entry: Entry) void {
 
 pub fn activate(a: *App, action: Action) void {
     switch (action) {
-        .model => a.togglePicker(),
         .new => a.replaceCurrent(null),
         .resume_chat => @import("view_palette.zig").toggle(a, .replace_current),
         .settings => @import("view_settings.zig").open(a),

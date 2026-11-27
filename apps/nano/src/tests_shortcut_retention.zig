@@ -83,7 +83,12 @@ test "deep shortcuts modal palette and model picker block underlying workspace n
             h.a.openChat("b", null);
             h.a.showTab(0);
             h.t.settle(1);
-            h.press(if (model) .{ .key = '/', .cmd = true } else .{ .key = 'k', .cmd = true });
+            // The model picker opens from its chip, its one way in.
+            if (model) {
+                const chip = h.a.view.chip_anchor orelse return error.MissingChip;
+                h.t.click(chip.x + chip.w / 2, chip.y + chip.h / 2);
+                h.t.settle(1);
+            } else h.press(.{ .key = 'k', .cmd = true });
             h.press(key);
             try testing.expectEqualStrings("a", h.a.selected.?);
             try testing.expect(h.a.view.strip.menu == null);
@@ -646,7 +651,7 @@ test "retention custom sidebar chord replaces rather than supplements its defaul
 }
 
 test "retention custom new chat and project chords dispatch their saved bindings (#792, #793)" {
-    for ([_][]const u8{ "newSession", "newProject", "openProjectPicker", "openModelPicker" }) |key| {
+    for ([_][]const u8{ "newSession", "newProject", "openProjectPicker" }) |key| {
         var h: Harness = undefined;
         try h.init(true);
         defer h.deinit();
@@ -661,9 +666,9 @@ test "retention custom new chat and project chords dispatch their saved bindings
             // The New project form, not the new-tab destination sheet.
             try testing.expect(h.a.view.project_setup.open);
             try testing.expect(!h.a.view.open_chooser.open);
-        } else if (std.mem.eql(u8, key, "openProjectPicker")) {
+        } else {
             try testing.expectEqual(@import("view_tab_strip.zig").Menu.folder, h.a.view.strip.menu.?);
-        } else try testing.expect(h.a.picker == .model);
+        }
     }
 }
 

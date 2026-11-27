@@ -904,12 +904,6 @@ fn keys(c: *ui.Context, a: *App) void {
         strip.toggleProjectPicker(a);
         return;
     }
-    if (!a.view.settings_open and !picker_had_keys and boundShortcut(c, a, "openModelPicker")) {
-        a.picker = .model;
-        @import("view_picker.zig").opened(a);
-        a.redraw();
-        return;
-    }
     if (boundShortcut(c, a, "saveFile")) {
         if (!@import("app_file_editor.zig").saveFocused(a)) {
             if (a.view.write_open) @import("view_write.zig").close(a);
