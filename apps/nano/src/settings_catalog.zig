@@ -67,6 +67,7 @@ test "settings discovery searches task words across section metadata" {
     try t.expect(matches(.devices, "remote control"));
     try t.expect(matches(.appearance, "font motion"));
     try t.expect(matches(.appearance, "before after design"));
+    try t.expect(!matches(.appearance, "menu aim"));
     try t.expect(!matches(.files, "GitHub links"));
     try t.expect(!matches(.browsing, "GitHub nonsense"));
     try t.expect(matches(.browsing, " \t "));

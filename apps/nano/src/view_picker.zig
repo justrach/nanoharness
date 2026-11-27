@@ -10,6 +10,7 @@ const theme = @import("theme.zig");
 const icons = @import("icons.zig");
 const kit = @import("view_kit.zig");
 const rules = @import("rules.zig");
+const menu_aim = @import("menu_aim.zig");
 const models = @import("model_picker.zig");
 const workspace = @import("workspace.zig");
 const accounts_view = @import("view_settings_accounts.zig");
@@ -62,6 +63,7 @@ pub fn opened(a: *App) void {
     p.detail = null;
     p.hover_target = null;
     p.detail_rect = null;
+    p.aim.reset();
     p.starred = a.selected == null and p.favorites.items.len > 0;
     p.reveal = true;
     p.height = list_height;
@@ -522,6 +524,7 @@ pub fn popover(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (is_compact and p.account_submenu and open) {
         compactAccountMenu(c, a, k, .{ .x = x, .y = y, .w = w, .h = h }, motion);
     }
+    if (menu_aim.debugOn() and open) pickerAimOverlay(c, a);
 }
 
 fn keycap(c: *ui.Context, k: theme.Colors, text: []const u8) void {
@@ -619,8 +622,13 @@ fn modelList(c: *ui.Context, a: *App, k: theme.Colors, w: f32, available_h: f32,
 fn hoverDetail(c: *ui.Context, a: *App, hovered: ?usize) void {
     const p = &a.view.model_picker;
     const m = c.input.mouse;
-    const over_card = if (p.detail_rect) |r| m.x >= r.x and m.x < r.x + r.w and m.y >= r.y and m.y < r.y + r.h else false;
+    if (p.detail != null) p.aim.note(.{ .x = m.x, .y = m.y }, c.time) else p.aim.reset();
+    const over_card = if (p.detail_rect) |r| r.contains(m) else false;
     if (hovered) |i| {
+        if (p.detail != i and holdPickerAim(c, a, over_card)) {
+            p.hover_target = p.detail;
+            return;
+        }
         if (p.hover_target != i) {
             p.hover_target = i;
             p.hover_since = c.time;
@@ -630,6 +638,7 @@ fn hoverDetail(c: *ui.Context, a: *App, hovered: ?usize) void {
         const waited = c.time - p.hover_since;
         if (waited >= wait) {
             p.detail = i;
+            p.aim.reset();
             c.changed = true;
         } else c.frameIn(@floatCast(wait - waited));
         return;
@@ -642,8 +651,41 @@ fn hoverDetail(c: *ui.Context, a: *App, hovered: ?usize) void {
     const waited = c.time - p.hover_since;
     if (waited >= 0.16) {
         p.detail = null;
+        p.detail_rect = null;
+        p.aim.reset();
         c.changed = true;
     } else c.frameIn(@floatCast(0.16 - waited));
+}
+
+fn holdPickerAim(c: *ui.Context, a: *App, inside: bool) bool {
+    if (!menu_aim.enabled) return false;
+    const p = &a.view.model_picker;
+    const sub = p.detail_rect orelse return false;
+    const mouse = c.input.mouse;
+    const opts = menu_aim.options();
+    const d = menu_aim.decide(opts, .{ .x = mouse.x, .y = mouse.y }, p.aim.previous(), c.time, p.aim.last_move_s, sub, inside);
+    if (d != .hold) return false;
+    const remain = opts.idle_s - (c.time - p.aim.last_move_s);
+    if (remain > 0) c.frameIn(@floatCast(remain));
+    return true;
+}
+
+fn pickerAimOverlay(c: *ui.Context, a: *App) void {
+    const p = &a.view.model_picker;
+    const sub = p.detail_rect orelse return;
+    ui.key(c, "picker-menu-aim-debug");
+    const cv = ui.canvas(c, .{
+        .absolute = true,
+        .fixed = true,
+        .width = .{ .px = c.size.w },
+        .height = .{ .px = c.size.h },
+        .layer = 20,
+    });
+    const mouse = c.input.mouse;
+    const tri = menu_aim.fromCursor(mouse, sub);
+    var buf: [menu_aim.trail_cap]ui.Point = undefined;
+    const trail = p.aim.copyTrail(&buf);
+    menu_aim.paintDebug(cv, tri, trail, !sub.contains(mouse));
 }
 
 fn modelRow(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, at: usize, grouped: bool, inner: f32, open: bool) struct { hovered: bool = false, rect: ?ui.Rect = null } {
