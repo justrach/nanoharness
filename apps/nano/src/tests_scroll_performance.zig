@@ -392,9 +392,9 @@ fn paceRun(panes: Panes, rule: Rule) !PaceRun {
                 const b: glide.Beat = .{ .target = at, .now = at - refresh, .period = refresh };
                 const act = ui.link_pacing.tick(.{ .glide_wants = g.wants(b, t.ctx.glideRoom()) });
                 if (act != .frame) break :blk false;
-                const f = ui.glideFrame(&t.ctx, &g, b);
+                const gf = ui.glideFrame(&t.ctx, &g, b);
                 t.frame();
-                ui.glideLaidOut(&t.ctx, &g, f);
+                ui.glideLaidOut(&t.ctx, &g, gf);
                 break :blk true;
             },
         };
