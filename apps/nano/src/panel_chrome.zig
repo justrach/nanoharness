@@ -12,6 +12,10 @@ pub const fs_top_inset: f32 = fs_handle_h + fs_pane_header_h;
 pub const titlebar_height: f32 = 38;
 pub const top_pad: f32 = 4;
 pub const header_height: f32 = titlebar_height + top_pad;
+/// A windowed card under full screen's 28pt pane header: the header takes
+/// the title bar's bottom pad, as it takes the bezel handle's place in full
+/// screen (`fs_top_inset`).
+pub const windowed_pane_top: f32 = titlebar_height + fs_pane_header_h;
 pub const tab_height: f32 = 32;
 pub const tab_top: f32 = (header_height - tab_height) / 2;
 pub const body_radius: f32 = 10;

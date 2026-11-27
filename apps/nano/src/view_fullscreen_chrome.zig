@@ -2,6 +2,8 @@
 //! - Top-edge centered pill handle (Fold.swift) revealing a floating top bar on click or edge dwell.
 //! - Borderless 28pt pane caption strip above each card (Split.swift) showing chat/project/branch/device
 //!   or interactive folder/computer pickers on draft panes, plus subtle swap/expand/close & ⌘K controls.
+//!   A windowed Zen pane that the title bar does not already name wears the same strip, in its
+//!   theme's ink instead of white on black (`palette`, `view_tab_strip_render.paneHeaders`).
 const std = @import("std");
 const builtin = @import("builtin");
 const nanoui = @import("nanoui");
@@ -319,6 +321,12 @@ pub fn drawTopPeek(c: *ui.Context, a: *App, strip_layout: strip.rendering.Layout
     if (exit_btn.clicked()) a.setFullScreen(false);
 }
 
+/// The header strip's ink: white on the black bezel in full screen, the
+/// window's own theme (ink and tooltips) in a window.
+pub fn palette(a: *const App, k: theme.Colors) theme.Colors {
+    return if (a.view.full_screen) theme.colors(true) else k;
+}
+
 /// The project picker is open on this pane's header (not a footer chip's).
 fn pickerOpenAt(a: *const App, pane_ix: usize) bool {
     const state = &a.view.strip;
@@ -333,6 +341,110 @@ fn projectAnchor(c: *ui.Context, a: *App, pane_ix: usize, id: u64) void {
     if (pickerOpenAt(a, pane_ix)) a.view.strip.anchor = r;
 }
 
+/// What a pane's header says about its chat besides the title: its project
+/// (and checkout), branch, and computer.
+pub const Identity = struct {
+    proj_icon: icons.Name = .@"chat-round-line",
+    proj_name: ?[]const u8 = null,
+    proj_tip: ?[]const u8 = null,
+    branch: ?[]const u8 = null,
+    device_name: ?[]const u8 = null,
+    is_remote: bool = false,
+};
+
+pub fn identityOf(c: *ui.Context, a: *const App, chat: ?@import("workspace.zig").Chat) Identity {
+    var id: Identity = .{};
+    const ch = chat orelse return id;
+    id.proj_icon = .folder;
+    const space = a.findSpace(ch.space_id);
+    if (space) |sp| {
+        const checkout: footer_view.Checkout = if (sp.git) footer_view.checkoutOf(ch, sp) else .local;
+        if (sp.git and checkout != .local) id.proj_icon = .@"folder-with-files";
+        id.proj_name = sp.name;
+        const path = ch.cwd orelse sp.path;
+        id.proj_tip = if (sp.git) c.print("{s} \u{00b7} {s}", .{ checkout.label(), path }) else path;
+        if (sp.git) id.branch = ch.row_branch orelse ch.branch;
+    } else if (ch.cwd) |cwd| if (cwd.len > 0) {
+        id.proj_name = header_view.pathBasename(cwd);
+        id.proj_tip = cwd;
+    };
+    id.is_remote = if (ch.device_id) |did| (if (a.device_id) |local| !std.mem.eql(u8, did, local) else true) else false;
+    id.device_name = knownDevice(a, ch.device_id);
+    return id;
+}
+
+/// Each identity chip's text room (0: not shown), widest first to go.
+pub const ChipRoom = struct {
+    proj: f32 = 0,
+    branch: f32 = 0,
+    device: f32 = 0,
+
+    pub fn width(r: ChipRoom) f32 {
+        return (if (r.proj > 0) r.proj + 20 else 0) + (if (r.branch > 0) r.branch + 26 else 0) + (if (r.device > 0) r.device + 24 else 0);
+    }
+};
+
+const chip_proj_style: ui.TextStyle = .{ .size = 11, .line_height = 14, .weight = .medium };
+const chip_meta_style: ui.TextStyle = .{ .size = 10.5, .line_height = 14 };
+
+/// The project, branch and computer chips a `pane_w` header has room for,
+/// in that order, while their total stays within `budget`.
+pub fn chipRoom(c: *ui.Context, id: Identity, pane_w: f32, show_device: bool, budget: f32) ChipRoom {
+    var r: ChipRoom = .{};
+    if (id.proj_name) |pn| if (pane_w >= 240) {
+        const m = @min(@min(130, pane_w * 0.24), @ceil(c.text.width(pn, chip_proj_style)));
+        if (r.width() + m + 20 <= budget) r.proj = m;
+    };
+    if (id.branch) |br| if (pane_w >= 390) {
+        const m = @min(@min(135, pane_w * 0.22), @ceil(c.text.width(br, chip_meta_style)));
+        if (r.width() + m + 26 <= budget) r.branch = m;
+    };
+    if (id.device_name) |dn| if (show_device) {
+        const m = @min(@min(120, pane_w * 0.18), @ceil(c.text.width(dn, chip_meta_style)));
+        if (r.width() + m + 24 <= budget) r.device = m;
+    };
+    return r;
+}
+
+/// The header's project, branch and computer chips, as `chipRoom` sized them.
+pub fn identityChips(c: *ui.Context, a: *App, p: theme.Colors, pane_ix: usize, id: Identity, room: ChipRoom, focused: bool) void {
+    if (room.proj > 0) if (id.proj_name) |pn| {
+        var pchip = ui.div(c).row().h(18).px(5).gap(4).itemsCenter().rounded(4)
+            .bg(p.ink(if (focused) 0.085 else 0.05)).clip();
+        if (id.proj_tip) |pt| pchip = tip.on(pchip, p, .{ .text = pt, .look = .tab });
+        defer pchip.end();
+        if (focused) projectAnchor(c, a, pane_ix, c.node(pchip.index).id);
+        kit.ellipsisText(c, pn, .{
+            .size = 11,
+            .line_height = 14,
+            .weight = .medium,
+            .color = p.ink(if (focused) 0.78 else 0.48),
+        }, room.proj);
+    };
+    if (room.branch > 0) if (id.branch) |br| {
+        var bchip = ui.div(c).row().h(18).px(5).gap(3).itemsCenter().rounded(4)
+            .bg(p.ink(if (focused) 0.08 else 0.045)).clip();
+        if (id.proj_tip) |pt| bchip = tip.on(bchip, p, .{ .text = pt, .look = .tab });
+        defer bchip.end();
+        icons.icon(c, .@"git-branch", 10.5, p.ink(if (focused) 0.68 else 0.42), 0);
+        kit.ellipsisText(c, br, .{
+            .size = 10.5,
+            .line_height = 14,
+            .color = p.ink(if (focused) 0.72 else 0.45),
+        }, room.branch);
+    };
+    if (room.device > 0) if (id.device_name) |dn| {
+        const dchip = ui.div(c).row().h(18).px(4).gap(3).itemsCenter().clip();
+        defer dchip.end();
+        icons.icon(c, .monitor, 10.5, p.ink(if (focused) 0.65 else 0.42), 0);
+        kit.ellipsisText(c, dn, .{
+            .size = 10.5,
+            .line_height = 14,
+            .color = p.ink(if (focused) 0.72 else 0.45),
+        }, room.device);
+    };
+}
+
 pub fn chatHeader(
     c: *ui.Context,
     a: *App,
@@ -343,54 +455,27 @@ pub fn chatHeader(
     focused: bool,
     is_split: bool,
 ) void {
-    const dk = theme.colors(true);
+    const p = palette(a, k);
+    const windowed = !a.view.full_screen;
+    // A window's title bar can already carry this pane's computer picker.
+    const bar_device = windowed and !is_split and strip.rendering.showsTitlebarDevice(a);
     ui.key(c, c.print("fs-pane-header-{d}", .{pane_ix}));
     const bar = ui.div(c).row().wFull().h(chrome.fs_pane_header_h).px(6).gap(6).itemsCenter().clip();
     defer bar.end();
     const row_hot = bar.hovered();
+    // In a window the focused pane's header is where its keyboard pickers open.
+    if (windowed and focused) if (c.rects.get(c.node(bar.index).id)) |r| {
+        a.view.strip.active_tab_anchor = r;
+    };
+    const trailing_w: f32 = if (is_split) 74 else if (windowed) 0 else 128;
 
     if (chat_id) |cid| {
         const chat = a.findChat(cid);
-        const space = if (chat) |ch| a.findSpace(ch.space_id) else null;
-
-        var proj_icon: icons.Name = if (chat != null) .folder else .@"chat-round-line";
-        var proj_name: ?[]const u8 = null;
-        var proj_tip: ?[]const u8 = null;
-        var checkout: footer_view.Checkout = .local;
-        if (space) |sp| {
-            if (chat) |ch| checkout = if (sp.git) footer_view.checkoutOf(ch, sp) else .local;
-            if (sp.git and checkout != .local) proj_icon = .@"folder-with-files";
-            proj_name = sp.name;
-            const path = if (chat) |ch| (ch.cwd orelse sp.path) else sp.path;
-            proj_tip = if (sp.git) c.print("{s} \u{00b7} {s}", .{ checkout.label(), path }) else path;
-        } else if (chat) |ch| if (ch.cwd) |cwd| if (cwd.len > 0) {
-            proj_name = header_view.pathBasename(cwd);
-            proj_tip = cwd;
-        };
-
-        const branch: ?[]const u8 = if (space) |sp|
-            (if (sp.git and chat != null) (chat.?.row_branch orelse chat.?.branch) else null)
-        else
-            null;
-        const dev_id: ?[]const u8 = if (chat) |ch| ch.device_id else null;
-        const is_remote = if (dev_id) |did| (if (a.device_id) |local| !std.mem.eql(u8, did, local) else true) else false;
-        const device_name: ?[]const u8 = if (is_remote or pane_w >= 620) knownDevice(a, dev_id) else null;
+        const id = identityOf(c, a, chat);
         const title: []const u8 = if (chat) |ch| sidebar.chatLabel(ch) else "Conversation";
-
-        const trailing_w: f32 = if (is_split) 74 else 128;
-        const proj_style: ui.TextStyle = .{ .size = 11, .line_height = 14, .weight = .medium };
-        const meta_style: ui.TextStyle = .{ .size = 10.5, .line_height = 14 };
-        const show_proj = proj_name != null and pane_w >= 240;
-        const proj_max: f32 = if (show_proj) @min(@min(130, pane_w * 0.24), @ceil(c.text.width(proj_name.?, proj_style))) else 0;
-        const proj_w: f32 = if (proj_max > 0) proj_max + 20 else 0;
-        const show_branch = branch != null and pane_w >= 390;
-        const branch_max: f32 = if (show_branch) @min(@min(135, pane_w * 0.22), @ceil(c.text.width(branch.?, meta_style))) else 0;
-        const branch_w: f32 = if (branch_max > 0) branch_max + 26 else 0;
-        const show_device = device_name != null and (is_remote or pane_w >= 620);
-        const device_max: f32 = if (show_device) @min(@min(120, pane_w * 0.18), @ceil(c.text.width(device_name.?, meta_style))) else 0;
-        const device_w: f32 = if (device_max > 0) device_max + 24 else 0;
+        const room = chipRoom(c, id, pane_w, !bar_device and (id.is_remote or pane_w >= 620), std.math.floatMax(f32));
         const lead_icon_w: f32 = (if (focused) @as(f32, 11) else 0) + 18;
-        const title_max = @max(72, pane_w - 12 - trailing_w - lead_icon_w - proj_w - branch_w - device_w - 12);
+        const title_max = @max(72, pane_w - 12 - trailing_w - lead_icon_w - room.width() - 12);
 
         {
             const lead = ui.div(c).row().grow().w(0).gap(6).itemsCenter().clip().control();
@@ -399,55 +484,21 @@ pub fn chatHeader(
                 projectAnchor(c, a, pane_ix, c.node(lead.index).id);
                 ui.div(c).size(5, 5).rounded(2.5).bg(k.accent.alpha(0.92)).end();
             }
-            icons.icon(c, proj_icon, 12.5, ui.Color.white.alpha(if (focused) 0.78 else 0.45), 0);
+            icons.icon(c, id.proj_icon, 12.5, p.ink(if (focused) 0.78 else 0.45), 0);
             const title_style: ui.TextStyle = .{
                 .size = 11.5,
                 .line_height = 15,
                 .weight = if (focused) .semibold else .regular,
-                .color = ui.Color.white.alpha(if (focused) 0.92 else 0.55),
+                .color = p.ink(if (focused) 0.92 else 0.55),
             };
             const truncated = c.text.width(title, title_style) > title_max;
             var title_wrap = ui.div(c).row().grow().w(0).itemsCenter().clip();
-            if (truncated) title_wrap = tip.on(title_wrap, dk, .{ .text = title, .look = .tab });
+            if (truncated) title_wrap = tip.on(title_wrap, p, .{ .text = title, .look = .tab });
             {
                 defer title_wrap.end();
                 kit.ellipsisText(c, title, title_style, title_max);
             }
-            if (proj_max > 0) if (proj_name) |pn| {
-                var pchip = ui.div(c).row().h(18).px(5).gap(4).itemsCenter().rounded(4)
-                    .bg(ui.Color.white.alpha(if (focused) 0.085 else 0.05)).clip();
-                if (proj_tip) |pt| pchip = tip.on(pchip, dk, .{ .text = pt, .look = .tab });
-                defer pchip.end();
-                if (focused) projectAnchor(c, a, pane_ix, c.node(pchip.index).id);
-                kit.ellipsisText(c, pn, .{
-                    .size = 11,
-                    .line_height = 14,
-                    .weight = .medium,
-                    .color = ui.Color.white.alpha(if (focused) 0.78 else 0.48),
-                }, proj_max);
-            };
-            if (branch_max > 0) if (branch) |br| {
-                var bchip = ui.div(c).row().h(18).px(5).gap(3).itemsCenter().rounded(4)
-                    .bg(ui.Color.white.alpha(if (focused) 0.08 else 0.045)).clip();
-                if (proj_tip) |pt| bchip = tip.on(bchip, dk, .{ .text = pt, .look = .tab });
-                defer bchip.end();
-                icons.icon(c, .@"git-branch", 10.5, ui.Color.white.alpha(if (focused) 0.68 else 0.42), 0);
-                kit.ellipsisText(c, br, .{
-                    .size = 10.5,
-                    .line_height = 14,
-                    .color = ui.Color.white.alpha(if (focused) 0.72 else 0.45),
-                }, branch_max);
-            };
-            if (device_max > 0) if (device_name) |dn| {
-                const dchip = ui.div(c).row().h(18).px(4).gap(3).itemsCenter().clip();
-                defer dchip.end();
-                icons.icon(c, .monitor, 10.5, ui.Color.white.alpha(if (focused) 0.65 else 0.42), 0);
-                kit.ellipsisText(c, dn, .{
-                    .size = 10.5,
-                    .line_height = 14,
-                    .color = ui.Color.white.alpha(if (focused) 0.72 else 0.45),
-                }, device_max);
-            };
+            identityChips(c, a, p, pane_ix, id, room, focused);
             if (!focused and lead.clicked()) strip.queue(a, .{ .focus = .{ .chat = pane_ix } });
         }
     } else {
@@ -456,7 +507,6 @@ pub fn chatHeader(
         const proj = strip.folder(a, target);
         const proj_name = if (proj) |f| f.name else "No project";
         const computer = strip.deviceLabel(a, strip.device(a, target));
-        const trailing_w: f32 = if (is_split) 74 else 128;
         const avail = @max(80, pane_w - 16 - trailing_w - (if (focused) @as(f32, 11) else 0));
         const chip_cap = @max(42, (avail - 64) / 2);
 
@@ -467,9 +517,9 @@ pub fn chatHeader(
             ui.key(c, c.print("fs-draft-folder-{d}", .{pane_ix}));
             var fpill = tip.on(
                 ui.div(c).row().h(20).px(6).gap(4).itemsCenter().rounded(5)
-                    .bg(ui.Color.white.alpha(if (focused) 0.12 else 0.06))
-                    .hover(ui.Color.white.alpha(0.18)).control(),
-                dk,
+                    .bg(p.ink(if (focused) 0.12 else 0.06))
+                    .hover(p.ink(0.18)).control(),
+                p,
                 .{ .text = "Choose project / folder", .look = .tab },
             );
             defer fpill.end();
@@ -478,14 +528,14 @@ pub fn chatHeader(
                 a.view.strip.active_folder_anchor = r;
                 if (pickerOpenAt(a, pane_ix)) a.view.strip.anchor = r;
             };
-            icons.icon(c, .folder, 11, ui.Color.white.alpha(if (focused) 0.85 else 0.55), 0);
+            icons.icon(c, .folder, 11, p.ink(if (focused) 0.85 else 0.55), 0);
             kit.ellipsisText(c, proj_name, .{
                 .size = 11.5,
                 .line_height = 14,
                 .weight = if (focused) .medium else .regular,
-                .color = ui.Color.white.alpha(if (focused) 0.92 else 0.62),
+                .color = p.ink(if (focused) 0.92 else 0.62),
             }, chip_cap);
-            icons.icon(c, .@"alt-arrow-down", 10, ui.Color.white.alpha(0.55), 0);
+            icons.icon(c, .@"alt-arrow-down", 10, p.ink(0.55), 0);
             if (fpill.clicked()) {
                 const state = &a.view.strip;
                 if (state.menu == .folder and !state.footer_folder and strip.same(state.target, target)) {
@@ -496,13 +546,13 @@ pub fn chatHeader(
                 }
             }
         }
-        {
+        if (!bar_device) {
             ui.key(c, c.print("fs-draft-device-{d}", .{pane_ix}));
             var dpill = tip.on(
                 ui.div(c).row().h(20).px(6).gap(4).itemsCenter().rounded(5)
-                    .bg(ui.Color.white.alpha(if (focused) 0.10 else 0.05))
-                    .hover(ui.Color.white.alpha(0.16)).control(),
-                dk,
+                    .bg(p.ink(if (focused) 0.10 else 0.05))
+                    .hover(p.ink(0.16)).control(),
+                p,
                 .{ .text = "Choose computer / runtime host", .look = .tab },
             );
             defer dpill.end();
@@ -510,13 +560,13 @@ pub fn chatHeader(
             if (focused and a.view.strip.menu != .device) if (drect) |r| {
                 a.view.strip.device_anchor = r;
             };
-            icons.icon(c, .monitor, 11, ui.Color.white.alpha(if (focused) 0.80 else 0.52), 0);
+            icons.icon(c, .monitor, 11, p.ink(if (focused) 0.80 else 0.52), 0);
             kit.ellipsisText(c, computer, .{
                 .size = 11,
                 .line_height = 14,
-                .color = ui.Color.white.alpha(if (focused) 0.84 else 0.55),
+                .color = p.ink(if (focused) 0.84 else 0.55),
             }, chip_cap);
-            icons.icon(c, .@"alt-arrow-down", 10, ui.Color.white.alpha(0.50), 0);
+            icons.icon(c, .@"alt-arrow-down", 10, p.ink(0.50), 0);
             if (dpill.clicked()) {
                 const state = &a.view.strip;
                 if (state.menu == .device and strip.same(state.target, target)) {
@@ -532,13 +582,13 @@ pub fn chatHeader(
         if (!focused and gap_fill.clicked()) strip.queue(a, .{ .focus = target });
     }
 
-    trailingControls(c, a, dk, pane_ix, focused, is_split, row_hot);
+    trailingControls(c, a, p, pane_ix, focused, is_split, row_hot);
 }
 
 fn trailingControls(
     c: *ui.Context,
     a: *App,
-    dk: theme.Colors,
+    p: theme.Colors,
     pane_ix: usize,
     focused: bool,
     is_split: bool,
@@ -552,7 +602,7 @@ fn trailingControls(
         ui.key(c, c.print("fs-pane-swap-{d}", .{pane_ix}));
         if (darkIconButton(
             c,
-            dk,
+            p,
             if (pane_ix == 0) .@"alt-arrow-right" else .@"alt-arrow-left",
             22,
             11,
@@ -564,7 +614,7 @@ fn trailingControls(
         ui.key(c, c.print("fs-pane-zoom-{d}", .{pane_ix}));
         if (darkIconButton(
             c,
-            dk,
+            p,
             .@"expand-arrows",
             22,
             10.5,
@@ -574,11 +624,13 @@ fn trailingControls(
             strip.queue(a, .{ .zoom = target });
         }
         ui.key(c, c.print("fs-pane-close-{d}", .{pane_ix}));
-        if (darkIconButton(c, dk, .close, 22, 10.5, "Close this pane", false)) {
+        if (darkIconButton(c, p, .close, 22, 10.5, "Close this pane", false)) {
             strip.queue(a, .{ .close = target });
         }
         return;
     }
+    // A window's title bar and menus already hold these.
+    if (!a.view.full_screen) return;
 
     const actions = ui.div(c).row().gap(4).itemsCenter();
     defer actions.end();
@@ -586,30 +638,30 @@ fn trailingControls(
         ui.key(c, "fullscreen-header-palette-trigger");
         const kbd = if (comptime builtin.os.tag == .macos) "\u{2318}K" else "Ctrl+K";
         var btn = tip.on(
-            ui.div(c).row().h(20).px(6).center().rounded(5).bg(ui.Color.white.alpha(0.10)).hover(ui.Color.white.alpha(0.18)).control(),
-            dk,
+            ui.div(c).row().h(20).px(6).center().rounded(5).bg(p.ink(0.10)).hover(p.ink(0.18)).control(),
+            p,
             .{ .text = "Command switcher (tabs, sessions, commands)", .look = .tab },
         );
         defer btn.end();
-        ui.text(c, kbd, .{ .size = 11, .line_height = 11 * phi, .weight = .medium, .color = ui.Color.white.alpha(0.80) });
+        ui.text(c, kbd, .{ .size = 11, .line_height = 11 * phi, .weight = .medium, .color = p.ink(0.80) });
         if (btn.clicked()) palette_view.toggle(a, .preserve_tabs);
     }
     ui.key(c, "fullscreen-header-overview");
-    if (darkIconButton(c, dk, .widget, 22, 11.5, "Tab overview (\u{21e7}\u{2318}\\)", false)) {
+    if (darkIconButton(c, p, .widget, 22, 11.5, "Tab overview (\u{21e7}\u{2318}\\)", false)) {
         @import("view_tab_overview.zig").toggle(a);
     }
     ui.key(c, "fullscreen-header-split");
-    if (darkIconButton(c, dk, .@"split-columns", 22, 11.5, "Split pane right (\u{2318}D)", false)) {
+    if (darkIconButton(c, p, .@"split-columns", 22, 11.5, "Split pane right (\u{2318}D)", false)) {
         strip.splitChoosingFolder(a, .horizontal);
     }
     ui.key(c, "fullscreen-header-exit");
-    if (darkIconButton(c, dk, .@"expand-arrows", 22, 11, "Exit full screen", false)) {
+    if (darkIconButton(c, p, .@"expand-arrows", 22, 11, "Exit full screen", false)) {
         a.setFullScreen(false);
     }
 }
 
 pub fn hostHeader(c: *ui.Context, a: *App, k: theme.Colors, focused: bool) void {
-    const dk = theme.colors(true);
+    const p = palette(a, k);
     ui.key(c, "fs-host-header");
     const bar = ui.div(c).row().wFull().h(chrome.fs_pane_header_h).px(6).gap(6).itemsCenter().clip();
     defer bar.end();
@@ -617,23 +669,23 @@ pub fn hostHeader(c: *ui.Context, a: *App, k: theme.Colors, focused: bool) void 
         const lead = ui.div(c).row().grow().w(0).gap(6).itemsCenter().clip().control();
         defer lead.end();
         if (focused) ui.div(c).size(5, 5).rounded(2.5).bg(k.accent.alpha(0.92)).end();
-        icons.icon(c, strip.glyph(a, .host), 12.5, ui.Color.white.alpha(if (focused) 0.78 else 0.45), 0);
+        icons.icon(c, strip.glyph(a, .host), 12.5, p.ink(if (focused) 0.78 else 0.45), 0);
         ui.text(c, strip.title(a, .host), .{
             .size = 11.5,
             .line_height = 15,
             .weight = if (focused) .semibold else .regular,
-            .color = ui.Color.white.alpha(if (focused) 0.90 else 0.55),
+            .color = p.ink(if (focused) 0.90 else 0.55),
         });
         if (!focused and lead.clicked()) strip.queue(a, .{ .focus = .host });
     }
     ui.key(c, "fs-host-close");
-    if (darkIconButton(c, dk, .close, 22, 10.5, "Close panel", false)) {
+    if (darkIconButton(c, p, .close, 22, 10.5, "Close panel", false)) {
         strip.queue(a, .{ .close = .host });
     }
 }
 
 pub fn filesHeader(c: *ui.Context, a: *App, k: theme.Colors, focused: bool) void {
-    const dk = theme.colors(true);
+    const p = palette(a, k);
     ui.key(c, "fs-files-header");
     const bar = ui.div(c).row().wFull().h(chrome.fs_pane_header_h).px(6).gap(6).itemsCenter().clip();
     defer bar.end();
@@ -641,17 +693,17 @@ pub fn filesHeader(c: *ui.Context, a: *App, k: theme.Colors, focused: bool) void
         const lead = ui.div(c).row().grow().w(0).gap(6).itemsCenter().clip().control();
         defer lead.end();
         if (focused) ui.div(c).size(5, 5).rounded(2.5).bg(k.accent.alpha(0.92)).end();
-        icons.icon(c, .folder, 12.5, ui.Color.white.alpha(if (focused) 0.78 else 0.45), 0);
+        icons.icon(c, .folder, 12.5, p.ink(if (focused) 0.78 else 0.45), 0);
         ui.text(c, "Files", .{
             .size = 11.5,
             .line_height = 15,
             .weight = if (focused) .semibold else .regular,
-            .color = ui.Color.white.alpha(if (focused) 0.90 else 0.55),
+            .color = p.ink(if (focused) 0.90 else 0.55),
         });
         if (!focused and lead.clicked()) strip.queue(a, .{ .focus = .files });
     }
     ui.key(c, "fs-files-close");
-    if (darkIconButton(c, dk, .close, 22, 10.5, "Close files panel", false)) {
+    if (darkIconButton(c, p, .close, 22, 10.5, "Close files panel", false)) {
         strip.queue(a, .{ .close = .files });
     }
 }
@@ -671,7 +723,7 @@ pub fn settingsHeader(c: *ui.Context, a: *App) void {
 
 fn darkIconButton(
     c: *ui.Context,
-    dk: theme.Colors,
+    p: theme.Colors,
     icon_name: icons.Name,
     box_size: f32,
     icon_size: f32,
@@ -680,14 +732,14 @@ fn darkIconButton(
 ) bool {
     var b = tip.on(
         ui.div(c).row().size(box_size, box_size).center().rounded(5)
-            .bg(if (on) ui.Color.white.alpha(0.14) else .transparent)
-            .hover(ui.Color.white.alpha(0.12))
+            .bg(if (on) p.ink(0.14) else .transparent)
+            .hover(p.ink(0.12))
             .control(),
-        dk,
+        p,
         .{ .text = help, .look = .tab },
     );
     defer b.end();
     const hot = b.hovered();
-    icons.icon(c, icon_name, icon_size, ui.Color.white.alpha(if (on or hot) 0.92 else 0.58), 0);
+    icons.icon(c, icon_name, icon_size, p.ink(if (on or hot) 0.92 else 0.58), 0);
     return b.clicked();
 }

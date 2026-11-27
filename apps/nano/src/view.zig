@@ -261,8 +261,11 @@ pub fn view(a: *App, c: *ui.Context) void {
             null;
         a.view.chrome.compact_host = github_host and a.view.chrome.host_width < chrome.github_min_width;
         strip_layout = strip.rendering.layout(c, a);
-        if (!fs and strip_layout.pane_row) {
-            const extra = chrome.tab_height + ws_gutter;
+        // Windowed Zen panes wear full screen's header strip right under the
+        // title bar; other splits keep their slot row there.
+        const pane_headers = strip.rendering.paneHeaders(a);
+        if (!fs and (pane_headers or strip_layout.pane_row)) {
+            const extra = if (pane_headers) chrome.windowed_pane_top - chrome.header_height else chrome.tab_height + ws_gutter;
             a.view.chrome.y += extra;
             a.view.chrome.height = @max(0, a.view.chrome.height - extra);
         }
@@ -280,7 +283,9 @@ pub fn view(a: *App, c: *ui.Context) void {
             defer card.end();
             settings_view.page(c, a, k);
         } else {
-            const workspace = ui.div(c).row().pt(if (fs) chrome.fs_handle_h else a.view.chrome.y).pl(a.view.chrome.leading).pr(ws_gutter).pb(ws_gutter).hFull().wFull();
+            // Headers drawn above the cards sit in the workspace's top inset.
+            const workspace_top = if (fs or pane_headers) a.view.chrome.y - chrome.fs_pane_header_h else a.view.chrome.y;
+            const workspace = ui.div(c).row().pt(workspace_top).pl(a.view.chrome.leading).pr(ws_gutter).pb(ws_gutter).hFull().wFull();
             defer workspace.end();
             const expanded = strip.layoutExpanded(a);
             if (expanded == null or expanded.? == .chat) {
@@ -303,7 +308,7 @@ pub fn view(a: *App, c: *ui.Context) void {
                 if (expanded != null) a.view.chrome.files_width = a.view.chrome.width;
                 const fcol = ui.div(c).column().w(a.view.chrome.files_width).hFull();
                 defer fcol.end();
-                if (fs) @import("view_fullscreen_chrome.zig").filesHeader(c, a, k, a.view.strip.focused == .files);
+                if (fs or pane_headers) @import("view_fullscreen_chrome.zig").filesHeader(c, a, k, a.view.strip.focused == .files);
                 const files = panel_chrome.bodyForOn(c, k, zen, fs).grow().wFull().h(0).clip();
                 defer files.end();
                 if (c.input.pressed and files.interaction().hovered) a.view.strip.focused = .files;
@@ -440,7 +445,7 @@ fn seam(c: *ui.Context, a: *App, k: theme.Colors) void {
 fn chatPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     const zen = a.settings.uiMode() == .zen;
     const fs = a.view.full_screen;
-    if (fs) {
+    if (fs or strip.rendering.paneHeaders(a)) {
         const pane_ix = if (a.tabs.layout()) |s| s.focus else 0;
         const pane_w = @max(0, a.view.chrome.chat_width);
         @import("view_fullscreen_chrome.zig").chatHeader(c, a, k, pane_ix, a.selected, pane_w, true, false);
@@ -473,7 +478,6 @@ fn focused(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (a.selected == null) {
         @import("view_newchat.zig").canvas(c, a, k);
     } else {
-        @import("view_chat_header.zig").draw(c, a, k, a.selected.?, transcript_view.paneWidth(c, a), true);
         if (a.settings.hierarchyProfile().shows_action_toolbar) @import("view_actions.zig").toolbar(c, a, k);
         @import("view_bots.zig").strip(c, a, k, @min(transcript_view.paneWidth(c, a), transcript_view.column_w));
         transcript_view.transcript(c, a, k);
@@ -492,7 +496,7 @@ fn hostPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     const fs = a.view.full_screen;
     const hcol = ui.div(c).column().w(a.view.chrome.host_width).hFull();
     defer hcol.end();
-    if (fs) @import("view_fullscreen_chrome.zig").hostHeader(c, a, k, a.view.strip.focused == .host);
+    if (fs or strip.rendering.paneHeaders(a)) @import("view_fullscreen_chrome.zig").hostHeader(c, a, k, a.view.strip.focused == .host);
     ui.key(c, "workspace-host-body");
     const host = panel_chrome.bodyForOn(c, k, zen, fs).grow().wFull().h(0);
     defer host.end();
@@ -575,7 +579,7 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split, widths: *[tab
             else
                 ui.div(c).column().h(size).w(slot_w);
             defer slot_box.end();
-            if (a.view.full_screen) {
+            if (a.view.full_screen or strip.rendering.paneHeaders(a)) {
                 const pane_chat = if (ix == s.focus) a.selected else chat;
                 @import("view_fullscreen_chrome.zig").chatHeader(c, a, k, ix, pane_chat, slot_w, ix == s.focus, true);
             }
@@ -708,10 +712,7 @@ fn divider(c: *ui.Context, a: *App, k: theme.Colors, ix: usize, across: bool, to
 fn neighbor(c: *ui.Context, a: *App, k: theme.Colors, ix: usize, chat_id: ?[]const u8, w: f32) bool {
     _ = ix;
     if (chat_id) |id| {
-        const header_view = @import("view_chat_header.zig");
-        header_view.draw(c, a, k, id, w, false);
-        const peer_top: f32 = if (header_view.shownInMode(a)) 16 else 8;
-        if (a.peer(id)) |p| _ = transcript_view.entries(c, a, k, &p.transcript, w, p.watch != null, peer_top);
+        if (a.peer(id)) |p| _ = transcript_view.entries(c, a, k, &p.transcript, w, p.watch != null, 8);
         return false;
     }
     const body = ui.div(c).column().grow().wFull();

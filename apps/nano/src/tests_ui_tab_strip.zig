@@ -127,6 +127,109 @@ test "single Zen chat ends beside the device and controls with or without its si
     try testing.expectEqualStrings("a", h.a.selected.?);
 }
 
+/// The control around the `name` glyph in the header band above the cards, between `left` and `right`.
+fn headerIcon(h: *Harness, comptime name: []const u8, left: f32, right: f32) !ui.Rect {
+    const top = h.a.view.chrome.y - chrome.fs_pane_header_h;
+    for (h.t.ctx.nodes.items, 0..) |node, i| switch (node.content) {
+        .image => |im| if (im.source == .encoded and std.mem.eql(u8, im.source.encoded, @import("icons_svg").get(name)) and
+            node.rect.y >= top - 0.5 and node.rect.y + node.rect.h <= h.a.view.chrome.y + 0.5 and
+            node.rect.x >= left and node.rect.x < right)
+        {
+            var at: u32 = @intCast(i);
+            while (at != std.math.maxInt(u32)) : (at = h.t.ctx.nodes.items[at].parent) {
+                const parent = h.t.ctx.nodes.items[at];
+                if (parent.style.control) return parent.rect;
+            }
+        },
+        else => {},
+    };
+    return error.MissingPaneHeaderControl;
+}
+
+fn firstText(h: *Harness, text: []const u8, left: f32) ?ui.Rect {
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |tx| if (std.mem.eql(u8, tx.str, text) and node.rect.x >= left) return node.rect,
+        else => {},
+    };
+    return null;
+}
+
+fn countText(h: *Harness, text: []const u8, left: f32, right: f32, below: f32) usize {
+    var n: usize = 0;
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |tx| if (std.mem.eql(u8, tx.str, text) and node.rect.x >= left and node.rect.x < right and node.rect.y < below) {
+            n += 1;
+        },
+        else => {},
+    };
+    return n;
+}
+
+test "windowed chrome: a Zen split names each pane's chat, project and computer once, in one header above its card" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    h.a.splitPane(.horizontal);
+    h.a.openChat("b", "remote-project");
+    h.t.settle(1);
+    h.snap("windowed-zen-split");
+
+    // Cards start under the title bar and one 28pt header, as full screen's start under the bezel handle and one.
+    const card_top = chrome.titlebar_height + chrome.fs_pane_header_h;
+    try testing.expectEqual(card_top, h.a.view.chrome.y);
+    const side = h.a.view.sidebar_width;
+    const right = h.t.ctx.size.w;
+    for ([_][]const u8{ "Alpha", "Beta" }) |title| {
+        try testing.expectEqual(@as(usize, 1), countText(&h, title, side, right, right));
+        const r = firstText(&h, title, side) orelse return error.MissingPaneTitle;
+        try testing.expect(r.y >= card_top - chrome.fs_pane_header_h and r.y + r.h <= card_top);
+    }
+    // Above each card's content: one project chip and at most one computer per pane.
+    const near_top = card_top + 40;
+    try testing.expectEqual(@as(usize, 1), countText(&h, "fieldnotes", side, right, near_top));
+    try testing.expectEqual(@as(usize, 1), countText(&h, "remote-project", side, right, near_top));
+    try testing.expectEqual(@as(usize, 1), countText(&h, "Build box", side, right, near_top));
+    try testing.expect(countText(&h, "Studio", side, right, near_top) <= 1);
+}
+
+test "windowed chrome: each Zen split pane header carries full screen's swap, zoom and close" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    h.a.splitPane(.horizontal);
+    h.a.openChat("b", "remote-project");
+    h.t.settle(1);
+    const mid = h.a.view.chrome.x + h.a.view.chrome.chat_width / 2;
+    const w = h.t.ctx.size.w;
+    // Same glyphs and handlers as full screen's (`trailingControls`).
+    _ = try headerIcon(&h, "alt-arrow-left", mid, w);
+    _ = try headerIcon(&h, "expand-arrows", 0, mid);
+    _ = try headerIcon(&h, "close", 0, mid);
+    _ = try headerIcon(&h, "close", mid, w);
+
+    const swap = try headerIcon(&h, "alt-arrow-right", 0, mid);
+    h.t.click(swap.x + swap.w / 2, swap.y + swap.h / 2);
+    h.t.settle(1);
+    try testing.expectEqualStrings("b", h.a.tabs.layout().?.panes.items[0].?);
+
+    const zoom = try headerIcon(&h, "expand-arrows", mid, w);
+    h.t.click(zoom.x + zoom.w / 2, zoom.y + zoom.h / 2);
+    h.t.settle(1);
+    try testing.expect(h.a.view.strip.expanded != null);
+    try testing.expect(h.a.tabs.layout().?.zoomed);
+    // Restore the panes as the zoomed tab's own control would.
+    strip.queue(&h.a, .{ .zoom = .{ .chat = 1 } });
+    h.t.settle(1);
+    try testing.expect(!h.a.tabs.layout().?.zoomed);
+
+    const close = try headerIcon(&h, "close", mid, w);
+    h.t.click(close.x + close.w / 2, close.y + close.h / 2);
+    h.t.settle(1);
+    try testing.expectEqual(@as(usize, 1), strip.chatCount(&h.a));
+}
+
 test "session navigation parity opens archived history outside a blank split pane" {
     var h: Harness = undefined;
     try h.init(true);
@@ -1322,7 +1425,7 @@ test "narrow side panel picker cards stay unclipped and topbar plus never overla
     try testing.expect(plus.x + plus.w <= toggle.x - 2);
 }
 
-test "collapsed-sidebar horizontal split keeps tabs aligned to panes" {
+test "collapsed-sidebar horizontal split keeps pane headers aligned to panes" {
     var h: Harness = undefined;
     try h.init(false);
     defer h.deinit();
@@ -1367,7 +1470,8 @@ fn expectSplitTabsAligned(h: *Harness) !void {
     var pane_rects: [4]ui.Rect = undefined;
     for (h.t.ctx.nodes.items) |node| {
         const r = node.rect;
-        if (r.y < h.a.view.chrome.y and @abs(r.h - chrome.tab_height) < 0.5 and @abs(node.style.radius - 6) < 0.5 and node.style.control and r.w >= 40) {
+        // Zen panes' own header strips (`paneHeaders`), one above each card.
+        if (@abs(r.y - (h.a.view.chrome.y - chrome.fs_pane_header_h)) < 0.5 and @abs(r.h - chrome.fs_pane_header_h) < 0.5 and node.style.clip and r.w >= 40) {
             try testing.expect(tabs_found < tab_rects.len);
             tab_rects[tabs_found] = r;
             tabs_found += 1;
@@ -1533,12 +1637,16 @@ test "browse-style top tab bar highlights only the active tab in stable index or
     var top_inactive: usize = 0;
     var active_x: f32 = 0;
     var rightmost_tab_right: f32 = 0;
-    var pane_active: usize = 0;
-    var pane_inactive: usize = 0;
-    var pane_active_x: f32 = 0;
-    var pane_inactive_x: f32 = 0;
+    // Each Zen pane names itself in its own header above its card
+    // (`paneHeaders`); only the focused one carries the accent dot.
+    var pane_dots: usize = 0;
+    var pane_dot_x: f32 = 0;
     for (h.t.ctx.nodes.items) |node| {
         const r = node.rect;
+        if (r.w == 5 and r.h == 5 and r.y >= h.a.view.chrome.y - chrome.fs_pane_header_h and r.y < h.a.view.chrome.y) {
+            pane_dots += 1;
+            pane_dot_x = r.x;
+        }
         if (!node.style.control) continue;
         if (r.y < chrome.header_height and @abs(r.h - 28) < 0.5 and r.w >= 72) {
             rightmost_tab_right = @max(rightmost_tab_right, r.x + r.w);
@@ -1554,26 +1662,13 @@ test "browse-style top tab bar highlights only the active tab in stable index or
                 try testing.expectEqual(@as(usize, 0), node.style.shadows.len);
                 top_inactive += 1;
             }
-        } else if (r.y >= chrome.header_height - 0.5 and r.y < h.a.view.chrome.y and @abs(r.h - chrome.tab_height) < 0.5 and @abs(node.style.radius - 6) < 0.5) {
-            const bg = node.style.background orelse return error.MissingPaneHeaderBackground;
-            if (bg.a > 0.5) {
-                try testing.expect(node.style.border != null);
-                pane_active += 1;
-                pane_active_x = r.x;
-            } else {
-                try testing.expectEqual(@as(f32, 0), bg.a);
-                try testing.expect(node.style.border == null);
-                pane_inactive += 1;
-                pane_inactive_x = r.x;
-            }
         }
     }
     try testing.expectEqual(@as(usize, 1), top_active);
     try testing.expectEqual(@as(usize, 5), top_inactive);
     try testing.expect(active_x > t1.x and active_x < t3.x);
-    try testing.expectEqual(@as(usize, 1), pane_active);
-    try testing.expectEqual(@as(usize, 1), pane_inactive);
-    try testing.expect(pane_active_x > pane_inactive_x);
+    try testing.expectEqual(@as(usize, 1), pane_dots);
+    try testing.expect(pane_dot_x > h.a.view.chrome.x + h.a.view.chrome.chat_width / 2);
 
     // 3. New-tab (+) button sits immediately after the tab run instead of pinned far right.
     var plus_rect: ?ui.Rect = null;

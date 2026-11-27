@@ -116,6 +116,30 @@ fn trailingReserve(a: *const App) f32 {
     return if (width > 0) width + 10 else 0;
 }
 
+/// A horizontal split shows its panes side by side under the title bar, each
+/// with its own header row (`Layout.pane_row`).
+pub fn paneRow(a: *const App) bool {
+    if (a.view.settings_open or strip.count(a) <= 1) return false;
+    const split = a.tabs.layout() orelse return false;
+    return split.axis == .horizontal and !split.zoomed and strip.layoutExpanded(a) == null and split.panes.items.len > 1;
+}
+
+/// Windowed Zen panes the title bar does not already name wear full
+/// screen's 28pt header strip above their cards (`view_fullscreen_chrome.
+/// chatHeader`), in place of the split's slot row: each pane of a split,
+/// and the one pane under a strip of two or more tabs. A lone chat's title
+/// bar caption is its header (`usesWindowedChatCaption`).
+pub fn paneHeaders(a: *const App) bool {
+    if (a.view.full_screen or a.view.settings_open or a.settings.uiMode() != .zen) return false;
+    if (paneRow(a)) return true;
+    return strip.count(a) == 1 and singleSpec(a).n > 1;
+}
+
+/// The title bar carries the active pane's computer picker (`devicePicker`).
+pub fn showsTitlebarDevice(a: *const App) bool {
+    return !a.view.settings_open and showDevicePicker(a);
+}
+
 pub fn layout(c: *ui.Context, a: *const App) Layout {
     const left = @max(strip.leftInset(a), a.view.chrome.leading);
     if (a.view.settings_open or strip.count(a) <= 1) return .{ .left = left };
@@ -163,7 +187,7 @@ pub fn layout(c: *ui.Context, a: *const App) Layout {
         .columns = columns,
         // Horizontal splits always have a pane row, even on wide windows.
         // Opening a utility must not move the pane headers between rows.
-        .pane_row = in_row and (if (split) |s| s.panes.items.len > 1 else false),
+        .pane_row = paneRow(a),
     };
 }
 
@@ -196,7 +220,8 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, lane: Layout, pane_widths:
     const other_pill_w: f32 = if (other_shown > 0) @min(128, @max(72, max_other_budget / @as(f32, @floatFromInt(other_shown)) - 4)) else 0;
     const other_reserve: f32 = if (other_shown > 0) @as(f32, @floatFromInt(other_shown)) * (other_pill_w + 4) else 0;
     if (lane.pane_row) {
-        {
+        // Windowed Zen panes draw their own headers above their cards.
+        if (!paneHeaders(a)) {
             ui.key(c, "instrument-strip");
             const row = ui.div(c).fixed().offset(a.view.chrome.x, chrome.header_height)
                 .size(a.view.chrome.width, chrome.tab_height).row().gap(ws_gutter).itemsCenter().layer(2);
