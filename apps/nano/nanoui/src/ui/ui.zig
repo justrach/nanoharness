@@ -382,6 +382,7 @@ test {
     _ = @import("images.zig");
     _ = @import("tests_images.zig");
     _ = @import("pacing.zig");
+    _ = @import("scroll_glide.zig");
     _ = @import("svg.zig");
     _ = @import("tests_svg.zig");
     _ = @import("tests_truncate.zig");
