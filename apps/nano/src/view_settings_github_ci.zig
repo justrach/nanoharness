@@ -410,23 +410,17 @@ const Ghost = struct {
     color: ?ui.Color = null,
 };
 
-/// `ghost_action`'s width.
+/// A ghost's width as `view_kit.actionButton` lays it out.
 fn ghostW(c: *ui.Context, g: Ghost) f32 {
-    return 2 * 10 + (if (g.bordered) @as(f32, 2) else 0) + (if (g.icon != null) @as(f32, 14 + 6) else 0) + c.text.width(g.label, .{ .size = 12 });
+    return 2 * 12 + (if (g.icon != null) @as(f32, 14 + 6) else 0) + c.text.width(g.label, .{ .size = kit.text_body, .weight = .medium });
 }
 
-/// `ghost_action`: 12-point muted words, maybe an icon and an edge, a wash
-/// under the pointer. True when clicked.
+/// A page action through the panes' one button: edged (secondary) where
+/// the GPUI page draws a hairline, words alone (quiet) where it doesn't,
+/// the danger hue for a destructive one; 32 tall. True when clicked.
 fn ghost(c: *ui.Context, k: theme.Colors, g: Ghost) bool {
-    const pad: f32 = if (g.bordered) 1 else 0;
-    var b = ui.div(c).row().px(10 + pad).py(6 + pad).gap(6).itemsCenter().rounded(8).hover(k.ink(0.06));
-    if (g.bordered) b = b.border(k.border).borderW(1);
-    if (g.dim) b = b.opacity(0.5);
-    defer b.end();
-    const hot = b.hovered();
-    if (g.icon) |i| icons.icon(c, i, 14, k.muted, 0);
-    ui.text(c, g.label, set.st(c, 12, .{ .color = g.color orelse if (hot) k.text else k.muted }));
-    return b.clicked();
+    const kind: kit.ButtonKind = if (g.color != null) .danger else if (g.bordered) .secondary else .quiet;
+    return kit.actionButton(c, k, g.label, .{ .kind = kind, .icon = g.icon, .enabled = !g.dim });
 }
 
 /// The explanation, Connect and the snippet: everything before an
@@ -449,8 +443,7 @@ fn intro(c: *ui.Context, a: *App, k: theme.Colors, rs: *const runners.Runners, w
         else
             null,
     };
-    const label_style = set.st(c, 13, .{ .weight = .medium, .color = if (open) k.on_solid else k.muted.alpha(0.7) });
-    const button_w = 2 * 12 + c.text.width(label, label_style);
+    const button_w = 2 * 12 + c.text.width(label, .{ .size = kit.text_body, .weight = .medium });
     const cd = card(c, k, 16);
     defer cd.end();
     {
@@ -469,10 +462,7 @@ fn intro(c: *ui.Context, a: *App, k: theme.Colors, rs: *const runners.Runners, w
                 ui.text(c, n, set.st(c, 12, .{ .wrap = true, .color = k.muted.alpha(0.8) }));
             }
         }
-        const b = ui.div(c).row().px(12).py(6).rounded(8).bg(if (open) k.solid else k.ink(0.06));
-        defer b.end();
-        ui.text(c, label, label_style);
-        if (open and b.clicked()) connect(a, url.?);
+        if (kit.actionButton(c, k, label, .{ .kind = .primary, .enabled = open })) connect(a, url.?);
     }
     snippet(c, a, k, true);
 }
@@ -529,7 +519,7 @@ fn installation(c: *ui.Context, a: *App, k: theme.Colors, rs: *const runners.Run
         const g: Ghost = .{
             .label = if (disconnecting) "Disconnecting…" else if (confirming) "Disconnect for good?" else "Disconnect",
             .dim = disconnecting,
-            .color = if (confirming) k.danger_muted else null,
+            .color = k.danger,
         };
         const w = rowInner() - 36 - 14 - 14 - ghostW(c, g);
         {
@@ -612,7 +602,7 @@ fn concurrencyRow(c: *ui.Context, a: *App, k: theme.Colors, inst: *const runners
     const busy = p.isBusy(c.print("{s}:concurrent", .{id}));
     const r = set.row(c, k, false, false);
     defer r.end();
-    const w = rowInner() - 14 - (24 + 8 + 16 + 8 + 24);
+    const w = rowInner() - 14 - (kit.hit_target + 8 + 16 + 8 + kit.hit_target);
     {
         const col = ui.div(c).column().w(w);
         defer col.end();
@@ -626,16 +616,18 @@ fn concurrencyRow(c: *ui.Context, a: *App, k: theme.Colors, inst: *const runners
             var v = ui.div(c).row().w(16).justifyCenter();
             if (busy) v = v.opacity(0.5);
             defer v.end();
-            ui.text(c, c.print("{d}", .{current}), set.st(c, 13, .{ .color = k.text }));
+            ui.text(c, c.print("{d}", .{current}), set.st(c, 13, .{ .tabular = true, .color = k.text }));
             continue;
         }
         const next = runners.stepConcurrent(current, delta);
         const enabled = next != current and !busy;
-        var b = ui.div(c).row().size(24, 24).center().rounded(6).border(k.border).borderW(1);
-        if (enabled) b = b.hover(k.ink(0.06));
+        // The panes' 32-point target, edged like a secondary button.
+        var b = ui.div(c).row().size(kit.hit_target, kit.hit_target).center().rounded(kit.radius_control).border(k.border).borderW(1);
+        if (enabled) b = kit.pressFeedback(b.hover(k.hover).control());
         defer b.end();
+        const clicked = @import("control_behavior.zig").activate(c, b, k, if (delta < 0) "Fewer concurrent jobs" else "More concurrent jobs", enabled, false);
         ui.text(c, if (delta < 0) "−" else "+", set.st(c, 13, .{ .color = if (enabled) k.text else k.muted.alpha(0.4) }));
-        if (enabled and b.clicked()) setConcurrent(a, id, next);
+        if (clicked) setConcurrent(a, id, next);
     }
 }
 

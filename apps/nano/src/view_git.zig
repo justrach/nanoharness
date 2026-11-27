@@ -11,19 +11,20 @@ const git = @import("app_git.zig");
 const panels = @import("app_panels.zig");
 const prs = @import("app_change_requests.zig");
 const cr = @import("change_requests.zig");
+const display = @import("github_display.zig");
 
 pub fn history(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (a.panels.git_workflow.open) return @import("view_git_workflow.zig").view(c, a, k);
     const s = &a.panels.history;
     {
-        const bar = ui.div(c).row().wFull().h(40).px(12).gap(8).itemsCenter();
+        const bar = ui.div(c).row().wFull().h(48).px(16).gap(8).itemsCenter();
         defer bar.end();
         icons.icon(c, .@"git-branch", 14, k.muted, 0);
         const chat = if (a.selected) |id| a.findChat(id) else null;
-        kit.ellipsisText(c, if (chat) |ch| ch.branch orelse "Checkout history" else "Git history", .{ .size = 12, .mono = true, .color = k.text }, 200);
+        kit.ellipsisText(c, if (chat) |ch| ch.branch orelse "Checkout history" else "Git history", .{ .size = kit.text_body, .mono = true, .color = k.text }, @max(80, a.view.chrome.host_width - 300));
         ui.spacer(c);
-        if (button(c, k, "Staging", true)) @import("app_git_workflow.zig").show(a);
-        if (button(c, k, "Changes", true)) panels.addDiffsTab(a);
+        if (button(c, k, "Git changes", true)) @import("app_git_workflow.zig").show(a);
+        if (button(c, k, "Diffs", true)) panels.addDiffsTab(a);
         if (button(c, k, "Refresh", s.pending == null)) git.load(a, 0);
     }
     rule(c, k);
@@ -36,9 +37,9 @@ pub fn history(c: *ui.Context, a: *App, k: theme.Colors) void {
     const snapshot = s.snapshot orelse return empty(c, k, if (s.pending != null) "Loading Git history…" else "Git history is not loaded.");
     const page = snapshot.page;
     if (page.comparison) |comparison| {
-        const note = ui.div(c).row().wFull().px(14).py(8);
+        const note = ui.div(c).row().wFull().px(16).py(8);
         defer note.end();
-        ui.text(c, c.print("{d} ahead · {d} behind {s} (local refs)", .{ comparison.ahead, comparison.behind, comparison.base }), .{ .size = 11, .color = k.muted });
+        ui.text(c, c.print("{d} ahead · {d} behind {s} (local refs)", .{ comparison.ahead, comparison.behind, comparison.base }), .{ .size = kit.text_caption, .tabular = true, .color = k.muted });
     }
     if (page.commits.len == 0) return empty(c, k, "No commits yet.");
     {
@@ -50,7 +51,7 @@ pub fn history(c: *ui.Context, a: *App, k: theme.Colors) void {
             // A chronological rail, not a branch graph. Endpoint flags
             // describe the full list, not just this visible page.
             const row = nanoui.kit.timelineItem(c, .{
-                .height = 68,
+                .height = 56,
                 .first = i == 0 and s.cursor == 0,
                 .last = i + 1 == page.commits.len and page.nextCursor == null,
                 .color = if (is_head) k.accent else k.muted,
@@ -58,24 +59,25 @@ pub fn history(c: *ui.Context, a: *App, k: theme.Colors) void {
             defer row.end();
             const body = ui.div(c).column().grow().w(0).gap(4).clip();
             defer body.end();
-            kit.ellipsisText(c, commit.subject, .{ .size = 12.5, .weight = .medium, .color = k.text }, @max(80, a.view.chrome.host_width - 74));
+            kit.ellipsisText(c, commit.subject, .{ .size = kit.text_title, .line_height = 18, .weight = .medium, .color = k.text }, @max(80, a.view.chrome.host_width - 74));
             const meta = ui.div(c).row().wFull().gap(6).itemsCenter().clip();
             defer meta.end();
-            ui.text(c, commit.sha[0..@min(7, commit.sha.len)], .{ .size = 10.5, .mono = true, .color = k.muted });
-            kit.ellipsisText(c, c.print("{s} · {s}", .{ commit.authorName, commit.authoredAt[0..@min(10, commit.authoredAt.len)] }), .{ .size = 10.5, .color = k.muted }, 180);
-            if (is_head) tag(c, k, "HEAD", k.accent);
-            if (commit.parentShas.len > 1) tag(c, k, "Merge", k.muted);
+            ui.text(c, commit.sha[0..@min(7, commit.sha.len)], .{ .size = kit.text_caption, .mono = true, .color = k.muted });
+            const when = display.ago(c.alloc().alloc(u8, 24) catch continue, a.nowMs(), commit.authoredAt);
+            kit.ellipsisText(c, c.print("{s} · {s}", .{ commit.authorName, when }), .{ .size = kit.text_caption, .tabular = true, .color = k.muted }, 180);
+            if (is_head) tag(c, k, "HEAD", .accent);
+            if (commit.parentShas.len > 1) tag(c, k, "Merge", .neutral);
             for (commit.refs, 0..) |ref, j| {
                 if (j >= 2) break;
-                tag(c, k, ref.label, k.muted);
+                tag(c, k, ref.label, .neutral);
             }
         }
     }
     rule(c, k);
-    const footer = ui.div(c).row().wFull().h(42).px(12).gap(8).itemsCenter();
+    const footer = ui.div(c).row().wFull().h(48).px(16).gap(8).itemsCenter();
     defer footer.end();
     if (button(c, k, "Previous", s.cursor > 0 and s.pending == null)) git.load(a, git.previousCursor(s.cursor));
-    ui.text(c, if (s.pending != null) "Loading…" else c.print("{d}–{d}", .{ s.cursor + 1, s.cursor + page.commits.len }), .{ .size = 11, .color = k.muted });
+    ui.text(c, if (s.pending != null) "Loading…" else c.print("{d}–{d}", .{ s.cursor + 1, s.cursor + page.commits.len }), .{ .size = kit.text_body, .tabular = true, .color = k.muted });
     ui.spacer(c);
     if (button(c, k, "Next", page.nextCursor != null and s.pending == null)) git.load(a, page.nextCursor.?);
 }
@@ -130,53 +132,50 @@ pub fn github(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (button(c, k, "Browse repository", a.selected != null)) @import("app_github_repository.zig").show(a);
         return;
     }
-    const list = ui.div(c).column().wFull().grow().h(0).p(14).gap(12).scrollY();
+    const list = ui.div(c).column().wFull().grow().h(0).px(8).py(8).scrollY();
     defer list.end();
-    for (items) |item| {
+    for (items, 0..) |item, i| {
         const pr = item.summary;
         ui.key(c, pr.url);
-        const card = ui.div(c).column().wFull().p(13).gap(9).bg(k.ink(if (k.dark) 0.025 else 0.015)).border(k.border).borderW(1).rounded(10);
-        defer card.end();
+        if (i > 0) {
+            const line = ui.div(c).row().wFull().px(8);
+            defer line.end();
+            rule(c, k);
+        }
+        // The repository list's row: title first, then the state chip, the
+        // number and the branches on one quiet line; actions under them.
+        const row = ui.div(c).column().wFull().px(8).py(12).gap(8);
+        defer row.end();
         const model = cr.model(c.alloc(), pr);
-        const tone = @import("view_change_requests.zig").badgeColor(k, pr, item.provenance);
+        const prs_view = @import("view_change_requests.zig");
+        ui.text(c, model.title, .{ .size = kit.text_title, .line_height = 18, .weight = .medium, .wrap = true, .color = k.text });
         {
-            const row = ui.div(c).row().wFull().gap(8).itemsCenter();
-            defer row.end();
-            icons.icon(c, .@"pull-request", 14, tone, 0);
-            ui.text(c, model.number, .{ .size = 12, .mono = true, .color = tone });
-            tag(c, k, model.state_label, tone);
+            const meta = ui.div(c).row().wFull().gap(8).itemsCenter().clip();
+            defer meta.end();
+            kit.statusChip(c, k, model.state_label, .{ .tone = kit.roleTone(prs_view.badgeRole(pr, item.provenance)) });
+            ui.text(c, model.number, .{ .size = kit.text_body, .line_height = 16, .tabular = true, .color = k.muted });
+            icons.icon(c, .@"git-branch", 12, k.muted, 0);
+            kit.ellipsisText(c, c.print("{s} → {s}", .{ pr.head_ref, pr.base_ref }), .{ .size = kit.text_body, .line_height = 16, .mono = true, .color = k.muted }, @max(60, a.view.chrome.host_width - 200));
         }
-        ui.text(c, model.title, .{ .size = 13.5, .weight = .semibold, .wrap = true, .color = k.text });
+        if (item.provenance.note(c.alloc(), pr)) |note| ui.text(c, note, .{ .size = kit.text_caption, .wrap = true, .color = k.muted });
         {
-            const branch = ui.div(c).row().px(8).py(3).gap(5).itemsCenter().rounded(6).bg(k.ink(if (k.dark) 0.04 else 0.035)).border(k.border).borderW(1);
-            defer branch.end();
-            icons.icon(c, .@"git-branch", 11, k.muted, 0);
-            ui.text(c, c.print("{s} → {s}", .{ pr.head_ref, pr.base_ref }), .{ .size = 11, .mono = true, .wrap = true, .color = k.muted });
-        }
-        if (item.provenance.note(c.alloc(), pr)) |note| ui.text(c, note, .{ .size = 11, .wrap = true, .color = k.muted });
-        {
-            const row = ui.div(c).row().wFull().gap(8).itemsCenter();
-            defer row.end();
-            if (button(c, k, "Open on GitHub", true)) _ = nanoui.shell.openUrl(pr.url);
+            const actions = ui.div(c).row().wFull().gap(8).itemsCenter();
+            defer actions.end();
+            if (kit.actionButton(c, k, "Open on GitHub", .{ .trailing = .@"arrow-up-right" })) _ = nanoui.shell.openUrl(pr.url);
             const selected = if (a.selected) |id| std.mem.eql(u8, id, item.chat_id) else false;
             if (!selected) {
-                if (button(c, k, "Open session", true)) a.openChatInTab(item.chat_id);
-            } else if (a.findChat(item.chat_id)) |chat| @import("view_change_requests.zig").mergeControls(c, a, k, chat, pr);
+                if (kit.actionButton(c, k, "Open session", .{})) a.openChatInTab(item.chat_id);
+            } else if (a.findChat(item.chat_id)) |chat| prs_view.mergeControlsIn(c, a, k, chat, pr, .pane);
         }
     }
 }
 
+/// The panes' secondary button (`view_kit.actionButton`).
 fn button(c: *ui.Context, k: theme.Colors, label: []const u8, enabled: bool) bool {
-    const b = ui.div(c).row().h(26).px(9).itemsCenter().rounded(7).bg(k.ink(if (k.dark) 0.035 else 0.025)).border(k.border).borderW(1).hover(if (enabled) k.hover else .transparent).control();
-    defer b.end();
-    ui.text(c, label, .{ .size = 11.5, .color = if (enabled) k.text else k.faint });
-    return enabled and b.clicked();
+    return kit.actionButton(c, k, label, .{ .enabled = enabled });
 }
-fn tag(c: *ui.Context, k: theme.Colors, label: []const u8, color: ui.Color) void {
-    const chip = ui.div(c).row().px(5).py(2).rounded(4).bg(color.alpha(0.08)).maxW(160).clip();
-    defer chip.end();
-    kit.ellipsisText(c, label, .{ .size = 10, .color = color }, 150);
-    _ = k;
+fn tag(c: *ui.Context, k: theme.Colors, label: []const u8, tone: kit.Tone) void {
+    kit.statusChip(c, k, label, .{ .tone = tone, .max_w = 150 });
 }
 fn rule(c: *ui.Context, k: theme.Colors) void {
     ui.div(c).wFull().h(1).bg(k.border).end();

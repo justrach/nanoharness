@@ -66,7 +66,7 @@ test "native git workflow stages exact files and commits only after confirmation
         try setup(&h, dark);
         defer h.deinit();
         try screenshot(&h, if (dark) "before-dark" else "before-light");
-        try h.t.clickText("Staging");
+        try h.t.clickText("Git changes");
         h.t.settle(0.1);
         try testing.expect(h.t.hasText("Staged (1)"));
         try testing.expect(h.t.hasText("Unstaged (2)"));
