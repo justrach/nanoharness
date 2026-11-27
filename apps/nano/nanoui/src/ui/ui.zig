@@ -29,6 +29,10 @@ pub const jump = motion_legacy.jump;
 pub const Interaction = ctx_mod.Interaction;
 pub const FrameStats = ctx_mod.FrameStats;
 pub const frame_log = @import("frame_log.zig");
+/// A scroll's position on each display refresh (`Surface` on macOS).
+pub const scroll_glide = @import("scroll_glide.zig");
+/// What each refresh applied before (`scroll_glide`'s baseline).
+pub const ScrollPacing = @import("pacing.zig").Scroll;
 pub const FrameLog = frame_log.FrameLog;
 pub const Surface = if (@import("builtin").os.tag == .macos) @import("surface.zig").Surface else void;
 pub const surface_drop = if (@import("builtin").os.tag == .macos) @import("surface_drop.zig") else struct {};

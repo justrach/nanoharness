@@ -25,6 +25,7 @@ pub const FrameLog = frame_log_mod.FrameLog;
 pub const KeysReleased = struct { ctx: ?*anyopaque, func: *const fn (ctx: ?*anyopaque, s: *Surface) void };
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 const pacing = @import("pacing.zig");
+const glide_mod = @import("scroll_glide.zig");
 const link_pace = @import("surface_pacing.zig");
 pub const Surface = struct {
     gpa: std.mem.Allocator,
@@ -103,9 +104,14 @@ pub const Surface = struct {
     tip: ?[]const u8 = null,
     frame_log: ?FrameLog = null,
     frame_kind: frame_log_mod.Kind = .input,
-    /// Scrolling gathered for the link's next frame, and main's frame log.
+    /// Scrolling gathered for the link's next frame for a view that reads
+    /// the wheel itself, and main's frame log.
     scroll: pacing.Scroll = .{},
     pacing_log: pacing.FrameLog = .{},
+    /// A scrolling box's scroll, a position for each refresh (`scroll_glide`).
+    glide: glide_mod.Glide = .{},
+    /// The frame-rate range last asked of the link.
+    link_range: pacing.Range = .{ .minimum = -1, .maximum = -1, .preferred = -1 },
     pub fn create(window: *Window, view: ui.View, theme_override: ?Theme) !*Surface {
         const gpa = window.app.gpa;
         const self = try gpa.create(Surface);
@@ -327,9 +333,14 @@ pub const Surface = struct {
         c.input.window_active = self.window.isFocused();
         c.window_focused = c.input.window_active;
         self.pacing_log.note(now);
-        // What scrolling gathered since the last frame, applied at once.
-        const dy = self.scroll.take();
-        if (dy != 0 and !c.applyScroll(dy) and (c.wants_wheel or c.wheelAt())) c.input.scroll.y += dy;
+        // What a view reading the wheel itself gathered, applied at once.
+        const raw = self.scroll.take();
+        c.applyScrollStep(raw);
+        // A scrolling box's: this refresh's position (`scroll_glide`). A frame
+        // off the beat, with the link running, leaves it to the link's next.
+        const step: glide_mod.Step = if (!vis) self.glide.flush() else if (kind == .link or self.display_link == null) self.glide.beat(now, dur, c.glideRoom()) else .{};
+        c.applyScrollStep(@floatCast(step.dy));
+        const dy = raw + @as(f32, @floatCast(step.dy));
         const r = frame_mod.run(c, self.view, &self.text, &self.instances, self.size, self.scale, a11y.themed(self, self.theme()), dt, now - self.start_time);
         if (self.dead) return;
         a11y.afterFrame(self);
@@ -388,7 +399,10 @@ pub const Surface = struct {
         const c = &self.ctx;
         const refresh = if (self.link_duration > 0) self.link_duration else 1.0 / @as(f64, @max(60.0, self.max_fps));
         const due_soon = pacing.keepLinkForFrameIn(c.frame_in, refresh);
-        const more = self.resizeStepping() or c.animating or hot_changed or c.input.down or self.scroll.active(now) or due_soon;
+        const scrolling = self.glide.active(now);
+        const more = self.resizeStepping() or c.animating or hot_changed or c.input.down or self.scroll.active(now) or scrolling or due_soon;
+        // The scroll's floor on the link's rate goes with it.
+        if (!scrolling and self.link_fps == 0) self.setRate(null);
         if (self.display_link != null) {
             if (more) {
                 self.setRate(null);
@@ -496,6 +510,15 @@ pub const Surface = struct {
     /// enabling transparent viewport holes over live WKWebView panes.
     pub const attachBackdrop = events.attachBackdrop;
 
+    /// A scroll's event: the link's next refresh draws it (`scroll_glide`),
+    /// on the display's beat, instead of a frame built now. The frame built
+    /// now had no drawable either: it showed on that same refresh.
+    pub fn requestBeat(self: *Surface) void {
+        if (self.display_link == null or self.in_frame or !self.visible()) return self.requestFrame();
+        self.setRate(null);
+        self.setPaced(true);
+    }
+
     /// Draws a frame at the display's next refresh: for changes from
     pub fn requestFrame(self: *Surface) void {
         self.full_pending = true;
@@ -516,14 +539,17 @@ pub const Surface = struct {
         const link = self.display_link orelse return;
         const max_rate = @max(@as(f32, 60.0), self.max_fps);
         const fps: f32 = if (seconds) |s| (if (s <= 1.0 / max_rate * 1.1) 0 else std.math.clamp(1 / @max(s, 0.001), 1, max_rate)) else 0;
-        if (fps == self.link_fps) return;
+        // While a scroll moves, the floor is the screen's fastest too.
+        const want = pacing.range(fps, self.max_fps, fps == 0 and self.glide.active(cf.CACurrentMediaTime()));
+        if (fps == self.link_fps and std.meta.eql(want, self.link_range)) return;
         const faster = (fps == 0 and self.link_fps > 0) or (fps > self.link_fps and self.link_fps > 0);
         if (fps == 0 and self.link_fps > 0) {
             if (self.frame_log) |*fl| fl.last_t = 0;
         }
         self.link_fps = fps;
+        self.link_range = want;
         if (self.paced and faster) objc.msg(void, link, "setPaused:", .{objc.YES});
-        objc.msg(void, link, "setPreferredFrameRateRange:", .{pacing.range(fps, self.max_fps)});
+        objc.msg(void, link, "setPreferredFrameRateRange:", .{want});
         if (self.paced and faster) objc.msg(void, link, "setPaused:", .{objc.NO});
     }
 

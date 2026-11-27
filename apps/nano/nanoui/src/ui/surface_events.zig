@@ -266,14 +266,23 @@ fn scrollWheel(obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) v
     // and up the scrolling box under the pointer, else a view that takes it.
     const took = dy != 0 and s.ctx.applyScroll(0);
     const wheel = (s.ctx.wants_wheel or s.ctx.wheelAt()) and !took;
-    // A view taking the wheel keeps the same beat as a scrolling box: events come
-    // unevenly, and a display link stopping between them misses frames.
-    if (took or (wheel and s.visible())) s.scroll.add(dy, cf.CACurrentMediaTime());
+    const now = cf.CACurrentMediaTime();
+    // A box's scroll is drawn a position a refresh (`scroll_glide`). An event
+    // that only says the gesture ended or its momentum stopped reaches it too.
+    const glided = took or (dy == 0 and s.glide.active(now));
+    if (glided) {
+        s.glide.event(.{ .dy = dy, .t = now, .phase = glidePhase(event), .precise = in.precise, .reduce_motion = s.reduce_motion });
+    } else if (wheel and s.visible()) {
+        // A view taking the wheel keeps the same beat as a scrolling box: events come
+        // unevenly, and a display link stopping between them misses frames.
+        s.scroll.add(dy, now);
+    }
     const release_over = !s.ctx.scroll_holding and s.ctx.hasOverscroll();
-    if (!took and dx == 0 and !wheel and !release_over) return;
+    if (!glided and dx == 0 and !wheel and !release_over) return;
     if (s.visible()) {
         in.scroll.x += dx;
-        s.requestFrame();
+        // Only a box's scroll: its frame is the link's next refresh.
+        if (dx == 0 and !wheel and !release_over) s.requestBeat() else s.requestFrame();
     } else {
         in.scroll = .{ .x = dx, .y = if (wheel) dy else 0 };
         const tok = s.token();
@@ -283,8 +292,17 @@ fn scrollWheel(obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) v
     }
 }
 
-
-
+/// The event's phase as `scroll_glide` reads it: momentum's end apart.
+fn glidePhase(event: objc.Object) @import("scroll_glide.zig").Phase {
+    const m = objc.msg(objc.NSUInteger, event, "momentumPhase", .{});
+    if (m != 0) return if (m & (8 | 16) != 0) .momentum_ended else .momentum;
+    return switch (scrollPhase(event)) {
+        .began => .began,
+        .changed => .changed,
+        .ended => .ended,
+        .none, .momentum => .none,
+    };
+}
 
 fn backingChanged(obj: objc.Object, _: objc.SEL) callconv(.c) void {
     const s = surfaceOf(obj) orelse return;

@@ -584,6 +584,8 @@ pub const Context = struct {
     pub const updateHot = hit_mod.updateHot;
     pub const noteModality = hit_mod.noteModality;
     pub const applyScroll = scroll_mod.applyScroll;
+    pub const glideRoom = scroll_mod.glideRoom;
+    pub const applyScrollStep = scroll_mod.applyStep;
     pub const wheelAt = scroll_mod.wheelAt;
     pub const hasOverscroll = scroll_mod.hasOverscroll;
 

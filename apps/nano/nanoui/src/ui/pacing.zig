@@ -37,12 +37,14 @@ pub const Range = extern struct { minimum: f32, maximum: f32, preferred: f32 };
 
 /// The pace to ask the link for: `fps` frames a second (a slow, steady
 /// change), or, with 0, the screen's fastest (a ProMotion display's 120),
-/// down to half of it when the system needs to save power. 0 for a screen
-/// that doesn't say leaves the system's default.
-pub fn range(fps: f32, screen_max: f32) Range {
+/// down to half of it when the system needs to save power. While a scroll
+/// moves (`scrolling`) the floor is the screen's fastest too: a scroll at
+/// half rate is the judder it was meant to avoid. 0 for a screen that
+/// doesn't say leaves the system's default.
+pub fn range(fps: f32, screen_max: f32, scrolling: bool) Range {
     if (fps > 0) return .{ .minimum = fps, .maximum = fps, .preferred = fps };
     if (screen_max <= 0) return .{ .minimum = 0, .maximum = 0, .preferred = 0 };
-    return .{ .minimum = screen_max / 2, .maximum = screen_max, .preferred = screen_max };
+    return .{ .minimum = if (scrolling) screen_max else screen_max / 2, .maximum = screen_max, .preferred = screen_max };
 }
 
 /// Whether `frameIn` is due within ~1.5 display refreshes, so the display
@@ -92,9 +94,34 @@ test "scrolling between refreshes adds up, is applied once, and keeps the link a
 }
 
 test "the link asks for the screen's fastest, or a steady pace" {
-    try std.testing.expectEqual(Range{ .minimum = 60, .maximum = 120, .preferred = 120 }, range(0, 120));
-    try std.testing.expectEqual(Range{ .minimum = 2, .maximum = 2, .preferred = 2 }, range(2, 120));
-    try std.testing.expectEqual(Range{ .minimum = 0, .maximum = 0, .preferred = 0 }, range(0, 0));
+    try std.testing.expectEqual(Range{ .minimum = 60, .maximum = 120, .preferred = 120 }, range(0, 120, false));
+    try std.testing.expectEqual(Range{ .minimum = 2, .maximum = 2, .preferred = 2 }, range(2, 120, false));
+    try std.testing.expectEqual(Range{ .minimum = 0, .maximum = 0, .preferred = 0 }, range(0, 0, false));
+}
+
+test "a scroll holds the screen's full rate, and the normal range returns after it" {
+    const Glide = @import("scroll_glide.zig").Glide;
+    var g: Glide = .{};
+    const refresh = 1.0 / 120.0;
+    var t: f64 = 1;
+    for (0..30) |i| {
+        g.event(.{ .dy = -4, .t = t - refresh, .phase = if (i == 0) .began else .changed });
+        _ = g.beat(t, refresh, .{});
+        try std.testing.expectEqual(Range{ .minimum = 120, .maximum = 120, .preferred = 120 }, range(0, 120, g.active(t)));
+        t += refresh;
+    }
+    g.event(.{ .dy = 0, .t = t - refresh, .phase = .ended });
+    // Through the linger the floor stays; then the normal range, and idle.
+    var released: ?f64 = null;
+    for (0..60) |_| {
+        if (g.wants(t, .{})) _ = g.beat(t, refresh, .{});
+        if (released == null and !g.active(t)) released = t;
+        t += refresh;
+    }
+    try std.testing.expect(released.? - (t - 61 * refresh) <= @import("scroll_glide.zig").linger + 2 * refresh);
+    try std.testing.expectEqual(Range{ .minimum = 60, .maximum = 120, .preferred = 120 }, range(0, 120, g.active(t)));
+    // A steady pace (a 24 fps clock) is not lifted by it.
+    try std.testing.expectEqual(Range{ .minimum = 24, .maximum = 24, .preferred = 24 }, range(24, 120, true));
 }
 
 test "keepLinkForFrameIn keeps link running for immediate frames and pauses for idle waits" {

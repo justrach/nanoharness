@@ -324,3 +324,90 @@ test "active mouse-down and drag on math-heavy history stay viewport-proportiona
     try testing.expect(t.ctx.stats.passes <= 2);
     t.up();
 }
+
+const Panes = enum { single, split };
+const Rule = enum { old, glide };
+const PaceRun = struct { refreshes: usize, frames: usize, start: f32, end: f32, sum: f32 };
+
+/// The production shell's transcript, one pane or split, scrolled by a
+/// synthetic 120 Hz trackpad stream through the rule each refresh applies.
+fn paceRun(panes: Panes, rule: Rule) !PaceRun {
+    const glide = ui.scroll_glide;
+    var f: Fixture = undefined;
+    try f.init(false);
+    defer f.a.deinit();
+    f.a.view.sidebar_open = false;
+    if (panes == .split) f.a.splitPane(.horizontal);
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&f.a, @import("view.zig").view), .{ .width = 1200, .height = 780, .dark = true });
+    defer t.deinit();
+    const refresh: f64 = 1.0 / 120.0;
+    t.dt = 1.0 / 120.0;
+    t.settle(1);
+    t.ctx.input.mouse = if (panes == .split) .{ .x = 250, .y = 350 } else .{ .x = 600, .y = 350 };
+    t.frame();
+    const box = t.ctx.glideRoom().box;
+    if (box == 0) return error.NoTranscriptUnderPointer;
+    const start = t.ctx.scroll.get(box) orelse return error.NoTranscriptOffset;
+    // One event a refresh, 3 ms before its tick; every seventh a refresh
+    // late, arriving with the next. Up the history, 4 points an event.
+    var events: [140]glide.Event = undefined;
+    for (&events, 0..) |*e, i| {
+        const k: f64 = @floatFromInt(i);
+        const late: f64 = if (i % 7 == 6) refresh else 0;
+        e.* = .{ .dy = 4, .t = 1 + k * refresh - 0.003 + late, .phase = if (i == 0) .began else .changed };
+    }
+    var g: glide.Glide = .{};
+    var old: ui.ScrollPacing = .{};
+    var next: usize = 0;
+    var frames: usize = 0;
+    const refreshes = events.len + 1;
+    // The stream's refreshes, then a quiet half second for it to settle.
+    for (0..refreshes + 60) |i| {
+        const at = 1 + refresh + @as(f64, @floatFromInt(i)) * refresh;
+        var fresh = false;
+        while (next < events.len and events[next].t < at - refresh) : (next += 1) {
+            switch (rule) {
+                .old => old.add(@floatCast(events[next].dy), events[next].t),
+                .glide => g.event(events[next]),
+            }
+            fresh = true;
+        }
+        const drew = switch (rule) {
+            // The old rule: a frame when events came, applying their sum.
+            .old => blk: {
+                const dy = old.take();
+                if (!fresh) break :blk false;
+                t.ctx.applyScrollStep(dy);
+                break :blk true;
+            },
+            .glide => blk: {
+                const room = t.ctx.glideRoom();
+                if (!g.wants(at, room)) break :blk false;
+                t.ctx.applyScrollStep(@floatCast(g.beat(at, refresh, room).dy));
+                break :blk true;
+            },
+        };
+        if (!drew) continue;
+        t.frame();
+        if (i < refreshes) frames += 1;
+    }
+    return .{ .refreshes = refreshes, .frames = frames, .start = start, .end = t.ctx.scroll.get(box).?, .sum = 4 * events.len };
+}
+
+test "transcript scroll draws a new position on every refresh, one pane or split" {
+    @import("theme.zig").registerFonts();
+    for ([_]Panes{ .single, .split }) |panes| {
+        const old = try paceRun(panes, .old);
+        const new = try paceRun(panes, .glide);
+        std.debug.print("\n{s} pane transcript, synthetic 120 Hz stream: old rule {d}/{d} refreshes drawn, glide {d}/{d}\n", .{ @tagName(panes), old.frames, old.refreshes, new.frames, new.refreshes });
+        // Every refresh drawn; the old rule leaves about one in seven.
+        try testing.expectEqual(new.refreshes, new.frames);
+        try testing.expect((old.refreshes - old.frames) * 8 >= old.refreshes);
+        try testing.expect(new.frames * 7 >= old.frames * 8);
+        // Where the scroll ends doesn't change: the system's sum, exactly.
+        try testing.expectApproxEqAbs(old.start - old.sum, old.end, 0.01);
+        try testing.expectApproxEqAbs(new.start - new.sum, new.end, 0.01);
+        try testing.expectApproxEqAbs(old.end, new.end, 0.01);
+    }
+}

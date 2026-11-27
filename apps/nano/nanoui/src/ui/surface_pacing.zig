@@ -94,7 +94,9 @@ pub fn metalDisplayLinkNeedsUpdate(obj: objc.Object, _: objc.SEL, _: objc.Object
     s.wake.last_tick = cf.CACurrentMediaTime();
     const target = objc.msg(f64, update, "targetPresentationTimestamp", .{});
     const frame_in_due = s.ctx.frame_in != null and target >= s.frame_in_due - 0.001;
-    if (!s.full_pending and !frame_in_due and !s.ctx.animating and !s.geometry_changed and !s.retained_ready and !s.pending_sync and s.ctx.time_driven == .none) {
+    // A scroll in motion has a new position for every refresh, events or not.
+    const glide_due = s.glide.wants(target, s.ctx.glideRoom());
+    if (!s.full_pending and !frame_in_due and !glide_due and !s.ctx.animating and !s.geometry_changed and !s.retained_ready and !s.pending_sync and s.ctx.time_driven == .none) {
         s.updatePacing(target, false);
         return;
     }
@@ -102,7 +104,7 @@ pub fn metalDisplayLinkNeedsUpdate(obj: objc.Object, _: objc.SEL, _: objc.Object
     const duration: f64 = if (s.link_fps > 0) 1.0 / @as(f64, s.link_fps) else 1.0 / @as(f64, @max(60.0, s.max_fps));
     s.renderer.given_drawable = drawable;
     defer s.renderer.given_drawable = null;
-    if (!s.full_pending and !frame_in_due and !s.ctx.animating and !s.geometry_changed and (s.retained_ready or (!s.pending_sync and s.ctx.time_driven != .none))) {
+    if (!s.full_pending and !frame_in_due and !glide_due and !s.ctx.animating and !s.geometry_changed and (s.retained_ready or (!s.pending_sync and s.ctx.time_driven != .none))) {
         s.redrawRetained(target, duration);
         return;
     }
