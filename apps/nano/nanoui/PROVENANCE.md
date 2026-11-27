@@ -149,6 +149,21 @@ All Harness-local patches above (including `scroll_fade`, `d3d11_texture`,
 `after_frame`) are retained, and HDR files (`d3d11_hdr.zig`, `hdr.hlsl`,
 `hdr_output.zig`) remain excluded.
 
+Harness-local scroll pacing (macOS): `src/ui/scroll_glide.zig` gives a
+scrolling box a position for every display refresh instead of applying each
+event's delta on the next frame (a refresh with no event moves on by at most
+one refresh at the events' velocity, the next event corrects, and a stop
+keeps what was shown rather than stepping back; wheel notches ease over
+140 ms unless Reduce Motion). `scroll_glide.route` decides which events reach
+it, `pacing.tick`/`keepRunning` what the link's tick does and whether it
+keeps running, `pacing.PeriodMeter` the link's real interval, and
+`scroll.glideFrame`/`glideLaidOut` apply a refresh's step to the box.
+`surface_pacing.zig`'s tick draws when it moves; `pacing.range` holds the
+link's floor at the screen's rate while it does; `surface_wake.presented`
+owes the window-server nudge during it and pays it once after; and
+`frame_log.Record` appends `scroll` and `skipped`. Windows, Linux, iOS and
+Android event handling is unchanged.
+
 These changes live in this checked-in package, not an ignored download cache.
 
 To update: start with the pinned upstream distribution, retain the notices,

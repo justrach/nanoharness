@@ -17,6 +17,8 @@ var redraws: u32 = 0;
 var last_frame: ?u64 = null;
 var last_passes: u32 = 0;
 var last_redraws: u32 = 0;
+/// The display beat's scroll for `last_frame` (`Context.scroll_pace`).
+var last_pace: @import("nanoui").ui.scroll_glide.Report = .{};
 var last_note_buf: [64]u8 = undefined;
 var last_note_len: usize = 0;
 var log_buf: [8192]u8 = undefined;
@@ -111,6 +113,7 @@ pub fn frame(a: *App, c: *const @import("nanoui").ui.Context) void {
         last_frame = c.frame;
         last_passes = p;
         last_redraws = r;
+        last_pace = c.scroll_pace;
         return;
     }
     const logged_frame = last_frame.?;
@@ -119,6 +122,8 @@ pub fn frame(a: *App, c: *const @import("nanoui").ui.Context) void {
     last_frame = c.frame;
     last_passes = p;
     last_redraws = r;
+    const pace = last_pace;
+    last_pace = c.scroll_pace;
     const s = c.stats;
     const total = s.build_ms + s.layout_ms + s.paint_ms;
     const watching = a.now < until;
@@ -135,10 +140,10 @@ pub fn frame(a: *App, c: *const @import("nanoui").ui.Context) void {
     defer if (!c.animating and scroll_n == 0) {
         last_note_len = 0;
     };
-    var buf: [320]u8 = undefined;
+    var buf: [384]u8 = undefined;
     const line = std.fmt.bufPrint(
         &buf,
-        "{d:.3} frame=#{d} total={d:.2}ms (build={d:.2} layout={d:.2} paint={d:.2}) passes={d} nodes={d} anim={d} scroll={d} retained={d} redraws={d} tab={d} pane={d} menu={s} act={s}\n",
+        "{d:.3} frame=#{d} total={d:.2}ms (build={d:.2} layout={d:.2} paint={d:.2}) passes={d} nodes={d} anim={d} scroll={d} retained={d} redraws={d} tab={d} pane={d} menu={s} act={s} pace={s} skipped_total={d} glide_total={d}\n",
         .{
             a.now,
             logged_frame,
@@ -156,6 +161,9 @@ pub fn frame(a: *App, c: *const @import("nanoui").ui.Context) void {
             pane,
             menu_name,
             act,
+            @tagName(pace.source),
+            pace.skipped_total,
+            pace.glide_total,
         },
     ) catch return;
     if (file == null) return;

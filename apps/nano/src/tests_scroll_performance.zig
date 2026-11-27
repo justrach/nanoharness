@@ -324,3 +324,101 @@ test "active mouse-down and drag on math-heavy history stay viewport-proportiona
     try testing.expect(t.ctx.stats.passes <= 2);
     t.up();
 }
+
+const Panes = enum { single, split };
+const Rule = enum { old, glide };
+const PaceRun = struct { refreshes: usize, frames: usize, start: f32, end: f32, sum: f32 };
+
+/// The production shell's transcript, one pane or split, scrolled by a
+/// synthetic 120 Hz trackpad stream through the rule each refresh applies.
+fn paceRun(panes: Panes, rule: Rule) !PaceRun {
+    const glide = ui.scroll_glide;
+    var f: Fixture = undefined;
+    try f.init(false);
+    defer f.a.deinit();
+    f.a.view.sidebar_open = false;
+    if (panes == .split) f.a.splitPane(.horizontal);
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&f.a, @import("view.zig").view), .{ .width = 1200, .height = 780, .dark = true });
+    defer t.deinit();
+    const refresh: f64 = 1.0 / 120.0;
+    t.dt = 1.0 / 120.0;
+    t.settle(1);
+    t.ctx.input.mouse = if (panes == .split) .{ .x = 250, .y = 350 } else .{ .x = 600, .y = 350 };
+    t.frame();
+    const box = t.ctx.glideRoom().box;
+    if (box == 0) return error.NoTranscriptUnderPointer;
+    const start = t.ctx.scroll.get(box) orelse return error.NoTranscriptOffset;
+    // One event a refresh, 3 ms before its tick; every seventh a refresh
+    // late, arriving with the next. Up the history, 4 points an event.
+    var events: [140]glide.Event = undefined;
+    for (&events, 0..) |*e, i| {
+        const k: f64 = @floatFromInt(i);
+        const late: f64 = if (i % 7 == 6) refresh else 0;
+        e.* = .{ .dy = 4, .t = 1 + k * refresh - 0.003 + late, .phase = if (i == 0) .began else .changed };
+    }
+    var g: glide.Glide = .{};
+    var old: ui.ScrollPacing = .{};
+    var next: usize = 0;
+    var frames: usize = 0;
+    const refreshes = events.len + 1;
+    // The stream's refreshes, then a quiet half second for it to settle.
+    for (0..refreshes + 60) |i| {
+        const at = 1 + refresh + @as(f64, @floatFromInt(i)) * refresh;
+        var fresh = false;
+        while (next < events.len and events[next].t < at - refresh) : (next += 1) {
+            const e = events[next];
+            switch (rule) {
+                .old => old.add(@floatCast(e.dy), e.t),
+                // Routed as `surface_events.scrollWheel` routes it.
+                .glide => switch (glide.route(e.dy, e.phase, e.dy != 0 and t.ctx.applyScroll(0), false, g.active(e.t))) {
+                    .glide => g.event(e),
+                    .wheel_view, .none => {},
+                },
+            }
+            fresh = true;
+        }
+        const drew = switch (rule) {
+            // The old rule: a frame when events came, applying their sum.
+            .old => blk: {
+                const dy = old.take();
+                if (!fresh) break :blk false;
+                t.ctx.applyScrollStep(dy);
+                break :blk true;
+            },
+            // The macOS surface's tick: `link_pacing.tick` on `Glide.wants`,
+            // then `glideFrame` before the frame and `glideLaidOut` after.
+            .glide => blk: {
+                const b: glide.Beat = .{ .target = at, .now = at - refresh, .period = refresh };
+                const act = ui.link_pacing.tick(.{ .glide_wants = g.wants(b, t.ctx.glideRoom()) });
+                if (act != .frame) break :blk false;
+                const gf = ui.glideFrame(&t.ctx, &g, b);
+                t.frame();
+                ui.glideLaidOut(&t.ctx, &g, gf);
+                break :blk true;
+            },
+        };
+        if (!drew) continue;
+        if (rule == .old) t.frame();
+        if (i < refreshes) frames += 1;
+    }
+    return .{ .refreshes = refreshes, .frames = frames, .start = start, .end = t.ctx.scroll.get(box).?, .sum = 4 * events.len };
+}
+
+test "transcript scroll draws a new position on every refresh, one pane or split, and ends within a refresh of the sum" {
+    @import("theme.zig").registerFonts();
+    for ([_]Panes{ .single, .split }) |panes| {
+        const old = try paceRun(panes, .old);
+        const new = try paceRun(panes, .glide);
+        std.debug.print("\n{s} pane transcript, synthetic 120 Hz stream: old rule {d}/{d} refreshes drawn, glide {d}/{d}\n", .{ @tagName(panes), old.frames, old.refreshes, new.frames, new.refreshes });
+        // Every refresh drawn; the old rule leaves about one in seven.
+        try testing.expectEqual(new.refreshes, new.frames);
+        try testing.expect((old.refreshes - old.frames) * 8 >= old.refreshes);
+        try testing.expect(new.frames * 7 >= old.frames * 8);
+        // Where the scroll ends: the old rule at the system's sum; the glide
+        // within one refresh's travel (4 points) past it, never short of it.
+        try testing.expectApproxEqAbs(old.start - old.sum, old.end, 0.01);
+        try testing.expect(new.end <= new.start - new.sum + 0.01);
+        try testing.expect(new.end >= new.start - new.sum - 4 - 0.01);
+    }
+}

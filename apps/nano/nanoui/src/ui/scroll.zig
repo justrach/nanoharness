@@ -8,6 +8,7 @@ const motion = @import("motion.zig");
 const ctx_mod = @import("context.zig");
 const Context = ctx_mod.Context;
 const none = ctx_mod.none;
+const glide = @import("scroll_glide.zig");
 
 const salt_overscroll: u32 = 0x6f76_7363;
 const salt_bar_flash: u32 = 0x6261_7200;
@@ -148,6 +149,69 @@ pub fn applyScroll(c: *Context, dy: f32) bool {
         }
     }
     return false;
+}
+
+/// Where a refresh's extrapolated scroll may go (`scroll_glide.Room`): the
+/// innermost scrolling box under the pointer and how far it can move each
+/// way before its edge margin. A box that reads the wheel itself, a box in
+/// a rubber band, or no box: nowhere.
+pub fn glideRoom(c: *const Context) glide.Room {
+    var i = c.hits.items.len;
+    while (i > 0) {
+        i -= 1;
+        const h = c.hits.items[i];
+        if (!h.scroll or !h.rect.contains(c.input.mouse)) continue;
+        if (h.wheel) return .none(h.id);
+        if (@abs(c.overscroll.get(h.id) orelse 0) > 0.05) return .none(h.id);
+        const offset: f64 = c.scroll.get(h.id) orelse 0;
+        const max: f64 = c.scroll_max.get(h.id) orelse std.math.inf(f64);
+        // A positive delta lowers the offset (`applyScroll`).
+        return .{ .box = h.id, .up = @max(0, offset - glide.edge_margin), .down = @max(0, max - offset - glide.edge_margin) };
+    }
+    return .none(0);
+}
+
+/// A refresh's scroll step, as an event's delta was applied: the box under
+/// the pointer, else a view that takes the wheel.
+pub fn applyStep(c: *Context, dy: f32) void {
+    if (dy != 0 and !applyScroll(c, dy) and (c.wants_wheel or wheelAt(c))) c.input.scroll.y += dy;
+}
+
+/// What a refresh's glide did to the box under the pointer, for `glideLaidOut`.
+pub const GlideFrame = struct {
+    step: glide.Step = .{},
+    box: u64 = 0,
+    offset: f32 = 0,
+};
+
+/// A refresh's scroll from the glide, applied before the frame is built
+/// (the macOS surface's link frames and the transcript tests both call it).
+/// A momentum delta keeps its phase: `applyScroll`'s one bounded impact at
+/// the bottom reads it, and a frame drawn between the event and this
+/// refresh has cleared `input.scroll_phase`.
+pub fn glideFrame(c: *Context, g: *glide.Glide, b: glide.Beat) GlideFrame {
+    const room = glideRoom(c);
+    return applyGlideStep(c, g.beat(b, room), room.box);
+}
+
+/// `glide.Glide.flush`'s step (a hidden window, a link with no drawable).
+pub fn glideFlush(c: *Context, g: *glide.Glide) GlideFrame {
+    return applyGlideStep(c, g.flush(), glideRoom(c).box);
+}
+
+fn applyGlideStep(c: *Context, step: glide.Step, box: u64) GlideFrame {
+    if (step.momentum and c.input.scroll_phase == .none) c.input.scroll_phase = .momentum;
+    applyStep(c, @floatCast(step.dy));
+    return .{ .step = step, .box = box, .offset = c.scroll.get(box) orelse 0 };
+}
+
+/// After layout: if the layout moved the offset the glide left (the content
+/// shrank under it, or a followed end caught up), the box keeps no lead a
+/// later settle or hold could act on.
+pub fn glideLaidOut(c: *const Context, g: *glide.Glide, f: GlideFrame) void {
+    if (f.box == 0 or f.box != g.box) return;
+    const now = c.scroll.get(f.box) orelse return;
+    if (@abs(now - f.offset) > 0.01) g.keepLead();
 }
 
 /// Resolves vertical scroll and rubber-band overscroll for box `n` in `layout.arrange`.

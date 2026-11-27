@@ -12,6 +12,7 @@ const Surface = @import("surface.zig").Surface;
 const drop = @import("surface_drop.zig");
 const link_pace = @import("surface_pacing.zig");
 const keys = @import("surface_keys.zig");
+const glide_mod = @import("scroll_glide.zig");
 
 pub const methods = [_]objc.Method{
     .{ .name = "isFlipped", .imp = &yes, .types = "c@:" },
@@ -266,14 +267,24 @@ fn scrollWheel(obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) v
     // and up the scrolling box under the pointer, else a view that takes it.
     const took = dy != 0 and s.ctx.applyScroll(0);
     const wheel = (s.ctx.wants_wheel or s.ctx.wheelAt()) and !took;
-    // A view taking the wheel keeps the same beat as a scrolling box: events come
-    // unevenly, and a display link stopping between them misses frames.
-    if (took or (wheel and s.visible())) s.scroll.add(dy, cf.CACurrentMediaTime());
+    const now = cf.CACurrentMediaTime();
+    // A box's scroll is drawn a position a refresh (`scroll_glide.route`).
+    const gphase = glidePhase(event);
+    const to = glide_mod.route(dy, gphase, took, wheel, s.glide.active(now));
+    const glided = to == .glide;
+    switch (to) {
+        .glide => s.glide.event(.{ .dy = dy, .t = now, .phase = gphase, .precise = in.precise, .reduce_motion = s.reduce_motion }),
+        // A view taking the wheel keeps the same beat as a scrolling box: events come
+        // unevenly, and a display link stopping between them misses frames.
+        .wheel_view => if (s.visible()) s.scroll.add(dy, now),
+        .none => {},
+    }
     const release_over = !s.ctx.scroll_holding and s.ctx.hasOverscroll();
-    if (!took and dx == 0 and !wheel and !release_over) return;
+    if (!glided and dx == 0 and !wheel and !release_over) return;
     if (s.visible()) {
         in.scroll.x += dx;
-        s.requestFrame();
+        // Only a box's scroll: its frame is the link's next refresh.
+        if (dx == 0 and !wheel and !release_over) s.requestBeat() else s.requestFrame();
     } else {
         in.scroll = .{ .x = dx, .y = if (wheel) dy else 0 };
         const tok = s.token();
@@ -283,8 +294,17 @@ fn scrollWheel(obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) v
     }
 }
 
-
-
+/// The event's phase as `scroll_glide` reads it: momentum's end apart.
+fn glidePhase(event: objc.Object) glide_mod.Phase {
+    const m = objc.msg(objc.NSUInteger, event, "momentumPhase", .{});
+    if (m != 0) return if (m & (8 | 16) != 0) .momentum_ended else .momentum;
+    return switch (scrollPhase(event)) {
+        .began => .began,
+        .changed => .changed,
+        .ended => .ended,
+        .none, .momentum => .none,
+    };
+}
 
 fn backingChanged(obj: objc.Object, _: objc.SEL) callconv(.c) void {
     const s = surfaceOf(obj) orelse return;

@@ -35,6 +35,12 @@ pub const Record = struct {
     atlas_reset: bool,
     animating: bool = false,
     queued: u8 = 0,
+    /// How the display beat drew the scroll (`scroll_glide.Source`): new
+    /// events, extrapolated (`glide`), a wheel's ease, a settle, or none.
+    scroll: @import("scroll_glide.zig").Source = .none,
+    /// Refreshes since the previous frame on which a moving scroll drew
+    /// nothing (0 when frames keep the display's pace).
+    skipped: u32 = 0,
 
     pub fn cpuMs(r: Record) f64 {
         return r.build_ms + r.layout_ms + r.paint_ms + r.after_frame_ms + r.encode_ms;
@@ -179,13 +185,13 @@ pub const FrameLog = struct {
         var aw: std.Io.Writer.Allocating = .fromArrayList(self.gpa, &self.jsonl);
         for (self.records.items[self.flushed..]) |r| {
             aw.writer.print(
-                "{{\"t\":{d:.6},\"kind\":\"{s}\",\"interval_ms\":{d:.3},\"duration\":{d:.6},\"dt\":{d:.6},\"build_ms\":{d:.3},\"layout_ms\":{d:.3},\"paint_ms\":{d:.3},\"after_frame_ms\":{d:.3},\"drawable_wait_ms\":{d:.3},\"encode_ms\":{d:.3},\"sync\":{},\"gpu_ms\":{d:.3},\"presented_t\":{d:.6},\"nodes\":{d},\"instances\":{d},\"atlas_reset\":{},\"queued\":{d}}}\n",
+                "{{\"t\":{d:.6},\"kind\":\"{s}\",\"interval_ms\":{d:.3},\"duration\":{d:.6},\"dt\":{d:.6},\"build_ms\":{d:.3},\"layout_ms\":{d:.3},\"paint_ms\":{d:.3},\"after_frame_ms\":{d:.3},\"drawable_wait_ms\":{d:.3},\"encode_ms\":{d:.3},\"sync\":{},\"gpu_ms\":{d:.3},\"presented_t\":{d:.6},\"nodes\":{d},\"instances\":{d},\"atlas_reset\":{},\"queued\":{d},\"scroll\":\"{s}\",\"skipped\":{d}}}\n",
                 .{
-                    r.t,              @tagName(r.kind),   r.interval_ms, r.duration,
-                    r.dt,             r.build_ms,         r.layout_ms,   r.paint_ms,
-                    r.after_frame_ms, r.drawable_wait_ms, r.encode_ms,   r.sync,
-                    r.gpu_ms,         r.presented_t,      r.nodes,       r.instances,
-                    r.atlas_reset,    r.queued,
+                    r.t,              @tagName(r.kind),   r.interval_ms,      r.duration,
+                    r.dt,             r.build_ms,         r.layout_ms,        r.paint_ms,
+                    r.after_frame_ms, r.drawable_wait_ms, r.encode_ms,        r.sync,
+                    r.gpu_ms,         r.presented_t,      r.nodes,            r.instances,
+                    r.atlas_reset,    r.queued,           @tagName(r.scroll), r.skipped,
                 },
             ) catch break;
         }

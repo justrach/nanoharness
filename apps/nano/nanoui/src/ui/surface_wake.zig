@@ -136,11 +136,38 @@ fn fire(ptr: ?*anyopaque) callconv(.c) void {
 
 /// A frame has just gone to the screen: has the window server look. Not while
 /// another is on its way, which covers one left off the screen a refresh later:
-/// at 60 fps the nudge took about 5% of a core in the window server.
-pub fn presented(s: *Surface) void {
+/// at 60 fps the nudge took about 5% of a core in the window server. A moving
+/// scroll draws on every refresh, so it owes the nudge instead, and pays it
+/// once when it stops (`settled`).
+pub fn presented(s: *Surface, now: f64) void {
     if (s.ctx.animating or s.ctx.time_driven != .none) return;
-    objc.msg(void, s.window.nswindow, "invalidateShadow", .{});
+    if (s.shadow_nudge.afterPresent(s.glide.moving(now))) objc.msg(void, s.window.nswindow, "invalidateShadow", .{});
 }
+
+/// A moving scroll has stopped: the nudge its last frame owes.
+pub fn settled(s: *Surface, now: f64) void {
+    if (s.shadow_nudge.settle(s.glide.moving(now))) objc.msg(void, s.window.nswindow, "invalidateShadow", .{});
+}
+
+/// Whether a present is followed by the window server's nudge.
+pub const Nudge = struct {
+    /// A frame was presented during a scroll without one.
+    owed: bool = false,
+
+    /// A frame was just presented: nudge now (true), or, with another
+    /// frame due on the next refresh, owe it.
+    pub fn afterPresent(n: *Nudge, scrolling: bool) bool {
+        n.owed = scrolling;
+        return !scrolling;
+    }
+
+    /// Whether the owed nudge is due: the scroll has stopped.
+    pub fn settle(n: *Nudge, scrolling: bool) bool {
+        if (scrolling or !n.owed) return false;
+        n.owed = false;
+        return true;
+    }
+};
 
 /// A frame is wanted from the link: sees that it comes. Not a poll: it stops
 /// as the link is paused, which it is whenever nothing is wanted.
@@ -193,4 +220,27 @@ test "a link that gives no frames is nudged, and not for ever" {
     // Paused or out of sight: no frames are wanted, so nothing runs.
     try t.expectEqual(Look.stop, look(false, false, 0));
     try t.expectEqual(Look.stop, look(false, true, 0));
+}
+
+test "a scroll's frames are not nudged one by one; its last frame is, once" {
+    const t = std.testing;
+    var n: Nudge = .{};
+    // The old rule: every quiet present nudged.
+    var old_nudges: usize = 0;
+    var nudges: usize = 0;
+    for (0..120) |_| {
+        old_nudges += 1;
+        if (n.afterPresent(true)) nudges += 1;
+        if (n.settle(true)) nudges += 1;
+    }
+    try t.expectEqual(@as(usize, 120), old_nudges);
+    try t.expectEqual(@as(usize, 0), nudges);
+    // It stops: one nudge, and no more for the refreshes after.
+    for (0..30) |_| if (n.settle(false)) {
+        nudges += 1;
+    };
+    try t.expectEqual(@as(usize, 1), nudges);
+    // A present at rest is nudged at once, as before, and owes nothing.
+    try t.expect(n.afterPresent(false));
+    try t.expect(!n.settle(false));
 }
