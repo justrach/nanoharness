@@ -97,6 +97,10 @@ pub fn metalDisplayLinkNeedsUpdate(obj: objc.Object, _: objc.SEL, _: objc.Object
     // A scroll in motion has a new position for every refresh, events or not.
     const glide_due = s.glide.wants(target, s.ctx.glideRoom());
     if (!s.full_pending and !frame_in_due and !glide_due and !s.ctx.animating and !s.geometry_changed and !s.retained_ready and !s.pending_sync and s.ctx.time_driven == .none) {
+        if (s.glide.moving(target)) {
+            s.scroll_skipped +|= 1;
+            s.skipped_total +|= 1;
+        }
         s.updatePacing(target, false);
         return;
     }

@@ -114,6 +114,11 @@ pub const Surface = struct {
     link_range: pacing.Range = .{ .minimum = -1, .maximum = -1, .preferred = -1 },
     /// The window server's nudge a scroll's frames owe (`surface_wake.Nudge`).
     shadow_nudge: wake.Nudge = .{},
+    /// Refreshes a moving scroll drew nothing on: since the last frame, and
+    /// since launch; and the refreshes drawn by extrapolation.
+    scroll_skipped: u32 = 0,
+    skipped_total: u64 = 0,
+    glide_total: u64 = 0,
     pub fn create(window: *Window, view: ui.View, theme_override: ?Theme) !*Surface {
         const gpa = window.app.gpa;
         const self = try gpa.create(Surface);
@@ -343,6 +348,10 @@ pub const Surface = struct {
         const step: glide_mod.Step = if (!vis) self.glide.flush() else if (kind == .link or self.display_link == null) self.glide.beat(now, dur, c.glideRoom()) else .{};
         c.applyScrollStep(@floatCast(step.dy));
         const dy = raw + @as(f32, @floatCast(step.dy));
+        if (step.source == .glide) self.glide_total +|= 1;
+        c.scroll_pace = .{ .source = step.source, .skipped_total = self.skipped_total, .glide_total = self.glide_total };
+        const skipped = self.scroll_skipped;
+        self.scroll_skipped = 0;
         const r = frame_mod.run(c, self.view, &self.text, &self.instances, self.size, self.scale, a11y.themed(self, self.theme()), dt, now - self.start_time);
         if (self.dead) return;
         a11y.afterFrame(self);
@@ -390,6 +399,8 @@ pub const Surface = struct {
             .instances = c.stats.instances,
             .atlas_reset = false,
             .animating = c.animating,
+            .scroll = step.source,
+            .skipped = skipped,
         });
         self.updateCursor();
         if (!presented) return self.requestFrame();
@@ -461,6 +472,7 @@ pub const Surface = struct {
             .instances = self.instances.items.len,
             .atlas_reset = false,
             .animating = c.time_driven == .fast,
+            .skipped = self.takeSkipped(),
         });
         if (!presented) return self.requestFrame();
         if (self.retained_ready) {
@@ -512,6 +524,12 @@ pub const Surface = struct {
     /// Places `stage_view` behind `self.nsview` inside a flipped host contentView,
     /// enabling transparent viewport holes over live WKWebView panes.
     pub const attachBackdrop = events.attachBackdrop;
+
+    fn takeSkipped(self: *Surface) u32 {
+        const n = self.scroll_skipped;
+        self.scroll_skipped = 0;
+        return n;
+    }
 
     /// A scroll's event: the link's next refresh draws it (`scroll_glide`),
     /// on the display's beat, instead of a frame built now. The frame built

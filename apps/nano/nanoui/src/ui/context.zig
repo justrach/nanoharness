@@ -152,6 +152,9 @@ pub const Context = struct {
     scrollbars: std.AutoHashMapUnmanaged(u64, @import("scroll.zig").ScrollbarGeom) = .empty,
     scrollbar_drag: ?@import("scroll.zig").ScrollbarDrag = null,
     scroll_holding: bool = false,
+    /// How the display beat drew this frame's scroll, for frame logs
+    /// (`scroll_glide.Report`; the macOS surface fills it in).
+    scroll_pace: @import("scroll_glide.zig").Report = .{},
     /// The textures this frame shows (`ui.texture`), by slot.
     textures: std.ArrayList(@import("gpu.zig").Texture) = .empty,
     /// The frame's gradients of many stops (`gpu.gradientData`).
