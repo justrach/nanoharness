@@ -169,11 +169,12 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, width: f3
         const bar = ui.div(c).row().wFull().h(kit.hit_target).gap(8).itemsCenter();
         defer bar.end();
         const buf = c.alloc().alloc(u8, 192) catch return;
-        const line = display.summaryLine(buf, display.Counts.of(page.items), page.page, page.hasNextPage);
         const toggle = if (expanded) "Hide charts" else "Show charts";
         // Its padding, the words, the gap and the chevron.
         const toggle_w = 12 + c.text.width(toggle, .{ .size = kit.text_body, .weight = .medium }) + 6 + 12 + 12;
-        kit.ellipsisText(c, line, .{ .size = kit.text_body, .line_height = 16, .tabular = true, .color = k.muted }, @max(40, width - toggle_w - 8));
+        const st: ui.TextStyle = .{ .size = kit.text_body, .line_height = 16, .tabular = true, .color = k.muted };
+        const line = display.summaryFit(buf, display.Counts.of(page.items), page.page, page.hasNextPage, @max(40, width - toggle_w - 8), Measure{ .c = c, .st = st });
+        ui.text(c, line, st);
         ui.spacer(c);
         if (kit.actionButton(c, k, toggle, .{ .kind = .quiet, .trailing = if (expanded) .@"alt-arrow-down" else .@"alt-arrow-right", .key = "github-charts-toggle" })) {
             a.settings.toggle(.github_charts_expanded);
@@ -188,6 +189,15 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, width: f3
     }
     if (flow.hasClientFilter(s)) drawFilterBanner(c, a, k, page, width, enabled);
 }
+
+/// `github_display.summaryFit`'s ruler: the summary's own face.
+const Measure = struct {
+    c: *ui.Context,
+    st: ui.TextStyle,
+    pub fn width(m: Measure, s: []const u8) f32 {
+        return m.c.text.width(s, m.st);
+    }
+};
 
 fn drawAnalyticsGrid(c: *ui.Context, a: *App, k: theme.Colors, stats: Stats, inner_w: f32, enabled: bool) void {
     const show_days = stats.day_len >= 2;

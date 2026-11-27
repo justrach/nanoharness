@@ -73,12 +73,48 @@ pub const Counts = struct {
 /// before the counts), and "Page 2 · " first past page one. States with no
 /// items are left out. Empty for an empty page.
 pub fn summaryLine(buf: []u8, n: Counts, page: usize, has_next: bool) []const u8 {
+    return writeSummary(buf, n, page, has_next, 4, false);
+}
+
+/// `summaryLine` as it fits in `max_w` (as `measure.width` reads it),
+/// never cut mid-word: whole when it fits; else without the "more on next
+/// page" hint (pagination already says so); else with whole counts dropped
+/// from the end, ending "· …"; at the narrowest, "N loaded" alone.
+pub fn summaryFit(buf: []u8, n: Counts, page: usize, has_next: bool, max_w: f32, measure: anytype) []const u8 {
+    const full = writeSummary(buf, n, page, has_next, 4, false);
+    if (measure.width(full) <= max_w) return full;
+    if (has_next) {
+        const counts = writeSummary(buf, n, page, false, 4, false);
+        if (measure.width(counts) <= max_w) return counts;
+    }
+    var keep: usize = 4;
+    while (keep > 0) {
+        keep -= 1;
+        const cut = writeSummary(buf, n, page, false, keep, true);
+        if (measure.width(cut) <= max_w) return cut;
+    }
+    return writeSummary(buf, n, page, false, 0, false);
+}
+
+/// The line with at most `max_parts` non-empty state counts, and " · …"
+/// after them when `more` and any were left out.
+fn writeSummary(buf: []u8, n: Counts, page: usize, has_next: bool, max_parts: usize, more: bool) []const u8 {
     if (n.loaded == 0) return "";
     var w: std.Io.Writer = .fixed(buf);
     if (page > 1) w.print("Page {d} · ", .{page}) catch return "";
     w.print("{d} loaded", .{n.loaded}) catch return "";
     const parts = [_]struct { usize, []const u8 }{ .{ n.open, "open" }, .{ n.draft, "draft" }, .{ n.merged, "merged" }, .{ n.closed, "closed" } };
-    for (parts) |p| if (p[0] > 0) w.print(" · {d} {s}", .{ p[0], p[1] }) catch return "";
+    var shown: usize = 0;
+    var left_out = false;
+    for (parts) |p| if (p[0] > 0) {
+        if (shown == max_parts) {
+            left_out = true;
+            continue;
+        }
+        w.print(" · {d} {s}", .{ p[0], p[1] }) catch return "";
+        shown += 1;
+    };
+    if (more and left_out) w.writeAll(" · …") catch return "";
     if (has_next) w.writeAll(" · more on next page") catch return "";
     return w.buffered();
 }
@@ -234,6 +270,29 @@ test "the summary line counts only the loaded page and says when more may exist"
     // Issues have no merged or draft items: those parts are left out.
     try testing.expectEqualStrings("4 loaded · 3 open · 1 closed", summaryLine(&buf, .{ .loaded = 4, .open = 3, .closed = 1 }, 1, false));
     try testing.expectEqualStrings("", summaryLine(&buf, .{}, 1, true));
+}
+
+test "the summary line fits whole or drops whole pieces, never a word" {
+    const n: Counts = .{ .loaded = 8, .open = 2, .draft = 1, .merged = 3, .closed = 2 };
+    var buf: [160]u8 = undefined;
+    const full = "8 loaded · 2 open · 1 draft · 3 merged · 2 closed · more on next page";
+    const counts = "8 loaded · 2 open · 1 draft · 3 merged · 2 closed";
+    const w = Fixed.width;
+    try testing.expectEqualStrings(full, summaryFit(&buf, n, 1, true, w(.{}, full), Fixed{}));
+    // A width that cuts the hint mid-word ("… · more on nex…"): the hint goes whole.
+    try testing.expectEqualStrings(counts, summaryFit(&buf, n, 1, true, w(.{}, full) - 6, Fixed{}));
+    try testing.expectEqualStrings(counts, summaryFit(&buf, n, 1, true, w(.{}, counts), Fixed{}));
+    // Narrower: whole counts leave from the end.
+    try testing.expectEqualStrings("8 loaded · 2 open · 1 draft · 3 merged · …", summaryFit(&buf, n, 1, true, w(.{}, counts) - 1, Fixed{}));
+    try testing.expectEqualStrings("8 loaded · 2 open · …", summaryFit(&buf, n, 1, false, 22, Fixed{}));
+    try testing.expectEqualStrings("8 loaded", summaryFit(&buf, n, 1, false, 4, Fixed{}));
+    // Every answer ends on a whole word or the ellipsis piece.
+    var width: f32 = 4;
+    while (width < 90) : (width += 1) {
+        const got = summaryFit(&buf, n, 1, true, width, Fixed{});
+        try testing.expect(std.mem.endsWith(u8, got, "loaded") or std.mem.endsWith(u8, got, "open") or std.mem.endsWith(u8, got, "draft") or
+            std.mem.endsWith(u8, got, "merged") or std.mem.endsWith(u8, got, "closed") or std.mem.endsWith(u8, got, " · …") or std.mem.endsWith(u8, got, "next page"));
+    }
 }
 
 test "relative dates read as the sidebar's, with ago" {

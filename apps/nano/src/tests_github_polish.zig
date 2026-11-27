@@ -231,9 +231,15 @@ test "github empty and single-page lists show no pagination; a list with more pa
         var f: Fixture = undefined;
         try f.init(520, 700, empty, null);
         defer f.deinit();
-        // One message, one remedy.
+        // One message; the All filter right above it is the way out, so the
+        // empty state adds no button of its own.
         try testing.expect(f.t.hasText("No open pull requests"));
-        try testing.expect(f.t.hasText("Show all pull requests"));
+        try testing.expect(!f.t.hasText("Show all pull requests"));
+        for (f.t.ctx.a11y_items.items) |item| if (item.role == .button) {
+            const known = std.mem.eql(u8, item.label, "Session PRs") or std.mem.eql(u8, item.label, "Refresh");
+            if (!known) std.debug.print("unexpected empty-state button: {s}\n", .{item.label});
+            try testing.expect(known);
+        };
     }
     {
         var f: Fixture = undefined;
@@ -244,7 +250,7 @@ test "github empty and single-page lists show no pagination; a list with more pa
     }
 }
 
-test "github error shows one banner with Retry and the checkout's name, not a placeholder" {
+test "github error shows one banner, one Refresh and the checkout's name, not a placeholder" {
     var f: Fixture = undefined;
     try f.init(520, 700, empty, null);
     defer f.deinit();
@@ -253,7 +259,13 @@ test "github error shows one banner with Retry and the checkout's name, not a pl
     f.a.panels.github_repository.error_text = try testing.allocator.dupe(u8, "GitHub is unavailable on this session's host.");
     f.t.settle(0.1);
     try testing.expect(f.t.hasText("GitHub is unavailable on this session's host."));
-    try testing.expect(f.t.hasText("Retry"));
+    // One control refreshes: the header's. The banner only explains.
+    try testing.expect(!f.t.hasText("Retry"));
+    var refreshers: usize = 0;
+    for (f.t.ctx.a11y_items.items) |item| {
+        if (item.role == .button and (std.mem.eql(u8, item.label, "Refresh") or std.mem.eql(u8, item.label, "Retry"))) refreshers += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), refreshers);
     try testing.expect(f.t.hasText("fieldnotes"));
     try testing.expect(!f.t.hasText("Repository GitHub"));
     try testing.expect(!f.t.containsText("No GitHub page is loaded"));
@@ -274,4 +286,32 @@ test "github activity timeline keeps every event in reach with a glyph rail, not
     try testing.expect(last.y - first.y < 220);
     try testing.expect(f.t.hasText("Approved"));
     try testing.expect(f.t.hasText("9f3c2a1"));
+}
+
+/// The summary line as drawn: the text node that starts with the count.
+fn summaryText(f: *Fixture) ?[]const u8 {
+    for (f.t.ctx.nodes.items) |n| switch (n.content) {
+        .text => |tx| if (std.mem.startsWith(u8, tx.str, "7 loaded")) return tx.str,
+        else => {},
+    };
+    return null;
+}
+
+test "github summary line never ends mid-word beside the charts toggle, folded or open" {
+    for ([_]f32{ 300, 360, 420, 520, 640, 784 }) |width| for ([_]bool{ false, true }) |open| {
+        var f: Fixture = undefined;
+        try f.init(width, 900, many, null);
+        defer f.deinit();
+        if (open) {
+            try f.t.clickText("Show charts");
+            f.t.settle(0.1);
+        }
+        const line = summaryText(&f) orelse return error.MissingSummary;
+        // Whole, or whole pieces then " · …": never "more on nex…".
+        const whole = std.mem.endsWith(u8, line, "more on next page") or std.mem.endsWith(u8, line, " · …") or
+            !std.mem.endsWith(u8, line, "…");
+        if (!whole) std.debug.print("{d} px: \"{s}\"\n", .{ width, line });
+        try testing.expect(whole);
+        try testing.expect(std.mem.indexOf(u8, line, "more on nex") == null or std.mem.endsWith(u8, line, "more on next page"));
+    };
 }

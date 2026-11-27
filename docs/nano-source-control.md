@@ -92,8 +92,11 @@ not filtered to the session's branch. The tab above the pane already says
 "GitHub ↳ <chat>", so the pane carries no second band repeating it.
 
 The list comes first. One line above it counts the loaded page only, e.g.
-"30 loaded (more on the next page) · 3 open · 1 draft · 3 merged · 2
-closed". **Show charts** unfolds the page's state ring, By label / By author
+"30 loaded · 3 open · 1 draft · 3 merged · 2 closed · more on next page".
+When the line doesn't fit beside the charts toggle, the hint goes whole
+(pagination already says there is more), then whole counts from the end
+("· …"); it is never cut mid-word (`github_display.summaryFit`).
+**Show charts** unfolds the page's state ring, By label / By author
 bars (selecting one filters the loaded page, with a Clear filter banner) and
 a recent-activity histogram; the choice is remembered
 (`githubChartsExpanded`) and starts folded. Each row is the title, then one
@@ -109,10 +112,12 @@ and the composer footer's PR badge all use it, as soft-tint chips with no
 border (`view_kit.statusChip`). Buttons in these panes are one 32-point
 recipe (`view_kit.actionButton`: primary, secondary, quiet, danger).
 
-An empty list says which list is empty ("No open pull requests") and offers
-**Show all** when a filter hides items; pagination appears only when there
-is another page. A failed request shows one banner with **Retry** and no
-stale tabs; the first page's loading state reserves the rows' space.
+An empty list says which list is empty ("No open pull requests") and adds
+no button: the filter above it is the way out. Pagination appears only when
+there is another page. A failed request shows one banner explaining it, no
+stale tabs, and the header's **Refresh** as its one remedy; the first
+page's loading state reserves the rows' space. **Session PRs** carries the
+list glyph, so a back arrow in the pane always means one level up.
 
 Open a PR for **Summary**, **Code** and **Activity**. Code lists paged files
 with status/addition/deletion counts and one expandable patch at a time.

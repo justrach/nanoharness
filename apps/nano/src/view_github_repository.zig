@@ -39,11 +39,11 @@ pub fn view(c: *ui.Context, a: *App, k: theme.Colors) void {
     {
         const viewport = ui.div(c).column().wFull().grow().h(0).scrollY();
         defer viewport.end();
-        if (s.error_text) |text| errorBanner(c, a, k, text, ready);
+        if (s.error_text) |text| errorBanner(c, k, text);
         const in_list = s.kind == .pulls or s.kind == .issues;
         if (in_list) {
             // With nothing loaded and an error showing, the tabs would only
-            // repeat the failed request: the banner's Retry is the remedy.
+            // repeat the failed request: the header's Refresh is the remedy.
             if (page != null or s.error_text == null) {
                 listControls(c, a, k, compact, ready);
                 kit.hairline(c, k);
@@ -135,7 +135,8 @@ fn header(c: *ui.Context, a: *App, k: theme.Colors, width: f32, compact: bool, r
     var actions = ui.div(c).row().gap(8).itemsCenter();
     if (compact) actions = actions.wFull().justifyEnd();
     defer actions.end();
-    if (kit.actionButton(c, k, "Session PRs", .{ .icon = .@"arrow-left", .tip = "Back to Session pull requests" })) flow.hide(a);
+    // Not a back arrow: within the pane, an arrow means one level up.
+    if (kit.actionButton(c, k, "Session PRs", .{ .icon = .list, .tip = "Session pull requests" })) flow.hide(a);
     if (kit.actionButton(c, k, "Refresh", .{ .icon = .refresh, .enabled = ready })) flow.refresh(a);
 }
 
@@ -160,22 +161,16 @@ fn listControls(c: *ui.Context, a: *App, k: theme.Colors, compact: bool, ready: 
         flow.list(a, s.list_kind, states[chosen]);
 }
 
-/// One message and one remedy: what went wrong, and Retry.
-fn errorBanner(c: *ui.Context, a: *App, k: theme.Colors, text: []const u8, ready: bool) void {
+/// What went wrong, in one banner; the header's Refresh is its one remedy
+/// (the same `flow.refresh` a Retry here would repeat).
+fn errorBanner(c: *ui.Context, k: theme.Colors, text: []const u8) void {
     const colors = kit.chipColors(k, .warning);
     const wrap = ui.div(c).column().wFull().px(inset).pt(12);
     defer wrap.end();
-    const box = ui.div(c).column().wFull().pl(12).pr(4).pt(10).pb(4).gap(2).rounded(kit.radius_card).bg(colors.fill);
+    const box = ui.div(c).row().wFull().px(12).py(10).gap(8).rounded(kit.radius_card).bg(colors.fill);
     defer box.end();
-    {
-        const line = ui.div(c).row().wFull().pr(8).gap(8);
-        defer line.end();
-        icons.icon(c, .@"danger-triangle", 14, colors.ink, 0);
-        ui.text(c, text, .{ .size = kit.text_body, .line_height = 17, .wrap = true, .color = k.text });
-    }
-    const actions = ui.div(c).row().wFull().justifyEnd();
-    defer actions.end();
-    if (kit.actionButton(c, k, "Retry", .{ .kind = .quiet, .icon = .refresh, .enabled = ready, .key = "github-error-retry" })) flow.refresh(a);
+    icons.icon(c, .@"danger-triangle", 14, colors.ink, 0);
+    ui.text(c, text, .{ .size = kit.text_body, .line_height = 17, .wrap = true, .color = k.text });
 }
 
 /// Four rows' worth of placeholder bars while the first page loads, so the
@@ -293,7 +288,7 @@ fn list(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, width: f32, e
     const s = &a.panels.github_repository;
     const is_pull = s.list_kind == .pulls;
     const kind: display.Kind = if (is_pull) .pull else .issue;
-    if (page.items.len == 0) return emptyList(c, a, k, page, enabled);
+    if (page.items.len == 0) return emptyList(c, a, k, page);
     {
         const top = ui.div(c).column().wFull().px(inset).pt(4);
         defer top.end();
@@ -347,8 +342,9 @@ fn list(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, width: f32, e
     }
 }
 
-/// One message and, when a filter hides things, one way out of it.
-fn emptyList(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, enabled: bool) void {
+/// One glyph and one line saying which list is empty; the filter and
+/// pagination above and below are the ways out, so nothing repeats them.
+fn emptyList(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page) void {
     const s = &a.panels.github_repository;
     const is_pull = s.list_kind == .pulls;
     const noun = if (is_pull) "pull requests" else "issues";
@@ -363,11 +359,6 @@ fn emptyList(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, enabled:
         .all => c.print("No {s} yet", .{noun}),
     };
     ui.text(c, title, .{ .size = kit.text_title, .weight = .medium, .color = k.text });
-    if (page.hasNextPage) {
-        if (kit.actionButton(c, k, "Next page", .{ .trailing = .@"alt-arrow-right", .enabled = enabled })) flow.turnPage(a, true);
-    } else if (s.filter != .all) {
-        if (kit.actionButton(c, k, c.print("Show all {s}", .{noun}), .{ .enabled = enabled, .key = "github-empty-show-all" })) flow.list(a, s.list_kind, .all);
-    } else ui.text(c, "Refresh to check again.", .{ .size = kit.text_body, .color = k.muted });
 }
 
 fn summary(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page) void {
