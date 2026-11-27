@@ -157,7 +157,9 @@ pub fn togglePicker(a: *App) void {
 
 pub fn togglePickerCompact(a: *App) void {
     a.picker = if (a.picker == .none) .model else .none;
-    if (a.picker != .none) @import("view_picker.zig").openedCompact(a);
+    // The chip closing its own card (Space on the focused chip) hands the
+    // keys back to the message box, as every other way of closing it does.
+    if (a.picker != .none) @import("view_picker.zig").openedCompact(a) else a.view.focus_composer = true;
     a.redraw();
 }
 

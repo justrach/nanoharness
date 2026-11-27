@@ -353,10 +353,8 @@ test "desktop issues project picker, model picker, reopenClosedTab shortcuts and
     h.t.settle(0.2);
     try testing.expect(h.a.view.strip.menu == null);
 
-    // #793: Cmd+/ toggles the model picker open and closed; Cmd+Shift+T reopens a closed tab.
-    _ = h.t.shortcut(.{ .key = '/', .cmd = true });
-    h.t.settle(0.2);
-    try testing.expect(h.a.picker != .none);
+    // #793: Cmd+/ no longer opens the model picker (its chip is the one way
+    // in); Cmd+Shift+T reopens a closed tab.
     _ = h.t.shortcut(.{ .key = '/', .cmd = true });
     h.t.settle(0.2);
     try testing.expect(h.a.picker == .none);

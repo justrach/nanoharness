@@ -579,7 +579,9 @@ pub fn chipWithMax(c: *ui.Context, a: *App, k: theme.Colors, max_w_override: ?f3
     // pointer and must not clear the wash until the pointer actually moves.
     const b = kit.listenerHover(&a.view.hovers, if (a.picker != .none) base.bg(k.hover) else base, k.hover).div;
     defer b.end();
-    if (b.clicked()) a.togglePickerCompact();
+    // The picker's one way in, so the keyboard reaches it too: Tab focuses
+    // it (with the accent ring), Return or Space opens it.
+    if (@import("control_behavior.zig").activate(c, b, k, "Choose model", true, a.picker != .none)) a.togglePickerCompact();
     if (c.rects.get(c.node(b.index).id)) |r| a.view.chip_anchor = r;
     // Before the engine lists them: the glyph spinner for an agent not yet
     // known (an open chat's is: its own), a pulsing bar for its model

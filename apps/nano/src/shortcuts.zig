@@ -54,7 +54,6 @@ pub const all = [_]Shortcut{
     .{ .key = "splitTerminal", .group = .panels, .title = "Split terminal right", .description = "Split the focused terminal to the right, like Ghostty ⌘D.", .default = "mod-d" },
     .{ .key = "splitTerminalDown", .group = .panels, .title = "Split terminal down", .description = "Split the focused terminal downward.", .default = "" },
     .{ .key = "newSession", .group = .sessions, .title = "New chat", .description = "Open a new chat tab, preserving the current chat and split layout.", .default = "mod-t" },
-    .{ .key = "openModelPicker", .group = .sessions, .title = "Open model picker", .description = "Open the model picker for the current session.", .default = "mod-/" },
     .{ .key = "nextSession", .group = .sessions, .title = "Next tab or session", .description = "Switch to the next tab when two or more are open; otherwise select the next session in the sidebar.", .default = "ctrl-tab" },
     .{ .key = "prevSession", .group = .sessions, .title = "Previous tab or session", .description = "Switch to the previous tab when two or more are open; otherwise select the previous session in the sidebar.", .default = "ctrl-shift-tab" },
     .{ .key = "archiveSession", .group = .sessions, .title = "Archive session", .description = "Move the current session to the archived shelf.", .default = "mod-shift-a" },
@@ -278,7 +277,7 @@ test "combinations shown and stored as the GPUI app's" {
     try testing.expect(fromShortcut(&buf, .{ .key = 'r' }) == null);
     try testing.expect(fromShortcut(&buf, .{ .key = ui.Shortcut.escape, .cmd = true }) == null);
     try testing.expect(reserved("mod-enter"));
-    try testing.expectEqual(@as(usize, 17 + 9), all.len);
+    try testing.expectEqual(@as(usize, 16 + 9), all.len);
     try testing.expectEqualStrings("mod-9", all[all.len - 1].default);
 }
 

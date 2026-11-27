@@ -187,7 +187,7 @@ test "completion exact names outrank longer prefixes without changing fuzzy matc
         .{ .query = "compact", .exact = "compact", .prefix = "compact-at" },
         .{ .query = "COMPACT", .exact = "compact", .prefix = "compact-at" },
         .{ .query = "review", .exact = "review", .prefix = "review-extra" },
-        .{ .query = "harness:model", .exact = "harness:model", .prefix = "harness:model-extra" },
+        .{ .query = "harness:settings", .exact = "harness:settings", .prefix = "harness:settings-extra" },
         .{ .query = "ÄPFEL", .exact = "äpfel", .prefix = "äpfel-baum" },
     }) |c| try testing.expect(matchRank(c.query, c.exact).? < matchRank(c.query, c.prefix).?);
 
