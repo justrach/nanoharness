@@ -10,6 +10,7 @@ const theme = @import("theme.zig");
 const icons = @import("icons.zig");
 const kit = @import("view_kit.zig");
 const rules = @import("rules.zig");
+const menu_aim = @import("menu_aim.zig");
 const settings = @import("settings.zig");
 const workspace = @import("workspace.zig");
 const sidebar = @import("view_sidebar.zig");
@@ -37,6 +38,9 @@ pub const State = struct {
     ctx_id: std.ArrayList(u8) = .empty,
     ctx_at: ?ui.Point = null,
     ctx_h: ?f32 = null,
+    /// The open nested group's card, for pointer aim.
+    sub_rect: ?ui.Rect = null,
+    aim: menu_aim.Tracker = .{},
 
     pub fn deinit(s: *State, gpa: std.mem.Allocator) void {
         @import("text_buffer.zig").deinit(&s.query);
@@ -78,6 +82,8 @@ pub fn close(a: *App) void {
     a.view.filter_menu = false;
     a.view.more_menu = false;
     a.view.menus.open = null;
+    a.view.menus.sub_rect = null;
+    a.view.menus.aim.reset();
 }
 
 pub fn anyOpen(a: *const App) bool {
@@ -102,6 +108,8 @@ pub fn keys(c: *ui.Context, a: *App) void {
             if (m.open != null) {
                 m.open = null;
                 m.sub_active = null;
+                m.sub_rect = null;
+                m.aim.reset();
             } else close(a);
             return;
         }
@@ -112,6 +120,8 @@ pub fn keys(c: *ui.Context, a: *App) void {
             if (c.shortcut(.{ .key = S.left })) {
                 m.open = null;
                 m.sub_active = null;
+                m.sub_rect = null;
+                m.aim.reset();
             }
             if (c.shortcut(.{ .key = S.enter })) if (m.sub_active) |i| choose(a, groups[g].rows[i]);
             return;
@@ -144,6 +154,7 @@ pub fn menus(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (a.view.filter_menu) if (a.view.filter_anchor) |r| projects(c, a, k, r);
     if (a.view.filter_menu and a.view.menus.ctx_at != null) spaceMenu(c, a, k);
     if (a.view.more_menu) if (a.view.more_anchor) |r| view(c, a, k, r);
+    if (a.settings.get(.menu_aim_debug) and a.view.more_menu) debugOverlay(c, a);
 }
 
 // The project menu.
@@ -586,6 +597,8 @@ pub fn choose(a: *App, ch: Choice) void {
         s.setText("sidebarLastActivity", win.key());
         a.view.menus.open = null;
         a.view.menus.sub_active = null;
+        a.view.menus.sub_rect = null;
+        a.view.menus.aim.reset();
         a.redraw();
         return;
     }
@@ -620,6 +633,8 @@ pub fn choose(a: *App, ch: Choice) void {
         .by_status, .by_device, .by_project, .in_one_list, .last_called, .created => {
             a.view.menus.open = null;
             a.view.menus.sub_active = null;
+            a.view.menus.sub_rect = null;
+            a.view.menus.aim.reset();
         },
         else => {},
     }
@@ -643,6 +658,7 @@ fn sectionHeading(c: *ui.Context, k: theme.Colors, title: []const u8) void {
 
 fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
     const m = &a.view.menus;
+    const hold = updateAim(c, a);
     const w: f32 = @max(252, sidebar.widthOf(a) - 2 * 8);
     // Topbar triggers drop cleanly below `[⋯]` without covering it; footer
     // triggers open upward. Always clamped to the window bounds.
@@ -756,14 +772,21 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
         row = if (open or m.group == gi) row.bg(k.selected) else row.hover(k.selected);
         defer row.end();
         // Coming onto a group opens its menu; a click on the group toggles it.
-        if (row.hovered() and m.group != gi) {
+        // With menu-aim on, a pointer heading for the open submenu does not steal it.
+        if (row.hovered() and m.group != gi and !hold) {
             m.group = gi;
             m.open = gi;
             m.sub_active = null;
+            m.sub_rect = null;
+            m.aim.reset();
         }
         if (row.clicked()) {
             m.group = gi;
             m.open = if (m.open == gi) null else gi;
+            if (m.open == null) {
+                m.sub_rect = null;
+                m.aim.reset();
+            }
         }
         icons.icon(c, groupIcon(gi), 14, k.muted, 0);
         label(c, k, g.label, row.hovered() or open);
@@ -785,13 +808,17 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
         var row = ui.div(c).row().wFull().h(29).px(8).gap(8).itemsCenter().rounded(7);
         row = if (m.group == groups.len) row.bg(k.selected) else row.hover(k.selected);
         defer row.end();
-        if (row.hovered() and (m.open == null or c.input.mouse.x <= x + w - 28)) {
+        if (row.hovered() and stealHover(a, hold, m.open, c.input.mouse.x, x, w)) {
             m.group = groups.len;
             m.open = null;
+            m.sub_rect = null;
+            m.aim.reset();
         }
         if (row.clicked()) {
             m.group = groups.len;
             m.open = null;
+            m.sub_rect = null;
+            m.aim.reset();
             a.settings.toggle(.sidebar_compact);
         }
         icons.icon(c, .@"fold-vertical", 14, k.muted, 0);
@@ -805,13 +832,17 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
         var row = ui.div(c).row().wFull().h(29).px(8).gap(8).itemsCenter().rounded(7);
         row = if (m.group == index) row.bg(k.selected) else row.hover(k.selected);
         defer row.end();
-        if (row.hovered() and (m.open == null or c.input.mouse.x <= x + w - 28)) {
+        if (row.hovered() and stealHover(a, hold, m.open, c.input.mouse.x, x, w)) {
             m.group = index;
             m.open = null;
+            m.sub_rect = null;
+            m.aim.reset();
         }
         if (row.clicked()) {
             m.group = index;
             m.open = null;
+            m.sub_rect = null;
+            m.aim.reset();
             choose(a, ch);
         }
         icons.icon(c, ch.icon(), 14, k.muted, 0);
@@ -837,6 +868,56 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
     }
 }
 
+/// When menu-aim is off, the right strip of the parent card still lets a
+/// diagonal reach the submenu (v0.2.182). When it is on, the triangle is
+/// the only hold: idle or a move away falls through to ordinary hover.
+fn stealHover(a: *const App, hold: bool, open: ?usize, mouse_x: f32, x: f32, w: f32) bool {
+    if (open == null) return true;
+    if (a.settings.get(.menu_aim_enabled)) return !hold;
+    return mouse_x <= x + w - 28;
+}
+
+fn updateAim(c: *ui.Context, a: *App) bool {
+    const m = &a.view.menus;
+    if (m.open == null) {
+        m.aim.reset();
+        m.sub_rect = null;
+        return false;
+    }
+    const p = c.input.mouse;
+    m.aim.note(.{ .x = p.x, .y = p.y }, c.time);
+    if (!a.settings.get(.menu_aim_enabled)) return false;
+    const sub = m.sub_rect orelse return false;
+    const inside = sub.contains(p);
+    const opts = menu_aim.Options{
+        .padding = a.settings.menuAimPadding(),
+        .idle_s = a.settings.menuAimIdleS(),
+    };
+    const d = menu_aim.decide(opts, .{ .x = p.x, .y = p.y }, m.aim.previous(), c.time, m.aim.last_move_s, sub, inside);
+    if (d != .hold) return false;
+    const remain = opts.idle_s - (c.time - m.aim.last_move_s);
+    if (remain > 0) c.frameIn(@floatCast(remain));
+    return true;
+}
+
+fn debugOverlay(c: *ui.Context, a: *App) void {
+    const m = &a.view.menus;
+    const sub = m.sub_rect orelse return;
+    ui.key(c, "menu-aim-debug");
+    const cv = ui.canvas(c, .{
+        .absolute = true,
+        .fixed = true,
+        .width = .{ .px = c.size.w },
+        .height = .{ .px = c.size.h },
+        .layer = 20,
+    });
+    const mouse = c.input.mouse;
+    const tri = menu_aim.fromCursor(mouse, sub);
+    var buf: [menu_aim.trail_cap]ui.Point = undefined;
+    const trail = m.aim.copyTrail(&buf);
+    menu_aim.paintDebug(cv, tri, trail, !sub.contains(mouse));
+}
+
 /// A group's menu beside its row, 10 right of it (`nested_menu`), or left
 /// when there isn't room.
 fn submenu(c: *ui.Context, a: *App, k: theme.Colors, g: Group, row: ui.Rect) void {
@@ -848,9 +929,12 @@ fn submenu(c: *ui.Context, a: *App, k: theme.Colors, g: Group, row: ui.Rect) voi
     const x = if (left) row.x - inset - 6 - w else row.x + row.w + inset + 6;
     const est: f32 = (if (is_activity) @as(f32, 12) else 30) + @as(f32, @floatFromInt(g.rows.len)) * 35;
     const y = rules.snapToWindow(row.y, est, c.size.h, 8);
+    m.sub_rect = .{ .x = x, .y = y, .w = w, .h = est };
+    ui.key(c, "sidebar-view-submenu");
     const card = held(kit.shadowLg(ui.div(c).fixed().offset(x, y).w(w).layer(6).column().p(inset + 1).gap(2)
         .bg(k.composer).border(k.border).borderW(1).rounded(12)));
     defer card.end();
+    if (c.rects.get(c.node(card.index).id)) |rr| m.sub_rect = rr;
     if (!is_activity) {
         // `menu_heading`: small capitals, spaced.
         const hd = ui.div(c).row().wFull().px(8).pt(6).pb(4);

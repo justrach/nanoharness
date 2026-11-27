@@ -45,7 +45,7 @@ const Harness = struct {
     }
 
     fn snap(h: *Harness, name: []const u8) void {
-        const dir = std.c.getenv("NANO_PICKER_SNAP_DIR") orelse return;
+        const dir = std.c.getenv("NANO_PICKER_SNAP_DIR") orelse std.c.getenv("NANO_SNAP_DIR") orelse return;
         var buf: [1024]u8 = undefined;
         const path = std.fmt.bufPrint(&buf, "{s}/{s}.png", .{ std.mem.span(dir), name }) catch return;
         h.t.screenshot(path) catch {};
@@ -212,6 +212,55 @@ test "a row under the pointer shows a detail card of what the catalog says, and 
     h.t.settle(1);
     try testing.expect(h.a.view.model_picker.detail == null);
     try testing.expect(h.a.picker != .none);
+}
+
+test "picker detail without menu-aim switches after the pointer rests on another row" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try testing.expect(!h.a.settings.get(.menu_aim_enabled));
+    const fast = inPicker(&h, "Synthetic Fast") orelse return error.MissingModel;
+    const max = inPicker(&h, "Synthetic Max") orelse return error.MissingMax;
+    h.t.moveTo(fast.x + 4, fast.y + 4);
+    h.t.advance(0.25);
+    const first = h.a.view.model_picker.detail orelse return error.MissingDetail;
+    h.t.moveTo(max.x + 4, max.y + 4);
+    h.t.advance(0.12);
+    const next = h.a.view.model_picker.detail orelse return error.MissingSwitchedDetail;
+    try testing.expect(next != first);
+    h.snap("picker-aim-before");
+}
+
+test "picker detail with menu-aim holds the card while moving toward it across another row" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.set(.menu_aim_enabled, true);
+    h.a.settings.set(.menu_aim_debug, true);
+    const fast = inPicker(&h, "Synthetic Fast") orelse return error.MissingModel;
+    const max = inPicker(&h, "Synthetic Max") orelse return error.MissingMax;
+    h.t.moveTo(fast.x + 8, fast.y + fast.h / 2);
+    h.t.advance(0.25);
+    const first = h.a.view.model_picker.detail orelse return error.MissingDetail;
+    const card = h.a.view.model_picker.detail_rect orelse return error.MissingCard;
+    const x0 = fast.x + 8;
+    const y0 = fast.y + fast.h / 2;
+    const mid_x = max.x + max.w * 0.7;
+    const mid_y = max.y + max.h / 2;
+    const x1 = card.x + 24;
+    const y1 = card.y + card.h * 0.45;
+    var i: usize = 0;
+    while (i <= 8) : (i += 1) {
+        const f = @as(f32, @floatFromInt(i)) / 8.0;
+        h.t.moveTo(x0 + (mid_x - x0) * f, y0 + (mid_y - y0) * f);
+    }
+    i = 0;
+    while (i <= 10) : (i += 1) {
+        const f = @as(f32, @floatFromInt(i)) / 10.0;
+        h.t.moveTo(mid_x + (x1 - mid_x) * f, mid_y + (y1 - mid_y) * f);
+    }
+    h.snap("picker-aim-after");
+    try testing.expectEqual(@as(?usize, first), h.a.view.model_picker.detail);
 }
 
 test "a model's page: its reasoning on a slider, the keys and a drag move it, Use model applies both" {

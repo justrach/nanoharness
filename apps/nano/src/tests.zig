@@ -67,6 +67,8 @@ test {
     _ = @import("snap.zig");
     _ = @import("app_account.zig");
     _ = @import("settings.zig");
+    _ = @import("menu_aim.zig");
+    _ = @import("tests_ui_menu_aim.zig");
     _ = @import("shortcuts.zig");
     _ = @import("view_settings.zig");
     _ = @import("tests_settings_navigation.zig");

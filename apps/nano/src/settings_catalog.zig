@@ -25,7 +25,7 @@ pub fn description(section: Section) []const u8 {
 fn keywords(section: Section) []const u8 {
     return switch (section) {
         .account => "profile member card join date sign in out cloud sync avatar",
-        .appearance => "font colors dark light compact animation reduce motion before after design preview comparison visual diff switch theme default system auto",
+        .appearance => "font colors dark light compact animation reduce motion before after design preview comparison visual diff switch theme default system auto pointer menu aim submenu triangle overlay",
         .notifications => "privacy telemetry metrics responsiveness scroll statistics consent sound volume banner",
         .shortcuts => "keys hotkey enter return slash commands suggestions stop escape",
         .files => "hidden ignored directory starting folder editor save wrap",
@@ -67,6 +67,8 @@ test "settings discovery searches task words across section metadata" {
     try t.expect(matches(.devices, "remote control"));
     try t.expect(matches(.appearance, "font motion"));
     try t.expect(matches(.appearance, "before after design"));
+    try t.expect(matches(.appearance, "menu aim"));
+    try t.expect(matches(.appearance, "submenu triangle"));
     try t.expect(!matches(.files, "GitHub links"));
     try t.expect(!matches(.browsing, "GitHub nonsense"));
     try t.expect(matches(.browsing, " \t "));

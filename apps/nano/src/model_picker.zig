@@ -124,6 +124,7 @@ pub const State = struct {
     hover_target: ?usize = null,
     hover_since: f64 = 0,
     detail_rect: ?ui.Rect = null,
+    aim: @import("menu_aim.zig").Tracker = .{},
     /// The slider's track as last laid out, and a drag on it.
     track: ?ui.Rect = null,
     dragging: bool = false,
