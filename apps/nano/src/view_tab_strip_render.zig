@@ -228,6 +228,9 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, lane: Layout, pane_widths:
             const row = ui.div(c).fixed().offset(a.view.chrome.x, chrome.header_height)
                 .size(a.view.chrome.width, chrome.tab_height).row().gap(ws_gutter).itemsCenter().layer(2);
             defer row.end();
+            // Pane captions mark the focused pane as full screen's headers do.
+            pane_captions = !a.view.full_screen;
+            defer pane_captions = false;
             for (lane.targets[0..n], widths[0..n], 0..) |target, width, ix| slot(c, a, k, target, ix, width);
         }
         ui.key(c, "instrument-workspaces");
@@ -446,9 +449,18 @@ fn inactiveTabPill(c: *ui.Context, a: *App, k: theme.Colors, slot_ix: usize, pan
     }
 }
 
+/// The slots being drawn are a windowed split's pane captions, one over
+/// each card. There the focused pane is marked as in full screen's header
+/// strip, by an accent dot and stronger text, not by a filled tab.
+var pane_captions = false;
+
 fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize, width: f32, group_hot: bool) void {
     ui.key(c, c.print("instrument-slot-{d}", .{ix}));
-    const on = strip.same(strip.active(a), target);
+    const focused = strip.same(strip.active(a), target);
+    const quiet = pane_captions;
+    // Filled like a selected tab only outside the pane captions.
+    const github_child_tab = target == .host and @import("app_github_repository.zig").surface(a);
+    const on = focused and (!quiet or github_child_tab);
     const name = strip.title(a, target);
     const github_child = target == .host and @import("app_github_repository.zig").surface(a);
     const computer = if (github_child) c.print("↳ {s}", .{@import("app_github_repository.zig").ownerTitle(a)}) else strip.deviceLabel(a, strip.device(a, target));
@@ -477,7 +489,14 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
         if (c.rects.get(c.node(box.index).id)) |r| a.view.strip.anchor = r;
     }
     const hot = box.hovered() or group_hot;
-    const vis = tabStyle(k, on, hot);
+    var vis = tabStyle(k, on, hot);
+    if (quiet and focused) {
+        vis.fg = k.text;
+        vis.icon = k.text;
+        vis.weight = .medium;
+        // In the slot's left padding, so the labels keep their room.
+        ui.div(c).absolute().offset(1, (chrome.tab_height - 5) / 2).size(5, 5).rounded(2.5).bg(k.accent.alpha(0.92)).end();
+    }
     const show_controls = hot or c.focus == c.node(box.index).id;
     const menu_count = strip.tabCount(a, target);
     var handled = false;

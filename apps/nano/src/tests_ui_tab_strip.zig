@@ -316,6 +316,39 @@ test "windowed chrome: three Zen panes each keep one header, its focus cue a dot
     }
 }
 
+test "windowed chrome: three Developer pane captions mark the focused pane with a dot, not a filled tab" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.developer);
+    h.a.splitPane(.horizontal);
+    h.a.openChat("b", "remote-project");
+    h.a.splitPane(.horizontal);
+    h.t.resize(1340, 780);
+    h.t.settle(1);
+    try testing.expectEqual(@as(usize, 3), strip.chatCount(&h.a));
+    const top = chrome.header_height - 0.5;
+    var slots: usize = 0;
+    var dots: usize = 0;
+    var dot_x: f32 = 0;
+    for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (r.y < top or r.y >= h.a.view.chrome.y) continue;
+        if (node.style.control and @abs(r.h - chrome.tab_height) < 0.5 and r.w > 100) {
+            slots += 1;
+            if (node.style.background) |bg| try testing.expect(bg.a < 0.5);
+        }
+        if (r.w == 5 and r.h == 5) {
+            dots += 1;
+            dot_x = r.x;
+        }
+    }
+    try testing.expectEqual(@as(usize, 3), slots);
+    try testing.expectEqual(@as(usize, 1), dots);
+    // The third pane, just split off, has focus.
+    try testing.expect(dot_x > h.a.view.chrome.x + h.a.view.chrome.chat_width * 2 / 3);
+}
+
 test "windowed chrome: a Zen split whose pane holds tabs keeps the slot row that shows them" {
     var h: Harness = undefined;
     try h.init(true);
@@ -1789,7 +1822,7 @@ test "browse-style top tab bar highlights only the active tab in stable index or
             pane_dot_x = r.x;
         }
         if (!node.style.control) continue;
-        if (r.y < chrome.header_height and @abs(r.h - 28) < 0.5 and r.w >= 72) {
+        if (r.y + r.h <= chrome.header_height and @abs(r.h - 28) < 0.5 and r.w >= 72) {
             rightmost_tab_right = @max(rightmost_tab_right, r.x + r.w);
             const bg = node.style.background orelse return error.MissingTabBackground;
             if (bg.a > 0.5) {
@@ -1841,7 +1874,7 @@ test "browse-style top tab bar highlights only the active tab in stable index or
     for (h.t.ctx.nodes.items) |node| {
         const r = node.rect;
         if (!node.style.control) continue;
-        if (r.y < chrome.header_height and @abs(r.h - 28) < 0.5 and r.w >= 72) {
+        if (r.y + r.h <= chrome.header_height and @abs(r.h - 28) < 0.5 and r.w >= 72) {
             const bg = node.style.background orelse return error.MissingSingleTabBackground;
             if (bg.a > 0.5) {
                 try testing.expect(node.style.border != null);
