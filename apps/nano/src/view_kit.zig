@@ -33,6 +33,145 @@ pub const IconButton = struct {
     tip: ?@import("view_tooltip.zig").Tip = null,
 };
 
+/// DESIGN.md's compact type, shape and target scale.
+pub const text_title: f32 = 13;
+pub const text_body: f32 = 12;
+pub const text_caption: f32 = 11;
+pub const radius_bubble: f32 = 16;
+pub const radius_card: f32 = 10;
+pub const radius_control: f32 = 6;
+pub const hit_target: f32 = 32;
+pub const chip_h: f32 = 20;
+
+/// A status or tag chip's hue (`DESIGN.md` "Status and tag chips").
+pub const Tone = enum { neutral, accent, success, danger, warning };
+
+/// A display role (`github_display.Role`) as a chip tone.
+pub fn roleTone(r: @import("github_display.zig").Role) Tone {
+    return switch (r) {
+        .success => .success,
+        .accent => .accent,
+        .danger => .danger,
+        .muted => .neutral,
+    };
+}
+
+/// A display role's colour, for a glyph, a dot or a bar.
+pub fn roleColor(k: theme.Colors, r: @import("github_display.zig").Role) ui.Color {
+    return switch (r) {
+        .success => k.success,
+        .accent => k.accent,
+        .danger => k.danger,
+        .muted => k.muted,
+    };
+}
+
+/// A chip's soft fill and its darker text: the hue at 12% (light) or 16%
+/// (dark) behind the hue mixed 35% toward black (light) or 20% toward
+/// white (dark). Neutral is the ink wash behind muted words.
+pub fn chipColors(k: theme.Colors, tone: Tone) struct { fill: ui.Color, ink: ui.Color } {
+    const hue = switch (tone) {
+        .neutral => return .{ .fill = k.ink(if (k.dark) 0.07 else 0.055), .ink = k.muted },
+        .accent => k.accent,
+        .success => k.success,
+        .danger => k.danger,
+        .warning => k.warning,
+    };
+    return .{
+        .fill = hue.alpha(if (k.dark) 0.16 else 0.12),
+        .ink = if (k.dark) hue.mix(ui.Color.white, 0.20) else hue.mix(ui.Color.hex(0x000000), 0.35),
+    };
+}
+
+pub const Chip = struct {
+    tone: Tone = .neutral,
+    icon: ?icons.Name = null,
+    /// Counts and other changing numbers.
+    tabular: bool = false,
+    mono: bool = false,
+    /// Longer words are cut with an ellipsis.
+    max_w: f32 = 160,
+};
+
+/// The one status/tag chip: 20 tall, rounded 6, no border, a soft tint
+/// behind 11-point medium words in the darker hue.
+pub fn statusChip(c: *ui.Context, k: theme.Colors, text: []const u8, o: Chip) void {
+    const colors = chipColors(k, o.tone);
+    const chip = ui.div(c).row().h(chip_h).px(6).gap(4).itemsCenter().rounded(radius_control).bg(colors.fill).clip();
+    defer chip.end();
+    if (o.icon) |name| icons.icon(c, name, 11, colors.ink, 0);
+    const st: ui.TextStyle = .{ .size = text_caption, .line_height = 14, .weight = .medium, .tabular = o.tabular, .mono = o.mono, .color = colors.ink };
+    ellipsisText(c, text, st, o.max_w);
+}
+
+/// A chip's width before it is drawn (for dropping labels that don't fit).
+pub fn statusChipWidth(c: *ui.Context, text: []const u8, o: Chip) f32 {
+    const st: ui.TextStyle = .{ .size = text_caption, .weight = .medium, .tabular = o.tabular, .mono = o.mono };
+    return 12 + (if (o.icon != null) @as(f32, 15) else 0) + @min(o.max_w, @ceil(c.text.width(text, st)));
+}
+
+pub const ButtonKind = enum {
+    /// The pane's one main action: the theme's solid fill.
+    primary,
+    /// Hairline edge, no fill.
+    secondary,
+    /// Words or a glyph alone until the pointer is over it.
+    quiet,
+    /// Secondary, in the danger hue.
+    danger,
+};
+
+pub const Button = struct {
+    kind: ButtonKind = .secondary,
+    icon: ?icons.Name = null,
+    trailing: ?icons.Name = null,
+    enabled: bool = true,
+    selected: bool = false,
+    /// Only the glyph shows; `label` names it and is its tooltip.
+    icon_only: bool = false,
+    tip: ?[]const u8 = null,
+    key: ?[]const u8 = null,
+};
+
+/// The panes' one button: 32 tall (the hit target), rounded 6, 12-point
+/// medium words, a hover wash and a short press, keyboard focus through
+/// the shared activation. True once per activation.
+pub fn actionButton(c: *ui.Context, k: theme.Colors, label: []const u8, o: Button) bool {
+    ui.key(c, o.key orelse label);
+    var b = ui.div(c).row().h(hit_target).gap(6).itemsCenter().justifyCenter().rounded(radius_control);
+    b = if (o.icon_only) b.w(hit_target) else b.px(12);
+    const on = o.enabled;
+    switch (o.kind) {
+        .primary => b = b.bg(if (on) k.solid else k.selected),
+        .secondary, .danger => b = b.border(if (on) k.border else k.border.alpha(0.5)).borderW(1),
+        .quiet => {},
+    }
+    if (o.selected) b = b.bg(k.selected);
+    if (on and o.kind != .primary) b = b.hover(k.hover);
+    const tip_text = o.tip orelse if (o.icon_only) label else null;
+    if (tip_text) |t| b = @import("view_tooltip.zig").on(b, k, .{ .text = t });
+    if (on) b = pressFeedback(b.control());
+    const clicked = @import("control_behavior.zig").activate(c, b, k, label, on, o.selected);
+    defer b.end();
+    if (on and o.kind == .primary and b.hovered()) b = b.opacity(0.92);
+    const fg: ui.Color = if (!on) k.faint else switch (o.kind) {
+        .primary => k.on_solid,
+        .secondary => k.text,
+        .quiet => if (b.hovered() or o.selected) k.text else k.muted,
+        .danger => chipColors(k, .danger).ink,
+    };
+    const glyph: ui.Color = if (!on) k.faint else if (o.kind == .primary) k.on_solid else if (o.kind == .danger) fg else k.muted;
+    if (o.icon) |name| icons.icon(c, name, 14, if (o.icon_only and on) fg else glyph, 0);
+    if (!o.icon_only) ui.text(c, label, .{ .size = text_body, .line_height = 16, .weight = .medium, .color = fg });
+    if (o.trailing) |name| icons.icon(c, name, 12, glyph, 0);
+    return clicked;
+}
+
+/// A one-pixel hairline across its parent.
+pub fn hairline(c: *ui.Context, k: theme.Colors) void {
+    ui.div(c).wFull().h(1).bg(k.border).end();
+}
+
 /// The last successful copy belongs to one mounted control, never a borrowed
 /// message or frame-arena string. All copy icons keep the same 1.2-second tick.
 pub const CopyFeedback = struct {

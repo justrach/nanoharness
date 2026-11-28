@@ -115,7 +115,7 @@ try {
   const nano = path.join(root, 'apps/nano/zig-out/bin/harness-nano');
   await run(nano, ['--nanoui-hidden', '--nanoui-dark', '--nanoui-wait=3',
     `--nanoui-snapshot=${path.join(base, 'native-staging.png')}`,
-    '--nanoui-script=click:Staging;live:2;click:Stage;live:2;click:Unstage;live:2'],
+    '--nanoui-script=click:Git changes;live:2;click:Stage;live:2;click:Unstage;live:2'],
   { HARNESS_NANO_OPEN_CHAT: chat, HARNESS_NANO_PANELS: 'git-history' });
   assert.equal(await git(['status', '--porcelain=v1']), beforeFiles);
   assert.equal(await git(['rev-parse', 'HEAD']), originalHead);

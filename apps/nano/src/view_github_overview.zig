@@ -1,7 +1,8 @@
-//! Editorial analytics dashboard above the GitHub issue & PR list:
-//! KPI strip, canvas State Split donut ring, clickable By Label / By Contributor
-//! stacked bars, and Recent Activity date histogram — rendered strictly from
-//! the loaded repository page with zero background polling or extra RPCs.
+//! The line above the GitHub issue & PR list that counts the loaded page,
+//! and the charts it folds away (remembered, folded by default): a state
+//! split ring, By label / By author bars that filter the page, and a
+//! recent-activity histogram. All from the loaded page, with no polling or
+//! extra RPCs; colours from `github_display`'s one state mapping.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -11,6 +12,7 @@ const kit = @import("view_kit.zig");
 const flow = @import("app_github_repository.zig");
 const behavior = @import("control_behavior.zig");
 const icons = @import("icons.zig");
+const display = @import("github_display.zig");
 
 const max_groups = 5;
 const max_days = 7;
@@ -156,108 +158,46 @@ fn sortGroupsDesc(items: []GroupRow) void {
     }.less);
 }
 
-fn cardBg(k: theme.Colors) ui.Color {
-    return k.ink(if (k.dark) 0.028 else 0.018);
-}
-
+/// The summary line and the charts toggle; the charts when unfolded; the
+/// page filter's banner while one is set. `width` is the list's inner width.
 pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, width: f32, enabled: bool) void {
     if (page.items.len == 0) return;
-    const stats = computeStats(c.alloc(), page);
     const s = &a.panels.github_repository;
-    const has_filter = flow.hasClientFilter(s);
-
-    // Narrow panes (<340px) or single-item pages stay a compact 1-row pill strip so
-    // the first item title and metadata never get pushed off small viewports.
-    if (width < 340 or page.items.len < 2) {
-        drawCompactStrip(c, a, k, page, stats, width, has_filter, enabled);
-        return;
-    }
-
-    const inner_w = @max(120, width - 28);
-    drawKpiGrid(c, k, page, stats, inner_w);
-    drawAnalyticsGrid(c, a, k, stats, inner_w, enabled);
-    if (has_filter) drawFilterBanner(c, a, k, page, inner_w, enabled);
-}
-
-fn drawCompactStrip(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, stats: Stats, width: f32, has_filter: bool, enabled: bool) void {
-    const inner_w = @max(80, width - 28);
-    const strip = ui.div(c).row().wFull().px(10).py(6).gap(7).itemsCenter().rounded(8).bg(cardBg(k)).border(k.border).borderW(1).clip();
-    defer strip.end();
-    const dot_color = if (stats.open_total > 0 and stats.resolved == 0) k.warning else k.success;
-    _ = c.leaf(.{ .width = .{ .px = 7 }, .height = .{ .px = 7 }, .radius = 3.5, .background = dot_color }, .none, null);
-    const word = if (stats.merged > 0) "merged" else "closed";
-    const summary = c.print("{d}{s} shown · {d} open · {d} {s}", .{
-        stats.total,
-        if (page.hasNextPage) "+" else "",
-        stats.open_total,
-        stats.resolved,
-        word,
-    });
-    const text_w = @max(24, inner_w - (if (has_filter) @as(f32, 82) else 32));
-    kit.ellipsisText(c, summary, .{ .size = 11, .mono = true, .color = k.muted }, text_w);
-    if (has_filter) {
+    const expanded = a.settings.get(.github_charts_expanded);
+    {
+        ui.key(c, "github-summary-line");
+        const bar = ui.div(c).row().wFull().h(kit.hit_target).gap(8).itemsCenter();
+        defer bar.end();
+        const buf = c.alloc().alloc(u8, 192) catch return;
+        const toggle = if (expanded) "Hide charts" else "Show charts";
+        // Its padding, the words, the gap and the chevron.
+        const toggle_w = 12 + c.text.width(toggle, .{ .size = kit.text_body, .weight = .medium }) + 6 + 12 + 12;
+        const st: ui.TextStyle = .{ .size = kit.text_body, .line_height = 16, .tabular = true, .color = k.muted };
+        const line = display.summaryFit(buf, display.Counts.of(page.items), page.page, page.hasNextPage, @max(40, width - toggle_w - 8), Measure{ .c = c, .st = st });
+        ui.text(c, line, st);
         ui.spacer(c);
-        if (miniClearButton(c, k, enabled)) flow.clearClientFilters(a);
-    }
-}
-
-fn drawKpiGrid(c: *ui.Context, k: theme.Colors, page: flow.Page, stats: Stats, inner_w: f32) void {
-    const is_pull = page.kind == .pulls;
-    const cols: usize = if (inner_w >= 552) 4 else 2;
-    const gap: f32 = 8;
-    const card_w = @floor((inner_w - gap * @as(f32, @floatFromInt(cols - 1))) / @as(f32, @floatFromInt(cols)));
-
-    const Metric = struct { label: []const u8, value: []const u8, sub: []const u8, color: ui.Color };
-    const open_pct = if (stats.total > 0) (stats.open_total * 100) / stats.total else 0;
-    const resolved_pct = if (stats.total > 0) (stats.resolved * 100) / stats.total else 0;
-    const open_sub = if (stats.draft > 0) c.print("{d} draft · {d}%", .{ stats.draft, open_pct }) else c.print("{d}% of page", .{open_pct});
-    const resolved_sub = if (is_pull and stats.merged > 0) c.print("{d} merged · {d} closed", .{ stats.merged, stats.closed }) else c.print("{d}% resolved", .{resolved_pct});
-    const contrib_sub = if (stats.top_author.len > 0) c.print("top: {s} ({d})", .{ stats.top_author, stats.top_author_count }) else "no author";
-
-    const cards = [4]Metric{
-        .{
-            .label = "On This Page",
-            .value = c.print("{d}{s}", .{ stats.total, if (page.hasNextPage) "+" else "" }),
-            .sub = c.print("Page {d} · latest #{d}", .{ page.page, stats.latest_number }),
-            .color = k.text,
-        },
-        .{
-            .label = "Open",
-            .value = c.print("{d}", .{stats.open_total}),
-            .sub = open_sub,
-            .color = k.warning,
-        },
-        .{
-            .label = if (is_pull) "Merged / Closed" else "Closed",
-            .value = c.print("{d}", .{stats.resolved}),
-            .sub = resolved_sub,
-            .color = k.success,
-        },
-        .{
-            .label = "Contributors",
-            .value = c.print("{d}", .{stats.unique_authors}),
-            .sub = contrib_sub,
-            .color = k.accent,
-        },
-    };
-
-    const grid = ui.div(c).column().wFull().gap(gap);
-    defer grid.end();
-    var idx: usize = 0;
-    while (idx < 4) : (idx += cols) {
-        const row = ui.div(c).row().wFull().gap(gap);
-        defer row.end();
-        for (0..cols) |col_i| {
-            const m = cards[idx + col_i];
-            const card = ui.div(c).column().w(card_w).p(11).gap(3).rounded(10).bg(cardBg(k)).border(k.border).borderW(1).clip();
-            defer card.end();
-            const room = @max(24, card_w - 22);
-            kit.ellipsisText(c, m.label, .{ .size = 11, .color = k.muted }, room);
-            kit.ellipsisText(c, m.value, .{ .size = 20, .line_height = 24, .weight = .bold, .tabular = true, .color = m.color }, room);
-            kit.ellipsisText(c, m.sub, .{ .size = 10.5, .mono = true, .color = k.faint }, room);
+        if (kit.actionButton(c, k, toggle, .{ .kind = .quiet, .trailing = if (expanded) .@"alt-arrow-down" else .@"alt-arrow-right", .key = "github-charts-toggle" })) {
+            a.settings.toggle(.github_charts_expanded);
+            a.redraw();
         }
     }
+    if (expanded) {
+        const stats = computeStats(c.alloc(), page);
+        const charts = ui.div(c).column().wFull().pt(4).pb(8).gap(8);
+        defer charts.end();
+        drawAnalyticsGrid(c, a, k, stats, width, enabled);
+    }
+    if (flow.hasClientFilter(s)) drawFilterBanner(c, a, k, page, width, enabled);
 }
+
+/// `github_display.summaryFit`'s ruler: the summary's own face.
+const Measure = struct {
+    c: *ui.Context,
+    st: ui.TextStyle,
+    pub fn width(m: Measure, s: []const u8) f32 {
+        return m.c.text.width(s, m.st);
+    }
+};
 
 fn drawAnalyticsGrid(c: *ui.Context, a: *App, k: theme.Colors, stats: Stats, inner_w: f32, enabled: bool) void {
     const show_days = stats.day_len >= 2;
@@ -290,21 +230,27 @@ fn drawAnalyticsGrid(c: *ui.Context, a: *App, k: theme.Colors, stats: Stats, inn
     }
 }
 
+fn card(c: *ui.Context, k: theme.Colors, w: f32) ui.Div {
+    return ui.div(c).column().w(w).p(12).gap(8).rounded(kit.radius_card).border(k.border).borderW(1).clip();
+}
+
+fn cardTitle(c: *ui.Context, k: theme.Colors, text: []const u8, room: f32) void {
+    kit.ellipsisText(c, text, .{ .size = kit.text_body, .line_height = 16, .weight = .medium, .color = k.text }, room);
+}
+
+fn stateColor(k: theme.Colors, kind: display.Kind, state: display.State) ui.Color {
+    return kit.roleColor(k, display.role(kind, state));
+}
+
 fn drawStateCard(c: *ui.Context, a: *App, k: theme.Colors, stats: Stats, card_w: f32, enabled: bool) void {
     const s = &a.panels.github_repository;
+    const kind: display.Kind = if (s.list_kind == .pulls) .pull else .issue;
     const room = @max(60, card_w - 24);
-    const card = ui.div(c).column().w(card_w).p(12).gap(10).rounded(10).bg(cardBg(k)).border(k.border).borderW(1).clip();
-    defer card.end();
+    const box = card(c, k, card_w);
+    defer box.end();
+    cardTitle(c, k, "State split", room);
 
-    {
-        const head = ui.div(c).row().wFull().gap(6).itemsCenter().clip();
-        defer head.end();
-        kit.ellipsisText(c, "State Split", .{ .size = 12, .weight = .semibold, .color = k.text }, room - 42);
-        ui.spacer(c);
-        if (room >= 145) ui.text(c, "Click", .{ .size = 10.5, .color = k.faint });
-    }
-
-    // Donut ring gauge centered cleanly inside card width
+    // The ring: one arc per state, in the list's colours.
     {
         const gauge_row = ui.div(c).row().wFull().justifyCenter();
         defer gauge_row.end();
@@ -314,20 +260,16 @@ fn drawStateCard(c: *ui.Context, a: *App, k: theme.Colors, stats: Stats, card_w:
         const cv = ui.canvas(c, .{ .width = .{ .px = box_size }, .height = .{ .px = box_size } });
         const center: ui.Point = .{ .x = box_size / 2, .y = box_size / 2 };
         const stroke_r: f32 = 31;
-        const stroke_w: f32 = 8.5;
-        cv.ring(center, stroke_r + stroke_w / 2, stroke_w, k.ink(if (k.dark) 0.08 else 0.06));
+        const stroke_w: f32 = 8;
+        cv.ring(center, stroke_r + stroke_w / 2, stroke_w, k.hover);
         if (stats.total > 0) {
             const total_f: f32 = @floatFromInt(stats.total);
             var start_frac: f32 = 0;
-            const slices = .{
-                .{ stats.resolved, k.success },
-                .{ stats.open, k.warning },
-                .{ stats.draft, k.muted },
-            };
-            inline for (slices) |sl| {
+            const slices = [_]struct { usize, display.State }{ .{ stats.merged, .merged }, .{ stats.closed, .closed }, .{ stats.open, .open }, .{ stats.draft, .draft } };
+            for (slices) |sl| {
                 if (sl[0] > 0) {
                     const span: f32 = @as(f32, @floatFromInt(sl[0])) / total_f;
-                    drawArcSlice(cv, c, center, stroke_r, stroke_w, start_frac, span, sl[1]);
+                    drawArcSlice(cv, c, center, stroke_r, stroke_w, start_frac, span, stateColor(k, kind, sl[1]));
                     start_frac += span;
                 }
             }
@@ -335,42 +277,34 @@ fn drawStateCard(c: *ui.Context, a: *App, k: theme.Colors, stats: Stats, card_w:
         const label_layer = ui.div(c).absolute().offset(0, 0).size(box_size, box_size).center().column();
         defer label_layer.end();
         const resolved_pct = if (stats.total > 0) (stats.resolved * 100) / stats.total else 0;
-        ui.text(c, c.print("{d}%", .{resolved_pct}), .{ .size = 14, .weight = .bold, .tabular = true, .color = k.text });
-        ui.text(c, "resolved", .{ .size = 9.5, .color = k.faint });
+        ui.text(c, c.print("{d}%", .{resolved_pct}), .{ .size = kit.text_title, .weight = .medium, .tabular = true, .color = k.text });
+        ui.text(c, if (kind == .pull) "done" else "closed", .{ .size = kit.text_caption, .color = k.muted });
     }
 
-    // Clickable legend items filtering locally without RPCs
+    // Legend rows filter the loaded page without a request.
     {
-        const leg = ui.div(c).column().wFull().gap(4);
+        const leg = ui.div(c).column().wFull();
         defer leg.end();
-        const LegendEntry = struct {
-            chip: flow.StateChip,
-            label: []const u8,
-            a11y: []const u8,
-            count: usize,
-            color: ui.Color,
-        };
+        const LegendEntry = struct { chip: flow.StateChip, state: display.State, a11y: []const u8, count: usize };
         const entries = [_]LegendEntry{
-            .{ .chip = .open, .label = "Open", .a11y = "Filter state: Open", .count = stats.open, .color = k.warning },
-            .{ .chip = .merged, .label = "Merged", .a11y = "Filter state: Merged", .count = stats.merged, .color = k.accent },
-            .{ .chip = .closed, .label = "Closed", .a11y = "Filter state: Closed", .count = stats.closed, .color = k.success },
-            .{ .chip = .draft, .label = "Draft", .a11y = "Filter state: Draft", .count = stats.draft, .color = k.muted },
+            .{ .chip = .open, .state = .open, .a11y = "Filter state: Open", .count = stats.open },
+            .{ .chip = .draft, .state = .draft, .a11y = "Filter state: Draft", .count = stats.draft },
+            .{ .chip = .merged, .state = .merged, .a11y = "Filter state: Merged", .count = stats.merged },
+            .{ .chip = .closed, .state = .closed, .a11y = "Filter state: Closed", .count = stats.closed },
         };
         for (entries) |entry| {
             if (entry.count == 0) continue;
             ui.key(c, entry.a11y);
             const active = s.state_chip == entry.chip;
-            const row_bg = if (active) entry.color.alpha(0.14) else ui.Color.transparent;
-            const row = ui.div(c).row().wFull().px(6).py(3).gap(7).itemsCenter().rounded(6)
-                .bg(row_bg)
-                .border(if (active) entry.color.alpha(0.45) else ui.Color.transparent).borderW(1);
-            if (enabled) _ = row.hover(k.hover).control();
+            var row = ui.div(c).row().wFull().h(kit.hit_target).px(6).gap(8).itemsCenter().rounded(kit.radius_control);
+            if (active) row = row.bg(k.selected);
+            if (enabled) row = kit.pressFeedback(row.hover(k.hover).control());
             defer row.end();
             const activated = behavior.activate(c, row, k, entry.a11y, enabled, active);
-            _ = c.leaf(.{ .width = .{ .px = 7 }, .height = .{ .px = 7 }, .radius = 3.5, .background = entry.color }, .none, null);
-            kit.ellipsisText(c, entry.label, .{ .size = 11.5, .color = if (active) k.text else k.muted }, @max(24, room - 54));
+            kit.dot(c, 8, stateColor(k, kind, entry.state));
+            kit.ellipsisText(c, display.label(entry.state), .{ .size = kit.text_body, .color = if (active) k.text else k.muted }, @max(24, room - 54));
             ui.spacer(c);
-            ui.text(c, c.print("{d}", .{entry.count}), .{ .size = 11.5, .mono = true, .weight = .semibold, .color = k.text });
+            ui.text(c, c.print("{d}", .{entry.count}), .{ .size = kit.text_body, .tabular = true, .weight = .medium, .color = k.text });
             if (activated) flow.toggleStateChip(a, entry.chip);
         }
     }
@@ -390,19 +324,35 @@ fn drawArcSlice(cv: *ui.Canvas, c: *ui.Context, center: ui.Point, r: f32, width:
     cv.polyline(points, .{ .width = width, .color = color });
 }
 
+/// Open in the open state's colour; merged or closed as quiet ink, since
+/// a group mixes both.
+fn openColor(k: theme.Colors) ui.Color {
+    return kit.roleColor(k, display.role(.pull, .open));
+}
+
+fn doneColor(k: theme.Colors) ui.Color {
+    return k.muted.alpha(0.55);
+}
+
+fn legend(c: *ui.Context, k: theme.Colors) void {
+    const leg = ui.div(c).row().gap(8).itemsCenter();
+    defer leg.end();
+    miniDotLabel(c, k, openColor(k), "Open");
+    miniDotLabel(c, k, doneColor(k), "Done");
+}
+
 fn drawGroupsCard(c: *ui.Context, a: *App, k: theme.Colors, stats: Stats, card_w: f32, enabled: bool) void {
     const s = &a.panels.github_repository;
     const room = @max(80, card_w - 24);
-    const card = ui.div(c).column().w(card_w).p(12).gap(8).rounded(10).bg(cardBg(k)).border(k.border).borderW(1).clip();
-    defer card.end();
+    const box = card(c, k, card_w);
+    defer box.end();
 
     {
         const head = ui.div(c).row().wFull().gap(8).itemsCenter().clip();
         defer head.end();
-        const title = if (stats.is_label_grouping) "By Label" else "By Contributor";
-        kit.ellipsisText(c, title, .{ .size = 12, .weight = .semibold, .color = k.text }, @max(40, room - 74));
+        cardTitle(c, k, if (stats.is_label_grouping) "By label" else "By author", @max(40, room - 96));
         ui.spacer(c);
-        if (room >= 200) ui.text(c, "Click to filter", .{ .size = 10.5, .color = k.faint });
+        if (room >= 180) legend(c, k);
     }
 
     var max_total: usize = 1;
@@ -410,10 +360,10 @@ fn drawGroupsCard(c: *ui.Context, a: *App, k: theme.Colors, stats: Stats, card_w
         if (g.total > max_total) max_total = g.total;
     }
     const label_w = @min(108.0, @max(54.0, @floor(room * 0.34)));
-    const count_w: f32 = 44;
-    const bar_w = @max(28.0, room - label_w - count_w - 20);
+    const count_w: f32 = 28;
+    const bar_w = @max(28.0, room - label_w - count_w - 28);
 
-    const list = ui.div(c).column().wFull().gap(4);
+    const list = ui.div(c).column().wFull();
     defer list.end();
     for (stats.groups[0..stats.group_len], 0..) |g, i| {
         ui.key(c, c.print("gh-group-{d}-{s}", .{ i, g.name }));
@@ -422,33 +372,28 @@ fn drawGroupsCard(c: *ui.Context, a: *App, k: theme.Colors, stats: Stats, card_w
         else
             (s.author_filter != null and std.mem.eql(u8, s.author_filter.?, g.name));
         const a11y = c.print("Filter {s}: {s}", .{ if (stats.is_label_grouping) "label" else "author", g.name });
-        const row = ui.div(c).row().wFull().px(4).py(4).gap(6).itemsCenter().rounded(6)
-            .bg(if (active) k.accent.alpha(0.11) else ui.Color.transparent)
-            .border(if (active) k.accent.alpha(0.42) else ui.Color.transparent).borderW(1).clip();
-        if (enabled) _ = row.hover(k.hover).control();
+        var row = ui.div(c).row().wFull().h(kit.hit_target).px(6).gap(8).itemsCenter().rounded(kit.radius_control).clip();
+        if (active) row = row.bg(k.selected);
+        if (enabled) row = kit.pressFeedback(row.hover(k.hover).control());
         defer row.end();
         const activated = behavior.activate(c, row, k, a11y, enabled, active);
 
         const lbl_box = ui.div(c).row().w(label_w).clip();
-        kit.ellipsisText(c, g.name, .{ .size = 11.5, .weight = if (active) .semibold else .medium, .color = if (active) k.accent else k.text }, label_w);
+        kit.ellipsisText(c, g.name, .{ .size = kit.text_body, .weight = .medium, .color = if (active) k.text else k.muted }, label_w);
         lbl_box.end();
 
-        const track = ui.div(c).row().w(bar_w).h(10).rounded(4).bg(k.ink(if (k.dark) 0.06 else 0.05)).clip();
+        const track = ui.div(c).row().w(bar_w).h(8).rounded(4).bg(k.hover).clip();
         {
             defer track.end();
             const denom: f32 = @floatFromInt(max_total);
-            const res_w = @floor(bar_w * @as(f32, @floatFromInt(g.resolved)) / denom);
             const open_w = @floor(bar_w * @as(f32, @floatFromInt(g.open)) / denom);
-            if (g.resolved > 0) {
-                _ = c.leaf(.{ .width = .{ .px = @max(3, res_w) }, .height = .fill, .radius = 3, .background = k.success }, .none, null);
-            }
-            if (g.open > 0) {
-                _ = c.leaf(.{ .width = .{ .px = @max(3, open_w) }, .height = .fill, .radius = 3, .background = k.warning }, .none, null);
-            }
+            const res_w = @floor(bar_w * @as(f32, @floatFromInt(g.resolved)) / denom);
+            if (g.open > 0) _ = c.leaf(.{ .width = .{ .px = @max(3, open_w) }, .height = .fill, .background = openColor(k) }, .none, null);
+            if (g.resolved > 0) _ = c.leaf(.{ .width = .{ .px = @max(3, res_w) }, .height = .fill, .background = doneColor(k) }, .none, null);
         }
 
         const cnt_box = ui.div(c).row().w(count_w).justifyEnd().clip();
-        kit.ellipsisText(c, c.print("{d}/{d}", .{ g.resolved, g.total }), .{ .size = 11, .mono = true, .color = k.muted }, count_w);
+        kit.ellipsisText(c, c.print("{d}", .{g.total}), .{ .size = kit.text_body, .tabular = true, .color = k.muted }, count_w);
         cnt_box.end();
 
         if (activated) {
@@ -459,20 +404,15 @@ fn drawGroupsCard(c: *ui.Context, a: *App, k: theme.Colors, stats: Stats, card_w
 
 fn drawDaysCard(c: *ui.Context, k: theme.Colors, stats: Stats, card_w: f32) void {
     const room = @max(80, card_w - 24);
-    const card = ui.div(c).column().w(card_w).p(12).gap(10).rounded(10).bg(cardBg(k)).border(k.border).borderW(1).clip();
-    defer card.end();
+    const box = card(c, k, card_w);
+    defer box.end();
 
     {
         const head = ui.div(c).row().wFull().gap(6).itemsCenter().clip();
         defer head.end();
-        kit.ellipsisText(c, "Recent Activity", .{ .size = 12, .weight = .semibold, .color = k.text }, @max(40, room - 88));
+        cardTitle(c, k, "Recent activity", @max(40, room - 96));
         ui.spacer(c);
-        if (room >= 165) {
-            const leg = ui.div(c).row().gap(8).itemsCenter();
-            defer leg.end();
-            miniDotLabel(c, k, k.warning, "Open");
-            miniDotLabel(c, k, k.success, "Closed");
-        }
+        if (room >= 180) legend(c, k);
     }
 
     var max_day: usize = 1;
@@ -482,41 +422,41 @@ fn drawDaysCard(c: *ui.Context, k: theme.Colors, stats: Stats, card_w: f32) void
     }
 
     const n = stats.day_len;
-    const gap: f32 = 5;
+    const gap: f32 = 4;
     const col_w = @max(14, @floor((room - gap * @as(f32, @floatFromInt(n - 1))) / @as(f32, @floatFromInt(n))));
-    const bar_w = std.math.clamp(@floor((col_w - 4) / 2), 4.0, 11.0);
-    const max_bar_h: f32 = 72;
+    const bar_w = std.math.clamp(@floor((col_w - 4) / 2), 4.0, 10.0);
+    const max_bar_h: f32 = 64;
 
     const plot = ui.div(c).row().wFull().pt(4).gap(gap).itemsEnd().justifyCenter();
     defer plot.end();
     for (stats.days[0..n]) |d| {
-        const col = ui.div(c).column().w(col_w).gap(5).itemsCenter().clip();
+        const col = ui.div(c).column().w(col_w).gap(4).itemsCenter().clip();
         defer col.end();
         {
             const bars = ui.div(c).row().w(col_w).h(max_bar_h).gap(2).justifyCenter().itemsEnd();
             defer bars.end();
             const denom: f32 = @floatFromInt(max_day);
             if (d.open > 0) {
-                const h = @max(5, @round(max_bar_h * @as(f32, @floatFromInt(d.open)) / denom));
-                _ = c.leaf(.{ .width = .{ .px = bar_w }, .height = .{ .px = h }, .radius = 2.5, .background = k.warning }, .none, null);
+                const h = @max(4, @round(max_bar_h * @as(f32, @floatFromInt(d.open)) / denom));
+                _ = c.leaf(.{ .width = .{ .px = bar_w }, .height = .{ .px = h }, .radius = 2, .background = openColor(k) }, .none, null);
             }
             if (d.resolved > 0) {
-                const h = @max(5, @round(max_bar_h * @as(f32, @floatFromInt(d.resolved)) / denom));
-                _ = c.leaf(.{ .width = .{ .px = bar_w }, .height = .{ .px = h }, .radius = 2.5, .background = k.success }, .none, null);
+                const h = @max(4, @round(max_bar_h * @as(f32, @floatFromInt(d.resolved)) / denom));
+                _ = c.leaf(.{ .width = .{ .px = bar_w }, .height = .{ .px = h }, .radius = 2, .background = doneColor(k) }, .none, null);
             }
             if (d.open == 0 and d.resolved == 0) {
-                _ = c.leaf(.{ .width = .{ .px = bar_w }, .height = .{ .px = 3 }, .radius = 1.5, .background = k.ink(0.08) }, .none, null);
+                _ = c.leaf(.{ .width = .{ .px = bar_w }, .height = .{ .px = 2 }, .radius = 1, .background = k.hover }, .none, null);
             }
         }
-        kit.ellipsisText(c, d.date[5..10], .{ .size = 9.5, .mono = true, .color = k.faint }, col_w);
+        kit.ellipsisText(c, d.date[5..10], .{ .size = kit.text_caption, .tabular = true, .color = k.muted }, col_w);
     }
 }
 
 fn miniDotLabel(c: *ui.Context, k: theme.Colors, color: ui.Color, label: []const u8) void {
     const item = ui.div(c).row().gap(4).itemsCenter();
     defer item.end();
-    _ = c.leaf(.{ .width = .{ .px = 6 }, .height = .{ .px = 6 }, .radius = 3, .background = color }, .none, null);
-    ui.text(c, label, .{ .size = 10, .color = k.muted });
+    kit.dot(c, 6, color);
+    ui.text(c, label, .{ .size = kit.text_caption, .color = k.muted });
 }
 
 fn drawFilterBanner(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, inner_w: f32, enabled: bool) void {
@@ -525,16 +465,15 @@ fn drawFilterBanner(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, i
     for (page.items) |item| {
         if (flow.itemMatchesFilter(s, item)) shown += 1;
     }
-    const bar = ui.div(c).row().wFull().px(10).py(6).gap(8).itemsCenter().rounded(8)
-        .bg(k.accent.alpha(if (k.dark) 0.10 else 0.08))
-        .border(k.accent.alpha(0.32)).borderW(1).clip();
+    const colors = kit.chipColors(k, .accent);
+    const bar = ui.div(c).row().wFull().pl(12).pr(4).gap(8).itemsCenter().rounded(kit.radius_card).bg(colors.fill).clip();
     defer bar.end();
 
-    icons.icon(c, .tuning, 12, k.accent, 0);
+    icons.icon(c, .tuning, 12, colors.ink, 0);
     const desc = describeFilter(c, s, shown, page.items.len);
-    kit.ellipsisText(c, desc, .{ .size = 11.5, .color = k.text }, @max(40, inner_w - 118));
+    kit.ellipsisText(c, desc, .{ .size = kit.text_body, .tabular = true, .color = k.text }, @max(40, inner_w - 128));
     ui.spacer(c);
-    if (miniClearButton(c, k, enabled)) flow.clearClientFilters(a);
+    if (kit.actionButton(c, k, "Clear filter", .{ .kind = .quiet, .enabled = enabled, .key = "clear-github-overview-filter" })) flow.clearClientFilters(a);
 }
 
 fn describeFilter(c: *ui.Context, s: *const flow.State, shown: usize, total: usize) []const u8 {
@@ -558,15 +497,4 @@ fn describeFilter(c: *ui.Context, s: *const flow.State, shown: usize, total: usi
             c.print("Showing {d} of {d} (@{s})", .{ shown, total, au });
     }
     return c.print("Showing {d} of {d} ({s})", .{ shown, total, state_part });
-}
-
-fn miniClearButton(c: *ui.Context, k: theme.Colors, enabled: bool) bool {
-    ui.key(c, "clear-github-overview-filter");
-    const b = ui.div(c).row().h(22).px(8).itemsCenter().rounded(6)
-        .bg(k.ink(if (k.dark) 0.06 else 0.045)).border(k.border).borderW(1);
-    if (enabled) _ = b.hover(k.hover).control();
-    defer b.end();
-    const activated = behavior.activate(c, b, k, "Clear filter", enabled, false);
-    ui.text(c, "Clear filter", .{ .size = 11, .weight = .medium, .color = if (enabled) k.text else k.faint });
-    return activated;
 }

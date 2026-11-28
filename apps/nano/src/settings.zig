@@ -138,6 +138,8 @@ pub const Prefs = struct {
     restart_to_install_updates: bool = true,
     // Sidebar `#star-banner` dismissal.
     star_banner_dismissed: bool = false,
+    /// The GitHub list's charts, folded under its summary line until opened.
+    github_charts_expanded: bool = false,
 };
 
 /// One of `Prefs`'s switches.
@@ -174,6 +176,7 @@ pub const Flag = enum {
     automatically_install_updates,
     restart_to_install_updates,
     star_banner_dismissed,
+    github_charts_expanded,
 };
 
 /// Settings › Appearance's "Reduce motion", as saved in `reduceMotion`.

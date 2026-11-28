@@ -12,9 +12,10 @@ commits per page. It shows subjects, author/date, abbreviated SHA, HEAD,
 branch/tag labels, merge commits and local ahead/behind counts. Its rail is
 a chronological list, not a branch topology graph. Previous/Next page and
 Refresh are explicit; an idle panel does not poll or fetch remotes.
-**Changes** opens the existing live working-tree/branch/turn diff surface.
+**Diffs** opens the existing live working-tree/branch/turn diff surface.
 
-**Staging** opens the native Git changes workflow described below. History
+**Git changes** opens the native staging workflow described below; its
+**Git history** button comes back. History
 itself remains read-only. Existing diff discard and PR merge flows keep their
 current confirmations and host-side ownership checks.
 
@@ -26,13 +27,17 @@ process output is never displayed by the new history view.
 
 ## Staging, commit and push
 
-From **Git history → Staging**, inspect the separately listed staged and
+From **Git history → Git changes**, inspect the separately listed staged and
 unstaged files. A partly staged file appears in both sections. **Stage** adds
 only that file's current contents to the index; **Unstage** removes only that
 file from the index and preserves its working contents. There is no automatic
 stage-all, destructive per-file discard, or arbitrary shell command field.
+Every file row is the same height; its status letter (A green, D red,
+changed in the warning hue, untracked muted) shares the path's baseline, and
+a long path is cut in the middle so the file name stays visible.
 
-Enter a commit message and select **Commit staged…**, then confirm the staged
+Enter a commit message and select **Commit staged…** (the pane's primary
+button; Push… is secondary), then confirm the staged
 file count and message. Only the index is committed. Git uses the user's
 configured identity and normal hooks; the app does not add an attribution or
 bypass a failing hook. The message is cleared only after a successful reply.
@@ -76,17 +81,52 @@ the PR URL; Open session switches to its conversation. Merge is offered only
 for the selected session through the existing confirm-then-merge flow.
 
 Select **Repository** to browse beyond session-linked PRs. The native
-repository browser shows paged **Pull requests** and **Issues** with
-**Open / Closed / All** filters. It uses the selected session's real checkout
-and owning device to resolve a GitHub remote, and shows the resulting
-`owner/repository` explicitly. Existing upstream/branch remote selection rules
-apply; the result is repository-wide, not filtered to the session's branch.
+repository browser shows paged **Pull requests** and **Issues** tabs with an
+**Open / Closed / All** filter beside them, under one header row with the
+repository's name, **Session PRs** (back to the session pull requests) and
+**Refresh**. It uses the selected session's real checkout and owning device
+to resolve a GitHub remote, and shows the resulting `owner/repository`
+explicitly (the checkout's folder name until a page has loaded). Existing
+upstream/branch remote selection rules apply; the result is repository-wide,
+not filtered to the session's branch. The tab above the pane already says
+"GitHub ↳ <chat>", so the pane carries no second band repeating it.
+
+The list comes first. One line above it counts the loaded page only, e.g.
+"30 loaded · 3 open · 1 draft · 3 merged · 2 closed · more on next page".
+When the line doesn't fit beside the charts toggle, the hint goes whole
+(pagination already says there is more), then whole counts from the end
+("· …"); it is never cut mid-word (`github_display.summaryFit`).
+**Show charts** unfolds the page's state ring, By label / By author
+bars (selecting one filters the loaded page, with a Clear filter banner) and
+a recent-activity histogram; the choice is remembered
+(`githubChartsExpanded`) and starts folded. Each row is the title, then one
+quiet line: a state chip, the number, the author and a relative time
+("updated 2d ago"), with label chips at the end that are the first thing
+dropped when the pane narrows. Rows are separated by hairlines rather than
+boxed, and the whole row opens the item.
+
+States have one colour everywhere (`github_display.role`): open green,
+draft muted, merged the accent, a closed pull request red (a closed issue
+muted). The list, the detail header, the charts, the session pull requests
+and the composer footer's PR badge all use it, as soft-tint chips with no
+border (`view_kit.statusChip`). Buttons in these panes are one 32-point
+recipe (`view_kit.actionButton`: primary, secondary, quiet, danger).
+
+An empty list says which list is empty ("No open pull requests") and adds
+no button: the filter above it is the way out. Pagination appears only when
+there is another page. A failed request shows one banner explaining it, no
+stale tabs, and the header's **Refresh** as its one remedy; the first
+page's loading state reserves the rows' space. **Session PRs** carries the
+list glyph, so a back arrow in the pane always means one level up.
 
 Open a PR for **Summary**, **Code** and **Activity**. Code lists paged files
 with status/addition/deletion counts and one expandable patch at a time.
 Missing/binary/clipped patches are clearly marked incomplete. Activity shows
-paged GitHub timeline entries, comments and review summaries; it is not an
-inline review-thread editor. Issues have their own description and activity.
+paged GitHub timeline entries as a timeline: a glyph per kind of event
+(comment, commit, review, label, …), "author verb" and a relative time on one
+line, and a comment's or review's words under it; an approving or
+changes-requested review carries a chip. It is not an inline review-thread
+editor. Issues have their own description and activity.
 Descriptions and activity bodies render as native Markdown in readable
 cards: headings, emphasis, lists, quotes, tables and fenced code. Provider
 prose has no transcript attachment authority, image loading or clickable
@@ -115,17 +155,19 @@ navigation carries only validated owner/name/item fields, not a provider URL or
 API endpoint. Requests still use the selected session's host authentication, and
 the original checkout and remote stay independently fenced across the request.
 The linked repository is named visibly; browsing does not change the checkout.
-Back loads that repository's listing, Refresh retries the linked item, and
-Sessions returns to the current checkout's session PRs.
+Back (**Pull requests** / **Issues**) loads that repository's listing,
+Refresh retries the linked item, and **Session PRs** returns to the current
+checkout's session PRs.
 
 **Open on GitHub** and the link menu's **Open in browser** remain explicit
 external-browser actions. Other website links retain their existing behavior.
 Bare `#123` text without a URL is not guessed into a repository navigation.
 Enterprise hosts and unsupported GitHub URL shapes are not intercepted.
 
-The presentation follows the hierarchy of Zeron's native PR viewer: a
-state/number badge, title and author/branch/change metadata above the
-**Summary / Code / Activity** tabs, followed by a **Description** card.
+The presentation follows the hierarchy of Zeron's native PR viewer: the
+title, then a state chip with the number, author and age, the branch line
+and the change counts, above the **Summary / Code / Activity** tabs,
+followed by a **Description** card.
 List rows size to their content rather than clipping long titles to a fixed
 height. Empty session-linked results offer **Browse repository** and do not
 claim that GitHub authentication failed. A surface panel's header **+** opens

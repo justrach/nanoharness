@@ -147,7 +147,9 @@ test "github links default real Markdown click opens another repository closed P
     try clickPull(&h, false);
     try nativeOnly(&h);
     try testing.expect(h.t.hasText(pull.detail.?.title));
-    try testing.expect(h.t.hasText("#42 · closed"));
+    // The state chip and the number, as the list and footer badge show them.
+    try testing.expect(h.t.hasText("Closed"));
+    try testing.expect(h.t.containsText("#42 · "));
     try testing.expect(h.t.hasText("Summary"));
     try testing.expect(h.t.hasText("Code"));
     try testing.expect(h.t.hasText("Activity"));
@@ -225,7 +227,7 @@ test "github links second transcript click reuses the native panel for an issue"
     try nativeOnly(&h);
     try request(&h, "issue", 51);
     try testing.expect(h.t.hasText(issue.detail.?.title));
-    try testing.expect(h.t.hasText("Back to issues"));
+    try testing.expect(h.t.hasText("Issues"));
     try testing.expect(!h.t.hasText("Code"));
 }
 
@@ -246,9 +248,9 @@ test "github child linked PR keeps its item and originating split after neighbor
     try testing.expectEqual(flow.Kind.pull, h.a.panels.github_repository.kind);
     try testing.expectEqualStrings("a", h.a.panels.github_repository.owner.?);
     try testing.expectEqual(calls, try githubCalls(&h));
-    try h.t.clickText("Sessions");
+    try h.t.clickText("Session PRs");
     h.t.settle(0.2);
-    try testing.expect(h.t.hasText("Split from Synthetic source"));
+    try testing.expect(h.t.hasText("↳ Synthetic source"));
     try testing.expect(h.t.hasText("No session-linked pull requests"));
 }
 
@@ -293,10 +295,10 @@ test "github links detail failure Refresh retries detail and Back lazily loads t
     try testing.expectEqual(flow.Kind.pull, h.a.panels.github_repository.kind);
     try testing.expect(h.a.panels.github_repository.list == null);
     try testing.expectEqual(@as(usize, 2), try githubCalls(&h));
-    try h.t.clickText("Back to PRs");
+    try h.t.clickText("Pull requests");
     h.t.settle(0.1);
     try request(&h, "pulls", null);
-    try testing.expect(h.t.hasText("No matching items"));
+    try testing.expect(h.t.hasText("No pull requests yet"));
     try testing.expectEqual(@as(usize, 3), try githubCalls(&h));
     try nativeOnly(&h);
 }

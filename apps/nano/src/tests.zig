@@ -24,6 +24,8 @@ test {
     _ = @import("tests_git_workflow.zig");
     _ = @import("tests_github_repository.zig");
     _ = @import("tests_github_responsive.zig");
+    _ = @import("tests_github_polish.zig");
+    _ = @import("github_display.zig");
     _ = @import("tests_control_behavior.zig");
     _ = @import("tests_control_navigation.zig");
     _ = @import("tests_composer_dock_layout.zig");
