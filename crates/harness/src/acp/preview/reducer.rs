@@ -5,7 +5,7 @@
 //! transcript separately until the replay outcome is known. No I/O or actions
 //! (including cancellation or granting permission) originate here.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Map, Value};
@@ -98,6 +98,59 @@ impl Reducer {
 
     pub fn session(&self, id: &str) -> Option<&Session> {
         self.sessions.get(id)
+    }
+
+    /// Project both observations into the root transcript's message identity.
+    /// The child copy can supply content before the root copy arrives, but
+    /// only an explicit cross-reference allows it to stand in for that copy.
+    pub fn communications<'a>(&'a self, root: &str) -> BTreeMap<&'a str, (bool, &'a [Value])> {
+        let mut rows = BTreeMap::new();
+        for (owner, session) in &self.sessions {
+            if owner != root && session.parent.as_deref() != Some(root) {
+                continue;
+            }
+            for ((kind, id), entity) in &session.entities {
+                if *kind != EntityKind::SessionMessage {
+                    continue;
+                }
+                let fields = &entity.fields;
+                let (Ok(sender), Ok(recipient)) = (
+                    string(fields, "senderSessionId"),
+                    string(fields, "recipientSessionId"),
+                ) else {
+                    continue;
+                };
+                let (child, outgoing, reference) = if sender == root {
+                    (recipient, true, "senderMessageId")
+                } else if recipient == root {
+                    (sender, false, "recipientMessageId")
+                } else {
+                    continue;
+                };
+                if self.session(child).and_then(|s| s.parent.as_deref()) != Some(root) {
+                    continue;
+                }
+                let key = if owner == root {
+                    id.as_str()
+                } else if owner == child {
+                    let Ok(link) = string(fields, reference) else {
+                        continue;
+                    };
+                    link
+                } else {
+                    continue;
+                };
+                let Some(content) = fields.get("content").and_then(Value::as_array) else {
+                    continue;
+                };
+                if owner == root {
+                    rows.insert(key, (outgoing, content.as_slice()));
+                } else {
+                    rows.entry(key).or_insert((outgoing, content.as_slice()));
+                }
+            }
+        }
+        rows
     }
 
     /// Call on the matched resume response, or on loss of that connection.

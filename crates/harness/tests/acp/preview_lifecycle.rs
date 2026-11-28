@@ -1,6 +1,80 @@
 use super::*;
 
 #[tokio::test]
+async fn preview_session_message_parent_to_child() {
+    check_session_message("outgoing").await;
+}
+
+#[tokio::test]
+async fn preview_session_message_child_to_parent() {
+    check_session_message("incoming").await;
+}
+
+async fn check_session_message(direction: &str) {
+    {
+        // A separate fixture/chat uses the same agent-local IDs. Neither
+        // direction may suppress a message in an unrelated conversation.
+        for _ in 0..2 {
+            let (root, harness, req) = fixture(&format!("communication-{direction}"), true);
+            let live = run_to_end(&harness, req.clone(), controls().0).await;
+            let mut resume = req;
+            resume.resume = Some("synthetic-session".into());
+            let replayed = run_to_end(&harness, resume, controls().0).await;
+            let wire = traffic(&root);
+            let wire: Vec<_> = wire
+                .lines()
+                .filter(|line| line.starts_with("wire "))
+                .collect();
+            assert_eq!(
+                wire,
+                [
+                    "wire initialize other",
+                    "wire session/new other",
+                    "wire session/prompt parent",
+                    "wire initialize other",
+                    "wire session/resume parent",
+                    "wire session/prompt parent"
+                ],
+                "only the two initiating parent submissions may send prompts"
+            );
+            for events in [&live, &replayed] {
+                assert_eq!(dones(events), [(DoneStatus::Completed, None)]);
+                assert!(!events.iter().any(|event| matches!(
+                    event,
+                    AgentEvent::UserMessage { .. } | AgentEvent::Subagent { .. }
+                )));
+                assert!(!events.iter().any(|event| matches!(event, AgentEvent::TextDelta { text } if text.contains("handoff"))));
+            }
+            let rows = |events: &[AgentEvent]| {
+                events
+                    .iter()
+                    .filter_map(|event| match event {
+                        AgentEvent::ToolCall {
+                            id,
+                            call: ToolCall::Unknown { name, .. },
+                        } if name.starts_with("Agent communication") => Some(id.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let live_rows = rows(&live);
+            let replay_rows = rows(&replayed);
+            println!(
+                "{direction}: live rows {}, replay additions {}",
+                live_rows.len(),
+                replay_rows.len()
+            );
+            assert_eq!(live_rows.len(), 1, "{direction} visible communication rows");
+            assert!(
+                replay_rows.is_empty(),
+                "replay and mirrored repeat must not publish a new row"
+            );
+            assert!(live.iter().any(|event| matches!(event, AgentEvent::ToolResult { id, output: Some(text), .. } if id == &live_rows[0] && text == "Synthetic agent handoff")));
+        }
+    }
+}
+
+#[tokio::test]
 async fn preview_targeted_tool_cancel_keeps_foreground_stop_separate() {
     use harness_adapters::acp::PreviewCancelTarget;
     let (root, harness, req) = fixture("targeted", true);

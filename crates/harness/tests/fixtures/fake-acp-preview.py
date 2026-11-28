@@ -20,6 +20,22 @@ def update(session, tag, **fields):
     write({'method': 'session/update', 'params': {'sessionId': session,
            'update': {'sessionUpdate': tag, **fields}}})
 
+def communication():
+    parent_sends = mode.endswith('outgoing')
+    sender, recipient = (session_id, 'child') if parent_sends else ('child', session_id)
+    parent_ref = 'parent-copy'
+    child_ref = 'child-copy'
+    source_ref, target_ref = (parent_ref, child_ref) if parent_sends else (child_ref, parent_ref)
+    content = {'type': 'text', 'text': 'Synthetic agent handoff'}
+    # The child observation comes first, with its cross-reference arriving
+    # after content. The root observation is the same communication.
+    update('child', 'session_message_chunk', messageId=child_ref, content=content)
+    update('child', 'session_message', messageId=child_ref, senderSessionId=sender,
+           recipientSessionId=recipient, **({'senderMessageId': source_ref} if parent_sends else {'recipientMessageId': target_ref}))
+    update(session_id, 'session_message', messageId=parent_ref, senderSessionId=sender,
+           recipientSessionId=recipient, content=[content],
+           **({'recipientMessageId': target_ref} if parent_sends else {'senderMessageId': source_ref}))
+
 for line in sys.stdin:
     req = json.loads(line)
     if 'method' not in req:
@@ -31,6 +47,8 @@ for line in sys.stdin:
     method = req['method']
     params = req.get('params', {})
     result = {}
+    if mode.startswith('communication-'):
+        record('wire', method, 'parent' if params.get('sessionId') == session_id else 'other')
     if method == 'initialize':
         assert version is None, 'requires a fresh stdio child'
         version = params['protocolVersion']
@@ -52,6 +70,8 @@ for line in sys.stdin:
             update(session_id, 'subagent_update', sessionId='child', title='Synthetic child')
             update('child', 'agent_message_chunk', messageId='historic',
                    content={'type': 'text', 'text': 'Do not republish history'})
+            if mode.startswith('communication-'):
+                communication()
             update(session_id, 'replay_complete')
             if mode != 'missing-child-barrier':
                 update('child', 'replay_complete')
@@ -95,6 +115,9 @@ for line in sys.stdin:
             update(session_id, 'state_update', state='running')
             update(session_id, 'agent_message_chunk', messageId='synthetic-assistant',
                    content={'type': 'text', 'text': 'Synthetic reply'})
+            if mode.startswith('communication-'):
+                update(session_id, 'subagent_update', sessionId='child', title='Synthetic child')
+                communication()
             if mode == 'interaction':
                 update(session_id, 'tool_call_update', toolCallId='same', title='Root tool', status='pending')
                 update('foreign', 'tool_call_update', toolCallId='same', title='Foreign tool', status='pending')

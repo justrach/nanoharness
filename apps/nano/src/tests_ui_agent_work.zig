@@ -222,6 +222,44 @@ fn snap(h: *Harness, name: []const u8) void {
     h.t.screenshot(path) catch {};
 }
 
+test "ACP Preview read-only child pane keeps the running worker and parent composer separate" {
+    var h: Harness = undefined;
+    try h.init(live_fixture, live_progress);
+    defer h.deinit();
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"WatchDocMessages":[],"QueueCommand":{}}
+    , .{});
+    h.a.engine.state = .connected;
+    h.a.composer.set("Synthetic parent draft");
+    h.a.view.focus_composer = true;
+    const start = h.a.engine.sent.items.len;
+    const part = &h.a.transcript.entries.items[1].parts.items[1];
+    @import("app_subagents.zig").open(&h.a, "chat-syn", part);
+    @import("app_subagents.zig").settleFrame(&h.a);
+    const child = h.a.panels.activeTab().?.agent.?;
+    try testing.expectEqualStrings("doc-lean-1", child.doc);
+    const watch = child.watch orelse return error.MissingChildWatch;
+    try testing.expect(h.a.engine.mux.pending.contains(watch));
+    try testing.expectEqualStrings("chat-syn", h.a.selected.?);
+    try testing.expectEqualStrings("Synthetic parent draft", h.a.composer.text());
+    @import("app_panels.zig").closeTab(&h.a, h.a.panels.active);
+    try testing.expect(!h.a.panels.host_open);
+    try testing.expect(!h.a.engine.mux.pending.contains(watch));
+    try testing.expectEqualStrings("chat-syn", h.a.selected.?);
+    try testing.expectEqualStrings("Synthetic parent draft", h.a.composer.text());
+    // The pane lifecycle may start/stop its observation, never a child run.
+    const prior = h.a.engine.sent.items[start..];
+    try testing.expectEqual(@as(usize, 1), prior.len);
+    try testing.expect(std.mem.indexOf(u8, prior[0], "\"method\":\"WatchDocMessages\"") != null);
+    const after_close = h.a.engine.sent.items.len;
+    h.a.send();
+    const frames = h.a.engine.sent.items[after_close..];
+    try testing.expectEqual(@as(usize, 1), frames.len);
+    try testing.expect(std.mem.indexOf(u8, frames[0], "\"method\":\"QueueCommand\"") != null);
+    try testing.expect(std.mem.indexOf(u8, frames[0], "\"chatId\":\"chat-syn\"") != null);
+    try testing.expect(std.mem.indexOf(u8, frames[0], "doc-lean-1") == null);
+}
+
 test "809 subagent follow-up routes through parent without consuming composer draft" {
     var h: Harness = undefined;
     try h.init(live_fixture, live_progress);

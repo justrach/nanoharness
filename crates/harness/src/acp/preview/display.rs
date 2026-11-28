@@ -10,6 +10,7 @@ pub(super) struct Display {
     shown: HashSet<String>,
     settled: HashSet<String>,
     background: HashMap<String, HashSet<String>>,
+    communications: HashSet<String>,
 }
 
 fn scoped(owner: &str, kind: &str, id: &str) -> String {
@@ -24,6 +25,50 @@ fn safe_text(text: &str) -> String {
 }
 
 impl Display {
+    /// History is already represented by the host document. Seed the same
+    /// identities used for live projection without publishing replayed rows.
+    pub fn communications(
+        &mut self,
+        reducer: &Reducer,
+        root: &str,
+        replay: bool,
+    ) -> Vec<AgentEvent> {
+        let mut events = Vec::new();
+        for (key, (outgoing, content)) in reducer.communications(root) {
+            let text: String = content
+                .iter()
+                .filter(|block| block["type"] == "text")
+                .filter_map(|block| block["text"].as_str())
+                .flat_map(str::chars)
+                .take(8192)
+                .collect();
+            let text = safe_text(&text);
+            if text.trim().is_empty() || !self.communications.insert(key.to_owned()) || replay {
+                continue;
+            }
+            let id = scoped(root, "session_message", key);
+            events.push(AgentEvent::ToolCall {
+                id: id.clone(),
+                call: ToolCall::Unknown {
+                    name: if outgoing {
+                        "Agent communication · sent"
+                    } else {
+                        "Agent communication · received"
+                    }
+                    .into(),
+                    input: None,
+                },
+            });
+            events.push(AgentEvent::ToolResult {
+                id,
+                is_error: false,
+                output: Some(text),
+                diff: None,
+            });
+        }
+        events
+    }
+
     pub fn has_background(&self) -> bool {
         self.background.values().any(|tasks| !tasks.is_empty())
     }

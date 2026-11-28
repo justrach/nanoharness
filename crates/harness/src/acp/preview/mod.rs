@@ -449,6 +449,9 @@ async fn run_inner(
     tokio::pin!(ack_deadline);
     let mut foreground = Foreground::default();
     let mut display = display::Display::default();
+    if session.request.resume.is_some() {
+        display.communications(&projection, &id, true);
+    }
     let mut pending_cancels = std::collections::HashMap::new();
     let mut form: Option<(
         Value,
@@ -470,6 +473,9 @@ async fn run_inner(
             return Ok((DoneStatus::Completed, None));
         }
         if !*foreground_reported && let Some(idle) = foreground.end() {
+            for event in display.communications(&projection, &id, false) {
+                let _ = send(&event_tx, event).await;
+            }
             if let Some((request_id, _, _)) = form.take() {
                 client.respond(&request_id, json!({"action": "cancel"}));
             }
