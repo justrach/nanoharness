@@ -113,6 +113,8 @@ pub struct RunControls {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunOrigin {
     pub chat_id: String,
+    /// Durable user entry ID, reused if this submission is dispatched again.
+    pub submission_id: Option<String>,
     /// Per-run directory for build-wrapper wait markers (`<pid>` files whose
     /// contents are Unix seconds). Never inherited from the host process.
     pub build_wait_dir: Option<std::path::PathBuf>,
@@ -140,6 +142,9 @@ pub trait Harness: Send + Sync {
     fn id(&self) -> HarnessId;
     fn display_name(&self) -> &str;
     fn supports_steering(&self) -> bool;
+    fn supports_steering_for(&self, _request: &RunRequest) -> bool {
+        self.supports_steering()
+    }
     fn steering_mode(&self) -> SteeringMode;
     /// Whether steers deliver [`SteerMessage::attachments`] to the live run.
     /// When true, the engine routes a send with images into a steerable run

@@ -1,0 +1,102 @@
+{
+  "width": 1280,
+  "height": 820,
+  "scale": 1,
+  "dark": false,
+  "surface": "opaque",
+  "workspaceScope": "local",
+  "open": "chat-syn",
+  "replies": {
+    "Mutate": {},
+    "WatchDocMessages": [],
+    "FocusChat": {}
+  },
+  "chats": [
+    {
+      "id": "chat-syn",
+      "title": "Synthetic conversation",
+      "deviceId": "dev-syn",
+      "config": {
+        "harness": "graff"
+      }
+    },
+    {
+      "id": "other",
+      "title": "Other synthetic chat",
+      "deviceId": "dev-syn",
+      "config": {
+        "harness": "codex"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "hover": [
+        100,
+        215
+      ]
+    },
+    {
+      "clickAt": [
+        195,
+        215
+      ]
+    },
+    {
+      "expect": "Rename\u2026"
+    },
+    {
+      "expectNot": "Try ACP v2 Preview"
+    },
+    {
+      "press": "escape"
+    },
+    {
+      "hover": [
+        100,
+        175
+      ]
+    },
+    {
+      "clickAt": [
+        195,
+        175
+      ]
+    },
+    {
+      "expect": "Rename\u2026"
+    },
+    {
+      "expect": "Try ACP v2 Preview"
+    },
+    {
+      "snap": "menu"
+    },
+    {
+      "click": "Try ACP v2 Preview"
+    },
+    {
+      "hover": [
+        100,
+        175
+      ]
+    },
+    {
+      "clickAt": [
+        195,
+        175
+      ]
+    },
+    {
+      "expect": "Use ACP v1"
+    },
+    {
+      "snap": "enabled"
+    }
+  ],
+  "devices": [
+    {
+      "id": "dev-syn"
+    }
+  ]
+}

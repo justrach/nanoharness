@@ -885,6 +885,7 @@ impl SessionsEngine {
         let controls = RunControls {
             origin: Some(harness_adapters::RunOrigin {
                 chat_id: chat_id.to_string(),
+                submission_id: Some(user_id.clone()),
                 ipc_token: self.inner.ipc_mcp_token.get().cloned(),
                 ..Default::default()
             }),
@@ -898,7 +899,7 @@ impl SessionsEngine {
             chat_id.to_string(),
             RunHandle {
                 run_id: run_id.clone(),
-                steerable: harness.supports_steering(),
+                steerable: harness.supports_steering_for(&request),
                 steers_attachments: harness.steers_attachments(),
                 runtime_config: RuntimeConfig::from_request(harness_id, &request),
                 steer_tx,
@@ -2071,6 +2072,10 @@ impl Inner {
     /// state-only update (`output` empty, `state` present) preserves any
     /// already-streamed log tail while advancing the child's lifecycle state.
     fn set_tool_progress(&self, chat_id: &str, tool_id: &str, output: &str, state: Option<&str>) {
+        if tool_id.starts_with(harness_proto::ACP_PREVIEW_STATUS_PREFIX) && state == Some("cleared") {
+            self.clear_tool_progress(chat_id, Some(tool_id));
+            return;
+        }
         self.tool_progress_channel(chat_id).send_modify(|items| {
             match items.iter_mut().find(|i| i.tool_id == tool_id) {
                 Some(existing) => {
@@ -3304,6 +3309,9 @@ async fn drive_run(
     // settled subagent: it announces more work is coming.
     let mut settled_subagents: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Live subagent sinks, parent tool-use id → transcript doc state.
+    let mut preview_rows = Vec::<(String, String)>::new();
+    let mut preview_child_docs =
+        std::collections::HashMap::<String, (String, harness_doc::SubagentStatus)>::new();
     let mut subagents: std::collections::HashMap<String, SubagentSink> =
         std::collections::HashMap::new();
     // NESTED spawns → the sink whose transcript holds their chip (a
@@ -4028,6 +4036,40 @@ async fn drive_run(
                 let was_clean = !sink.dirty;
                 harness_doc::fold_event_into_parts(&mut sink.folded, sub_event);
                 sink.dirty = true;
+                if parent_tool_use_id.starts_with("acp2-child:") {
+                    let first_content = !sink.folded.is_empty()
+                        && preview_child_docs.len() < 256
+                        && !preview_child_docs.contains_key(parent_tool_use_id);
+                    if first_content {
+                        preview_child_docs.insert(
+                            parent_tool_use_id.clone(),
+                            (sink.doc_id.clone(), harness_doc::SubagentStatus::Running),
+                        );
+                    }
+                    if (first_content || done)
+                        && let Some((doc_id, status)) = preview_child_docs.get_mut(parent_tool_use_id)
+                    {
+                        if done {
+                            *status = harness_doc::SubagentStatus::Done;
+                        }
+                        for (row_id, _) in preview_rows.iter().filter(|(_, key)| key == parent_tool_use_id) {
+                            let _ = doc_ref.update_agent_communication_link(row_id, parent_tool_use_id, doc_id, if done { "done" } else { "running" });
+                        }
+                        for part in &mut folded {
+                            if let MessagePart::Tool { call: harness_proto::ToolCall::AgentCommunication { child_key, .. }, subagent_ref, subagent_status, .. } = part
+                                && child_key == parent_tool_use_id
+                            {
+                                *subagent_ref = Some(doc_id.clone());
+                                *subagent_status = Some(*status);
+                                if !dirty {
+                                    flush_at = tokio::time::Instant::now()
+                                        + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+                                }
+                                dirty = true;
+                            }
+                        }
+                    }
+                }
                 // `flush_at` is otherwise only rescheduled when the parent
                 // turns dirty. A child streaming under an idle parent would
                 // find the deadline already past and commit its doc on every
@@ -4575,6 +4617,18 @@ async fn drive_run(
         let skip_fold = matches!(&event, AgentEvent::SessionStarted { .. }) && !folded.is_empty();
         if !skip_fold {
             fold_event_into_parts(&mut folded, &event);
+            if let AgentEvent::ToolCall { id, call: harness_proto::ToolCall::AgentCommunication { child_key, .. } } = &event
+                && preview_rows.len() < 256 && !preview_rows.iter().any(|(row, _)| row == id)
+            {
+                preview_rows.push((id.clone(), child_key.clone()));
+            }
+            if let AgentEvent::ToolCall { id, call: harness_proto::ToolCall::AgentCommunication { child_key, .. } } = &event
+                && let Some((doc_id, status)) = preview_child_docs.get(child_key)
+                && let Some(MessagePart::Tool { subagent_ref, subagent_status, .. }) = folded.iter_mut().find(|part| part.id() == id)
+            {
+                *subagent_ref = Some(doc_id.clone());
+                *subagent_status = Some(*status);
+            }
             // R2 sidecar PARKED (2026-08-10, product call): the fold's
             // summary/stats ARE the doc's whole record — no refs stamped, no
             // uploads. Full outputs survive only in the host's local run
@@ -5383,6 +5437,49 @@ mod tests {
             let mut feed = self.feed.lock().unwrap().take().expect("one run per test");
             Ok(futures::stream::poll_fn(move |cx| feed.poll_recv(cx).map(|e| e.map(Ok))).boxed())
         }
+    }
+
+    #[tokio::test]
+    async fn preview_communication_late_binds_committed_row_and_freezes() {
+        use super::{AgentEvent, DoneStatus, subagent_doc_id};
+        use harness_doc::{MessagePart, SubagentStatus};
+        use std::time::Duration;
+        let (feed, rx) = tokio::sync::mpsc::unbounded_channel();
+        let registry = crate::registry::HarnessRegistry::new();
+        registry.register(std::sync::Arc::new(FeedHarness {
+            steerable: true,
+            feed: std::sync::Mutex::new(Some(rx)),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(dir.path(), std::sync::Arc::new(registry), HarnessId::Mock, None).unwrap();
+        let chat = "synthetic-parent";
+        let key = "acp2-child:synthetic";
+        core.sessions.dispatch(chat, HarnessId::Mock, request(), None).await.unwrap();
+        let parent = core.doc_host.open(chat).unwrap();
+        let done = || AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: None };
+        feed.send(AgentEvent::ToolCall { id: "communication".into(), call: harness_proto::ToolCall::AgentCommunication { child_key: key.into(), outgoing: true } }).unwrap();
+        feed.send(done()).unwrap();
+        let row = || parent.doc().read_entries().unwrap().into_iter().flat_map(|e| e.parts).find(|p| p.id() == "communication");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while row().is_none() { tokio::time::sleep(Duration::from_millis(15)).await; }
+        }).await.unwrap();
+        assert!(matches!(row(), Some(MessagePart::Tool { subagent_ref: None, .. })));
+        let child = |event| AgentEvent::Subagent { parent_tool_use_id: key.into(), event: Box::new(event) };
+        feed.send(child(AgentEvent::TextDelta { text: "Synthetic child content".into() })).unwrap();
+        feed.send(child(done())).unwrap();
+        feed.send(child(AgentEvent::TextDelta { text: "Late straggler".into() })).unwrap();
+        let id = subagent_doc_id(chat, key);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if matches!(row(), Some(MessagePart::Tool { subagent_ref: Some(reference), subagent_status: Some(SubagentStatus::Done), .. }) if reference == id) { break; }
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+        }).await.unwrap();
+        let child_doc = core.doc_host.open(&id).unwrap();
+        let transcript = format!("{:?}", child_doc.doc().read_entries().unwrap());
+        assert!(transcript.contains("Synthetic child content"));
+        assert!(!transcript.contains("Late straggler"));
+        core.shutdown().await;
     }
 
     // A child streaming under an idle parent found the commit deadline

@@ -505,6 +505,11 @@ pub enum ToolCall {
         #[serde(skip_serializing_if = "Option::is_none")]
         input: Option<serde_json::Value>,
     },
+    #[serde(rename_all = "camelCase")]
+    AgentCommunication {
+        child_key: String,
+        outgoing: bool,
+    },
     Unknown {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1242,6 +1247,9 @@ impl ContextUsage {
         Some(self.tokens? as f64 / self.window.filter(|n| *n > 0)? as f64)
     }
 }
+
+/// Reserved live-only progress keys for ACP Preview session status.
+pub const ACP_PREVIEW_STATUS_PREFIX: &str = "harness:acp-preview:";
 
 /// One running tool's latest [`AgentEvent::ToolProgress`], as the host
 /// serves it to viewers (`WatchToolProgress`). Live-only, never synced.

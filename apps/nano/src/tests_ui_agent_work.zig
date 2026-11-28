@@ -222,6 +222,148 @@ fn snap(h: *Harness, name: []const u8) void {
     h.t.screenshot(path) catch {};
 }
 
+test "ACP Preview transient status is shown and clears without transcript changes" {
+    var h: Harness = undefined;
+    try h.init("{\"reset\":[]}", null);
+    defer h.deinit();
+    snap(&h, "preview-status-before");
+    const states = [_]struct { state: []const u8, label: []const u8, name: []const u8 }{
+        .{ .state = "waiting", .label = "Recovering agent connection", .name = "preview-recovery-after" },
+        .{ .state = "child-permission", .label = "Subagent requested permission", .name = "preview-child-activity-after" },
+    };
+    for (states) |fixture| {
+        const frame = try std.json.Stringify.valueAlloc(testing.allocator, .{.{ .toolId = "harness:acp-preview:synthetic", .output = "", .state = fixture.state }}, .{});
+        defer testing.allocator.free(frame);
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, frame, .{});
+        defer parsed.deinit();
+        try @import("app_progress.zig").apply(&h.a, "chat-syn", parsed.value);
+        h.t.settle(2);
+        try testing.expect(h.t.hasText(fixture.label));
+        snap(&h, fixture.name);
+        const empty = try std.json.parseFromSlice(std.json.Value, testing.allocator, "[]", .{});
+        defer empty.deinit();
+        try @import("app_progress.zig").apply(&h.a, "chat-syn", empty.value);
+        h.t.settle(2);
+        try testing.expect(!h.t.hasText(fixture.label));
+        try testing.expectEqual(@as(usize, 0), h.a.transcript.entries.items.len);
+    }
+}
+
+test "ACP Preview communication links open only the associated local child" {
+    const fixture =
+        \\{"reset":[{"id":"assistant","role":"assistant","status":"complete","parts":[
+        \\{"id":"first","kind":"tool","resolved":true,"call":{"kind":"agentCommunication","outgoing":true,"childKey":"acp2-child:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"subagentRef":"chat-syn--sub--fd5d8f38f7cd3ace"},
+        \\{"id":"second","kind":"tool","resolved":true,"call":{"kind":"agentCommunication","outgoing":false,"childKey":"acp2-child:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"subagentRef":"chat-syn--sub--3b6f1494bd7cb2d8"},
+        \\{"id":"collision","kind":"tool","resolved":true,"call":{"kind":"agentCommunication","outgoing":true,"childKey":"acp2-child:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"subagentRef":"chat-syn--sub--3b6f1494bd7cb2d8"}]}]}
+    ;
+    var filler: std.ArrayList(u8) = .empty;
+    defer filler.deinit(testing.allocator);
+    try filler.appendSlice(testing.allocator, "\"id\":\"height\",\"kind\":\"text\",\"text\":\"");
+    for (0..80) |_| try filler.appendSlice(testing.allocator, "Synthetic line\\n\\n");
+    try filler.appendSlice(testing.allocator, "\"},{\"id\":\"first\"");
+    const tall = try std.mem.replaceOwned(u8, testing.allocator, fixture, "\"id\":\"first\"", filler.items);
+    defer testing.allocator.free(tall);
+    var h: Harness = undefined;
+    try h.init(tall, null);
+    defer h.deinit();
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"WatchDocMessages\":[]}", .{});
+    h.a.engine.state = .connected;
+    h.a.composer.set("Synthetic draft");
+    const attachment = try h.a.gpa.create(@import("app_attachments.zig").Item);
+    attachment.* = .{
+        .app = &h.a,
+        .owner = try h.a.gpa.dupe(u8, "chat-syn"),
+        .name = try h.a.gpa.dupe(u8, "fixture.txt"),
+        .bytes = try h.a.gpa.dupe(u8, "fixture"),
+        .target = null,
+        .id = "00000000-0000-0000-0000-000000000001".*,
+        .status = .ready,
+    };
+    try h.a.attachments.items.append(h.a.gpa, attachment);
+    h.a.view.stick_end = false;
+    const parts = h.a.transcript.entries.items[0].parts.items[1..];
+    const api = @import("app_subagents.zig");
+    api.open(&h.a, "chat-syn", &parts[2]);
+    api.settleFrame(&h.a);
+    try testing.expect(h.a.panels.activeTab() == null);
+    h.t.settle(2);
+    const scroll_key = std.hash.Wyhash.hash(0x5452_414e_5343_5250, "chat-syn");
+    try testing.expect((h.t.ctx.scroll_max.get(scroll_key) orelse 0) > 80);
+    try h.t.ctx.scroll.put(h.t.ctx.gpa, scroll_key, 80);
+    try h.t.ctx.scroll_seen.put(h.t.ctx.gpa, scroll_key, 80);
+    try h.t.ctx.scroll_follow.put(h.t.ctx.gpa, scroll_key, false);
+    h.t.settle(1);
+    const parent_offset = h.t.ctx.scroll.get(scroll_key) orelse 0;
+    try testing.expectEqual(@as(f32, 80), parent_offset);
+    const parent_follow = h.t.ctx.scroll_follow.get(scroll_key);
+    const start = h.a.engine.sent.items.len;
+    for (parts[0..2], 0..) |*part, index| {
+        api.open(&h.a, "chat-syn", part);
+        api.settleFrame(&h.a);
+        const child = h.a.panels.activeTab().?.agent.?;
+        try testing.expect(child.read_only);
+        try testing.expectEqualStrings(part.subagent_ref, child.doc);
+        const child_frame = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\{"reset":[{"id":"reply","role":"assistant","status":"complete","parts":[{"id":"text","kind":"text","text":"Handoff reviewed."}]}]}
+        , .{});
+        defer child_frame.deinit();
+        try child.transcript.apply(child_frame.value);
+        h.t.settle(1);
+        if (index == 0) snap(&h, "communication-linked");
+        @import("view_host.zig").submitSubagentSteer(&h.a, child, "Must not send");
+        @import("app_panels.zig").closeTab(&h.a, h.a.panels.active);
+        try testing.expectEqualStrings("chat-syn", h.a.selected.?);
+        try testing.expectEqualStrings("Synthetic draft", h.a.composer.text());
+        try testing.expect(!h.a.view.stick_end);
+        try testing.expectEqual(parent_offset, h.t.ctx.scroll.get(scroll_key) orelse 0);
+        try testing.expectEqual(parent_follow, h.t.ctx.scroll_follow.get(scroll_key));
+        try testing.expectEqual(@as(usize, 1), h.a.attachments.items.items.len);
+        try testing.expect(h.a.attachments.items.items[0] == attachment);
+        try testing.expectEqualStrings("fixture", attachment.bytes);
+    }
+    const frames = h.a.engine.sent.items[start..];
+    try testing.expectEqual(@as(usize, 2), frames.len);
+    for (frames) |frame| try testing.expect(std.mem.indexOf(u8, frame, "\"method\":\"WatchDocMessages\"") != null);
+}
+
+test "ACP Preview read-only child pane keeps the running worker and parent composer separate" {
+    var h: Harness = undefined;
+    try h.init(live_fixture, live_progress);
+    defer h.deinit();
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"WatchDocMessages":[],"QueueCommand":{}}
+    , .{});
+    h.a.engine.state = .connected;
+    h.a.composer.set("Synthetic parent draft");
+    h.a.view.focus_composer = true;
+    const start = h.a.engine.sent.items.len;
+    const part = &h.a.transcript.entries.items[1].parts.items[1];
+    @import("app_subagents.zig").open(&h.a, "chat-syn", part);
+    @import("app_subagents.zig").settleFrame(&h.a);
+    const child = h.a.panels.activeTab().?.agent.?;
+    try testing.expectEqualStrings("doc-lean-1", child.doc);
+    const watch = child.watch orelse return error.MissingChildWatch;
+    try testing.expect(h.a.engine.mux.pending.contains(watch));
+    try testing.expectEqualStrings("chat-syn", h.a.selected.?);
+    try testing.expectEqualStrings("Synthetic parent draft", h.a.composer.text());
+    @import("app_panels.zig").closeTab(&h.a, h.a.panels.active);
+    try testing.expect(!h.a.panels.host_open);
+    try testing.expect(!h.a.engine.mux.pending.contains(watch));
+    try testing.expectEqualStrings("chat-syn", h.a.selected.?);
+    try testing.expectEqualStrings("Synthetic parent draft", h.a.composer.text());
+    // The pane lifecycle may start/stop its observation, never a child run.
+    const prior = h.a.engine.sent.items[start..];
+    try testing.expectEqual(@as(usize, 1), prior.len);
+    try testing.expect(std.mem.indexOf(u8, prior[0], "\"method\":\"WatchDocMessages\"") != null);
+    const after_close = h.a.engine.sent.items.len;
+    h.a.send();
+    const frames = h.a.engine.sent.items[after_close..];
+    try testing.expectEqual(@as(usize, 1), frames.len);
+    try testing.expect(std.mem.indexOf(u8, frames[0], "\"method\":\"QueueCommand\"") != null);
+    try testing.expect(std.mem.indexOf(u8, frames[0], "\"chatId\":\"chat-syn\"") != null);
+    try testing.expect(std.mem.indexOf(u8, frames[0], "doc-lean-1") == null);
+}
+
 test "809 subagent follow-up routes through parent without consuming composer draft" {
     var h: Harness = undefined;
     try h.init(live_fixture, live_progress);

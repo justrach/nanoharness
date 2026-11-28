@@ -449,6 +449,7 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
             ("Todo", format!("{done}/{} done", items.len()))
         }
         ToolCall::Mcp { server, tool, .. } => ("MCP", format!("{server} · {tool}")),
+        ToolCall::AgentCommunication { outgoing, .. } => ("Agent communication", if *outgoing { "sent" } else { "received" }.into()),
         // Subagent spawns decode as Unknown named "Agent[: <description>]"
         // (every native driver's convention): label them "Agent" with the
         // description as the detail — "Tool · Agent: scan repo" read as two
@@ -748,7 +749,7 @@ pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
             }
             ToolCall::WebFetch { .. } => fetches += 1,
             ToolCall::Todo { .. } => todos += 1,
-            ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => other += 1,
+            ToolCall::Mcp { .. } | ToolCall::Unknown { .. } | ToolCall::AgentCommunication { .. } => other += 1,
         }
     }
     let mut segments: Vec<String> = Vec::new();

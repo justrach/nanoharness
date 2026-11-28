@@ -2280,6 +2280,8 @@ pub const App = struct {
         var reasoning: ?[]const u8 = null;
         var orchestrator: ?[]const u8 = null;
         var service_tier: ?[]const u8 = null;
+        var acp_v2_preview: ?bool = null;
+        var sandbox: []const u8 = "workspace-write";
         var cwd: []const u8 = "~";
         var worktree: ?requests.WorktreeSpec = null;
         const agent_mod = @import("app_agent.zig");
@@ -2290,6 +2292,8 @@ pub const App = struct {
                 reasoning = agent_mod.sendReasoning(a, harness orelse "graff", model, c.reasoning);
                 orchestrator = c.orchestrator;
                 service_tier = agent_mod.sendServiceTier(a, harness orelse "graff", model, c.service_tier);
+                acp_v2_preview = if (c.acp_v2_preview) true else null;
+                sandbox = c.sandbox orelse sandbox;
                 if (c.cwd) |d| cwd = d;
             }
             break :blk id;
@@ -2334,8 +2338,9 @@ pub const App = struct {
             .harness = harness,
             .model = model,
             .reasoning = reasoning,
-            .modelOptions = .{ .orchestrator = orchestrator, .serviceTier = service_tier },
+            .modelOptions = .{ .orchestrator = orchestrator, .serviceTier = service_tier, .harnessAcpV2Preview = acp_v2_preview },
             .cwd = cwd,
+            .sandbox = sandbox,
             .worktree = worktree,
         }), .of(feedback.Pending, pending, feedback.Pending.onReply));
         // Sent: the prompt is no one's draft any more.

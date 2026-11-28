@@ -5,6 +5,8 @@
 
 #[path = "acp/command_edges.rs"]
 mod command_edges;
+#[path = "acp/preview.rs"]
+mod preview;
 
 use std::path::PathBuf;
 use std::time::Duration;
