@@ -148,43 +148,6 @@ test "browser zoom shortcuts route native menu and UI keys to the focused visibl
     }
 }
 
-const Http = struct {
-    server: std.Io.net.Server,
-    served: std.atomic.Value(bool) = .init(false),
-
-    fn run(h: *Http) void {
-        var fds = [_]std.posix.pollfd{.{ .fd = h.server.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
-        if ((std.posix.poll(&fds, 5000) catch return) <= 0) return;
-        const stream = h.server.accept(testing.io) catch return;
-        defer stream.close(testing.io);
-        fds[0].fd = stream.socket.handle;
-        if ((std.posix.poll(&fds, 1000) catch return) <= 0) return;
-        var bytes: [4096]u8 = undefined;
-        var buffers = [_][]u8{&bytes};
-        if ((stream.readWithControl(testing.io, &buffers, &.{}) catch return).data_len == 0) return;
-        const page =
-            \\<!doctype html><title></title>
-            \\<style>body { margin: 16px; } button, input { box-sizing: border-box; display: block; width: 180px; height: 36px; margin: 0 0 12px; }</style>
-            \\<button type="button">Count</button><input aria-label="Fixture text"><output>count=0; text=</output>
-            \\<script>
-            \\const button = document.querySelector('button'), field = document.querySelector('input');
-            \\const output = document.querySelector('output');
-            \\let count = 0;
-            \\function show() { document.title = output.textContent = `count=${count}; text=${field.value}`; }
-            \\button.addEventListener('click', event => { if (event.isTrusted) { ++count; show(); } });
-            \\field.addEventListener('focus', () => { document.title = 'Fixture input focused'; });
-            \\field.addEventListener('input', event => { if (event.isTrusted) show(); });
-            \\document.title = 'Synthetic localhost preview';
-            \\</script>
-        ;
-        var buf: [1024]u8 = undefined;
-        var writer = stream.writer(testing.io, &buf);
-        writer.interface.print("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ page.len, page }) catch return;
-        writer.interface.flush() catch return;
-        h.served.store(true, .release);
-    }
-};
-
 fn waitForTitle(native: *const app_browser.Native, expected: []const u8) !void {
     const deadline = std.Io.Clock.awake.now(testing.io).addDuration(.fromSeconds(5));
     while (!std.mem.eql(u8, expected, native.title())) {
@@ -239,7 +202,7 @@ const HiddenPreview = struct {
     }
 
     fn expectChrome(window: objc.Object, native: *const app_browser.Native, body: nanoui.ui.Rect) !void {
-        // Halfway up the localhost address bar, immediately above the body.
+        // Halfway up the address bar, immediately above the body.
         try testing.expect(body.y > 19);
         const content = objc.msg(objc.Object, window, "contentView", .{});
         const location = objc.msg(objc.CGPoint, content, "convertPoint:toView:", .{
@@ -287,28 +250,58 @@ const HiddenPreview = struct {
     }
 };
 
-test "the native Browser interacts with a real localhost HTTP preview without an engine" {
+test "the native Browser delivers input to a saved generated page without an engine" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const objc = nanoui.objc;
     const pool = objc.Pool.push();
     defer pool.pop();
     prepareAppKit();
-    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var http: Http = .{ .server = try addr.listen(testing.io, .{}) };
-    defer http.server.deinit(testing.io);
-    const thread = try std.Thread.spawn(.{}, Http.run, .{&http});
-    defer thread.join();
-    const address = try std.fmt.allocPrint(testing.allocator, "http://127.0.0.1:{d}/", .{http.server.socket.address.getPort()});
-    defer testing.allocator.free(address);
+    // HTTP(S), including localhost, routes to browse Connected Apps. A saved
+    // generated page exercises the production embedded WebKit path offline.
+    const id = "0123456789abcdef0123456789abcdef";
+    const address = "graff-view://html/" ++ id;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, ".graff/views");
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = ".graff/views/" ++ id ++ ".html",
+        .data =
+        \\<!doctype html><title></title>
+        \\<style>body { margin: 16px; } button, input { box-sizing: border-box; display: block; width: 180px; height: 36px; margin: 0 0 12px; }</style>
+        \\<button type="button">Count</button><input aria-label="Fixture text"><output>count=0; text=</output>
+        \\<script>
+        \\const button = document.querySelector('button'), field = document.querySelector('input');
+        \\const output = document.querySelector('output');
+        \\let count = 0;
+        \\function show() { document.title = output.textContent = `count=${count}; text=${field.value}`; }
+        \\button.addEventListener('click', event => { if (event.isTrusted) { ++count; show(); } });
+        \\field.addEventListener('focus', () => { document.title = 'Fixture input focused'; });
+        \\field.addEventListener('input', event => { if (event.isTrusted) show(); });
+        \\document.title = 'Synthetic generated preview ready';
+        \\</script>
+        ,
+    });
+    const home = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(home);
+    var env = std.process.Environ.Map.init(testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", home);
     @import("theme.zig").registerFonts();
     var a: App = .init(testing.allocator, testing.io, 1);
     defer a.deinit();
+    a.env = &env;
     a.offscreen = true;
-    a.openChat("localhost-fixture", null);
-    app_browser.openInternalLink(&a, "localhost-fixture", address);
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"preview-fixture","deviceId":"synthetic-local","title":"Synthetic preview","archived":false}]
+    , .{});
+    defer chats.deinit();
+    try a.chats.replace(chats.value);
+    a.device_id = try testing.allocator.dupe(u8, "synthetic-local");
+    a.openChat("preview-fixture", null);
+    app_browser.openSaved(&a, "preview-fixture", @import("saved_view.zig").View.init(.html, id).?);
     app_browser.settleFrame(&a);
     const preview_tab = a.panels.active;
-    const browser = a.panels.tabs.items[preview_tab].browser.?;
+    const browser = (a.panels.activeTab() orelse return error.NoBrowserTab).browser orelse return error.NoBrowserTab;
     try testing.expect(browser.native == null);
 
     // Same native hierarchy as the app, but never ordered or made key. The
@@ -344,9 +337,16 @@ test "the native Browser interacts with a real localhost HTTP preview without an
     const body = try HiddenPreview.settleLayout(surface, browser);
     const native = browser.native orelse return error.NoNativePreview;
     try testing.expect(native.visible);
-    try testing.expect(native.allowsBackForwardGestures());
-    try waitForTitle(native, "Synthetic localhost preview");
-    try testing.expect(http.served.load(.acquire));
+    // This route locks navigation to the saved page and uses no app bridge or
+    // persistent website data. The native view is created by the real layout.
+    try testing.expect(!native.allowsBackForwardGestures());
+    const config = objc.msg(objc.Object, native.view, "configuration", .{});
+    const store = objc.msg(objc.Object, config, "websiteDataStore", .{});
+    try testing.expect(!objc.msg(objc.BOOL, store, "isPersistent", .{}));
+    const controller = objc.msg(objc.Object, config, "userContentController", .{});
+    const scripts = objc.msg(objc.Object, controller, "userScripts", .{});
+    try testing.expectEqual(@as(objc.NSUInteger, 0), objc.msg(objc.NSUInteger, scripts, "count", .{}));
+    try waitForTitle(native, "Synthetic generated preview ready");
     try testing.expectEqualStrings(address, native.url());
 
     objc.msg(void, try HiddenPreview.themeFrame(window.nswindow), "layoutSubtreeIfNeeded", .{});
