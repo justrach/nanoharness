@@ -200,6 +200,9 @@ impl TitleGenerator {
         };
         let model = match settings.model {
             Some(model) => Some(model),
+            // Graff's native title command uses its configured default model.
+            // No ACP session or cross-provider catalog probe is needed.
+            None if harness_id == HarnessId::Graff => None,
             None => cheapest_model(
                 &tokio::time::timeout(std::time::Duration::from_secs(10), harness.models())
                     .await
@@ -207,11 +210,16 @@ impl TitleGenerator {
                     .unwrap_or_default(),
             ),
         };
-        let title_prompt = format!(
-            "{}\n\nSession request (JSON string):\n{}",
-            harness_adapters::TITLE_INSTRUCTIONS,
-            serde_json::to_string(prompt).ok()?
-        );
+        let title_prompt = if harness_id == HarnessId::Graff {
+            // The native command supplies its own instructions.
+            prompt.to_owned()
+        } else {
+            format!(
+                "{}\n\nSession request (JSON string):\n{}",
+                harness_adapters::TITLE_INSTRUCTIONS,
+                serde_json::to_string(prompt).ok()?
+            )
+        };
         for attempt in 0..=RETRY_DELAYS_MS.len() {
             let request = RunRequest {
                 turn_origin: Default::default(),
@@ -507,6 +515,52 @@ mod tests {
                     .contains(&serde_json::to_string(prompt).unwrap())
             );
         }
+        core.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn graff_sessions_use_native_titles_instead_of_prompt_prefixes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("fake-graff");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+set -eu
+[ "$#" -eq 3 ]
+[ "$1" = --json ]
+[ "$2" = title ]
+[ "$3" = '"Whoa, what just happened can you check why calendar sync stalls?"' ]
+[ ! -e ./fake-graff ]
+printf '%s\n' '{"type":"title_result","title":"Diagnose calendar sync stalls"}'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.register(Arc::new(
+            harness_adapters::AcpHarness::graff().with_executable(executable),
+        ));
+        let core = crate::EngineCore::assemble(dir.path(), registry.clone(), HarnessId::Mock, None)
+            .unwrap();
+        core.workspace
+            .create_chat("untitled", None, Some(&core.device_id), None, None)
+            .unwrap();
+        let generator = TitleGenerator::new(core.workspace.clone(), registry, core.repos.clone());
+        generator
+            .generate(
+                "untitled",
+                HarnessId::Graff,
+                "Whoa, what just happened can you check why calendar sync stalls?",
+                &dir.path().to_string_lossy(),
+            )
+            .await
+            .unwrap();
+        let chat = core.workspace.chat("untitled").unwrap().unwrap();
+        assert_eq!(chat.title.as_deref(), Some("Diagnose calendar sync stalls"));
         core.shutdown().await;
     }
 
