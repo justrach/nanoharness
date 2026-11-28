@@ -159,6 +159,24 @@ for line in sys.stdin:
                     activity['kind'] = 'elicitation'
                     request['method'] = 'elicitation/create'
                     request['params'] = {'sessionId': 'child', 'toolCallId': 'tool', 'mode': 'form', 'message': 'Synthetic question', 'requestedSchema': {'type': 'object', 'properties': {}}}
+                if mode.endswith('owned-stale'):
+                    update('child', 'state_update', state='requires_action', _meta={'graff/childActivity': activity})
+                    update('child', 'state_update', state='running')
+                    write(request)
+                    continue
+                if mode.endswith('mismatch'):
+                    if mode.endswith('id-mismatch'):
+                        activity['requestId'] = 7
+                    else:
+                        activity['toolCallId'] = '' if mode.endswith('empty-tool-mismatch') else 'other'
+                    update('child', 'state_update', state='requires_action', _meta={'graff/childActivity': activity})
+                    write(request)
+                    continue
+                if mode.endswith('null-clear'):
+                    write(request)
+                    update('child', 'state_update', state='requires_action', _meta={'graff/childActivity': None})
+                    update('child', 'state_update', state='requires_action', _meta={'graff/childActivity': activity})
+                    continue
                 if mode.endswith('stale'):
                     update('child', 'state_update', state='requires_action', _meta={'graff/childActivity': activity})
                     update('child', 'state_update', state='running')

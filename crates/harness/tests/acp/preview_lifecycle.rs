@@ -66,6 +66,45 @@ async fn preview_child_activity_matches_real_requests_in_either_order() {
 }
 
 #[tokio::test]
+async fn preview_attention_requires_current_exact_match_and_clears() {
+    for (mode, expected) in [
+        ("owned-stale", &[][..]),
+        ("id-mismatch", &[][..]),
+        ("tool-mismatch", &[][..]),
+        ("empty-tool-mismatch", &[][..]),
+        ("metadata-first", &["child-permission", "cleared"][..]),
+    ] {
+        assert_child_attention(mode, expected).await;
+    }
+}
+
+#[tokio::test]
+async fn preview_attention_explicit_clear_retires_unmatched_request() {
+    assert_child_attention("null-clear", &[]).await;
+}
+
+async fn assert_child_attention(mode: &str, expected: &[&str]) {
+    let (root, _, req) = fixture(&format!("child-activity-{mode}"), true);
+    let harness = AcpHarness::graff()
+        .with_executable(root.path().join("agent.py"))
+        .with_preview_stdio(true);
+    let events = run_to_end(&harness, req, controls().0).await;
+    assert_eq!(dones(&events), [(DoneStatus::Completed, None)]);
+    let attention: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolProgress { id, state, .. }
+                if id.starts_with("harness:acp-preview:child:") =>
+            {
+                state.as_deref()
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(attention, expected, "{mode}");
+}
+
+#[tokio::test]
 async fn preview_status_stale_unauthorized_and_elicitation_are_fail_closed() {
     for (mode, expected) in [
         ("child-activity-stale", 0),

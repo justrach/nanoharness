@@ -18,6 +18,8 @@ This is retrospective independent test authorship, permitted by the maintainer f
 | ACP-12 | Receives recovery or child attention, then status clears | Shows only live, owned recovery and transient attention; clears without adding transcript entries or claiming success | Wire / UI tree | `preview_reports_only_live_owned_network_recovery`; `ACP Preview transient status is shown and clears without transcript changes` |
 | ACP-13 | Stops foreground work or cancels a particular child tool | Foreground stop is session-scoped and remains separate from targeted tool cancellation | Wire / refusal | `preview_foreground_cancel_is_session_scoped`; `preview_targeted_tool_cancel_keeps_foreground_stop_separate` |
 | ACP-14 | Exercises Preview menu, recovery/attention and communication in Codegraff Light/Dark, normal/fullscreen | One truthful label/action per surface; menu switches protocol, attention clears, child opens read-only and the parent draft stays put | Offscreen matrix | `before/after × light/dark × normal/fullscreen × menu/status/communication` (local fixture scenes) |
+| ACP-15 | Delivers an owned request after candidate retirement, changes the request or tool ID, or delivers a matching request followed by child idle | Stale and mismatched pairs emit nothing; a matching pair emits one notice and idle clears it | Wire / state | `preview_attention_requires_current_exact_match_and_clears` |
+| ACP-16 | Delivers a child request, explicitly clears attention, then delivers the old metadata | The retired request cannot reopen attention | Wire / failure | `preview_attention_explicit_clear_retires_unmatched_request` |
 
 ## Design checks
 
@@ -46,3 +48,20 @@ apps/nano/zig-out/bin/test
 - The same synthetic normal Light candidate status and communication scenes also ran on the baseline using fixture-only snap hooks to supply progress and reveal the tool group. The baseline fails at **Recovering agent connection** and **Agent communication**, respectively. These are runtime view assertions, not build failures. The candidate passes both. The before/after matrix uses revision-specific expectations for capturing the expected surfaces, not as a substitute for these same-assertion red/green runs.
 - The candidate passed 14 adapter integration tests, five reducer unit tests and four named UI-tree tests. The adapter integration and filtered Zig test binaries, and the menu snap scenario, each passed 20 consecutive runs.
 - The existing adapter and UI-tree suites are candidate coverage; these baseline trials do not claim that every candidate test was backported or that the Graff reconnect regression was demonstrated on `19e314f1`. Real Graff reconnect evidence and the breaker's mutation/attack results are separate from this test-author run.
+
+## Independent breaker pass
+
+Six reversible functional mutations: **3 killed and 3 survived the existing assertions; 6 killed and 0 surviving with ACP-15.** No mutation was retained. The attention-clear candidate initially had no failing assertion among the existing 14 Preview integration tests; a scratch-fixture setup failure in the in-progress new assertions was not counted as a kill.
+
+| Mutated behavior | Existing coverage | With new regression |
+|---|---|---|
+| Permit a mismatched child key/ref to open | Killed by ACP-9 UI assertion | — |
+| Keep a pending child attention candidate after leaving `requires_action` | Survived | ACP-15 rejects a late request from the same owned child |
+| Allow a resume with a missing child barrier to prompt | Killed by ACP-7 wire assertion | — |
+| Re-emit mirrored and repeated communication rows | Killed by both ACP-9 wire directions | — |
+| Match any pending request for the same child, ignoring the tuple | Survived | ACP-15 rejects a mismatched request ID and covers wrong and empty tool IDs |
+| Emit an unrecognized state instead of `cleared` on child idle | Survived | ACP-15 checks the exact notice/clear sequence |
+
+The attack pass also found one existing defect: an explicit null `graff/childActivity` clears the candidate and visible attention but retains unmatched requests. Late metadata can therefore reopen retired attention. ACP-16 is intentionally red on this revision: it observes `child-permission` then `cleared`, where no notice is expected. The parent still completes normally. No production fix is included in the breaker commit.
+
+Run ACP-15 and ACP-16 with `scripts/heavy-build.sh cargo test --offline -p harness-adapters --test acp preview_attention`. The unmutated adapter passed all 15 Preview integration tests when ACP-16 was excluded. Twenty consecutive runs of the two new tests reproduced the same outcomes: ACP-15 passed and ACP-16 failed at the notice assertion. The breaker did not rerun the real Graff interop or visual matrix.
