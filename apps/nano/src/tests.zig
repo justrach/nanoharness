@@ -219,6 +219,7 @@ test {
     _ = @import("project_paths.zig");
     _ = @import("graff_update.zig");
     _ = @import("view_updates.zig");
+    _ = @import("windows_update.zig");
     _ = @import("sound.zig");
     _ = @import("visual_luau.zig");
     _ = @import("ascii_field.zig");

@@ -512,7 +512,7 @@ pub const Updater = struct {
     /// the manifest's SHA-256, then renamed into place. A file the manifest
     /// gives no SHA-256 for is never installed (the Rust updater installs a
     /// managed release unverified then; `stage_mac_app` already refuses).
-    fn download(self: *Updater, arena: Allocator, io: std.Io, m: Manifest, file: []const u8, dest: []const u8) !?[]const u8 {
+    pub fn download(self: *Updater, arena: Allocator, io: std.Io, m: Manifest, file: []const u8, dest: []const u8) !?[]const u8 {
         const expected_raw = m.sha256For(file) orelse
             return try std.fmt.allocPrint(arena, "the release has no SHA-256 for {s}; refusing to install it unverified", .{file});
         const expected = std.mem.trim(u8, expected_raw, " \t\r\n");
@@ -714,7 +714,7 @@ pub const Updater = struct {
         return .{ .version = try reply_gpa.dupe(u8, m.version) };
     }
 
-    fn refuseUnsigned(self: *Updater, arena: Allocator, m: Manifest) !?[]const u8 {
+    pub fn refuseUnsigned(self: *Updater, arena: Allocator, m: Manifest) !?[]const u8 {
         if (!self.require_manifest_sig) return null;
         const sig = m.sig orelse return try std.fmt.allocPrint(arena, "unsigned manifest; refusing to install", .{});
         const message = try manifestMessage(arena, m.version, m.files);
@@ -1091,7 +1091,7 @@ fn engineIo(ctx: ?*anyopaque) std.Io {
     return io.*;
 }
 
-fn stdGet(ctx: ?*anyopaque, gpa: Allocator, url: []const u8) anyerror!HttpReply {
+pub fn stdGet(ctx: ?*anyopaque, gpa: Allocator, url: []const u8) anyerror!HttpReply {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     errdefer aw.deinit();
     var hash = std.crypto.hash.sha2.Sha256.init(.{});

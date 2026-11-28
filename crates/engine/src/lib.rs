@@ -695,6 +695,7 @@ pub struct EngineRuntime {
 struct HeadlessRpc {
     inner: Arc<dyn RpcService>,
     stop_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    update_quiescent: update_bridge::QuiescentCheck,
     #[cfg(unix)]
     terminals: Terminals,
 }
@@ -808,18 +809,37 @@ impl RpcService for HeadlessRpc {
                 params,
             );
         }
-        if method != methods::STOP_ENGINE {
+        let for_update = method == methods::STOP_ENGINE_FOR_UPDATE;
+        if !for_update && method != methods::STOP_ENGINE {
             return self.inner.handle(method, params).await;
+        }
+        if for_update {
+            if params.get("pid").and_then(serde_json::Value::as_u64)
+                != Some(u64::from(std::process::id()))
+            {
+                return Err(RpcError::Failed("The local engine changed".into()));
+            }
+            if !(self.update_quiescent)() {
+                return Err(RpcError::Failed("The local engine is busy".into()));
+            }
         }
 
         let stop_tx = self.stop_tx.clone();
+        let still_idle = for_update.then(|| self.update_quiescent.clone());
         // Let the unary success frame reach the client before `Engine::run`
-        // aborts the IPC server and drains the runtime.
+        // aborts the IPC server and drains the runtime. Work might have arrived
+        // from another client while the response was in flight.
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let _ = stop_tx.send(());
+            if still_idle.is_none_or(|check| check()) {
+                let _ = stop_tx.send(());
+            }
         });
-        RpcReply::value(&serde_json::json!({ "ok": true }))
+        if for_update {
+            RpcReply::value(&serde_json::json!({ "pid": std::process::id() }))
+        } else {
+            RpcReply::value(&serde_json::json!({ "ok": true }))
+        }
     }
 }
 
@@ -1183,6 +1203,14 @@ impl Engine {
         let service: Arc<dyn RpcService> = Arc::new(HeadlessRpc {
             inner: runtime.core().rpc_service(),
             stop_tx,
+            update_quiescent: {
+                let sessions = runtime.core().sessions.clone();
+                let terminals = runtime.core().terminals.clone();
+                let harness_updates = runtime.core().harness_updates.clone();
+                Arc::new(move || {
+                    !sessions.any_active() && !terminals.any_open() && !harness_updates.any_active()
+                })
+            },
             #[cfg(unix)]
             terminals: runtime.core().terminals.clone(),
         });

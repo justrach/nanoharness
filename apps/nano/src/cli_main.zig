@@ -261,6 +261,16 @@ fn run(init: std.process.Init) !u8 {
     const env = init.environ_map;
     const all_args = try init.minimal.args.toSlice(arena);
     const args: []const []const u8 = if (all_args.len > 1) all_args[1..] else &.{};
+    if (comptime builtin.os.tag == .windows) {
+        const update = @import("windows_update.zig");
+        if (args.len > 0 and std.mem.eql(u8, args[0], update.helper_flag)) {
+            update.runHelper(arena, io, env, args[1..]) catch |err| {
+                std.log.err("Windows update: {t}", .{err});
+                return 1;
+            };
+            return 0;
+        }
+    }
 
     var out_buf: [65536]u8 = undefined;
     var err_buf: [8192]u8 = undefined;

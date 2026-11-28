@@ -33,6 +33,7 @@ pub fn main(init: std.process.Init) !void {
     // pinned its agent for this run.
     if (harness_override == null) @import("composer_defaults.zig").apply(&a);
     a.env = init.environ_map;
+    defer if (comptime @import("builtin").os.tag == .windows) @import("view_updates.zig").cleanupWindowsUpdate(&a);
     const gui = if (comptime @hasField(nanoui.App, "gui")) app.gui else true;
     a.performance.available = !@import("builtin").is_test and @import("builtin").mode != .debug and !app.flags.hidden and app.flags.play == null and app.flags.script.len == 0 and gui;
     if (a.performance.available) a.performance.start(init.gpa, init.io);

@@ -531,6 +531,15 @@ async fn explicit_dev_bearer_keeps_online_routing_enabled() {
 
 #[tokio::test]
 async fn headless_stop_rpc_drains_the_daemon_and_releases_ipc() {
+    assert_headless_stop(false).await;
+}
+
+#[tokio::test]
+async fn headless_stop_for_update_rejects_wrong_pid_and_drains_the_daemon() {
+    assert_headless_stop(true).await;
+}
+
+async fn assert_headless_stop(update: bool) {
     let dir = tempfile::tempdir().unwrap();
     let port = {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -578,13 +587,27 @@ async fn headless_stop_rpc_drains_the_daemon_and_releases_ipc() {
     .await
     .expect("headless IPC did not start");
 
-    assert_eq!(
-        client
-            .call(methods::STOP_ENGINE, serde_json::json!({}))
-            .await
-            .unwrap(),
-        serde_json::json!({ "ok": true })
-    );
+    let (method, params, expected) = if update {
+        // An unrelated engine on the configured port must not be stopped.
+        assert!(
+            client
+                .call(
+                    methods::STOP_ENGINE_FOR_UPDATE,
+                    serde_json::json!({ "pid": 0 })
+                )
+                .await
+                .is_err()
+        );
+        let pid = serde_json::json!({ "pid": std::process::id() });
+        (methods::STOP_ENGINE_FOR_UPDATE, pid.clone(), pid)
+    } else {
+        (
+            methods::STOP_ENGINE,
+            serde_json::json!({}),
+            serde_json::json!({ "ok": true }),
+        )
+    };
+    assert_eq!(client.call(method, params).await.unwrap(), expected);
     tokio::time::timeout(std::time::Duration::from_secs(5), daemon)
         .await
         .expect("headless engine did not stop")

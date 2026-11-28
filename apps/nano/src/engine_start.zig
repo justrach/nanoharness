@@ -243,14 +243,14 @@ pub fn replaceOlderEngine(a: *App) void {
 }
 
 fn enabled(a: *const App) bool {
-    if (a.offscreen or a.engine.scene != null) return false;
+    if (a.offscreen or a.engine.scene != null or a.updates.windows_restart_pending) return false;
     const env = a.env orelse return false;
     return env.get("HARNESS_NANO_NO_ENGINE_START") == null;
 }
 
 fn onTick(ctx: ?*anyopaque) callconv(.c) void {
     const a: *App = @ptrCast(@alignCast(ctx.?));
-    if (a.engine.state == .connected) {
+    if (!enabled(a) or a.engine.state == .connected) {
         a.engine_start.ticking = false;
         return;
     }

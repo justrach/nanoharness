@@ -37,7 +37,10 @@ pub const RestartPlace = enum {
 };
 
 // Worker-to-main handoff. The rest of the app-update UI state is main-owned.
+const windows_update = @import("windows_update.zig");
+
 const AppInstallResult = struct {
+    windows_stage: ?windows_update.Token = null,
     installed: [32]u8 = undefined,
     installed_len: usize = 0,
     failure: [160]u8 = undefined,
@@ -66,11 +69,17 @@ pub const State = struct {
     /// True in the desktop app and unit tests; false only in legacy GPUI
     /// parity scenes recorded against an unmanaged binary.
     desktop_update: bool = true,
-    /// Only a production macOS bundle with its own sibling CLI may install.
+    /// Only a production macOS bundle or a managed per-user Windows package may install.
     app_install_result: ?AppInstallResult = null,
     app_install_checked: bool = false,
     app_can_install: bool = false,
-    /// The CLI has already replaced the bundle on disk; reopening uses it.
+    windows_stage: ?windows_update.Token = null,
+    windows_worker: ?std.Thread = null,
+    windows_restart_pending: bool = false,
+    windows_stop_request: ?u64 = null,
+    windows_stop_deadline: i64 = 0,
+    windows_apply_failed: bool = false,
+    /// On macOS the bundle has already been replaced; on Windows it is staged.
     app_installed: [32]u8 = undefined,
     app_installed_len: usize = 0,
     app_downloading: bool = false,
@@ -392,10 +401,11 @@ pub fn updateSummary(buf: []u8, a: *const App, now_ms: i64) UpdateSummary {
         };
     }
     if (restart_ver) |ver| {
-        return .{
-            .line = std.fmt.bufPrint(buf, "Harness v{s} is installed. Restart when you're ready to use it.", .{ver}) catch "Update installed. Restart when ready.",
-            .action = .{ .restart = ver },
-        };
+        const line = if (a.updates.appFailed()) |failure| failure else if (builtin.os.tag == .windows)
+            std.fmt.bufPrint(buf, "Harness v{s} is ready. Restart to update.", .{ver}) catch "Restart to update."
+        else
+            std.fmt.bufPrint(buf, "Harness v{s} is installed. Restart when you're ready to use it.", .{ver}) catch "Update installed. Restart when ready.";
+        return .{ .line = line, .action = if (a.updates.windows_restart_pending) .none else .{ .restart = ver } };
     }
     if (a.updates.app_downloading) {
         const line = if (a.updates.restart_after_verify)
@@ -405,6 +415,12 @@ pub fn updateSummary(buf: []u8, a: *const App, now_ms: i64) UpdateSummary {
         else
             "Downloading update…";
         return .{ .line = line, .action = .downloading };
+    }
+    if (a.updates.windows_apply_failed) {
+        return .{
+            .line = "Windows couldn't install the update. The previous version was kept. Close other Harness instances before retrying.",
+            .action = if (latest) |ver| .{ .retry = ver } else .check,
+        };
     }
     if (a.updates.appFailed()) |err| {
         if (latest) |ver| {
@@ -484,7 +500,7 @@ pub fn onReleaseChecked(a: *App) void {
 /// Only a fresh successful check may replace the verified running bundle.
 /// Installation defaults on; the legacy restart preference is unrelated.
 fn automaticallyInstall(a: *App) void {
-    if (!a.settings.get(.automatically_install_updates) or !a.release.succeeded or
+    if (!a.settings.get(.automatically_install_updates) or !a.release.succeeded or a.updates.windows_restart_pending or a.updates.windows_apply_failed or
         a.release.schedule.in_flight or a.release.schedule.failures > 0 or
         appRestartVersion(a) != null or a.updates.app_downloading) return;
     if (a.env) |env| {
@@ -504,7 +520,7 @@ pub fn triggerAppUpdate(a: *App, ver: []const u8) void {
         openExternalUrl("https://github.com/justrach/nanoharness/releases/latest");
         return;
     }
-    if (a.updates.app_downloading) return;
+    if (a.updates.app_downloading or a.updates.windows_restart_pending) return;
     const latest = appUpdateVersion(a) orelse return;
     if (appRestartVersion(a)) |ready| {
         if (std.mem.eql(u8, ready, ver) and std.mem.eql(u8, latest, ver)) {
@@ -521,17 +537,26 @@ fn startAppDownload(a: *App, restart_after_verify: bool) void {
     if (a.updates.app_downloading) return;
     a.updates.restart_after_verify = restart_after_verify;
     a.updates.app_downloading = true;
+    a.updates.windows_apply_failed = false;
     a.updates.app_failed_len = 0;
     a.redraw();
     if (a.offscreen or builtin.is_test) return;
-    const t = std.Thread.spawn(.{}, appUpdateWorker, .{a}) catch {
+    var target = AppInstallResult{};
+    if (comptime builtin.os.tag == .windows) {
+        const ver = appUpdateVersion(a) orelse "";
+        target.installed_len = @min(ver.len, target.installed.len);
+        @memcpy(target.installed[0..target.installed_len], ver[0..target.installed_len]);
+    }
+    const t = std.Thread.spawn(.{}, appUpdateWorker, .{ a, target }) catch {
         a.updates.app_downloading = false;
         a.updates.restart_after_verify = false;
         a.updates.setAppFailed("couldn't start background installer");
         a.redraw();
         return;
     };
-    t.detach();
+    if (comptime builtin.os.tag == .windows) {
+        a.updates.windows_worker = t;
+    } else t.detach();
 }
 
 /// Pure install identity. Never search /Applications, PATH or an engine
@@ -605,12 +630,42 @@ pub fn initialize(a: *App) void {
     if (a.updates.app_install_checked) return;
     a.updates.app_install_checked = true;
     if (a.offscreen or builtin.is_test) return;
-    const cli = findHarnessCli(a.gpa, a.io) orelse return;
-    a.gpa.free(cli);
+    const path = if (comptime builtin.os.tag == .windows)
+        windows_update.findInstall(a.gpa, a.io, a.env orelse return) catch return
+    else
+        findHarnessCli(a.gpa, a.io) orelse return;
+    a.gpa.free(path);
     a.updates.app_can_install = true;
+    if (comptime builtin.os.tag == .windows) {
+        a.updates.windows_apply_failed = a.env.?.get(windows_update.failure_env) != null;
+    }
 }
 
-fn appUpdateWorker(a: *App) void {
+pub fn cleanupWindowsUpdate(a: *App) void {
+    if (a.updates.windows_worker) |worker| worker.join();
+    const env = a.env orelse return;
+    if (a.updates.windows_stage) |token| windows_update.discard(a.gpa, a.io, env, token);
+    if (a.updates.app_install_result) |result| if (result.windows_stage) |token| {
+        windows_update.discard(a.gpa, a.io, env, token);
+    };
+}
+
+fn appUpdateWorker(a: *App, target: AppInstallResult) void {
+    if (comptime builtin.os.tag == .windows) {
+        var result = target;
+        const env = a.env orelse return;
+        result.windows_stage = windows_update.stage(a.gpa, a.io, env, target.installed[0..target.installed_len]) catch |err| {
+            std.log.warn("Windows update staging: {t}", .{err});
+            queueAppInstallResult(a, "", switch (err) {
+                error.UnverifiedReleaseManifest, error.UnverifiedWindowsArchive => "Couldn't verify the Windows update. Check for updates and try again.",
+                error.ReleaseChanged => "The release changed while checking. Check for updates and try again.",
+                else => "Couldn't prepare the Windows update. Check your connection and disk space, then retry.",
+            });
+            return;
+        };
+        publishAppInstallResult(a, result);
+        return;
+    }
     const bin = findHarnessCli(a.gpa, a.io) orelse {
         queueAppInstallResult(a, "", "This installation cannot update itself. Install the latest release manually.");
         return;
@@ -654,6 +709,10 @@ fn queueAppInstallResult(a: *App, installed: []const u8, failure: []const u8) vo
     }
     result.failure_len = @min(failure.len, result.failure.len);
     @memcpy(result.failure[0..result.failure_len], failure[0..result.failure_len]);
+    publishAppInstallResult(a, result);
+}
+
+fn publishAppInstallResult(a: *App, result: AppInstallResult) void {
     a.updates.acquire();
     a.updates.app_install_result = result;
     a.updates.release();
@@ -712,6 +771,14 @@ fn appUpdateDelivered(ctx: ?*anyopaque) callconv(.c) void {
     const restart = a.updates.restart_after_verify;
     a.updates.restart_after_verify = false;
     const result = pending orelse return;
+    if (comptime builtin.os.tag == .windows) {
+        if (a.updates.windows_worker) |worker| worker.join();
+        a.updates.windows_worker = null;
+        if (a.updates.windows_stage) |old| {
+            if (a.env) |env| windows_update.discard(a.gpa, a.io, env, old);
+        }
+        a.updates.windows_stage = result.windows_stage;
+    }
     a.updates.setAppInstalled(result.installed[0..result.installed_len]);
     a.updates.setAppFailed(result.failure[0..result.failure_len]);
     a.updates.app_downloading = false;
@@ -738,7 +805,11 @@ fn restartIntoUpdate(a: *App, target: []const u8) void {
         return;
     }
     if (a.offscreen) return;
-    if (builtin.os.tag == .macos) {
+    if (comptime builtin.os.tag == .windows) {
+        if (a.updates.windows_restart_pending) return;
+        const editors = @import("app_file_editor.zig");
+        if (editors.requestExit(a, .quit, .{ .ctx = a, .func = restartWindowsAfterEditors })) restartWindowsAfterEditors(a);
+    } else if (builtin.os.tag == .macos) {
         const exe = std.process.executablePathAlloc(a.io, a.gpa) catch return;
         defer a.gpa.free(exe);
         const bundle = currentBundle(exe, builtin.os.tag) orelse return;
@@ -774,6 +845,63 @@ fn restartIntoUpdate(a: *App, target: []const u8) void {
         a.updates.setAppFailed("Quit and reopen Harness manually to use the update.");
         a.redraw();
     }
+}
+
+fn restartWindowsAfterEditors(ctx: *anyopaque) void {
+    const a: *App = @ptrCast(@alignCast(ctx));
+    if (a.updates.windows_stage == null or appRestartVersion(a) == null or a.window == null) return;
+    const env = a.env orelse return;
+    const root = windows_update.findInstall(a.gpa, a.io, env) catch return windowsRestartFailed(a, "This Windows installation can no longer update itself.");
+    defer a.gpa.free(root);
+    const pid = windows_update.localEnginePid(a.gpa, a.io, env, root) catch return windowsRestartFailed(a, "Couldn't identify the bundled engine. Quit other Harness instances and retry.");
+    if (pid) |local_pid| {
+        a.updates.setAppFailed("");
+        a.updates.windows_restart_pending = true;
+        a.updates.windows_stop_request = a.engine.call("StopEngineForUpdate", .{ .pid = local_pid }, .of(App, a, windowsEngineStopped)) orelse
+            return windowsRestartFailed(a, "Couldn't reach the local engine. Try again once it reconnects.");
+        a.updates.windows_stop_deadline = a.nowMs() + 5000;
+        nanoui.App.after(5000, a, windowsStopTimedOut);
+        a.redraw();
+    } else {
+        startWindowsRestart(a, null);
+    }
+}
+
+fn windowsStopTimedOut(ctx: ?*anyopaque) callconv(.c) void {
+    const a: *App = @ptrCast(@alignCast(ctx.?));
+    const id = a.updates.windows_stop_request orelse return;
+    if (a.nowMs() < a.updates.windows_stop_deadline) return;
+    a.engine.cancel(id);
+    windowsRestartFailed(a, "The engine didn't confirm shutdown. Try again once it reconnects.");
+}
+
+fn windowsEngineStopped(a: *App, id: u64, reply: @import("rpc.zig").Reply) void {
+    if (a.updates.windows_stop_request != id) return;
+    a.updates.windows_stop_request = null;
+    a.updates.windows_restart_pending = false;
+    if (reply != .ok or reply.ok != .object) return windowsRestartFailed(a, "The engine isn't ready to restart. Finish active work and close open terminals, then retry.");
+    const pid = reply.ok.object.get("pid") orelse return windowsRestartFailed(a, "Couldn't verify the engine shutdown.");
+    if (pid != .integer or pid.integer <= 1 or pid.integer > std.math.maxInt(u32)) return windowsRestartFailed(a, "Couldn't verify the engine shutdown.");
+    startWindowsRestart(a, @intCast(pid.integer));
+}
+
+fn startWindowsRestart(a: *App, pid: ?u32) void {
+    const env = a.env orelse return;
+    const token = a.updates.windows_stage orelse return;
+    const window = a.window orelse return;
+    const root = windows_update.findInstall(a.gpa, a.io, env) catch return windowsRestartFailed(a, "This Windows installation can no longer update itself.");
+    defer a.gpa.free(root);
+    windows_update.startHelper(a.gpa, a.io, root, token, pid) catch return windowsRestartFailed(a, "Couldn't start the Windows update installer. Try again.");
+    a.updates.windows_stage = null; // The helper now owns it.
+    a.updates.windows_restart_pending = true;
+    window.close();
+}
+
+fn windowsRestartFailed(a: *App, failure: []const u8) void {
+    a.updates.windows_restart_pending = false;
+    a.updates.windows_stop_request = null;
+    a.updates.setAppFailed(failure);
+    a.redraw();
 }
 
 pub fn openExternalUrl(url: []const u8) void {
