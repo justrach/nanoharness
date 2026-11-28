@@ -90,6 +90,7 @@
     {"name": "generate custom theme and animated backdrop", "method": "GenerateCustomTheme", "stream": false, "params": {"prompt":"kyoto rain at midnight","dark":true}},
     {"name": "inspect Native Flint status and RAM tier", "method": "GetNativeFlintStatus", "stream": false, "params": {}},
     {"name": "start Native Flint with nonexistent synthetic checkpoint", "method": "StartNativeFlint", "stream": false, "params": {"checkpointDir":"$DIR/no-flint-weights","context":8192}},
+    {"name": "start Native Inkling with nonexistent synthetic checkpoint", "method": "StartNativeFlint", "stream": false, "params": {"checkpointDir":"$DIR/no-inkling-weights","context":8192,"modelKind":"inkling"}},
     {"name": "stop Native Flint server", "method": "StopNativeFlint", "stream": false, "params": {}}
   ]
 }

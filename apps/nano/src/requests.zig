@@ -444,6 +444,7 @@ pub const NativeFlintTarget = struct {
 pub const StartNativeFlint = struct {
     checkpointDir: ?[]const u8 = null,
     context: ?u32 = null,
+    modelKind: ?[]const u8 = null,
     targetDeviceId: ?[]const u8 = null,
 };
 
@@ -451,12 +452,22 @@ pub fn nativeFlintStatus(target_device_id: ?[]const u8) Request(NativeFlintTarge
     return .{ .method = "GetNativeFlintStatus", .params = .{ .targetDeviceId = target_device_id } };
 }
 
-pub fn startNativeFlint(checkpoint_dir: ?[]const u8, context: ?u32, target_device_id: ?[]const u8) Request(StartNativeFlint) {
+pub fn startNativeModel(
+    checkpoint_dir: ?[]const u8,
+    context: ?u32,
+    model_kind: ?[]const u8,
+    target_device_id: ?[]const u8,
+) Request(StartNativeFlint) {
     return .{ .method = "StartNativeFlint", .params = .{
         .checkpointDir = checkpoint_dir,
         .context = context,
+        .modelKind = model_kind,
         .targetDeviceId = target_device_id,
     } };
+}
+
+pub fn startNativeFlint(checkpoint_dir: ?[]const u8, context: ?u32, target_device_id: ?[]const u8) Request(StartNativeFlint) {
+    return startNativeModel(checkpoint_dir, context, null, target_device_id);
 }
 
 pub fn stopNativeFlint(target_device_id: ?[]const u8) Request(NativeFlintTarget) {

@@ -12,11 +12,15 @@ const mock_harnesses =
 ;
 
 const status_stopped_128gb =
-    \\{"platformSupported":true,"ramSupported":true,"ramTier":"optimal","totalRamGb":128,"minRamGb":32,"recommendedContext":65536,"maxContext":131072,"estimatedFootprintGb":37,"binaryAvailable":true,"checkpointDir":"/Users/demo/models/flint-int4","checkpointValid":true,"state":"stopped","context":65536}
+    \\{"platformSupported":true,"ramSupported":true,"ramTier":"optimal","totalRamGb":128,"minRamGb":32,"recommendedContext":65536,"maxContext":131072,"estimatedFootprintGb":37,"modelKind":"flint","binaryAvailable":true,"flintBinaryAvailable":true,"nanoBinaryAvailable":true,"checkpointDir":"/Users/demo/models/flint-int4","checkpointValid":true,"flintCheckpointDir":"/Users/demo/models/flint-int4","flintCheckpointValid":true,"inklingCheckpointDir":"/Users/demo/models/inkling-2-mini","inklingCheckpointValid":true,"state":"stopped","context":65536}
 ;
 
 const status_running_128gb =
-    \\{"platformSupported":true,"ramSupported":true,"ramTier":"optimal","totalRamGb":128,"minRamGb":32,"recommendedContext":65536,"maxContext":131072,"estimatedFootprintGb":37,"binaryAvailable":true,"checkpointDir":"/Users/demo/models/flint-int4","checkpointValid":true,"state":"running","context":65536,"endpointUrl":"http://127.0.0.1:41234/v1/chat/completions"}
+    \\{"platformSupported":true,"ramSupported":true,"ramTier":"optimal","totalRamGb":128,"minRamGb":32,"recommendedContext":65536,"maxContext":131072,"estimatedFootprintGb":37,"modelKind":"flint","binaryAvailable":true,"flintBinaryAvailable":true,"nanoBinaryAvailable":true,"checkpointDir":"/Users/demo/models/flint-int4","checkpointValid":true,"flintCheckpointDir":"/Users/demo/models/flint-int4","flintCheckpointValid":true,"inklingCheckpointDir":"/Users/demo/models/inkling-2-mini","inklingCheckpointValid":true,"state":"running","context":65536,"endpointUrl":"http://127.0.0.1:41234/v1/chat/completions"}
+;
+
+const status_running_inkling =
+    \\{"platformSupported":true,"ramSupported":true,"ramTier":"optimal","totalRamGb":128,"minRamGb":32,"recommendedContext":65536,"maxContext":131072,"estimatedFootprintGb":27,"modelKind":"inkling","modelId":"inkling-2-mini","binaryAvailable":true,"flintBinaryAvailable":true,"nanoBinaryAvailable":true,"checkpointDir":"/Users/demo/models/inkling-2-mini","checkpointValid":true,"flintCheckpointDir":"/Users/demo/models/flint-int4","flintCheckpointValid":true,"inklingCheckpointDir":"/Users/demo/models/inkling-2-mini","inklingCheckpointValid":true,"state":"running","context":32768,"endpointUrl":"http://127.0.0.1:41235/v1/chat/completions"}
 ;
 
 const status_low_ram_16gb =
@@ -59,7 +63,9 @@ test "Native Flint card shows RAM headroom, context pills, and running route on 
         t.deinit();
         a.deinit();
     }
-    try testing.expect(t.hasText("Native Flint"));
+    try testing.expect(t.hasText("NanoAttention"));
+    try testing.expect(t.hasText("Flint INT4"));
+    try testing.expect(t.hasText("Inkling 2 Mini"));
     try testing.expect(t.hasText("Off"));
     try testing.expect(t.containsText("128 GB unified memory"));
     try testing.expect(t.hasText("64K"));
@@ -72,7 +78,16 @@ test "Native Flint card shows RAM headroom, context pills, and running route on 
     t.settle(1);
     try testing.expect(t.containsText("~31 GB estimated for 32K context"));
 
-    // Simulate running state.
+    // Switching to Inkling 2 Mini updates RAM footprint, weights path, and route label.
+    try t.clickText("Inkling 2 Mini");
+    t.settle(1);
+    try testing.expect(t.containsText("~27 GB estimated for 32K context"));
+    try testing.expect(t.containsText("Weights: /Users/demo/models/inkling-2-mini"));
+    snap(&t, "native-inkling-stopped-light");
+
+    // Switch back to Flint and simulate running state.
+    try t.clickText("Flint INT4");
+    t.settle(1);
     const running = try std.json.parseFromSlice(std.json.Value, testing.allocator, status_running_128gb, .{});
     defer running.deinit();
     agents_view.setFlintStatus(&a, running.value);
@@ -80,6 +95,15 @@ test "Native Flint card shows RAM headroom, context pills, and running route on 
     try testing.expect(t.hasText("Running"));
     try testing.expect(t.containsText("Active in Graff as nanoattention/flint"));
     snap(&t, "native-flint-running-light");
+
+    // Simulate running Inkling 2 Mini state.
+    const running_inkling = try std.json.parseFromSlice(std.json.Value, testing.allocator, status_running_inkling, .{});
+    defer running_inkling.deinit();
+    agents_view.setFlintStatus(&a, running_inkling.value);
+    t.settle(1);
+    try testing.expect(t.hasText("Running"));
+    try testing.expect(t.containsText("Active in Graff as nanoattention/inkling-2-mini"));
+    snap(&t, "native-inkling-running-light");
 }
 
 test "Native Flint card blocks low-RAM Macs and caps 32 GB Macs cleanly" {

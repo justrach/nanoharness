@@ -98,9 +98,9 @@ NanoHarness supports **CodeGraff (`graff`)**, Claude Code, Codex, Cursor, Devin,
   <br><sub>Installed agents appear in <strong>Settings → Agents</strong>, including Graff's context compaction threshold and one-click CLI updates.</sub>
 </p>
 
-### Native Flint
+### Native Flint & Inkling 2 Mini
 
-Run **Flint INT4** locally on Apple Silicon alongside NanoHarness and a compatible Graff build. Licensed weights, resumable downloads, and SHA-256 checksums are available at **[codegraff.com/flint](https://codegraff.com/flint)** (also linked directly from **Settings → Agents**).
+Run **Flint INT4** (`nanoattention/flint`) or **Inkling 2 Mini** (`nanoattention/inkling-2-mini`) locally on Apple Silicon powered by [justrach/nanoattention](https://github.com/justrach/nanoattention) inside **Settings → Agents**. Licensed Flint weights and SHA-256 checksums are at **[codegraff.com/flint](https://codegraff.com/flint)**, and Inkling 2 Mini weights are on **[Hugging Face](https://huggingface.co/thinkingmachines/Inkling-2-Mini)**.
 
 ## Build from source
 

@@ -183,7 +183,7 @@ pub fn screenAccessFor(c: *ui.Context, a: *App, k: theme.Colors, granted: bool) 
     set.space(c, 4);
 }
 
-/// Managed local Native Flint server with unified-memory guard (macOS only).
+/// Managed local NanoAttention server (Flint INT4 & Inkling 2 Mini) with unified-memory guard (macOS only).
 pub fn nativeFlintCard(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (comptime @import("builtin").os.tag != .macos) return;
     const flint = @import("native_flint.zig");
@@ -197,11 +197,12 @@ pub fn nativeFlintCard(c: *ui.Context, a: *App, k: theme.Colors) void {
 
     const ready = p.flint == .ready;
     const running = ready and st.state == .running;
+    const model = flint.effectiveModel(st, p.flint_model);
     const ctx = flint.effectiveContext(st, p.flint_context);
     const has_custom = p.flint_custom_dir.items.len > 0;
-    const can_start = ready and flint.canStart(st, ctx, has_custom);
+    const can_start = ready and flint.canStartFor(st, model, ctx, has_custom);
     const can_toggle = ready and !p.flint_busy and (running or can_start);
-    const pill_label = if (ready) flint.statusBadge(st, p.flint_busy) else if (p.flint == .failed) "Unavailable" else "Checking…";
+    const pill_label = if (ready) flint.statusBadgeFor(st, model, p.flint_busy) else if (p.flint == .failed) "Unavailable" else "Checking…";
 
     // Header row: title + live status pill + explicit On/Off server switch.
     {
@@ -248,10 +249,10 @@ pub fn nativeFlintCard(c: *ui.Context, a: *App, k: theme.Colors) void {
         defer mem_box.end();
         const inner_w = @max(w - 26, 120);
         const summary_buf = c.alloc().alloc(u8, 128) catch return;
-        const summary = flint.ramSummary(summary_buf, st, ctx);
+        const summary = flint.ramSummaryFor(summary_buf, st, model, ctx);
         ui.text(c, summary, set.st(c, 12, .{ .weight = .medium, .wrap = true, .color = k.text }));
         if (st.platform_supported and st.total_ram_gb > 0) {
-            const frac = flint.ramFraction(st, ctx);
+            const frac = flint.ramFractionFor(st, model, ctx);
             const bar_color = if (!st.ram_supported or frac >= 0.88)
                 k.danger
             else if (st.ram_tier == .tight or frac >= 0.68)
@@ -269,12 +270,46 @@ pub fn nativeFlintCard(c: *ui.Context, a: *App, k: theme.Colors) void {
         }
         const adv = ui.div(c).column().w(inner_w);
         defer adv.end();
-        ui.text(c, flint.ramAdvice(st), set.st(c, 11.5, .{ .wrap = true, .color = k.muted }));
+        ui.text(c, flint.ramAdviceFor(st, model), set.st(c, 11.5, .{ .wrap = true, .color = k.muted }));
+    }
+
+    // Model selector (`Flint INT4` / `Inkling 2 Mini`).
+    if (ready and st.platform_supported) {
+        set.space(c, 12);
+        const mod_row = ui.div(c).row().wFull().gap(6).itemsCenter();
+        defer mod_row.end();
+        ui.text(c, "Model", set.st(c, 12, .{ .weight = .medium, .color = k.text }));
+        set.space(c, 2);
+        for (flint.ModelKind.all) |kind| {
+            const selected = model == kind;
+            const interactive = !running and !p.flint_busy;
+            ui.key(c, c.print("native-flint-model-{s}", .{kind.wire()}));
+            var pill = ui.div(c).row().roundedFull();
+            pill = if (selected)
+                pill.px(9).py(3).bg(k.success.alpha(0.14))
+            else
+                pill.px(9).py(3).border(k.border).borderW(1);
+            if (running and !selected) pill = pill.opacity(0.32);
+            defer pill.end();
+            const hot = interactive and !selected and pill.hovered();
+            ui.text(c, kind.label(), set.st(c, 11, .{ .color = if (selected)
+                k.success_muted.alpha(0.95)
+            else if (hot)
+                k.text
+            else
+                k.muted }));
+            if (interactive and !selected and pill.clicked()) {
+                p.flint_model = kind;
+                p.flint_custom_dir.clearRetainingCapacity();
+                p.flint_err.clearRetainingCapacity();
+                a.redraw();
+            }
+        }
     }
 
     // RAM-gated context window selector.
     if (ready and st.platform_supported and st.ram_supported) {
-        set.space(c, 12);
+        set.space(c, 10);
         const ctx_row = ui.div(c).row().wFull().gap(6).itemsCenter();
         defer ctx_row.end();
         ui.text(c, "Context", set.st(c, 12, .{ .weight = .medium, .color = k.text }));
@@ -311,34 +346,37 @@ pub fn nativeFlintCard(c: *ui.Context, a: *App, k: theme.Colors) void {
 
     // Checkpoint folder status & actions.
     set.space(c, 12);
+    const model_bin_ok = flint.binaryAvailableFor(st, model);
+    const model_ckpt_ok = flint.checkpointValidFor(st, model);
     if (ready and st.platform_supported) {
-        const shown_dir = if (has_custom) p.flint_custom_dir.items else st.checkpoint_dir.items;
+        const shown_dir = if (has_custom) p.flint_custom_dir.items else flint.checkpointDirFor(st, model);
         const dir_row = ui.div(c).row().wFull().gap(8).itemsCenter();
         defer dir_row.end();
-        kit.dot(c, 6, if (st.checkpoint_valid or has_custom) k.success else k.ink(0.22));
+        kit.dot(c, 6, if (model_ckpt_ok or has_custom) k.success else k.ink(0.22));
         const label_w = @max(w - 14, 120);
         const dir_text = if (shown_dir.len > 0)
             c.print("Weights: {s}", .{shown_dir})
         else
             "Weights folder not configured";
-        kit.ellipsisText(c, dir_text, set.st(c, 12, .{ .color = if (st.checkpoint_valid or has_custom) k.text else k.muted }), label_w);
+        kit.ellipsisText(c, dir_text, set.st(c, 12, .{ .color = if (model_ckpt_ok or has_custom) k.text else k.muted }), label_w);
     }
 
-    if (ready and !st.binary_available and st.platform_supported) {
+    if (ready and !model_bin_ok and st.platform_supported) {
         set.space(c, 6);
         const warn = ui.div(c).column().w(w);
         defer warn.end();
-        ui.text(c, "Bundled `flint` runtime was not found. Use a release build or set FLINT_BINARY.", set.st(c, 11.5, .{ .wrap = true, .color = k.warning.alpha(0.95) }));
+        ui.text(c, c.print("Bundled `{s}` runtime was not found. Use a release build or set {s}.", .{ model.binaryName(), model.envVar() }), set.st(c, 11.5, .{ .wrap = true, .color = k.warning.alpha(0.95) }));
     } else if (running) {
         set.space(c, 6);
         const live_note = ui.div(c).column().w(w);
         defer live_note.end();
-        ui.text(c, "Active in Graff as " ++ flint.model ++ " · single request at a time.", set.st(c, 11.5, .{ .wrap = true, .color = k.success_muted.alpha(0.9) }));
-    } else if (ready and st.platform_supported and st.ram_supported and !st.checkpoint_valid and !has_custom) {
+        ui.text(c, c.print("Active in Graff as {s} · single request at a time.", .{model.modelId()}), set.st(c, 11.5, .{ .wrap = true, .color = k.success_muted.alpha(0.9) }));
+    } else if (ready and st.platform_supported and st.ram_supported and !model_ckpt_ok and !has_custom) {
         set.space(c, 6);
         const hint_box = ui.div(c).column().w(w);
         defer hint_box.end();
-        ui.text(c, if (st.checkpoint_hint.items.len > 0) st.checkpoint_hint.items else flint.setup, set.st(c, 11.5, .{ .wrap = true, .color = k.muted }));
+        const hint = flint.checkpointHintFor(st, model);
+        ui.text(c, if (hint.len > 0) hint else model.setupText(), set.st(c, 11.5, .{ .wrap = true, .color = k.muted }));
     }
 
     if (p.flint_err.items.len > 0) {
@@ -357,7 +395,7 @@ pub fn nativeFlintCard(c: *ui.Context, a: *App, k: theme.Colors) void {
             if (shots.action(c, k, "Choose weights folder…")) page.pickFlintFolder(a);
         }
         ui.key(c, "native-flint-download");
-        if (shots.action(c, k, flint.download_label)) _ = nanoui.shell.openUrl(flint.download_url);
+        if (shots.action(c, k, flint.download_label)) _ = nanoui.shell.openUrl(model.downloadUrl());
     }
 }
 
