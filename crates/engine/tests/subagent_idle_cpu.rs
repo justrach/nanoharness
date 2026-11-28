@@ -99,6 +99,7 @@ async fn quiet_subagent_boundaries_do_not_spin_the_session_commit_timer() {
                 attachments: vec![],
                 worktree: None,
                 resume: None,
+                prompt_quotes: Vec::new(),
             },
             Some("quiet-user".into()),
         )

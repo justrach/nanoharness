@@ -184,6 +184,7 @@ async fn exercise_projectless(command_first: bool) {
                         attachments: Vec::new(),
                         worktree: None,
                         resume: None,
+                        prompt_quotes: Vec::new(),
                     },
                     message_id: message_id.into(),
                 },

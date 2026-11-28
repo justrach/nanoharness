@@ -337,10 +337,26 @@ pub enum TurnOrigin {
     Background,
 }
 
+/// A quoted passage attached to a user's prompt, with its original transcript source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptQuote {
+    pub entry: String,
+    pub part: String,
+    pub nth: usize,
+    pub text: String,
+    /// UTF-8 byte range occupied by this blockquote in the stored prompt.
+    pub start: usize,
+    pub end: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRequest {
     pub prompt: String,
+    /// Display provenance for blockquotes; adapters only receive `prompt`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt_quotes: Vec<PromptQuote>,
     #[serde(default)]
     pub turn_origin: TurnOrigin,
     /// The harness picked at send time. Rides the command plane so

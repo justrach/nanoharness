@@ -140,6 +140,7 @@ fn payload(cwd: &str, message_id: &str) -> SessionCommandPayload {
             attachments: vec![],
             worktree: None,
             resume: None,
+            prompt_quotes: Vec::new(),
         },
     }
 }
@@ -416,7 +417,8 @@ async fn archive_retires_pending_peer_steers_known_only_by_their_origin() {
                 Vec::new(),
                 true,
                 TurnOrigin::Peer,
-                None
+                None,
+                Vec::new(),
             )
             .is_err()
     );

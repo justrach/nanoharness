@@ -4,12 +4,53 @@ const std = @import("std");
 const App = @import("app.zig").App;
 const rpc = @import("rpc.zig");
 const tr = @import("transcript.zig");
+const requests = @import("requests.zig");
+
+fn freeQuotes(gpa: std.mem.Allocator, quotes: []requests.PromptQuote) void {
+    for (quotes) |quote| {
+        gpa.free(@constCast(quote.entry));
+        gpa.free(@constCast(quote.part));
+        gpa.free(@constCast(quote.text));
+    }
+    if (quotes.len > 0) gpa.free(quotes);
+}
+
+fn cloneQuotes(gpa: std.mem.Allocator, quotes: []const requests.PromptQuote) ![]requests.PromptQuote {
+    var out: std.ArrayList(requests.PromptQuote) = .empty;
+    errdefer {
+        for (out.items) |quote| {
+            gpa.free(@constCast(quote.entry));
+            gpa.free(@constCast(quote.part));
+            gpa.free(@constCast(quote.text));
+        }
+        out.deinit(gpa);
+    }
+    try out.ensureTotalCapacity(gpa, quotes.len);
+    for (quotes) |quote| {
+        const entry = try gpa.dupe(u8, quote.entry);
+        errdefer gpa.free(entry);
+        const part = try gpa.dupe(u8, quote.part);
+        errdefer gpa.free(part);
+        const text = try gpa.dupe(u8, quote.text);
+        out.appendAssumeCapacity(.{ .entry = entry, .part = part, .nth = quote.nth, .text = text, .start = quote.start, .end = quote.end });
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+fn parseQuotes(gpa: std.mem.Allocator, raw: ?std.json.Value) ![]requests.PromptQuote {
+    const value = raw orelse return &.{};
+    if (value != .array) return &.{};
+    const parsed = std.json.parseFromValue([]const requests.PromptQuote, gpa, value, .{ .ignore_unknown_fields = true }) catch return &.{};
+    defer parsed.deinit();
+    return cloneQuotes(gpa, parsed.value);
+}
 
 pub const Pending = struct {
     app: *App,
     chat: []u8,
     message: []u8,
     part: tr.Part,
+    prompt_quotes: []requests.PromptQuote = &.{},
     started_ms: i64,
     finished: bool = false,
     rejected: bool = false,
@@ -25,6 +66,7 @@ pub const Pending = struct {
             .role = .user,
             .status = .complete,
             .parts = .fromOwnedSlice(@as([*]tr.Part, @ptrCast(&p.part))[0..1]),
+            .prompt_quotes = p.prompt_quotes,
         };
     }
 
@@ -46,11 +88,12 @@ pub const Pending = struct {
         gpa.free(p.chat);
         gpa.free(p.message);
         p.part.text.deinit(gpa);
+        freeQuotes(gpa, p.prompt_quotes);
         gpa.destroy(p);
     }
 };
 
-pub fn begin(a: *App, chat: []const u8, message: []const u8, prompt: []const u8) !*Pending {
+pub fn begin(a: *App, chat: []const u8, message: []const u8, prompt: []const u8, prompt_quotes: []const requests.PromptQuote) !*Pending {
     const p = try a.gpa.create(Pending);
     errdefer a.gpa.destroy(p);
     const owned_chat = try a.gpa.dupe(u8, chat);
@@ -60,7 +103,9 @@ pub fn begin(a: *App, chat: []const u8, message: []const u8, prompt: []const u8)
     var part: tr.Part = .{ .id = &.{}, .kind = .text };
     errdefer part.text.deinit(a.gpa);
     try part.text.appendSlice(a.gpa, prompt);
-    p.* = .{ .app = a, .chat = owned_chat, .message = owned_message, .part = part, .started_ms = a.nowMs() };
+    const owned_quotes = try cloneQuotes(a.gpa, prompt_quotes);
+    errdefer freeQuotes(a.gpa, owned_quotes);
+    p.* = .{ .app = a, .chat = owned_chat, .message = owned_message, .part = part, .prompt_quotes = owned_quotes, .started_ms = a.nowMs() };
     try a.pending_sends.append(a.gpa, p);
     return p;
 }
@@ -116,7 +161,9 @@ pub fn syncRemote(a: *App, chat: []const u8, value: std.json.Value) void {
             break;
         }
         const p = found orelse blk: {
-            const made = begin(a, chat, id.string, text.string) catch continue;
+            const quotes = parseQuotes(a.gpa, item.object.get("promptQuotes")) catch continue;
+            defer freeQuotes(a.gpa, quotes);
+            const made = begin(a, chat, id.string, text.string, quotes) catch continue;
             made.remote = true;
             made.finished = true;
             break :blk made;

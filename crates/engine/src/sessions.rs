@@ -719,7 +719,12 @@ impl SessionsEngine {
                     );
                     // Boundary consumption shares the guard: publish the User
                     // row before its prompt-bound provenance can be retired.
-                    self.doc_handle(chat_id)?.write_user_message(&user_id, &request.prompt, now_ms())?;
+                    self.doc_handle(chat_id)?.write_user_message_with_quotes(
+                        &user_id,
+                        &request.prompt,
+                        now_ms(),
+                        &request.prompt_quotes,
+                    )?;
                     true
                 } else {
                     false
@@ -798,7 +803,12 @@ impl SessionsEngine {
                     .collect::<Vec<_>>()
             });
         self.inner.journal.record_pending_turn_origin(chat_id, &user_id, request.turn_origin, false);
-        handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+        handle.write_user_message_with_quotes(
+            &user_id,
+            &request.prompt,
+            now_ms(),
+            &request.prompt_quotes,
+        )?;
         self.inner.journal.record_confirmed_turn_origin(chat_id, &user_id, request.turn_origin);
 
         // Engine-owned resume (harness sessions.ts:736 — every dispatch read the
@@ -989,6 +999,26 @@ impl SessionsEngine {
         attachments: Vec<String>,
         turn_origin: TurnOrigin,
     ) -> Result<SteerOutcome, EngineError> {
+        self.steer_with_origin_and_quotes(
+            chat_id,
+            prompt,
+            message_id,
+            attachments,
+            turn_origin,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn steer_with_origin_and_quotes(
+        &self,
+        chat_id: &str,
+        prompt: &str,
+        message_id: Option<String>,
+        attachments: Vec<String>,
+        turn_origin: TurnOrigin,
+        prompt_quotes: &[harness_proto::PromptQuote],
+    ) -> Result<SteerOutcome, EngineError> {
         let target = lock(&self.inner.runs)
             .get(chat_id)
             .filter(|h| h.steerable)
@@ -1038,7 +1068,12 @@ impl SessionsEngine {
                     s.status, SessionStatus::Working | SessionStatus::AwaitingInput
                 )),
             );
-            self.doc_handle(chat_id)?.write_user_message(&user_id, prompt, now_ms())?;
+            self.doc_handle(chat_id)?.write_user_message_with_quotes(
+                &user_id,
+                prompt,
+                now_ms(),
+                prompt_quotes,
+            )?;
         }
         // A routed steer is a turn too. Fired here (not only on the confirmed
         // path) — a reclaim falls back to dispatch, which just re-snapshots.
@@ -1531,6 +1566,7 @@ impl SessionsEngine {
                         attachments: Vec::new(),
                         resume: None,
                         worktree: None,
+                        prompt_quotes: Vec::new(),
                     })
                 });
             let Some(mut request) = request else {
@@ -1939,6 +1975,7 @@ impl Inner {
                 text: steer.prompt,
                 turn_origin: steer.turn_origin,
                 attachments: steer.attachments,
+                prompt_quotes: Vec::new(),
                 issued_by: self.device_id.clone(),
                 peer_chat_id: None,
                 issued_at: steer.issued_at,
@@ -2524,6 +2561,7 @@ impl SubagentSink {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         };
         if let Err(err) = self.doc.push_message(&entry) {
             tracing::warn!(doc = %self.doc_id, error = %err, "subagent steer write failed");
@@ -5094,6 +5132,7 @@ mod tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         })
         .unwrap();
         let current = format!("Current {skill}\nKeep **Markdown**");
@@ -5139,6 +5178,7 @@ mod tests {
                 status: None,
                 continuation_of: None,
                 duration_ms: None,
+                prompt_quotes: Vec::new(),
             })
             .unwrap();
         }
@@ -5279,6 +5319,7 @@ mod tests {
             resume: None,
             attachments: Vec::new(),
             worktree: None,
+            prompt_quotes: Vec::new(),
         }
     }
 

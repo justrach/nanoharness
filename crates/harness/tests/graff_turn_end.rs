@@ -101,6 +101,7 @@ async fn agent_started_turns_end_on_gui_turn_end() {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        prompt_quotes: Vec::new(),
     };
     let mut stream = harness.run(request, controls).await.unwrap();
     let events = tokio::time::timeout(Duration::from_secs(15), async {

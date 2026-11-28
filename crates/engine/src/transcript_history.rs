@@ -180,6 +180,7 @@ mod tests {
             status: Some(MessageStatus::Streaming),
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         }
     }
 

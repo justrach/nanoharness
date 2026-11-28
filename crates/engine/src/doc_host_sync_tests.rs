@@ -1400,6 +1400,7 @@ fn phone_run(id: &str) -> SessionCommandEntry {
                 attachments: Vec::new(),
                 resume: None,
                 worktree: None,
+                prompt_quotes: Vec::new(),
             },
             message_id: format!("m-{id}"),
         },

@@ -164,6 +164,7 @@ async fn transcript_survives_open_racing_create_chat() {
                         attachments: Vec::new(),
                         worktree: None,
                         resume: None,
+                        prompt_quotes: Vec::new(),
                     },
                     message_id: "msg-race-1".into(),
                 },

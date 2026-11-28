@@ -153,6 +153,7 @@ async fn try_generate_with_model(
         attachments: Vec::new(),
         resume: None,
         worktree: None,
+        prompt_quotes: Vec::new(),
     };
 
     let raw = tokio::time::timeout(Duration::from_secs(20), async {

@@ -174,6 +174,7 @@ fn send(core: &EngineCore, id: &str, prompt: &str, cwd: &str) -> String {
                     attachments: Vec::new(),
                     resume: None,
                     worktree: None,
+                    prompt_quotes: Vec::new(),
                 },
                 message_id: id.into(),
             },
@@ -296,6 +297,7 @@ fn seed_saved_question(core: &EngineCore, branch: &str) -> String {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         })
         .unwrap();
     request_id

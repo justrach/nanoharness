@@ -59,6 +59,7 @@ async fn real_graff_messages_during_background_work_do_not_cancel_it() {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        prompt_quotes: Vec::new(),
     };
     // Record the wire: a cancel of graff's own turn surfaces only there (the
     // `session/cancel` sent, and `gui_turn_end` with stopReason cancelled).

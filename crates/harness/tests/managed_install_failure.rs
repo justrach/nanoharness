@@ -57,6 +57,7 @@ async fn silent_npm_enoent_death_surfaces_decoded_error() {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        prompt_quotes: Vec::new(),
     };
 
     let err = match harness.run(request, controls).await {

@@ -43,6 +43,7 @@ async fn graff_acp_restores_in_the_selected_workspace() {
         attachments: Vec::new(),
         worktree: None,
         resume: Some("saved".into()),
+        prompt_quotes: Vec::new(),
     };
     let events = tokio::time::timeout(Duration::from_secs(10), async {
         harness
@@ -118,6 +119,7 @@ async fn run_graff_worktree_fixture(
             agent_name: Some(name.to_owned()),
         }),
         resume: resume.map(str::to_owned),
+        prompt_quotes: Vec::new(),
     };
     let events = tokio::time::timeout(Duration::from_secs(10), async {
         harness

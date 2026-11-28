@@ -168,6 +168,7 @@ fn run(message_id: &str, cwd: &str, worktree: Option<WorktreeSpec>) -> SessionCo
             attachments: Vec::new(),
             resume: None,
             worktree,
+            prompt_quotes: Vec::new(),
         },
         message_id: message_id.into(),
     }

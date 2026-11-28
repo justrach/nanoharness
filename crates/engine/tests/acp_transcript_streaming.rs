@@ -82,6 +82,7 @@ async fn acp_text_reaches_watch_doc_messages_while_prompt_is_pending() {
             attachments: Vec::new(),
             worktree: None,
             resume: None,
+            prompt_quotes: Vec::new(),
         },
     };
     client

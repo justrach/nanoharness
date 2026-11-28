@@ -200,6 +200,7 @@ fn try_text_append(prev: &SessionMessageEntry, next: &SessionMessageEntry) -> Op
         || prev.device_id != next.device_id
         || prev.status != next.status
         || prev.continuation_of != next.continuation_of
+        || prev.prompt_quotes != next.prompt_quotes
         || prev.parts.len() != next.parts.len()
     {
         return None;
@@ -587,6 +588,7 @@ mod tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         }
     }
 
@@ -798,6 +800,7 @@ mod context_update_tests {
             status: Some(crate::MessageStatus::Streaming),
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         };
         let baseline = TranscriptBaseline::capture(&[entry.clone()]);
         assert!(baseline.covers(&entry));
@@ -847,6 +850,7 @@ mod context_update_tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         });
         let b0 = Arc::new(SessionMessageEntry {
             id: "b".into(),
@@ -860,6 +864,7 @@ mod context_update_tests {
             status: Some(crate::MessageStatus::Streaming),
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         });
         let b1 = Arc::new(SessionMessageEntry {
             id: "b".into(),
@@ -873,6 +878,7 @@ mod context_update_tests {
             status: Some(crate::MessageStatus::Streaming),
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         });
 
         let prev_shared = [Arc::clone(&a), Arc::clone(&b0)];
@@ -919,6 +925,7 @@ mod context_update_tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            prompt_quotes: Vec::new(),
         };
         let mut held: Vec<SessionMessageEntry> =
             (0..10).map(|i| entry(&format!("a{i}"), "done")).collect();

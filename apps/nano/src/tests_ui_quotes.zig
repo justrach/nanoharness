@@ -164,6 +164,34 @@ const Harness = struct {
     }
 };
 
+test "sent quote chip above the prompt jumps to the exact repeated passage after reload" {
+    var h: Harness = undefined;
+    const frame = try std.json.Stringify.valueAlloc(testing.allocator, .{ .reset = &.{
+        .{ .id = "source", .role = "assistant", .status = "complete", .parts = &.{.{ .id = "source-part", .kind = "text", .text = "Repeated passage.\n\nIntervening text.\n\nRepeated passage." }} },
+        .{ .id = "follow-up", .role = "user", .parts = &.{.{ .id = "follow-up-part", .kind = "text", .text = "> Repeated passage.\n\nFollow up" }}, .promptQuotes = &.{.{ .entry = "source", .part = "source-part", .nth = 1, .text = "Repeated passage.", .start = 0, .end = 19 }} },
+    } }, .{});
+    defer testing.allocator.free(frame);
+    try h.open(frame, true);
+    defer h.deinit();
+    try testing.expectEqual(@as(usize, 1), h.a.transcript.entries.items[1].prompt_quotes.len);
+    var chip: ?ui.Rect = null;
+    for (h.t.ctx.a11y_items.items) |item| if (std.mem.eql(u8, item.label, "Show quoted passage: Repeated passage.")) {
+        chip = h.t.ctx.rects.get(item.id);
+    };
+    const chip_rect = chip orelse return error.SentQuoteChipMissing;
+    h.t.click(chip_rect.x + chip_rect.w / 2, chip_rect.y + chip_rect.h / 2);
+    h.t.advance(1);
+    try h.expectHighlighted("Repeated passage.");
+    const chosen = h.t.ctx.selection.start_rect orelse return error.HighlightNotDrawn;
+    var occurrences: usize = 0;
+    for (h.t.ctx.nodes.items) |node| if (node.content == .text and std.mem.eql(u8, node.content.text.str, "Repeated passage.")) {
+        if (occurrences == 1) try testing.expectApproxEqAbs(node.rect.y, chosen.y, 4);
+        occurrences += 1;
+        if (occurrences == 2) break;
+    };
+    try testing.expectEqual(@as(usize, 2), occurrences);
+}
+
 test "quote selection Add to chat shows beside a selection inside one reply" {
     var h: Harness = undefined;
     try h.init();

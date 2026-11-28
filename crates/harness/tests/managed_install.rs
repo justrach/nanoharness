@@ -48,6 +48,7 @@ async fn managed_install_reaches_session_started() {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        prompt_quotes: Vec::new(),
     };
 
     let mut stream = tokio::time::timeout(

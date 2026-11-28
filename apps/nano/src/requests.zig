@@ -194,8 +194,18 @@ pub fn listSkills(scope: CatalogScope) Request(CatalogScope) {
 
 // ── commands ─────────────────────────────────────────────────────────
 
+pub const PromptQuote = struct {
+    entry: []const u8,
+    part: []const u8,
+    nth: usize,
+    text: []const u8,
+    start: usize,
+    end: usize,
+};
+
 pub const RunRequest = struct {
     prompt: []const u8,
+    promptQuotes: ?[]const PromptQuote = null,
     turnOrigin: []const u8 = "human",
     harness: ?[]const u8 = null,
     model: ?[]const u8 = null,
@@ -246,8 +256,8 @@ pub fn watchToolProgress(chat_id: []const u8) Request(struct { chatId: []const u
     return .{ .method = "WatchToolProgress", .params = .{ .chatId = chat_id } };
 }
 
-pub fn queueMessage(chat_id: []const u8, text: []const u8) Request(struct { chatId: []const u8, text: []const u8, holdForTurnEnd: bool }) {
-    return .{ .method = "QueueMessage", .params = .{ .chatId = chat_id, .text = text, .holdForTurnEnd = true } };
+pub fn queueMessage(chat_id: []const u8, text: []const u8, prompt_quotes: []const PromptQuote) Request(struct { chatId: []const u8, text: []const u8, holdForTurnEnd: bool, promptQuotes: ?[]const PromptQuote }) {
+    return .{ .method = "QueueMessage", .params = .{ .chatId = chat_id, .text = text, .holdForTurnEnd = true, .promptQuotes = if (prompt_quotes.len == 0) null else prompt_quotes } };
 }
 
 const Row = struct { chatId: []const u8, id: []const u8, targetDeviceId: ?[]const u8 };

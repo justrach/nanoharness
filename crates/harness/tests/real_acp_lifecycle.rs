@@ -31,7 +31,7 @@ async fn live_run(cancel: bool) {
         model_options: serde_json::Map::new(), cwd: cwd.path().display().to_string(),
         sandbox: SandboxLevel::WorkspaceWrite, auto_approve: true,
         attachments: Vec::new(), worktree: None, resume: None,
-    };
+            prompt_quotes: Vec::new(),};
     let mut stream = harness_adapters::PiHarness::new()
         .run(request, controls)
         .await

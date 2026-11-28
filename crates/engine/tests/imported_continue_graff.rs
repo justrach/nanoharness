@@ -92,6 +92,7 @@ fn entry(role: MessageRole, text: &str, id: &str) -> SessionMessageEntry {
         status: Some(MessageStatus::Complete),
         continuation_of: None,
         duration_ms: None,
+        prompt_quotes: Vec::new(),
     }
 }
 
@@ -111,6 +112,7 @@ fn run_request(prompt: &str) -> RunRequest {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        prompt_quotes: Vec::new(),
     }
 }
 

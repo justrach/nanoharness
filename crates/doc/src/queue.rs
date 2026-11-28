@@ -15,7 +15,7 @@
 //! Writers: any device (unlike `messages`, which is host-only). The host is
 //! the only one that *takes* from the queue — see `DocHost::drain_queue`.
 
-use harness_proto::TurnOrigin;
+use harness_proto::{PromptQuote, TurnOrigin};
 use loro::ToJson;
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +37,9 @@ pub struct QueuedMessage {
     /// files that only exist on the device that typed it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<String>,
+    /// Source links for blockquotes in this queued prompt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt_quotes: Vec<PromptQuote>,
     /// Do not automatically steer this row into a live turn. The row remains
     /// visible until turn end or an explicit Steer now / Send now action.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -100,6 +103,7 @@ impl QueuedMessage {
             turn_origin: TurnOrigin::Human,
             peer_chat_id: None,
             attachments: Vec::new(),
+            prompt_quotes: Vec::new(),
             hold_for_turn_end: false,
             issued_by: issued_by.into(),
             issued_at: 0,
@@ -405,6 +409,12 @@ fn write_queued_map(map: &loro::LoroMap, item: &QueuedMessage) -> Result<(), Doc
             crate::schema::loro_value_from_json(&serde_json::to_value(&item.attachments)?),
         )?;
     }
+    if !item.prompt_quotes.is_empty() {
+        map.insert(
+            "promptQuotes",
+            crate::schema::loro_value_from_json(&serde_json::to_value(&item.prompt_quotes)?),
+        )?;
+    }
     if item.hold_for_turn_end {
         map.insert("holdForTurnEnd", true)?;
     }
@@ -432,6 +442,10 @@ fn queued_from_json(v: serde_json::Value) -> Option<QueuedMessage> {
     Some(QueuedMessage {
         id,
         text,
+        prompt_quotes: v
+            .get("promptQuotes")
+            .and_then(|quotes| serde_json::from_value(quotes.clone()).ok())
+            .unwrap_or_default(),
         turn_origin: v
             .get("turnOrigin")
             .and_then(|origin| serde_json::from_value(origin.clone()).ok())
@@ -514,6 +528,7 @@ mod tests {
             turn_origin: TurnOrigin::Human,
             peer_chat_id: None,
             attachments: Vec::new(),
+            prompt_quotes: Vec::new(),
             hold_for_turn_end: false,
             issued_by: "device-a".into(),
             issued_at: 1_000,
@@ -548,6 +563,42 @@ mod tests {
         assert_eq!(
             target.read_queue().unwrap()[1].turn_origin,
             TurnOrigin::Human
+        );
+    }
+
+    #[test]
+    fn prompt_quote_provenance_survives_queue_promotion_and_legacy_rows_default_empty() {
+        let source = doc();
+        let mut queued = item("quote-row", "> cited text\n\nfollow-up");
+        queued.prompt_quotes.push(PromptQuote {
+            entry: "source-entry".into(),
+            part: "source-part".into(),
+            nth: 0,
+            text: "cited text".into(),
+            start: 0,
+            end: 12,
+        });
+        source.push_queued(&queued).unwrap();
+        let target = doc();
+        target
+            .doc()
+            .import(&source.export_snapshot().unwrap())
+            .unwrap();
+        assert_eq!(
+            target
+                .take_queued("quote-row")
+                .unwrap()
+                .unwrap()
+                .prompt_quotes,
+            queued.prompt_quotes
+        );
+        assert!(
+            queued_from_json(
+                serde_json::json!({"id":"legacy","text":"old","issuedBy":"d","issuedAt":1})
+            )
+            .unwrap()
+            .prompt_quotes
+            .is_empty()
         );
     }
 

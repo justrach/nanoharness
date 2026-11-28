@@ -54,6 +54,7 @@ async fn sent_prompt(images: bool) -> serde_json::Value {
         ],
         worktree: None,
         resume: None,
+        prompt_quotes: Vec::new(),
     };
     tokio::time::timeout(Duration::from_secs(10), async {
         harness
@@ -159,6 +160,7 @@ async fn follow_up_prompt(authorized: bool) -> serde_json::Value {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        prompt_quotes: Vec::new(),
     };
     let follow_up = format!(
         "can you see this?\n\nAttached images (local files — open them to view):\n- {path}"

@@ -615,6 +615,7 @@ async fn queue_run(
         // Not something the person typed: the bot's own turn.
         turn_origin: TurnOrigin::Peer,
         prompt,
+        prompt_quotes: Vec::new(),
         harness: Some(config.as_ref().map_or(HarnessId::Graff, |c| c.harness)),
         model: config.as_ref().and_then(|c| c.model.clone()),
         reasoning: config.as_ref().and_then(|c| c.reasoning),
