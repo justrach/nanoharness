@@ -323,7 +323,7 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
             if (activate) {
                 if (link_owner) |owner| {
                     if (local_artifact) {
-                        @import("artifact_links.zig").open(owner.app, owner.parent, link.url);
+                        @import("artifact_links.zig").openReference(owner.app, owner.parent, link.url);
                     } else @import("app_browser.zig").openLink(owner.app, owner.parent, link.url);
                 } else {
                     _ = nanoui.shell.openUrl(link.url);

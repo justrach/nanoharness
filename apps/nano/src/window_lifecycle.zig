@@ -126,7 +126,9 @@ pub const Lifecycle = struct {
         const self: *Lifecycle = @ptrCast(@alignCast(ctx));
         if (self.state.window != window) return;
         // on_close runs before nanoui frees Window and its native parent.
-        // Keep conversation-owned browser state, but detach its old NSView.
+        // The last rendered viewport is already in memory; persist the
+        // workspace now, without retaining or dereferencing the old Context.
+        self.state.flushRememberedTabs();
         self.state.window = null;
         self.detachPresentation();
     }

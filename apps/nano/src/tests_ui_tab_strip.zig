@@ -110,9 +110,9 @@ test "single Zen chat ends beside the device and controls with or without its si
         try testing.expectApproxEqAbs(@as(f32, 21), sidebar.y + sidebar.h / 2, 0.01);
         if (sidebar_x) |x| try testing.expectApproxEqAbs(x, sidebar.x, 1) else sidebar_x = sidebar.x;
         if (sidebar_open) {
-            try testing.expectError(error.MissingTitlebarButton, h.button("clock-circle"));
+            try testing.expectError(error.MissingTitlebarButton, h.button("list"));
         } else {
-            const history = try h.button("clock-circle");
+            const history = try h.button("list");
             const mode = try h.button("magic-stick-3");
             try testing.expect(history.x < mode.x and mode.x < sidebar.x);
             try testing.expect(history.x >= cap.rect.x + cap.rect.w);
@@ -159,6 +159,158 @@ test "session navigation parity opens archived history outside a blank split pan
     try testing.expectEqualStrings("a", split.panes.items[0].?);
     try testing.expectEqual(@as(usize, 1), split.focus);
     try testing.expect(split.panes.items[1] == null and h.a.selected == null);
+}
+
+test "session parity followup restores split picks without replacing either chat prompt" {
+    for ([_]bool{ false, true }) |new_workspace| {
+        var h: Harness = undefined;
+        try h.init(true);
+        defer h.deinit();
+        h.a.newTab();
+        h.a.showTab(0);
+        if (h.a.new_model) |old| h.a.retireSlice(old);
+        h.a.new_model = try h.a.gpa.dupe(u8, "alpha-pick");
+        h.a.composer.set("Unsent Alpha prompt");
+        h.a.splitOpening(.horizontal, "b");
+        if (h.a.new_model) |old| h.a.retireSlice(old);
+        h.a.new_model = try h.a.gpa.dupe(u8, "beta-pick");
+        h.a.composer.set("Unsent Beta prompt");
+
+        if (new_workspace) h.a.newWorkspaceSession() else h.a.showTab(1);
+        if (h.a.new_model) |old| h.a.retireSlice(old);
+        h.a.new_model = try h.a.gpa.dupe(u8, "other-workspace-pick");
+        h.a.openChatInTab("b");
+        try testing.expectEqualStrings("b", h.a.selected.?);
+        try testing.expectEqualStrings("Unsent Beta prompt", h.a.composer.text());
+        try testing.expectEqualStrings("beta-pick", h.a.new_model orelse "");
+
+        h.a.openChatInTab("a");
+        try testing.expectEqualStrings("Unsent Alpha prompt", h.a.composer.text());
+        try testing.expectEqualStrings("alpha-pick", h.a.new_model orelse "");
+        h.a.openChatInTab("b");
+        try testing.expectEqualStrings("Unsent Beta prompt", h.a.composer.text());
+        try testing.expectEqualStrings("beta-pick", h.a.new_model orelse "");
+        try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
+    }
+}
+
+test "session parity followup clicking the selected session returns input from expanded Host and Files" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.developer);
+    h.a.settings.setText("sidebarOrganization", "inOneList");
+    h.a.settings.setText("sidebarLastActivity", "all");
+    h.a.splitOpening(.horizontal, "b");
+    h.a.composer.set("Unsent Beta prompt");
+    const workspace_count = h.a.tabs.items.items.len;
+    for ([_]strip.Panel{ .host, .files }) |cover| {
+        h.a.view.strip.focused = cover;
+        h.a.view.strip.expanded = cover;
+        h.t.settle(2);
+        try testing.expect(!@import("app_question.zig").ownsActivePane(&h.a));
+        var target: ?ui.Rect = null;
+        for (h.t.ctx.nodes.items) |node| switch (node.content) {
+            .text => |tx| if (std.mem.eql(u8, tx.str, "Beta") and node.rect.x < h.a.view.sidebar_width) {
+                if (target == null or node.rect.y > target.?.y) target = node.rect;
+            },
+            else => {},
+        };
+        const row = target orelse return error.MissingSelectedSessionRow;
+        h.t.click(row.x + row.w / 2, row.y + row.h / 2);
+        h.t.settle(2);
+
+        try testing.expectEqualStrings("b", h.a.selected.?);
+        try testing.expect(@import("app_question.zig").ownsActivePane(&h.a));
+        try testing.expectEqualStrings("Unsent Beta prompt", h.a.composer.text());
+        try testing.expectEqual(workspace_count, h.a.tabs.items.items.len);
+        const split = h.a.tabs.layout().?;
+        try testing.expectEqual(@as(usize, 1), split.focus);
+        try testing.expectEqual(@as(usize, 2), split.panes.items.len);
+        try testing.expectEqualStrings("a", split.panes.items[0].?);
+    }
+}
+
+test "session parity followup opening a live chat leaves an archive-only workspace alone" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try replace(&h.a.chats,
+        \\[ {"id":"a","deviceId":"local","title":"Alpha","spaceId":"local-project","archived":false},
+        \\  {"id":"archive","deviceId":"local","title":"Older session","spaceId":"local-project","archived":true},
+        \\  {"id":"next","deviceId":"local","title":"Newer session","spaceId":"local-project","archived":false} ]
+    );
+    h.a.openChatInTab("archive");
+    const archive = h.a.tabs.active;
+    try testing.expect(archive != 0);
+    try testing.expect(h.a.tabs.layout() == null);
+    // Creating a new workspace can give the old archive view a one-pane
+    // layout shell. It is still a standalone archive, not a live group.
+    h.a.newWorkspaceSession();
+    h.a.closeTab(h.a.tabs.active);
+    try testing.expectEqual(archive, h.a.tabs.active);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.panes.items.len);
+    h.a.openChatInTab("next");
+    try testing.expectEqualStrings("next", h.a.selected.?);
+    try testing.expectEqual(@as(usize, 0), h.a.tabs.active);
+    try testing.expectEqual(archive, h.a.tabs.find("archive").?.tab);
+    try testing.expectEqual(@as(usize, 0), h.a.tabs.find("a").?.tab);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    h.a.showTab(archive);
+    try testing.expectEqualStrings("archive", h.a.selected.?);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.groups[0].count());
+}
+
+test "session parity followup blank pane reuse only checks attachments owned by its composer" {
+    const attachments = @import("app_attachments.zig");
+    for ([_]bool{ false, true }) |attached_to_blank| {
+        var h: Harness = undefined;
+        try h.init(true);
+        defer h.deinit();
+        if (attached_to_blank) h.a.splitPane(.horizontal);
+        try attachments.stage(&h.a, "synthetic.txt", "Synthetic attachment");
+        if (!attached_to_blank) h.a.splitPane(.horizontal);
+        try testing.expect(h.a.selected == null);
+        const workspace = h.a.tabs.active;
+        h.a.openChatInTab("b");
+        try testing.expectEqualStrings("b", h.a.selected.?);
+        if (attached_to_blank) {
+            try testing.expect(h.a.tabs.active != workspace);
+            h.a.showTab(workspace);
+            try testing.expect(h.a.selected == null);
+        } else {
+            try testing.expectEqual(workspace, h.a.tabs.active);
+            try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.focus);
+            h.a.openChatInTab("a");
+        }
+        try testing.expectEqual(@as(usize, 1), attachments.count(&h.a));
+    }
+}
+
+test "session parity followup two blank split panes keep their own attachments" {
+    const attachments = @import("app_attachments.zig");
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.developer);
+    h.a.newWorkspaceSession();
+    const workspace = h.a.tabs.active;
+    try attachments.stage(&h.a, "synthetic.txt", "Synthetic attachment");
+    h.a.splitPane(.horizontal);
+    try testing.expect(h.a.selected == null);
+    const attachments_on_right = attachments.count(&h.a);
+    h.a.openChatInTab("b");
+    h.t.settle(2);
+    h.snap("blank-split-attachment");
+
+    try testing.expectEqual(@as(usize, 0), attachments_on_right);
+    try testing.expectEqual(workspace, h.a.tabs.active);
+    try testing.expectEqualStrings("b", h.a.selected.?);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.focus);
+    try testing.expectEqual(@as(usize, 0), attachments.count(&h.a));
+    h.a.focusPane(0);
+    try testing.expect(h.a.selected == null);
+    try testing.expectEqual(@as(usize, 1), attachments.count(&h.a));
 }
 
 test "question tab attention remains visible with hidden sidebar without selecting the question chat" {

@@ -2029,23 +2029,23 @@ test "visible chat completion clears Done without reopening the chat" {
     try h.init();
     defer h.deinit();
     const ws = @import("workspace.zig");
-    // A WatchChats update carries a new reply after this chat was opened.
-    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, chats, .{});
+    const state = "[" ++ chats ++ ",[{\"chatId\":\"a\",\"status\":\"idle\",\"lastCompletedTurn\":\"reply\"}]]";
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, state, .{});
     defer parsed.deinit();
-    try h.a.chats.replace(parsed.value);
-    try testing.expectEqual(ws.Mark.completed, ws.markOf(h.a.findChat("a").?, null, h.a.nowMs()));
+    try h.a.chats.replace(parsed.value.array.items[0]);
+    try h.a.sessions.replace(parsed.value.array.items[1]);
+    const settled = ws.sessionOf(h.a.sessions.items, "a").?;
+    try testing.expectEqual(ws.Mark.completed, ws.markOf(h.a.findChat("a").?, settled, h.a.nowMs()));
     h.t.ctx.input.window_active = true;
     h.t.settle(1);
     h.snap("active-chat-done");
     try testing.expect(!ws.unseen(h.a.findChat("a").?));
-    try testing.expectEqual(ws.Mark.idle, ws.markOf(h.a.findChat("a").?, null, h.a.nowMs()));
-    // Other chats keep their unread badge; Cmd+B must not resurrect this one.
+    try testing.expectEqual(ws.Mark.idle, ws.markOf(h.a.findChat("a").?, settled, h.a.nowMs()));
     try testing.expect(ws.unseen(h.a.findChat("b").?));
     h.press(.{ .key = 'b', .cmd = true });
     h.press(.{ .key = 'b', .cmd = true });
     try testing.expect(!ws.unseen(h.a.findChat("a").?));
 }
-
 test "visible chat completion stays unread while inactive or hidden" {
     for (0..5) |hidden| {
         var h: Harness = undefined;

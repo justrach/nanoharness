@@ -1,15 +1,17 @@
 # Harness MCP server
 
 `harness mcp` serves the Model Context Protocol on stdin/stdout and proxies every
-tool into the running engine's localhost IPC (`ws://127.0.0.1:$HARNESS_IPC_PORT`,
-default 27654) — the same `harness_rpc` surface the headed app and `harness sync`
-dial. It is a subcommand of the one `harness` binary: no Node runtime, no extra
-install, a few MB resident.
+tool into the running engine's localhost RPC (`ws://127.0.0.1:$HARNESS_IPC_PORT`,
+default 27664) — the same surface the desktop app and `harness sync` dial. It is
+a subcommand of the Zig `harness` CLI (`apps/nano`, `zig build cli`): no Node
+runtime and no extra install.
 
-Crate: `crates/mcp` (`harness-mcp`). The protocol layer is hand-rolled
-(`initialize`, `ping`, `tools/list`, `tools/call`; newline-delimited JSON-RPC
-2.0) — the repo already owns JSON-RPC framing for the Codex and ACP drivers and
-the stdio tool-server subset is tiny, so no SDK dependency was taken.
+Code: `apps/nano/src/mcp_server.zig` (protocol and stdio serving) and
+`apps/nano/src/mcp/` (the tools). The tool list is `protocol/mcp-tools.json`,
+compiled into the binary. The protocol layer is hand-rolled (`initialize`,
+`ping`, `tools/list`, `tools/call`; newline-delimited JSON-RPC 2.0), with no SDK
+dependency. Requests are answered concurrently, so a long `wait_for_turn` does
+not block pings.
 
 ## Identity
 
@@ -18,7 +20,7 @@ originating chat in the environment:
 
 | Variable          | Meaning                                                       |
 | ----------------- | ------------------------------------------------------------- |
-| `HARNESS_IPC_PORT`  | Engine to proxy (default 27654).                              |
+| `HARNESS_IPC_PORT`  | Engine to proxy (default 27664).                              |
 | `HARNESS_CHAT_ID`   | The chat whose agent spawned this server.                     |
 | `HARNESS_DEVICE_ID` | That chat's host device.                                      |
 
@@ -185,7 +187,7 @@ fix graff's shell-wait behavior.
 ## Smoke recipe
 
 ```sh
-BIN=target/debug/harness
+BIN=apps/nano/zig-out/bin/harness   # after `cd apps/nano && zig build cli`
 { echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
   echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_chats","arguments":{"limit":5}}}'
   sleep 5; } | HARNESS_IPC_PORT=27655 $BIN mcp
@@ -193,5 +195,6 @@ BIN=target/debug/harness
 
 `create_chat` with `"prompt": "Reply with exactly the word pong", "wait": true`
 against a live daemon returns the assistant's `pong` in a few seconds; archive
-the chat afterwards with `archive_chat`. Unit tests (`cargo test -p harness-mcp`)
-drive the whole tool set against an in-memory stub `RpcService`.
+the chat afterwards with `archive_chat`. Unit tests run from `apps/nano` with
+`zig build test -Dtest-filter="mcp"` (`mcp/unit_tests.zig`,
+`mcp/engine_link_tests.zig`).

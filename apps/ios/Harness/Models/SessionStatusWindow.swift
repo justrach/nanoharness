@@ -91,7 +91,7 @@ struct SessionStatusWindow {
         let live = effectiveStatus(sessionRow, now: nowMs)
         let base = chatIndicator(chat: chat, live: live)
         if base == .working && hostStatus == .offline {
-            return chat.unseen ? .completed : .idle
+            return .idle
         }
         if base != .working,
            hasLiveMidStreamTurn(

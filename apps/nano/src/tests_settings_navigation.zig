@@ -46,7 +46,10 @@ test "settings navigation finds GitHub links and toggles the saved preference fr
         try h.t.clickText("Open GitHub links in Harness");
         h.t.settle(0.1);
         try testing.expect(h.a.settings.get(.open_github_links_in_harness));
-        try h.t.clickText("Find a setting");
+        // ⌘F is the way back to the search field from a page.
+        h.t.ctx.focus = 0;
+        _ = h.t.shortcut(.{ .key = 'f', .cmd = true });
+        h.t.settle(0.1);
         h.t.typeText("privacy telemetry");
         h.t.settle(0.1);
         try testing.expect(h.t.hasText("Sounds, alerts and anonymous performance sharing"));
@@ -147,6 +150,7 @@ test "settings navigation keeps search and Back reachable on short windows and r
         "pending-1",
         "phone",
         "Run from phone: list the files",
+        true,
     );
     h.t.settle(0.1);
     try testing.expect(h.t.hasText("Approve remote action"));
@@ -157,7 +161,7 @@ test "settings navigation keeps search and Back reachable on short windows and r
     try testing.expect(!h.a.view.settings_open);
 }
 
-test "zen settings shows esc hints and closes on Escape or Close pill" {
+test "zen settings shows esc hints and closes on Escape or Back to chats" {
     const ui = @import("nanoui").ui;
     var h: Harness = undefined;
     try h.init(true);
@@ -167,7 +171,7 @@ test "zen settings shows esc hints and closes on Escape or Close pill" {
     h.t.settle(0.2);
 
     try testing.expect(h.t.hasText("Back to chats"));
-    try testing.expect(h.t.hasText("Close"));
+    try testing.expect(!h.t.hasText("Close"));
     try testing.expect(h.t.hasText("esc"));
 
     // Escape closes Settings even while Search settings has focus.
@@ -175,11 +179,11 @@ test "zen settings shows esc hints and closes on Escape or Close pill" {
     h.t.settle(0.2);
     try testing.expect(!h.a.view.settings_open);
 
-    // Reopen and verify clicking the page-header Close [esc] pill also exits Settings.
+    // Reopen and verify clicking Back to chats [esc] also exits Settings.
     view.open(&h.a);
     h.t.settle(0.2);
     try testing.expect(h.a.view.settings_open);
-    try h.t.clickText("Close");
+    try h.t.clickText("Back to chats");
     h.t.settle(0.2);
     try testing.expect(!h.a.view.settings_open);
 }

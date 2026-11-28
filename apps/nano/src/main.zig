@@ -36,6 +36,11 @@ pub fn main(init: std.process.Init) !void {
     const gui = if (comptime @hasField(nanoui.App, "gui")) app.gui else true;
     a.performance.available = !@import("builtin").is_test and @import("builtin").mode != .debug and !app.flags.hidden and app.flags.play == null and app.flags.script.len == 0 and gui;
     if (a.performance.available) a.performance.start(init.gpa, init.io);
+    // codegraff #941: this window's browser tabs are graff's preview
+    // consumers. Hidden, scripted and replayed runs leave the file alone.
+    if (!@import("builtin").is_test and !app.flags.hidden and app.flags.play == null and app.flags.script.len == 0 and gui) {
+        if (init.environ_map.get("HOME")) |home| a.preview_consumers.enable(init.gpa, init.io, home);
+    }
     @import("frame_profile.zig").start(&a);
     // Panics, fatal signals and hangs leave their stacks in ~/.harness/logs.
     if (a.settings.dataDir()) |dir| crash_log.start(init.io, dir);

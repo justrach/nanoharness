@@ -269,7 +269,7 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, corn
 const dictate = @import("app_dictation.zig");
 
 fn attachButtons(c: *ui.Context, a: *App, k: theme.Colors, show_mic: bool) void {
-    if (kit.iconButton(c, k, .paperclip, .{ .size = 28, .radius = 14, .icon = 18 }))
+    if (kit.iconButton(c, k, .paperclip, .{ .size = 28, .radius = 14, .icon = 18, .tip = .{ .text = "Attach files" } }))
         attachments.pick(a);
     // The mic shows where the device's Codex voice was found, and while a
     // session is live.
@@ -286,7 +286,9 @@ fn micButton(c: *ui.Context, a: *App, k: theme.Colors) bool {
     const busy = s.running != null and !listening;
     const level = std.math.clamp(s.level, 0, 1);
     ui.key(c, "composer-dictate");
-    const base = ui.div(c).row().size(28, 28).center().roundedFull().circular();
+    // What a click does now (`dictate.toggle`): start, finish, or cancel.
+    const label: []const u8 = if (listening) "Stop dictation" else if (busy) "Cancel dictation" else "Dictate";
+    const base = @import("view_tooltip.zig").on(ui.div(c).row().size(28, 28).center().roundedFull().circular(), k, .{ .text = label });
     const b = if (listening) base.bg(k.danger.alpha(0.10 + 0.30 * level)) else kit.listenerHover(&a.view.hovers, base, k.ink(0.10)).div;
     defer b.end();
     icons.icon(c, .microphone, 17, if (listening) k.danger else if (busy) k.faint else k.muted, 0);
@@ -683,22 +685,62 @@ fn skeleton(c: *ui.Context) void {
     _ = c.leaf(.{ .width = .{ .px = 56 }, .height = .{ .px = 11 }, .radius = 5.5, .background = c.theme.text.alpha(0.08 * (0.35 + 0.4 * phase)) }, .none, null);
 }
 
+pub const SendFacts = struct {
+    empty: bool,
+    running: bool,
+    chat_blocked: bool = false,
+    uploads_ready: bool = true,
+    connected: bool = true,
+};
+
+pub const SendButton = struct {
+    stop: bool,
+    /// Drawn faint: a click would not send now.
+    dimmed: bool,
+    /// A click does something: sends, stops, or says why it can't send.
+    acts: bool,
+};
+
+/// The Send/Stop button's state. It is dimmed whenever a click can't send
+/// (nothing typed, the engine down, a plain chat with no Auto tier,
+/// uploads still going). With the engine down a click still reaches
+/// `App.send`, which says so instead of failing silently.
+pub fn sendButton(f: SendFacts) SendButton {
+    const stop = f.running and f.empty;
+    if (stop) return .{ .stop = true, .dimmed = false, .acts = true };
+    const sendable = !f.empty and !f.chat_blocked and f.uploads_ready;
+    return .{ .stop = false, .dimmed = !sendable or !f.connected, .acts = sendable };
+}
+
+test "send button dims when it can't send and still explains a disconnected send" {
+    const t = std.testing;
+    try t.expectEqual(SendButton{ .stop = false, .dimmed = true, .acts = false }, sendButton(.{ .empty = true, .running = false }));
+    try t.expectEqual(SendButton{ .stop = false, .dimmed = false, .acts = true }, sendButton(.{ .empty = false, .running = false }));
+    try t.expectEqual(SendButton{ .stop = false, .dimmed = true, .acts = true }, sendButton(.{ .empty = false, .running = false, .connected = false }));
+    try t.expectEqual(SendButton{ .stop = false, .dimmed = true, .acts = false }, sendButton(.{ .empty = false, .running = false, .uploads_ready = false }));
+    try t.expectEqual(SendButton{ .stop = true, .dimmed = false, .acts = true }, sendButton(.{ .empty = true, .running = true }));
+}
+
 /// Send (or queue, while a run goes); Stop with nothing typed mid-run.
 fn send(c: *ui.Context, a: *App, k: theme.Colors, pad_left: f32) void {
     const empty = std.mem.trim(u8, a.composer.text(), " \n\t").len == 0 and attachments.count(a) == 0 and quotes.count(a) == 0;
-    const running = a.selectedStatus() == .working;
-    const stop = running and empty;
-    // Dimmed only when it can't send at all; an empty box just does nothing.
-    const blocked = !stop and (@import("app_agent.zig").chatSendBlocked(a) or !attachments.ready(a));
+    const state = sendButton(.{
+        .empty = empty,
+        .running = a.selectedStatus() == .working,
+        .chat_blocked = @import("app_agent.zig").chatSendBlocked(a),
+        .uploads_ready = attachments.ready(a),
+        .connected = a.engine.state == .connected,
+    });
+    const stop = state.stop;
     const pad = ui.div(c).row().pl(pad_left);
     defer pad.end();
     // Filled with the primary accent, its glyph contrast-checked on it
     // (`render_send_button`, `on_primary_accent`). `.circular()` renders a
     // true analytical Euclidean circle rather than a squircle polygon.
     var b = ui.div(c).row().size(28, 28).center().roundedFull().circular().bg(k.accent);
-    b = b.opacity(if (blocked) 0.35 else if (b.hovered()) 0.85 else 1);
+    b = b.opacity(if (state.dimmed) 0.35 else if (b.hovered()) 0.85 else 1);
     defer b.end();
-    if (b.clicked() and !blocked and (stop or !empty)) {
+    if (b.clicked() and state.acts) {
         if (stop) a.interrupt() else a.send();
     }
     if (stop) {

@@ -24,6 +24,7 @@
  * retried with backoff.
  */
 import { personalOrgId } from "./auth";
+import { readJsonCapped } from "./body";
 import { deleteCrashReports } from "./crash-reports";
 import { AUTH_USER_HEADER, ROOM_KIND_HEADER, type Env } from "./env";
 import { deleteHarnessMember } from "./member-profile";
@@ -94,7 +95,9 @@ export class AccountPurge implements DurableObject {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/start" && request.method === "POST") {
-      const body = (await request.json().catch(() => null)) as { userId?: unknown; orgId?: unknown } | null;
+      const parsed = await readJsonCapped(request, 64 * 1024);
+      if (!parsed.ok && parsed.status === 413) return json({ error: "too_large" }, 413);
+      const body = parsed.ok ? (parsed.value as { userId?: unknown; orgId?: unknown } | null) : null;
       if (typeof body?.userId !== "string" || !body.userId) return json({ error: "missing userId" }, 400);
       const existing = await this.ctx.storage.get<Job>("job");
       if (existing) return json({ status: existing.doneAt ? "done" : "running", pass: existing.pass });

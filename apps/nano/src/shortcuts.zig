@@ -38,12 +38,14 @@ pub const Shortcut = struct {
 
 const jump_description = "Open the session at this place in the sidebar list.";
 
-/// The Appshot capture's, recorded on the Appshots page (Control-Option-Space
-/// on the Mac, `ShortcutId::CaptureAppshot`).
+/// The GPUI app's Appshot capture key (Control-Option-Space on the Mac,
+/// `ShortcutId::CaptureAppshot`). Nano has no capture and shows no row for
+/// it; the file keeps it as saved.
 pub const appshot: Shortcut = .{ .key = "captureAppshot", .group = .sessions, .title = "Capture Appshot", .description = "", .default = "ctrl-alt-space" };
 
-/// In the page's order (`ShortcutId::ALL`, Appshots' left out: it has a
-/// page of its own).
+/// In the page's order (`ShortcutId::ALL`, Appshots' left out). The keys
+/// stay the GPUI app's (`splitTerminal`), so saved bindings still load; the
+/// titles say what the keys do here.
 pub const all = [_]Shortcut{
     .{ .key = "saveFile", .group = .files, .title = "Save file", .description = "Save the active workspace file.", .default = "mod-s" },
     .{ .key = "browserReload", .group = .browser, .title = "Reload browser page", .description = "Reload the focused browser tab.", .default = "mod-shift-r" },
@@ -51,8 +53,8 @@ pub const all = [_]Shortcut{
     .{ .key = "toggleChanges", .group = .panels, .title = "Toggle right sidebar", .description = "Show or hide the right sidebar for the current session.", .default = "mod-r" },
     .{ .key = "toggleFiles", .group = .panels, .title = "Toggle files panel", .description = "Show or hide the files panel for the current session.", .default = "mod-e" },
     .{ .key = "toggleTerminal", .group = .panels, .title = "Toggle terminal", .description = "Show or hide the terminal for the current session.", .default = "mod-j" },
-    .{ .key = "splitTerminal", .group = .panels, .title = "Split terminal right", .description = "Split the focused terminal to the right, like Ghostty ⌘D.", .default = "mod-d" },
-    .{ .key = "splitTerminalDown", .group = .panels, .title = "Split terminal down", .description = "Split the focused terminal downward.", .default = "" },
+    .{ .key = "splitTerminal", .group = .panels, .title = "Split chat right", .description = "Split the chat column to the right, like Ghostty ⌘D, with a new chat in the new pane.", .default = "mod-d" },
+    .{ .key = "splitTerminalDown", .group = .panels, .title = "Split chat down", .description = "Split the chat column downward, with a new chat in the new pane.", .default = "" },
     .{ .key = "newSession", .group = .sessions, .title = "New chat", .description = "Open a new chat tab, preserving the current chat and split layout.", .default = "mod-t" },
     .{ .key = "openModelPicker", .group = .sessions, .title = "Open model picker", .description = "Open the model picker for the current session.", .default = "mod-/" },
     .{ .key = "nextSession", .group = .sessions, .title = "Next tab or session", .description = "Switch to the next tab when two or more are open; otherwise select the next session in the sidebar.", .default = "ctrl-tab" },
@@ -78,11 +80,11 @@ fn jumps() [9]Shortcut {
 }
 
 /// The read-only group under them: the window's own keys
-/// (`fixed_rows`, from the live keymap on macOS).
+/// (`fixed_rows`, from the live keymap on macOS). None repeats a rebindable
+/// row: those keys follow the binding, so a fixed copy would go stale.
 pub const Fixed = struct { title: []const u8, keys: []const u8 = "", chord: ?ui.Shortcut = null };
 pub const fixed_label = "Panes, tabs and the composer";
 pub const fixed = [_]Fixed{
-    .{ .title = "Split the chat to the right", .keys = "Cmd+D" },
     .{ .title = "Close the pane (back to one column)", .keys = "Cmd+W" },
     .{ .title = "Next pane", .keys = "Cmd+]" },
     .{ .title = "Previous pane", .keys = "Cmd+[" },
@@ -96,8 +98,6 @@ pub const fixed = [_]Fixed{
     .{ .title = "Grow the pane down", .keys = "Ctrl+Cmd+↓" },
     .{ .title = "Make all panes the same size", .keys = "Ctrl+Cmd+=" },
     .{ .title = "Zoom the pane (and back)", .keys = "Cmd+Shift+Enter" },
-    .{ .title = "New chat tab", .keys = "Cmd+T" },
-    .{ .title = "Reopen closed chat tab", .keys = "Cmd+Shift+T" },
     .{ .title = "Next chat tab", .keys = "Cmd+Shift+]" },
     .{ .title = "Previous chat tab", .keys = "Cmd+Shift+[" },
     .{ .title = "First chat tab (2–8 for the next ones)", .keys = "Ctrl+1" },

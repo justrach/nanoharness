@@ -1476,6 +1476,10 @@ async fn checkout_file_diff_text_rpc_fits_the_default_worker_stack() {
     std::fs::write(repo_dir.join("a.txt"), "one\ntwo edited\n").expect("dirty tree");
 
     let core = assemble(&tmp.path().join("data"));
+    core.repos
+        .add(&repo_dir.to_string_lossy())
+        .await
+        .expect("register repo");
     let identity = core
         .repos
         .checkout_identity(&repo_dir)
@@ -1523,6 +1527,10 @@ async fn checkout_file_diff_text_rpc_reads_pinned_commit_sources() {
         .expect("working tree content");
 
     let core = assemble(&tmp.path().join("data"));
+    core.repos
+        .add(&repo_dir.to_string_lossy())
+        .await
+        .expect("register repo");
     let identity = core
         .repos
         .checkout_identity(&repo_dir)
@@ -2429,6 +2437,111 @@ async fn rpc_dispatch_for_m5_methods() {
         err.to_string().contains("not found"),
         "unexpected error: {err}"
     );
+
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_diff_terminal_and_attachment_rpcs_reject_unauthorized_paths() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let outside_repo = tmp.path().join("outside-repo");
+    init_repo(&outside_repo).await;
+    let secret_png = outside_repo.join("secret.png");
+    std::fs::write(&secret_png, b"\x89PNG\r\n\x1a\nsynthetic").expect("write png");
+
+    let core = assemble(&tmp.path().join("data"));
+    let identity = core
+        .repos
+        .checkout_identity(&outside_repo)
+        .await
+        .expect("identity");
+    // A chat hosted on a DIFFERENT device naming `outside_repo` must NOT widen
+    // this device's attachment or checkout jail.
+    core.workspace
+        .import_chat_row(&harness_proto::Chat {
+            id: "remote-chat".into(),
+            device_id: "other-device".into(),
+            title: Some("Remote".into()),
+            archived: false,
+            cwd: Some(outside_repo.to_string_lossy().to_string()),
+            branch: None,
+            checkout_id: None,
+            source_context: None,
+            source_context_unavailable_at: None,
+            config: None,
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: chrono::Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            space_id: None,
+            last_seen_at: None,
+            room_gen: None,
+            parent_chat_id: None,
+            last_prompt_at: None,
+        })
+        .expect("import remote chat");
+
+    let client = harness_rpc::memory_client(core.rpc_service());
+    let outside = outside_repo.to_string_lossy().to_string();
+
+    for (method, params) in [
+        (
+            methods::GET_CHECKOUT_DIFF,
+            serde_json::json!({ "cwd": outside }),
+        ),
+        (
+            methods::GET_CHECKOUT_FILE_DIFF_TEXT,
+            serde_json::json!({
+                "checkoutId": identity.id,
+                "cwd": outside,
+                "path": "a.txt",
+                "mode": "working",
+                "diffChecksum": "00",
+            }),
+        ),
+        (
+            methods::LIST_BRANCHES,
+            serde_json::json!({ "repoPath": outside }),
+        ),
+        (
+            methods::LIST_REFS,
+            serde_json::json!({ "repoPath": outside }),
+        ),
+        (
+            methods::LIST_GIT_HISTORY,
+            serde_json::json!({ "cwd": outside }),
+        ),
+        (
+            methods::SEARCH_GIT_HISTORY,
+            serde_json::json!({ "cwd": outside, "query": "init" }),
+        ),
+        (
+            methods::FETCH_ALL,
+            serde_json::json!({ "repoPath": outside }),
+        ),
+        (
+            methods::SWITCH_REF,
+            serde_json::json!({ "repoPath": outside, "refName": "main" }),
+        ),
+        (
+            methods::OPEN_TERMINAL,
+            serde_json::json!({ "chatId": "draft", "cwd": outside, "cols": 80, "rows": 24 }),
+        ),
+        (
+            methods::OPEN_TERMINAL,
+            serde_json::json!({ "chatId": "remote-chat", "cols": 80, "rows": 24 }),
+        ),
+        (
+            methods::READ_ATTACHMENT_CHUNK,
+            serde_json::json!({ "path": secret_png.to_string_lossy(), "offset": 0 }),
+        ),
+    ] {
+        assert!(
+            client.call(method, params).await.is_err(),
+            "{method} must reject unauthorized outside path"
+        );
+    }
 
     core.shutdown().await;
 }

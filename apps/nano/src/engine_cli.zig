@@ -15,6 +15,7 @@ const Allocator = std.mem.Allocator;
 const Map = std.process.Environ.Map;
 const auth_host = @import("auth_host.zig");
 const ws = @import("ws.zig");
+const io_deadline = @import("io_deadline.zig");
 
 pub const DaemonAction = enum { install, uninstall, start, stop, restart, status };
 
@@ -123,7 +124,13 @@ pub fn dataDirCandidates(gpa: Allocator, env: *const Map, windows: bool) ![][]u8
 
 /// The data folder (owned): the first candidate that exists, else the first.
 pub fn resolveDataDir(gpa: Allocator, io: Io, env: *const Map) ![]u8 {
-    const list = try dataDirCandidates(gpa, env, builtin.os.tag == .windows);
+    return resolveDataDirFor(gpa, io, env, builtin.os.tag == .windows);
+}
+
+/// `resolveDataDir` for the given platform, so a test on any OS can check the
+/// Windows answer.
+pub fn resolveDataDirFor(gpa: Allocator, io: Io, env: *const Map, windows: bool) ![]u8 {
+    const list = try dataDirCandidates(gpa, env, windows);
     defer gpa.free(list);
     var chosen: usize = 0;
     for (list, 0..) |p, i| {
@@ -450,15 +457,52 @@ pub fn rpcCallWithBearer(gpa: Allocator, io: Io, port: u16, bearer: ?[]const u8,
     // and never upgrades can't hang the command.
     const addr = Io.net.IpAddress.parseIp4("127.0.0.1", port) catch return error.NoEngine;
     const stream = addr.connect(io, .{ .mode = .stream }) catch return error.NoEngine;
-    var hs_dog: auth_host.SocketWatchdog = .{ .io = io, .handle = stream.socket.handle, .ms = timeout_ms };
-    hs_dog.arm();
-    const upgraded = ws.Client.upgradeWithBearer(gpa, io, stream, port, "/", bearer);
-    if (hs_dog.disarm()) {
-        if (upgraded) |c| c.deinit(gpa) else |_| {}
-        return error.Timeout;
-    }
+    const upgraded = if (comptime builtin.os.tag == .windows) blk: {
+        const outcome = io_deadline.run(io, timeout_ms, null, ws.Client.upgradeWithBearer, .{ gpa, io, stream, port, "/", bearer }) catch {
+            // No task was scheduled, so ownership of the connected stream
+            // has not transferred to upgradeWithBearer.
+            stream.close(io);
+            return error.NoEngine;
+        };
+        switch (outcome) {
+            .finished => |result| break :blk result,
+            .timed_out => |result| {
+                if (result) |late| late.deinit(gpa) else |_| {}
+                return error.Timeout;
+            },
+            .canceled => |result| {
+                if (result) |late| late.deinit(gpa) else |_| {}
+                return error.NoEngine;
+            },
+        }
+    } else blk: {
+        var hs_dog: auth_host.SocketWatchdog = .{ .io = io, .stream = stream, .ms = timeout_ms };
+        hs_dog.arm();
+        const result = ws.Client.upgradeWithBearer(gpa, io, stream, port, "/", bearer);
+        if (hs_dog.disarm()) {
+            if (result) |late| late.deinit(gpa) else |_| {}
+            return error.Timeout;
+        }
+        break :blk result;
+    };
     const client = upgraded catch return error.NoEngine;
     defer client.deinit(gpa);
+
+    if (comptime builtin.os.tag == .windows) {
+        const outcome = io_deadline.run(io, timeout_ms, null, rpcExchange, .{ gpa, client, method, params_json }) catch return error.NoEngine;
+        return switch (outcome) {
+            .finished => |result| result catch error.NoEngine,
+            .timed_out => |result| blk: {
+                if (result) |reply| reply.deinit(gpa) else |_| {}
+                break :blk error.Timeout;
+            },
+            .canceled => |result| blk: {
+                if (result) |reply| reply.deinit(gpa) else |_| {}
+                break :blk error.NoEngine;
+            },
+        };
+    }
+
     const Watchdog = struct {
         done: std.atomic.Value(bool) = .init(false),
         fired: std.atomic.Value(bool) = .init(false),
@@ -478,7 +522,15 @@ pub fn rpcCallWithBearer(gpa: Allocator, io: Io, port: u16, bearer: ?[]const u8,
         dog.done.store(true, .release);
         thread.join();
     }
+    const result = rpcExchange(gpa, client, method, params_json);
+    if (dog.fired.load(.acquire)) {
+        if (result) |reply| reply.deinit(gpa) else |_| {}
+        return error.Timeout;
+    }
+    return result catch error.NoEngine;
+}
 
+fn rpcExchange(gpa: Allocator, client: *ws.Client, method: []const u8, params_json: []const u8) !Reply {
     const req = try std.fmt.allocPrint(gpa, "{{\"id\":1,\"method\":{f},\"params\":{s}}}", .{ json.fmt(method, .{}), params_json });
     defer gpa.free(req);
     client.sendText(req) catch return error.NoEngine;
@@ -486,9 +538,7 @@ pub fn rpcCallWithBearer(gpa: Allocator, io: Io, port: u16, bearer: ?[]const u8,
     var msg: std.ArrayList(u8) = .empty;
     defer msg.deinit(gpa);
     while (true) {
-        const op = client.readMessage(gpa, &msg) catch {
-            return if (dog.fired.load(.acquire)) error.Timeout else error.NoEngine;
-        };
+        const op = client.readMessage(gpa, &msg) catch return error.NoEngine;
         if (op != .text) continue;
         var lines = std.mem.splitScalar(u8, msg.items, '\n');
         while (lines.next()) |line| {

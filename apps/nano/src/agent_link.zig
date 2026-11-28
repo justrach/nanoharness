@@ -1,7 +1,24 @@
 //! The GPUI transcript's spawn genus and task-title rules, without UI or I/O.
 const std = @import("std");
 
-pub const Status = enum { running, done, failed, cancelled, disconnected };
+/// A spawn chip's lifecycle (`subagentStatus`). `unknown` is a status this
+/// build doesn't know (a newer engine's); it is never read as no status.
+pub const Status = enum {
+    running,
+    done,
+    failed,
+    cancelled,
+    disconnected,
+    unknown,
+
+    /// Absent or empty: no lifecycle was recorded (null). The doc's
+    /// `completed` is `done`.
+    pub fn parse(raw: []const u8) ?Status {
+        if (raw.len == 0) return null;
+        if (std.mem.eql(u8, raw, "completed")) return .done;
+        return std.meta.stringToEnum(Status, raw) orelse .unknown;
+    }
+};
 
 fn str(o: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     const v = o.get(key) orelse return null;

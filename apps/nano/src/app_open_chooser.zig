@@ -1,5 +1,6 @@
-//! One destination chooser for a new tab, a split, or a project. It only
-//! changes the draft picks; the actual tab or split is made after the choice.
+//! One destination chooser for a new tab or a split. It only changes the
+//! draft picks; the actual tab or split is made after the choice. New
+//! project opens the project form itself (`app_project_setup.open`).
 const std = @import("std");
 const ui = @import("nanoui").ui;
 const tabs = @import("tabs.zig");
@@ -9,18 +10,14 @@ const Allocator = std.mem.Allocator;
 
 pub const Intent = enum {
     new_tab,
-    /// Cmd+T keeps the entire source split in its own top-level tab.
-    new_workspace_tab,
     split_right,
     split_down,
-    new_project,
 
     pub fn title(i: Intent) []const u8 {
         return switch (i) {
-            .new_tab, .new_workspace_tab => "New session",
+            .new_tab => "New session",
             .split_right => "Split to the right",
             .split_down => "Split below",
-            .new_project => "Open a project",
         };
     }
 };
@@ -154,7 +151,6 @@ pub fn choose(a: *App, space_id: ?[]const u8) void {
     // explicit choice is applied to the fresh draft afterwards.
     switch (intent) {
         .new_tab => a.addChatTab(false),
-        .new_project, .new_workspace_tab => a.newTab(),
         .split_right => a.splitPane(.horizontal),
         .split_down => a.splitPane(.vertical),
     }

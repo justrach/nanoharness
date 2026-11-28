@@ -839,23 +839,27 @@ test "model picker refresh button sends ListModels with force true without delay
     try testing.expect(saw_forced);
 }
 
-test "compact model picker exposes Speed Ultra Fast and persists serviceTier on open and new chats" {
+test "compact model picker exposes Speed Ultra Fast and matches the catalog tier on open and new chats" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
     h.a.togglePicker();
     h.t.settle(1);
 
-    const catalog_62 = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+    const catalog_62 =
         \\[{"id":"codex/gpt-6.2-sol","label":"GPT-6.2 Sol","maker":"openai","billing":"plan","context":500000,
         \\  "reasoningLevels":["low","medium","high","xhigh","ultra"],
         \\  "options":[
         \\    {"id":"serviceTier","label":"Service Tier","choices":[{"id":"default","label":"Standard"},{"id":"fast","label":"Fast"},{"id":"ultrafast","label":"Ultra Fast"}],"defaultChoice":"default"},
         \\    {"id":"orchestrator","label":"Orchestrator","choices":[{"id":"off","label":"Off"},{"id":"auto","label":"Auto"},{"id":"on","label":"On"}],"defaultChoice":"auto"}
         \\  ]}]
-    , .{});
-    defer catalog_62.deinit();
-    try h.a.models.replace(catalog_62.value);
+    ;
+    const scene_prefix = "{\"Mutate\":{},\"QueueCommand\":{},\"FocusChat\":{},\"ListModels\":";
+    const model_picker = @import("model_picker.zig");
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator, scene_prefix ++ catalog_62 ++ "}", .{});
+    h.a.engine.state = .connected;
+    _ = model_picker.refreshCatalog(&h.a, "graff");
+    h.t.settle(1);
 
     const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
         \\[{"id":"c-tier","deviceId":"synthetic-device","title":"Ultrafast chat","spaceId":"synthetic-project","archived":false,
@@ -871,10 +875,6 @@ test "compact model picker exposes Speed Ultra Fast and persists serviceTier on 
     for ([_][]const u8{ "Speed", "Standard", "Fast", "Ultra Fast" }) |label| {
         try testing.expect(h.t.hasText(label));
     }
-    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
-        \\{"Mutate":{}}
-    , .{});
-    h.a.engine.state = .connected;
     try h.t.clickText("Ultra Fast");
     h.t.settle(1);
     h.snap("compact-ultrafast-dark");
@@ -891,6 +891,74 @@ test "compact model picker exposes Speed Ultra Fast and persists serviceTier on 
     }
     try testing.expect(sent_set);
     try testing.expectEqualStrings("ultrafast", h.a.findChat("c-tier").?.service_tier.?);
+
+    h.a.newTab();
+    h.a.pickDraftDevice("synthetic-device");
+    h.a.setModel("codex/gpt-6.2-sol");
+    h.t.settle(1);
+    h.a.togglePickerCompact();
+    h.t.settle(1);
+    try h.t.clickText("Ultra Fast");
+    h.t.settle(1);
+    h.a.picker = .none;
+    h.a.composer.set("Start a synthetic chat");
+    const before_create = h.a.engine.sent.items.len;
+    h.a.send();
+    h.t.settle(1);
+    try expectTierRequests(h.a.engine.sent.items[before_create..], "ultrafast", true);
+
+    // Simulate a catalog refresh that drops Ultra Fast while the chat still
+    // has that choice persisted. The picker and the queued turn must agree.
+    const fast_catalog =
+        \\[{"id":"codex/gpt-6.2-sol","label":"GPT-6.2 Sol","maker":"openai","billing":"plan",
+        \\  "options":[{"id":"serviceTier","label":"Service Tier","choices":[{"id":"default","label":"Standard"},{"id":"fast","label":"Fast"}],"defaultChoice":"default"}]}]
+    ;
+    const refreshed = try std.json.parseFromSlice(std.json.Value, testing.allocator, scene_prefix ++ fast_catalog ++ "}", .{});
+    h.a.engine.scene.?.deinit();
+    h.a.engine.scene = refreshed;
+    _ = model_picker.refreshCatalog(&h.a, "graff");
+    h.t.settle(1);
+    h.a.openChatInTab("c-tier");
+    h.t.settle(1);
+    h.a.togglePickerCompact();
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("Fast"));
+    try testing.expect(!h.t.hasText("Ultra Fast"));
+    h.snap("compact-fast-catalog-dark");
+
+    h.a.picker = .none;
+    h.a.composer.set("Continue the synthetic chat");
+    const before_run = h.a.engine.sent.items.len;
+    h.a.send();
+    h.t.settle(1);
+    try expectTierRequests(h.a.engine.sent.items[before_run..], "fast", false);
+    try testing.expectEqualStrings("ultrafast", h.a.findChat("c-tier").?.service_tier.?);
+}
+
+fn expectTierRequests(frames: []const []u8, tier: []const u8, create_expected: bool) !void {
+    var saw_create = false;
+    var saw_run = false;
+    for (frames) |frame| {
+        const create = std.mem.indexOf(u8, frame, "\"createChat\"") != null;
+        const run = std.mem.indexOf(u8, frame, "\"QueueCommand\"") != null;
+        if (!create and !run) continue;
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, frame, .{});
+        defer parsed.deinit();
+        const params = parsed.value.object.get("params") orelse return error.MissingParams;
+        const config = if (create)
+            params.object.get("config") orelse return error.MissingConfig
+        else blk: {
+            const command = params.object.get("command") orelse return error.MissingCommand;
+            break :blk command.object.get("request") orelse return error.MissingRequest;
+        };
+        const options = config.object.get("modelOptions") orelse return error.MissingOptions;
+        const actual = options.object.get("serviceTier") orelse return error.MissingServiceTier;
+        try testing.expectEqualStrings(tier, actual.string);
+        saw_create = saw_create or create;
+        saw_run = saw_run or run;
+    }
+    try testing.expectEqual(create_expected, saw_create);
+    try testing.expect(saw_run);
 }
 
 test "graff model with empty reasoningLevels never inherits harness ladder or sends stale xhigh" {

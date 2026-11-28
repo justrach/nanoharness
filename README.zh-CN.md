@@ -22,7 +22,7 @@ Harness 内置 [CodeGraff](https://github.com/justrach/codegraff) 适配器。�
 
 ## 从源码运行
 
-需要 `rust-toolchain.toml` 里的 Rust 工具链（当前是 1.97.1）。
+需要 Zig `0.17.0` 和 `rust-toolchain.toml` 里的 Rust 工具链（当前是 1.97.1）。桌面应用和 `harness` 命令行用 Zig 写在 `apps/nano`，它们运行的引擎是 Rust 的 `harness-engine`。
 
 ### macOS
 
@@ -30,19 +30,14 @@ Harness 内置 [CodeGraff](https://github.com/justrach/codegraff) 适配器。�
 ./scripts/run-macos-dev.sh
 ```
 
-脚本会编译 `harness`，放到 `target/macos-dev/Harness.app`，再通过 Launch Services 打开，这样 TCC 记在应用上而不是终端上。开发数据在 `target/macos-dev/data`（可用 `HARNESS_DEV_DATA_DIR` 覆盖）；IPC 默认端口 `49777`。重建前先退出应用。
-
-离线看效果、带种子会话：
-
-```bash
-./scripts/dev-demo.sh
-```
+脚本会编译 `harness-engine` 和 Zig 应用，放到 `target/macos-dev/Harness.app`，再通过 Launch Services 打开，这样 TCC 记在应用上而不是终端上。开发数据在 `target/macos-dev/data`（可用 `HARNESS_DEV_DATA_DIR` 覆盖）；IPC 默认端口 `49777`。重建前先退出应用。
 
 ### Linux
 
 ```bash
-cargo build -p harness
-./target/debug/harness
+cargo build -p harness-engine --bin harness-engine
+(cd apps/nano && zig build)
+apps/nano/zig-out/bin/harness-nano
 ```
 
 发行版式的本地安装仍然走守护进程：
@@ -53,21 +48,20 @@ harness daemon start|stop|restart|status
 harness update
 ```
 
-侧边栏浏览器需要 [Linux browser runtime](docs/reference/linux-browser.md)。
-
 ### Windows
 
 解压便携 ZIP，运行 `harness.exe`，把 `harness-update.json` 放在旁边才能应用内更新。源码构建见 [Windows development](docs/reference/windows-development.md)。
 
 ```powershell
-cargo run --locked -p harness
+./scripts/package-windows.ps1 -ReleasesUrl https://github.com/justrach/nanoharness/releases/latest/download -CargoProfile release
+# 然后运行 target/package/harness-VERSION-windows-x86_64/harness-nano.exe
 ```
 
 ## 它怎么跑
 
 每台设备跑一个小引擎，会话就存在这台设备上。新安装默认纯本地，不用账号，也不用联网。
 
-- **带界面**（`harness`）：打开 GUI。如果守护进程已经在听 IPC 端口，就连上去；否则在进程内跑引擎，并在同一端口上给其他视口提供服务。
+- **带界面**（`harness`）：打开 GUI。如果引擎已经在听本地端口（`127.0.0.1:27664`，或 `HARNESS_IPC_PORT`），就连上去；否则以独立进程启动 `harness headless`，应用退出后它继续运行。
 - **无界面**（`harness headless`）：只有引擎。VPS 可以在你合上笔记本之后继续跑 agent。
 - **Agent** 从 `PATH` 发现（再加上文档里的 `*_EXECUTABLE` 覆盖）。设置 → Agents 会写明。新的 harness 是一个适配器，不是去 fork 这份 GUI。
 

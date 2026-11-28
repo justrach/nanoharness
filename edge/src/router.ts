@@ -119,12 +119,11 @@ const forwardRoom = async (
   path: string,
   search: URLSearchParams
 ): Promise<Response> => {
-  let body: ArrayBuffer | undefined;
+  let body: Uint8Array | undefined;
   if (request.method !== "GET" && request.method !== "HEAD") {
-    const declared = Number(request.headers.get("content-length") ?? 0);
-    if (declared > MAX_ROOM_BODY_BYTES) return json({ error: "too_large" }, 413);
-    body = await request.arrayBuffer();
-    if (body.byteLength > MAX_ROOM_BODY_BYTES) return json({ error: "too_large" }, 413);
+    const capped = await readCapped(request, MAX_ROOM_BODY_BYTES);
+    if (!capped) return json({ error: "too_large" }, 413);
+    body = capped;
   }
   const stub = roomActorStub(env.ROOM_ACTORS, roomId);
   const url = new URL(request.url);

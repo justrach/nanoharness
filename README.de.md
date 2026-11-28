@@ -18,8 +18,8 @@ synchronisieren.
 | <img src="docs/media/readme/nanoharness-agents-light.png" alt="Aktuelle Agent-Einstellungen im Light-Mode-Design" width="520"> | <img src="docs/media/readme/nanoharness-workspace-light.png" alt="Beispielgespräch mit graff im Light-Mode-Design" width="520"> |
 
 Modell und Arbeitsverzeichnis auswählen, Änderungen neben dem Chat prüfen
-und Dateien oder den Browser direkt in Harness öffnen. Die Desktop-App nutzt
-Rust und GPUI; die iOS-App zeigt synchronisierte Sitzungen in SwiftUI an.
+und Dateien oder den Browser direkt in Harness öffnen. Die Desktop-App ist in
+Zig auf nanoui gebaut, die Engine in Rust; die iOS-App zeigt synchronisierte Sitzungen in SwiftUI an.
 
 ### Mit CodeGraff verbunden
 
@@ -31,17 +31,17 @@ steht in den [Hinweisen zu Drittanbietern](THIRD_PARTY_NOTICES.md).
 
 ## Aus dem Quellcode starten
 
-Verwende die Rust-Version aus [`rust-toolchain.toml`](rust-toolchain.toml).
+Du brauchst Zig `0.17.0` und die Rust-Version aus [`rust-toolchain.toml`](rust-toolchain.toml).
 
 | System | Befehl |
 | --- | --- |
 | macOS | `./scripts/run-macos-dev.sh` |
-| Linux | `cargo build -p harness && ./target/debug/harness` |
-| Windows | `cargo run --locked -p harness` |
+| Linux | `cargo build -p harness-engine --bin harness-engine && (cd apps/nano && zig build) && apps/nano/zig-out/bin/harness-nano` |
+| Windows | `./scripts/package-windows.ps1 -ReleasesUrl https://github.com/justrach/nanoharness/releases/latest/download -CargoProfile release` → `target/package/harness-VERSION-windows-x86_64/harness-nano.exe` |
 
-Das macOS-Skript startet `target/macos-dev/Harness.app`. Für eine Offline-Demo
-mit Beispielsitzungen: `./scripts/dev-demo.sh`. Hinweise zu [Windows](docs/reference/windows-development.md)
-und zum [Linux-Browser](docs/reference/linux-browser.md) stehen in der Dokumentation.
+Das macOS-Skript baut `target/macos-dev/Harness.app` mit eigenen Daten und eigenem
+Engine-Port und startet es. Hinweise zu [Windows](docs/reference/windows-development.md)
+stehen in der Dokumentation.
 
 ## So funktioniert Harness
 

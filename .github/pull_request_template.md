@@ -16,6 +16,8 @@ to see needs a maintainer to add the `no-screenshots` label. -->
 ## Tests
 
 <!-- Name the test that fails without the change, and what else you ran. -->
+<!-- A feature built with agent-driven tests includes its plan table and the
+mutation result (tried / killed / surviving); see docs/agent-driven-tests.md. -->
 
 ## Contributor Agreement
 

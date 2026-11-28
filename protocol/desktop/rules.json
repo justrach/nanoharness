@@ -478,7 +478,7 @@
       "expect": "idle"
     },
     {
-      "name": "no session, a reply not yet seen",
+      "name": "missing session outcome with unseen content",
       "chat": {
         "id": "c1",
         "deviceId": "dev-a",
@@ -488,7 +488,7 @@
         "lastMessageAt": "2026-10-24T12:00:00.000Z"
       },
       "session": null,
-      "expect": "completed"
+      "expect": "idle"
     },
     {
       "name": "no session, the reply was seen",
@@ -523,7 +523,7 @@
       "expect": "working"
     },
     {
-      "name": "working but stale past 45 s, unseen reply",
+      "name": "working but stale past 45 s, unseen partial content",
       "chat": {
         "id": "c1",
         "deviceId": "dev-a",
@@ -539,7 +539,7 @@
         "startedAt": "2026-10-24T12:59:09.000Z",
         "updatedAt": "2026-10-24T12:59:14.000Z"
       },
-      "expect": "completed"
+      "expect": "idle"
     },
     {
       "name": "working but stale, nothing unseen",

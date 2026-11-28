@@ -258,6 +258,10 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addOptions("parity_options", opts);
     const test_step = b.step("test", "Run harness-nano tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+    // Everything `test` runs besides the Zig test binary, so CI can run that
+    // binary itself (`test-build`, then zig-out/bin/test) and log each test's
+    // name as it starts. Add new non-Zig checks here and to `test`.
+    const support_step = b.step("test-support", "Run the checks `test` runs besides the Zig test binary");
     if (b.graph.host.result.os.tag == .windows and target.result.os.tag == .windows and target.result.abi == .msvc) {
         // Exercise the actual Windows PowerShell 5.1 -> cmd -> MSVC boundary
         // for every Zig 0.17 mode, not a mocked shell on a different OS.
@@ -268,6 +272,7 @@ pub fn build(b: *std.Build) void {
         luau_build_test.addArg("-OutputDirectory");
         _ = luau_build_test.addOutputDirectoryArg("luau-build-test");
         test_step.dependOn(&luau_build_test.step);
+        support_step.dependOn(&luau_build_test.step);
         b.step("test-luau-windows", "Test the Windows Luau build helper with the installed MSVC toolset").dependOn(&luau_build_test.step);
     }
     // Pure AST/box geometry, safety and native-ABI regressions from the
@@ -278,6 +283,7 @@ pub fn build(b: *std.Build) void {
     math_tests.addArg("--target-dir");
     math_tests.addDirectoryArg(math_target);
     test_step.dependOn(&math_tests.step);
+    support_step.dependOn(&math_tests.step);
     b.step("test-build", "Build tests for a separate Windows or native runner").dependOn(&b.addInstallArtifact(tests, .{}).step);
 
     // `zig build snap -- scene.json out-dir`: the window drawn offscreen

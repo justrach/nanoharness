@@ -657,16 +657,14 @@ pub fn filesHeader(c: *ui.Context, a: *App, k: theme.Colors, focused: bool) void
 }
 
 pub fn settingsHeader(c: *ui.Context, a: *App) void {
-    const dk = theme.colors(true);
+    _ = a;
     ui.key(c, "fs-settings-header");
     const bar = ui.div(c).row().wFull().h(chrome.fs_pane_header_h).px(6).gap(6).itemsCenter().clip();
     defer bar.end();
     icons.icon(c, .@"settings-minimalistic", 12.5, ui.Color.white.alpha(0.75), 0);
     ui.text(c, "Settings", .{ .size = 11.5, .line_height = 15, .weight = .semibold, .color = ui.Color.white.alpha(0.90) });
-    ui.spacer(c);
-    if (darkIconButton(c, dk, .close, 22, 10.5, "Close settings (Esc)", false)) {
-        @import("view_settings.zig").close(a);
-    }
+    // No close button here: the Settings sidebar's Back (or Escape) is the
+    // one way out in every layout, full screen included.
 }
 
 fn darkIconButton(

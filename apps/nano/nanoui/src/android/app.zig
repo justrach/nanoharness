@@ -276,7 +276,8 @@ pub const App = struct {
         self.scale = @max(1, @as(f32, @floatFromInt(c.density)) / 160);
         self.reduced_motion = c.animations_off;
         for (self.windows.items) |w| if (w.surface) |s| {
-            s.ctx.reduced_motion = self.reduced_motion;
+            s.ctx.system_reduce_motion = self.reduced_motion;
+            s.ctx.reduced_motion = s.ctx.reduce_motion_override orelse self.reduced_motion;
         };
     }
 

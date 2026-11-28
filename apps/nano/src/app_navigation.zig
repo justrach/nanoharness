@@ -24,7 +24,11 @@ pub fn validateCurrent(a: *App) void {
 }
 
 pub fn parkActive(a: *App) void {
-    const d = drafts.canvas(a) catch return;
+    parkActiveDraft(a, drafts.canvas(a) catch return);
+}
+
+/// Take ownership of the outgoing canvas and keep it with its actual pane.
+pub fn parkActiveDraft(a: *App, d: tabs.Draft) void {
     const pane = if (a.tabs.layout()) |s| s.focus else null;
     if (pane != null) if (a.tabs.unpark(a.tabs.active, null)) |old| {
         var stale = old;

@@ -19,15 +19,14 @@ const row_height: f32 = 36;
 
 pub const RowLayout = struct {
     stacked: bool,
-    drag: bool,
     columns: usize,
     button_width: f32,
     fit_width: f32,
 };
 
 /// Reserve the tray's border/padding and row gutters before allocating
-/// actions. Drop the decorative drag handle before taking space from text
-/// or actions; when those no longer fit, put actions on rows of their own.
+/// actions; when text and actions no longer fit, put actions on rows of
+/// their own. Rows have no drag handle: the queue has no reordering.
 pub fn rowLayout(width: f32, actions: usize) RowLayout {
     const available = @max(0, width - 26);
     const count = @max(1, actions);
@@ -36,24 +35,21 @@ pub fn rowLayout(width: f32, actions: usize) RowLayout {
     const button_width = @min(28, available);
     return .{
         .stacked = available < action_width + 4 + 32,
-        .drag = available >= action_width + 4 + 32 + 18,
         .columns = columns,
         .button_width = button_width,
         .fit_width = @min(@max(0, width), @as(f32, @floatFromInt(columns)) * button_width + @as(f32, @floatFromInt(columns - 1)) * 4 + 26),
     };
 }
 
-test "composer dock queue layout sacrifices drag before wrapping priority actions" {
+test "composer dock queue layout wraps priority actions only when they no longer fit" {
     const narrow = rowLayout(108, 4);
-    try std.testing.expect(narrow.stacked and !narrow.drag);
+    try std.testing.expect(narrow.stacked);
     try std.testing.expectEqual(@as(usize, 2), narrow.columns);
     try std.testing.expectEqual(@as(f32, 86), narrow.fit_width);
     try std.testing.expectEqual(@as(usize, 3), rowLayout(148, 4).columns);
     try std.testing.expectEqual(@as(f32, 118), rowLayout(148, 4).fit_width);
     try std.testing.expectEqual(@as(f32, 86), rowLayout(488, 2).fit_width);
-    const single = rowLayout(188, 4);
-    try std.testing.expect(!single.stacked and !single.drag);
-    try std.testing.expect(rowLayout(208, 4).drag);
+    try std.testing.expect(!rowLayout(188, 4).stacked);
 }
 
 pub fn tray(c: *ui.Context, a: *App, k: theme.Colors, w: f32) bool {
@@ -92,8 +88,6 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, r: queue.Row, newest: bool, com
     line = if (editing) line.bg(k.ink(0.06)) else line.hover(k.ink(0.04));
     defer line.end();
     const gated = r.gate != .none;
-    if (!compact or (!stacked and layout.drag))
-        icons.icon(c, .@"queue-drag-handle", 13, k.muted.alpha(if (gated) 0.35 * 0.5 else 0.5), 14);
     if (!stacked) {
         var col = ui.div(c).column().clip().grow().w(0);
         defer col.end();

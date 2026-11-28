@@ -291,6 +291,8 @@ fn agentRowTrail(
         ui.text(c, "Failed", kit.style(c, 11.5, 16, .{ .weight = .medium, .color = k.danger }));
     } else if (ag_state == .cancelled) {
         ui.text(c, "Stopped", kit.style(c, 11.5, 16, .{ .color = k.muted }));
+    } else if (ag_state == .ended) {
+        ui.text(c, "Ended", kit.style(c, 11.5, 16, .{ .color = k.muted }));
     } else {
         if (model.len > 0) kit.fadeText(c, model, kit.style(c, 11, 16, .{ .color = k.faint }), 110);
         ui.text(c, "Done", kit.style(c, 11.5, 16, .{ .color = k.muted }));

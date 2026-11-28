@@ -26,9 +26,22 @@ fn crossLen(d: types.Direction, st: types.Style) types.Length {
 }
 
 /// Sizes box `index` and its children, given `avail_w` points of width.
+///
+/// A box is measured again at the width it was last measured at as often
+/// as not (`fitRow` measures a growing child at its share, `arrange` at
+/// the same share). Its size depends on nothing but its boxes and that
+/// width, and only measuring it again changes its boxes' sizes before it
+/// is placed, so it keeps them: measuring every child twice at every level
+/// of nested rows would cost 2^depth.
 pub fn measure(c: *Context, index: u32, avail_w: f32) types.Size {
-    if (index == 0) c.building = false;
+    if (index == 0) {
+        c.building = false;
+        c.layout_measures = 0;
+        for (c.nodes.items) |*b| b.measured_at = std.math.nan(f32);
+    }
     const n = c.node(index);
+    if (c.layout_reuse and n.measured_at == avail_w) return n.measured;
+    c.layout_measures += 1;
     const st = n.style;
     var box_w = switch (st.width) {
         .px => |v| v,
@@ -115,6 +128,7 @@ pub fn measure(c: *Context, index: u32, avail_w: f32) types.Size {
     size.h = std.math.clamp(size.h, st.min_height, @max(st.min_height, st.max_height));
     c.node(index).measured = size;
     c.node(index).flexible = flexible and st.width != .px;
+    c.node(index).measured_at = avail_w;
     return size;
 }
 
@@ -369,4 +383,140 @@ test "truncate and max_lines share string and width without cache collision" {
     t.frame();
     try std.testing.expectEqualStrings("First line", t.ctx.node(v.label_idx).content.text.str);
     try std.testing.expect(std.mem.endsWith(u8, t.ctx.node(v.wrap_idx).content.text.str, "…"));
+}
+
+/// Rows inside rows, `depth` deep, each beside a fixed box, wrapping text
+/// innermost: a growing row is measured at the room it is offered, then at
+/// its share of it, and so is everything inside it.
+const NestedRows = struct {
+    depth: u32,
+    fn build(s: *@This(), c: *Context) void {
+        const ui = @import("ui.zig");
+        ui.column(c, .{ .width = .fill });
+        nest(c, s.depth);
+        ui.end(c);
+    }
+    fn nest(c: *Context, depth: u32) void {
+        const ui = @import("ui.zig");
+        if (depth == 0) return ui.text(c, "Synthetic words that wrap across a few lines of a narrow box", .{ .size = 13, .wrap = true });
+        ui.row(c, .{ .grow = 1, .gap = 4, .padding = .all(2) });
+        _ = c.leaf(.{ .width = .{ .px = 12 }, .height = .{ .px = 12 } }, .none, null);
+        nest(c, depth - 1);
+        ui.end(c);
+    }
+};
+
+test "nested flexible rows measure a box at most once per row around it" {
+    const ui = @import("ui.zig");
+    const depths = [_]u32{ 6, 10, 14 };
+    var counts: [depths.len]u32 = undefined;
+    var again: [depths.len]u32 = undefined;
+    for (depths, 0..) |depth, i| {
+        var v: NestedRows = .{ .depth = depth };
+        var t: ui.Tester = undefined;
+        try t.init(std.testing.allocator, .init(&v, NestedRows.build), .{ .width = 800 });
+        defer t.deinit();
+        counts[i] = t.ctx.layout_measures;
+        // A box `k` rows deep is offered at most `k + 1` widths.
+        try std.testing.expect(counts[i] <= (depth + 1) * t.ctx.nodes.items.len);
+        // Every box worked out again whenever it is measured: 2^depth.
+        t.ctx.layout_reuse = false;
+        t.frame();
+        again[i] = t.ctx.layout_measures;
+    }
+    // Four levels deeper costs under 3 times as much, where working every
+    // box out again costs 2^4 times as much.
+    try std.testing.expect(counts[2] < 3 * counts[1]);
+    try std.testing.expect(again[2] > 10 * again[1]);
+    try std.testing.expect(again[2] > 100 * counts[2]);
+}
+
+/// Text that wraps and is only as wide as its lines (`ui.text` fills).
+fn narrowWrap(c: *Context, str: []const u8, style: types.TextStyle) void {
+    var s = style;
+    s.wrap = true;
+    _ = c.leaf(.{}, .{ .text = .{ .str = str, .style = s, .color = c.theme.text } }, null);
+}
+
+const MixedLayout = struct {
+    const long = "Synthetic sample text long enough to wrap onto several lines in most of these boxes";
+    fn build(_: *@This(), c: *Context) void {
+        const ui = @import("ui.zig");
+        ui.column(c, .{ .width = .fill, .gap = 6, .padding = .all(8), .align_items = .stretch });
+        defer ui.end(c);
+        // A message: a fixed badge beside a growing column of a header and wrapping text.
+        ui.row(c, .{ .gap = 8 });
+        _ = c.leaf(.{ .width = .{ .px = 24 }, .height = .{ .px = 24 } }, .none, null);
+        ui.column(c, .{ .grow = 1, .gap = 2 });
+        ui.row(c, .{ .gap = 6 });
+        ui.text(c, "Sample author", .{ .size = 13 });
+        ui.text(c, "12:00", .{ .size = 11 });
+        ui.end(c);
+        ui.text(c, long, .{ .size = 13, .wrap = true });
+        ui.end(c);
+        ui.end(c);
+        // Two wrapping texts too wide side by side: both give room back.
+        ui.row(c, .{ .gap = 4 });
+        narrowWrap(c, long, .{ .size = 13 });
+        narrowWrap(c, long ++ " and some more", .{ .size = 12 });
+        ui.end(c);
+        // A truncating label beside a fixed button.
+        ui.row(c, .{ .gap = 4 });
+        ui.text(c, long, .{ .size = 13, .truncate = .ellipsis });
+        _ = c.leaf(.{ .width = .{ .px = 60 }, .height = .{ .px = 20 } }, .none, null);
+        ui.end(c);
+        // Clamped widths, at most two lines, and a fixed column.
+        ui.row(c, .{ .gap = 4, .padding = .all(3) });
+        ui.column(c, .{ .grow = 1, .min_width = 80, .max_width = 200 });
+        ui.text(c, long, .{ .size = 12, .wrap = true, .max_lines = 2 });
+        ui.end(c);
+        ui.column(c, .{ .width = .{ .px = 90 } });
+        ui.text(c, long, .{ .size = 12, .wrap = true });
+        ui.end(c);
+        ui.column(c, .{ .grow = 2 });
+        narrowWrap(c, long, .{ .size = 12 });
+        ui.end(c);
+        ui.end(c);
+        // A row that scrolls sideways.
+        ui.row(c, .{ .scroll_x = true, .gap = 4 });
+        narrowWrap(c, long, .{ .size = 12 });
+        _ = c.leaf(.{ .width = .{ .px = 40 }, .height = .{ .px = 10 } }, .none, null);
+        ui.end(c);
+        NestedRows.nest(c, 5);
+    }
+};
+
+const Placed = struct { rect: types.Rect, measured: types.Size, flexible: bool, lines: usize };
+
+fn placed(gpa: std.mem.Allocator, c: *Context) ![]Placed {
+    const out = try gpa.alloc(Placed, c.nodes.items.len);
+    for (c.nodes.items, out) |n, *p| p.* = .{
+        .rect = n.rect,
+        .measured = n.measured,
+        .flexible = n.flexible,
+        .lines = if (n.content == .text) n.content.text.lines.len else 0,
+    };
+    return out;
+}
+
+test "layout reusing measured boxes places every box as measuring each again does" {
+    const ui = @import("ui.zig");
+    const gpa = std.testing.allocator;
+    for ([_]f32{ 260, 480, 900 }) |width| {
+        inline for (.{ MixedLayout, NestedRows }) |V| {
+            var v: V = if (V == NestedRows) .{ .depth = 9 } else .{};
+            var t: ui.Tester = undefined;
+            try t.init(gpa, .init(&v, V.build), .{ .width = width, .height = 600 });
+            defer t.deinit();
+            const reused = try placed(gpa, &t.ctx);
+            defer gpa.free(reused);
+            const fewer = t.ctx.layout_measures;
+            t.ctx.layout_reuse = false;
+            t.frame();
+            const each = try placed(gpa, &t.ctx);
+            defer gpa.free(each);
+            try std.testing.expect(fewer < t.ctx.layout_measures);
+            try std.testing.expectEqualSlices(Placed, each, reused);
+        }
+    }
 }

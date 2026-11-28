@@ -1,6 +1,7 @@
 //! Every test: `zig build test`.
 test {
     _ = @import("tests_ui_agent_work.zig");
+    _ = @import("io_deadline.zig");
     _ = @import("ws.zig");
     _ = @import("rpc.zig");
     _ = @import("workspace.zig");
@@ -37,6 +38,7 @@ test {
     _ = @import("tests_sidebar_performance.zig");
     _ = @import("sidebar_groups.zig");
     _ = @import("tests_link_actions.zig");
+    _ = @import("tests_file_references.zig");
     _ = @import("tests_artifact_markdown.zig");
     _ = @import("tests_artifact_links.zig");
     _ = @import("tests_titlebar_clearance.zig");
@@ -63,6 +65,7 @@ test {
     _ = @import("tests_ui_prompt_history.zig");
     _ = @import("tests_ui_caret.zig");
     _ = @import("app_drafts.zig");
+    _ = @import("app_attachment_images.zig");
     _ = @import("composer_defaults.zig");
     _ = @import("snap.zig");
     _ = @import("app_account.zig");
@@ -70,6 +73,7 @@ test {
     _ = @import("shortcuts.zig");
     _ = @import("view_settings.zig");
     _ = @import("tests_settings_navigation.zig");
+    _ = @import("tests_settings_controls.zig");
     _ = @import("tests_ui_usage.zig");
     _ = @import("view_settings_devices.zig");
     _ = @import("view_settings_devices_updates.zig");
@@ -141,6 +145,7 @@ test {
     _ = @import("view_rail.zig");
     _ = @import("tests_ui_rail.zig");
     _ = @import("tests_ui_tooltips.zig");
+    _ = @import("tests_ui_control_audit.zig");
     _ = @import("change_requests.zig");
     _ = @import("agent_updates.zig");
     _ = @import("tests_ui_change_requests.zig");
@@ -181,6 +186,8 @@ test {
     _ = @import("tests_ui_surfaces.zig");
     _ = @import("tests_browser_native.zig");
     _ = @import("tests_browser_ownership_deep.zig");
+    _ = @import("preview_consumers.zig");
+    _ = @import("tests_preview_consumers.zig");
     _ = @import("window_lifecycle.zig");
     _ = @import("theme.zig");
     _ = @import("view_newchat.zig");

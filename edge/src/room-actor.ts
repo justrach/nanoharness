@@ -29,6 +29,7 @@
  *   POST /forget?room=   (account deletion only; never routed from fetch)
  */
 import { AUTH_USER_HEADER, type Env } from "./env";
+import { readCapped } from "./body";
 import { PgRoomStore } from "./room-store-pg";
 import { LedgerRoomStore } from "./room-ledger";
 import {
@@ -344,8 +345,9 @@ export class RoomActor implements DurableObject {
   }
 
   private async body(request: Request): Promise<Json> {
-    const text = await request.text();
-    if (text.length > MAX_BODY_BYTES) throw new RoomError(413, "too_large");
+    const bytes = await readCapped(request, MAX_BODY_BYTES);
+    if (!bytes) throw new RoomError(413, "too_large");
+    const text = new TextDecoder().decode(bytes);
     try {
       const value: unknown = text ? JSON.parse(text) : {};
       if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error();

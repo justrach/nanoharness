@@ -321,6 +321,30 @@ pub fn run(a: *App, act: Action) void {
     if (opened.opening == null) failRun(opened, "Could not open terminal");
 }
 
+/// Whether the dock has a run to show beside `chat`: its own, or one that
+/// belongs to no chat.
+pub fn hasVisibleRun(x: *const Actions, chat: ?[]const u8) bool {
+    for (x.runs.items) |r| if (r.visible(chat)) return true;
+    return false;
+}
+
+pub const no_runs_tip = "No terminal or action runs in this chat yet";
+const no_runs_notice = "No terminal or action runs in this chat yet. Run a project action to open one.";
+
+/// The terminal and action-runs dock under the chat: the title bar's
+/// button, ⌘J (`toggleTerminal`) and the palette's "Toggle terminal". With
+/// nothing to show it stays shut and says why instead of opening empty.
+pub fn toggleDock(a: *App) void {
+    const x = &a.actions;
+    if (!hasVisibleRun(x, a.selected)) {
+        x.dock_open = false;
+        a.setNotice(no_runs_notice);
+        return a.redraw();
+    }
+    x.dock_open = !x.dock_open;
+    a.redraw();
+}
+
 fn showRun(a: *App, i: usize) void {
     a.actions.dock_active = i;
     a.actions.dock_open = true;

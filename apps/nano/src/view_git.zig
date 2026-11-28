@@ -107,6 +107,7 @@ pub fn sessionPullRequests(a: *const App, allocator: std.mem.Allocator) ![]PullR
 
 pub fn github(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (a.panels.github_repository.open) return @import("view_github_repository.zig").view(c, a, k);
+    const items = sessionPullRequests(a, c.alloc()) catch return;
     {
         const title = ui.div(c).column().wFull().p(14).gap(5);
         defer title.end();
@@ -115,12 +116,12 @@ pub fn github(c: *ui.Context, a: *App, k: theme.Colors) void {
             defer row.end();
             ui.text(c, "Session pull requests", .{ .size = 15, .weight = .semibold, .color = k.text });
             ui.spacer(c);
-            if (button(c, k, "Repository", true)) @import("app_github_repository.zig").show(a);
+            // The empty state has its own "Browse repository"; one is enough.
+            if (items.len > 0 and button(c, k, "Repository", true)) @import("app_github_repository.zig").show(a);
         }
         ui.text(c, "Branches used by this repository’s sessions—not every PR on GitHub.", .{ .size = 11.5, .wrap = true, .color = k.muted });
     }
     rule(c, k);
-    const items = sessionPullRequests(a, c.alloc()) catch return;
     if (items.len == 0) {
         const box = ui.div(c).column().wFull().grow().p(24).gap(10).center();
         defer box.end();

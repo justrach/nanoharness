@@ -13,6 +13,7 @@ const u = @import("util.zig");
 const link = @import("engine_link.zig");
 const transcript = @import("transcript.zig");
 const peer = @import("peer.zig");
+const peer_delivery = @import("peer_delivery.zig");
 const ids = @import("../ids.zig");
 pub const rooms = @import("rooms.zig");
 pub const bots = @import("bots.zig");
@@ -1107,7 +1108,13 @@ fn sendMessage(c: *Ctx, args: Value) !Value {
     const baseline = sessionFor(sss, chat);
     const mode = given(args, "mode") orelse "auto";
     const sent_at = c.t.nowMs();
-    const body = try attribute(c, chat, text);
+    const fyi = peer_delivery.isFyi(text);
+    const wait = argBool(args, "wait") orelse false;
+    if (fyi and (!std.mem.eql(u8, mode, "auto") or wait))
+        return c.failMsg("FYI mail requires mode 'auto' without waiting for a turn");
+    const message = peer_delivery.body(text);
+    if (message.len == 0) return c.failMsg("FYI text is empty");
+    const body = try attribute(c, chat, message);
     if (c.t.origin.chat_id) |origin| {
         var p = u.obj(c.a);
         try p.put("chatId", u.s(chat_id));
@@ -1123,8 +1130,8 @@ fn sendMessage(c: *Ctx, args: Value) !Value {
     var r = u.obj(c.a);
     try r.put("chatId", u.s(chat_id));
     try r.put("title", u.field(chat, "title"));
-    try r.put("sent", try deliver(c, chat, space, hs, baseline, body, mode));
-    if (argBool(args, "wait") orelse false) {
+    try r.put("sent", if (fyi) try peer_delivery.sendFyi(c, chat, baseline, body) else try deliver(c, chat, space, hs, baseline, body, mode));
+    if (wait) {
         try r.put("turn", try awaitTurn(c, chat, baseline, true, waitLimit(c, argUint(args, "timeout_secs")), sent_at));
     }
     return r.value();
@@ -1329,7 +1336,7 @@ pub fn deliver(c: *Ctx, chat: Value, space: ?Value, hs: []const Value, session: 
     const steers = if (info) |h| steersMidTurn(h) else false;
     // A working graff chat here reads its own peer inbox mid-turn.
     const peer_to: ?[]const u8 = if (eq(u8, mode, "auto") and eq(u8, live, "working") and !steers)
-        try graffPeerTarget(c, chat, harness, session)
+        try peer_delivery.target(c, chat, harness, session)
     else
         null;
     var chosen: []const u8 = undefined;
@@ -1346,7 +1353,10 @@ pub fn deliver(c: *Ctx, chat: Value, space: ?Value, hs: []const Value, session: 
     } else {
         return c.fail("unknown mode {s}; expected auto, run, steer, or queue", .{try u.debugQuote(a, mode)});
     }
-    var fallback: ?[]const u8 = null;
+    var fallback: ?[]const u8 = if (eq(u8, mode, "auto") and eq(u8, harness, "graff") and eq(u8, chosen, "queue"))
+        "native graff peer inbox unavailable on this device"
+    else
+        null;
     var id: []const u8 = undefined;
     if (eq(u8, chosen, "run")) {
         const cfg = config(chat);
@@ -1375,29 +1385,9 @@ pub fn deliver(c: *Ctx, chat: Value, space: ?Value, hs: []const Value, session: 
         try cmd.put("messageId", u.s(try newId(c)));
         id = try c.queueCommand(chat_id, cmd.value());
     } else if (eq(u8, chosen, "peer")) {
-        const to = peer_to.?;
-        const origin = c.t.origin.chat_id;
-        const from = if (origin) |o| try std.fmt.allocPrint(a, "harness:{s}", .{u.short(o)}) else "harness";
-        // Record the hop before sending: unrecorded, it would not count.
-        const record_err: ?[]const u8 = if (origin) |o|
-            try c.t.relay.record(a, chat_id, peer.relayDepth(text), o, now)
-        else blk: {
-            c.t.relay.clear(a, chat_id);
-            break :blk null;
-        };
-        const sent: peer.PeerSend.SendResult = if (record_err) |e|
-            .{ .err = try std.fmt.allocPrint(a, "relay depth not recorded: {s}", .{e}) }
-        else
-            try c.t.peer.send(a, from, to, text);
+        const sent = try peer_delivery.send(c, chat_id, peer_to.?, text, false);
         switch (sent) {
-            .ok => |detail| {
-                var r = u.obj(a);
-                try r.put("delivery", u.s("peer"));
-                try r.put("id", u.s(to));
-                try r.put("detail", u.s(detail));
-                try r.put("chatStatusAtSend", u.s(status));
-                return r.value();
-            },
+            .ok => |detail| return peer_delivery.result(a, peer_to.?, detail, status),
             // Explicit fallback: the queue still delivers at turn end.
             .err => |why| {
                 chosen = "queue";
@@ -1414,18 +1404,6 @@ pub fn deliver(c: *Ctx, chat: Value, space: ?Value, hs: []const Value, session: 
     try r.put("chatStatusAtSend", u.s(status));
     if (fallback) |f| try r.put("peerFallback", u.s(f));
     return r.value();
-}
-
-fn graffPeerTarget(c: *Ctx, chat: Value, harness: []const u8, session: ?Value) !?[]const u8 {
-    if (!std.mem.eql(u8, harness, "graff")) return null;
-    const local = c.t.origin.device_id orelse blk: {
-        var probe: Ctx = .{ .t = c.t, .a = c.a };
-        break :blk probe.localDeviceId() catch |err| switch (err) {
-            error.ToolFailed => return null,
-            else => return err,
-        };
-    };
-    return peer.peerTarget(chat, harness, session, local);
 }
 
 fn waitLimit(c: *Ctx, secs: ?u64) i64 {

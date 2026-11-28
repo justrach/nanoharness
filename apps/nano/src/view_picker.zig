@@ -62,7 +62,7 @@ pub fn opened(a: *App) void {
     p.detail = null;
     p.hover_target = null;
     p.detail_rect = null;
-    p.starred = a.selected == null and p.favorites.items.len > 0;
+    p.starred = showsTabs(a) and a.selected == null and p.favorites.items.len > 0;
     p.reveal = true;
     p.height = list_height;
     a.ensureModels(a.target().harness);
@@ -389,7 +389,7 @@ pub fn keys(c: *ui.Context, a: *App) void {
     const next_agent = c.shortcut(.{ .key = S.tab, .ctrl = true });
     const prev_agent = c.shortcut(.{ .key = S.tab, .ctrl = true, .shift = true });
     if (next_agent or prev_agent) {
-        if (a.selected != null) return;
+        if (a.selected != null or !showsTabs(a)) return;
         var agents: std.ArrayList([]const u8) = .empty;
         for (a.harnesses.items) |h| if (h.offered or std.mem.eql(u8, h.id, a.target().harness)) agents.append(c.alloc(), h.id) catch {};
         if (agents.items.len == 0) return;
@@ -509,12 +509,18 @@ pub fn popover(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (p.stage != null) {
             page(c, a, k, w - 2, open);
         } else {
-            tabs(c, a, k, w - 2);
-            // The full-bleed hairline over the search (`crate::theme::hairline(0.08)`).
-            _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.08) }, .none, null);
+            // A plain chat lists only the Auto tiers: no Starred or agent
+            // tabs (the row stays only for the compact card's Back).
+            const with_tabs = showsTabs(a) or p.can_return_compact;
+            if (with_tabs) {
+                tabs(c, a, k, w - 2);
+                // The full-bleed hairline over the search (`crate::theme::hairline(0.08)`).
+                _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.08) }, .none, null);
+            }
             search(c, a, k);
             _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.06) }, .none, null);
-            modelList(c, a, k, w - 2, h - 2 - 39 - 1 - 35 - 1 - 1 - 28, open, motion);
+            const tabs_h: f32 = if (with_tabs) 39 + 1 else 0;
+            modelList(c, a, k, w - 2, h - 2 - tabs_h - 35 - 1 - 1 - 28, open, motion);
             _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.08) }, .none, null);
             pickerFooter(c, a, k, open);
         }
@@ -1051,8 +1057,8 @@ fn compactPage(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) voi
 
     // 2c. Optional Service Tier / Speed row (`Standard · Fast · Ultra Fast`) when supported.
     if (has_speed) {
-        const raw_tier = st.service_tier orelse a.target().service_tier orelse m.service_tier_default orelse "default";
-        const cur_tier = if (std.mem.eql(u8, raw_tier, "ultrafast") and !m.service_tier_ultrafast) "fast" else raw_tier;
+        const raw_tier = st.service_tier orelse a.target().service_tier orelse m.service_tier_default;
+        const cur_tier = m.compatibleServiceTier(raw_tier) orelse "default";
         ui.key(c, "compact-service-tier-row");
         const tier_row = ui.div(c).row().wFull().h(32).px(8).gap(8).itemsCenter();
         {
@@ -1313,6 +1319,13 @@ fn slider(c: *ui.Context, a: *App, k: theme.Colors, accent: ui.Color, n: usize, 
         .bg(ui.Color.hex(0xfffefa)).border(k.border).borderW(1).shadowSm().end();
 }
 
+/// Whether the card draws its Starred and agent tabs: a plain "Chat"
+/// draft or chat offers only the Auto tiers (`model_picker.rows`), which
+/// ignore both, so they would be dead there.
+pub fn showsTabs(a: *const App) bool {
+    return !@import("app_agent.zig").chatMode(a);
+}
+
 fn tabs(c: *ui.Context, a: *App, k: theme.Colors, width: f32) void {
     const p = &a.view.model_picker;
     ui.key(c, "model-picker-tabs");
@@ -1363,6 +1376,7 @@ fn tabs(c: *ui.Context, a: *App, k: theme.Colors, width: f32) void {
             c.changed = true;
         }
     }
+    if (!showsTabs(a)) return;
     if (tab(c, k, .@"star-bold", null, "Starred", p.starred) and a.picker != .none) {
         p.starred = true;
         reset(c, a);
@@ -1416,7 +1430,8 @@ fn search(c: *ui.Context, a: *App, k: theme.Colors) void {
         const f = ui.div(c).row().grow().w(0).itemsCenter();
         defer f.end();
         ui.key(c, "model-picker-search");
-        const placeholder = if (a.selected == null) "Search models… · Ctrl+Tab agents" else "Search models…";
+        // Ctrl+Tab switches agent tabs: none in an existing or plain chat.
+        const placeholder = if (a.selected == null and showsTabs(a)) "Search models… · Ctrl+Tab agents" else "Search models…";
         if (a.picker == .none) {
             const query = p.query.text();
             ui.text(c, if (query.len > 0) query else placeholder, .{ .size = 14, .weight = .medium, .line_height = 22.75, .color = if (query.len > 0) k.text else k.faint });

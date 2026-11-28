@@ -1,14 +1,20 @@
 # harness-nano
 
-Harness's desktop app on [nanoui](https://github.com/justrach/nanoui), in Zig.
+Harness's desktop app, in Zig on [nanoui](https://github.com/justrach/nanoui).
+nanoui is vendored in `nanoui/`, pinned and described in `nanoui/PROVENANCE.md`.
 
-It's a new window over the same engine the GPUI app runs. The engine (the
-Harness daemon, or `harness headless`) keeps the workspaces, sessions and
-agents; harness-nano talks to it over the engine's local WebSocket RPC
-(`crates/rpc`). Both apps can be open on one engine at once.
+The engine (the Harness daemon, or `harness headless`) keeps the workspaces,
+sessions and agents; harness-nano talks to it over the engine's local
+WebSocket RPC (`crates/rpc`). Other windows and clients on the machine attach
+to the same engine.
 
 HTTPS goes through [http-zig](https://github.com/justrach/http-zig), the HTTP/2
-client codegraff uses. For now it fetches the newest release's manifest.
+client codegraff uses.
+
+The same build makes `harness`, the command-line launcher (`src/cli_main.zig`):
+`harness` opens the app, `harness headless` runs the engine through the
+`harness-engine` binary beside it, and `harness mcp`, `status`, `login`,
+`logout` and `daemon` are served in Zig.
 
 ## What it does
 
@@ -30,30 +36,25 @@ client codegraff uses. For now it fetches the newest release's manifest.
 - Agent rows stay visible and open their live transcript in a side tab without
   leaving the parent chat. Finished agents use their saved transcript, falling
   back to the document feed if the snapshot is unavailable.
-- A native Browser side tab opens websites, localhost previews and generated
-  HTML/MCP App pages. Transcript links open there, not in a separate browser.
-  See [the browser's boundaries and checks](../../docs/nano-browser.md).
+- On macOS, a native Browser side tab opens websites, localhost previews and
+  generated HTML/MCP App pages. A plain click on a transcript link opens the
+  system browser; the link's menu has **Open in Harness**. See
+  [the browser's boundaries and checks](../../docs/nano-browser.md).
+- Three workspace modes, Zen (the default), Developer and Design, decide how
+  much chrome the window shows. See "Workspace modes" in
+  [`DESIGN.md`](../../DESIGN.md).
 
-Also: answering the agent's questions, the message queue, the changes pane
-and file explorer, project actions with their terminal dock, attachments,
-dictation, pins and settings.
+Also: answering the agent's questions, the message queue, the changes pane,
+the file explorer and its editor, project actions with their terminal dock,
+attachments, dictation, pins and settings.
 
-Not there yet: typing into the dock, split diffs, editing files,
-dragging queued messages, Linux and Windows.
+## Releases
 
-## Release status
-
-This is a macOS preview, not a feature-complete replacement for the GPUI app.
-A passing screenshot comparison covers the scenes and GPUI revision in this
-checkout; it does not prove parity with newer desktop changes or the missing
-interactions above. Bring the GPUI reference up to date before a release
-parity run.
-
-The local bundler uses the workspace version for both macOS bundle version
-fields and ad-hoc signs the completed app. Public distribution still needs
-Developer ID signing and notarization, passing unit and shared protocol
-tests, and a strict visual run (`--max-changed 0.0005`). An ad-hoc signature
-check alone is not a public-distribution gate.
+Releases build this app for macOS, Linux and Windows
+(`scripts/package-macos.sh`, `scripts/package-linux.sh`,
+`scripts/package-windows.ps1`, run by `.github/workflows/release.yml`). The
+Linux release job runs `zig build test-visual` before it packages, and a macOS
+release is published only Developer ID signed and notarized.
 
 ## Build and run
 
@@ -61,27 +62,27 @@ You need Zig 0.17.0 and, on macOS, Xcode or the Command Line Tools.
 
 ```sh
 cd apps/nano
-zig build test          # unit tests
+zig build test          # unit tests (also runs native_math's cargo tests)
+zig build test -Dtest-filter="native math"   # only tests whose names contain this
 zig build run           # build and open the window
-sh scripts/bundle.sh    # release build as zig-out/Harness Nano.app
 zig build snap -- scenes/narrow-panes.json /tmp/nano-snap   # draw a scene offscreen
-open "zig-out/Harness Nano.app"
 ```
 
-The bundler forwards Zig build arguments. When testing a local nanoui fork,
-use the same override for the release app: `sh scripts/bundle.sh --fork=/path/to/nanoui`.
-Otherwise it builds the dependency pinned in `build.zig.zon`.
+For a full development bundle with its own engine, data folder and port, run
+`./scripts/run-macos-dev.sh` from the repository root. `sh scripts/bundle.sh`
+wraps a release build of the window alone as `zig-out/Harness Nano.app`, ad-hoc
+signed; it forwards Zig build arguments.
 
 harness-nano needs an engine. With Harness open, its engine is already
 running, so harness-nano shows your chats. When nothing answers, harness-nano
-starts `harness headless` itself (from `/Applications/Harness.app`,
-`~/Applications/Harness.app`, or `harness` on `PATH`; `HARNESS_NANO_ENGINE_BIN`
-names another), with its own environment, and writes the engine's output to
-`harness-nano-engine.log` in Harness's logs folder. When harness-nano quits it
-stops that engine, and only that one: an engine Harness.app, a daemon or a
-terminal started is never stopped from here. If Harness.app attached to the
-engine harness-nano started, it loses it when harness-nano quits. Set
-`HARNESS_NANO_NO_ENGINE_START` to wait for an engine instead.
+starts `harness headless` itself, with its own environment, and writes the
+engine's output to `harness-nano-engine.log` in Harness's logs folder. It looks
+for `harness` in `HARNESS_NANO_ENGINE_BIN`, beside its own executable, in
+`/Applications/Harness.app`, in `~/Applications/Harness.app`, then on `PATH`
+(`src/engine_start.zig`). It never stops an engine, the one it started
+included: once started, that engine is the machine's engine, and every other
+window attaches to it. Set `HARNESS_NANO_NO_ENGINE_START` to wait for an engine
+instead.
 
 harness-nano connects to `127.0.0.1:27664`. Set `HARNESS_IPC_PORT` to use
 another engine.
@@ -112,39 +113,31 @@ HARNESS_IPC_PORT=27990 zig-out/bin/harness-nano --nanoui-snapshot=/tmp/nano.png 
 To open a chat at launch (for those checks), set `HARNESS_NANO_OPEN_CHAT` to
 its id.
 
-## Tests that it matches the Rust desktop
+## Tests that it matches the engine
 
-`protocol/desktop/` holds what the Rust desktop and this app must agree on, as data: the sidebar's rules (times,
-status marks, order), tool chips and group summaries, how transcript frames apply, the theme's roles, and every
-request this app sends the engine. Both sides run the same files (`src/parity.zig` here; `crates/*/tests/desktop_*`
-in Rust), and the Rust runner sends each request to a real engine. See `protocol/desktop/README.md`.
+`protocol/desktop/` holds what this app and the Rust crates must agree on, as
+data: the sidebar's rules (times, status marks, order), tool chips and group
+summaries, how transcript frames apply, the Codegraff theme roles, and every
+request this app sends the engine. `src/parity.zig` runs every file here; the
+Rust runners (`crates/*/tests/desktop_*`) run the rules, transcript and request
+files, and the request runner sends each request to a real engine. See
+`protocol/desktop/README.md`.
 
 After changing a request on purpose: `zig build vectors`, then `cargo test -p harness-engine --test desktop_requests`.
 
-## Matching the desktop app
+## Themes and artwork
 
-Nano embeds the **desktop** theme catalog, not the mobile catalog (desktop
-Codegraff has its own palette). Regenerate it after desktop palette changes:
+`themes.json` is the built-in theme catalog (22 families, 37 variants), embedded
+at build time and read by `src/themes.zig`. Codegraff Light and Dark are its
+defaults; `protocol/desktop/theme.json` pins the roles they resolve to. A
+change to a Codegraff colour changes both files.
 
-```sh
-cargo run -p harness-theme --bin harness-theme-export -- --desktop --output apps/nano/themes.json
-```
-
-`desktop_catalog_matches_nano_bundle` checks that export. Desktop color-vector
-changes also update `protocol/desktop/theme.json`, consumed by Rust and Nano.
-
-Sizes, spacing, colours and rules come from the GPUI source and are checked
-side by side against the real app on the same throwaway engine: the title
-bar's buttons, the tab list, the project filter, session rows (status mark,
-agent mark, project monogram, fading title, relative time), the header's
-"project @ device", the transcript column (736 points), folded tool groups
-("Ran 2 commands"), and the composer pill with its model chip. The icons are
-Harness's own SVGs (`crates/ui/assets/icons`); the interface icons are Solar
-Linear by 480 Design (CC BY 4.0). File badges, explorer rows, tabs and diffs
-reuse Harness's Symbols artwork and `crates/ui/src/file-icons.json` manifest,
-including exact filenames, compound extensions and named folders. The app
-keeps their authored colors and the GPUI dark palette; the manifest is
-compiled at build time rather than parsed into memory on launch.
+The interface icons are Harness's own SVGs in `assets/icons` (Solar Linear by
+480 Design, CC BY 4.0, plus the agents' marks). File badges, explorer rows,
+tabs and diffs use the Symbols artwork in `assets/file-icons` and its
+`assets/file-icons.json` manifest, including exact filenames, compound
+extensions and named folders; `file_icons_build.zig` compiles the manifest at
+build time rather than parsing it at launch.
 
 ## Layout
 
@@ -154,13 +147,15 @@ compiled at build time rather than parsed into memory on launch.
 | `src/rpc.zig` | The RPC frames: calls, replies, streams, cancel. |
 | `src/engine.zig` | The connection: a reader thread, messages handed to the UI thread, reconnecting every 2 s. |
 | `src/workspace.zig` | Spaces, chats, sessions, agents and models, each list replaced whole. |
-| `src/transcript.zig` | A chat's transcript: resets and deltas, checked as `apply_transcript_frame` checks them. |
-| `src/app.zig` | The state, and the calls the GPUI app makes to open a chat, create one and send. |
-| `src/view*.zig`, `src/theme.zig` | The window: title bar, sidebar, transcript, composer, new-chat canvas, menus and pickers, in Harness's Codegraff Light and Dark roles. |
+| `src/transcript.zig` | A chat's transcript: resets and deltas, checked as `protocol/desktop/transcript.json` pins them. |
+| `src/app.zig` | The state, and the calls that open a chat, create one and send. |
+| `src/view*.zig`, `src/theme.zig` | The window: title bar, sidebar, transcript, composer, new-chat canvas, menus and pickers. |
 | `src/tabs.zig`, `src/rules.zig`, `src/tools.zig` | Tabs; relative times, project monograms and reasoning labels; how tool calls fold and what their groups say. |
 | `src/icons.zig`, `src/icons/` | Harness's icons and agent marks, tinted as drawn. |
-| `src/markdown.zig`, `markdown_html.zig`, `highlight.zig` | nanoterm's Markdown parser and code highlighting, unchanged. |
+| `src/markdown.zig`, `markdown_html.zig`, `highlight.zig` | nanoterm's Markdown parser and code highlighting. |
+| `src/cli_main.zig` | The `harness` command-line launcher. |
 | `src/release.zig` | The newest release, over HTTP/2. |
+| `lean-proofs/` | Lean 4 models of UI rules, checked by `scripts/check-nano-proofs.py`. |
 
 ## Seeing the window without opening it
 
@@ -170,21 +165,3 @@ made-up scene (no window on screen, no engine) and saves a PNG for each
 and transcripts to show, and steps that press shortcuts, click, type and
 check what's drawn (`expect`, `expectNot` fail the run). The format is at
 the top of `src/snap.zig`; `scenes/` has examples.
-
-## Checking it against the GPUI app
-
-`python3 parity/check.py` draws every scene in `parity/scenes` in both apps
-offscreen, the GPUI app through `crates/ui/examples/ui-scenes.rs` (built
-once; the script never builds it) and nano through `harness-nano-snap`,
-and compares them frame by frame. It writes gpui | nano | difference
-images and `report.json` with unrounded per-frame differences and their mean.
-Use `--max-changed 0.0005` to require every frame, including new scenes, to
-stay within 0.05% changed pixels; the older per-frame budgets alone allow a
-0.5-percentage-point regression and do not constrain new scenes. `--update`
-records new budgets but cannot bypass an explicit ceiling.
-
-Scenes declare the synthetic device's `dictationAvailable` capability
-(default false). Both renderers use it rather than racing a probe of the
-host's installed Codex; the model-picker scenes explicitly exercise the mic.
-Run against the same nanoui revision as the app:
-`NANOUI_FORK=/path/to/nanoui python3 parity/check.py --max-changed 0.0005`.

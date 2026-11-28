@@ -80,7 +80,7 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
 
     ui.text(c, s.intent.title(), .{ .size = 16, .weight = .semibold, .color = k.text });
-    ui.text(c, if (s.intent == .new_project) "Pick a computer and the folder to work in." else "The new session starts where you choose.", .{ .size = 13, .line_height = 20, .color = k.muted, .wrap = true });
+    ui.text(c, "The new session starts where you choose.", .{ .size = 13, .line_height = 20, .color = k.muted, .wrap = true });
 
     ui.text(c, "Computer", .{ .size = 12, .weight = .medium, .color = k.muted });
     const all_devices = devices(a, c.alloc());

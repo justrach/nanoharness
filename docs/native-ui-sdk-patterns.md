@@ -25,7 +25,7 @@ particularly `apps/docs/content/docs/core/behaviors/`.
 Both chat and GitHub previews now share `apps/nano/src/preview_focus.zig`:
 
 - Opening a preview focuses Close, a safe first action.
-- Tab and Shift+Tab cycle through Close, Zoom out, Zoom in and Fit, without
+- Tab and Shift+Tab cycle through Close, Zoom out, Zoom in, Fit and Copy image, without
   transferring keyboard focus into background controls.
 - Enter and Space activate controls through NanoUI's existing interaction path,
   also used for pointer and assistive activation.
@@ -72,8 +72,17 @@ retained rather than replaced by an animation dependency.
 
 Synthetic offscreen tests exercise Tab/Shift+Tab boundaries, Enter/Space,
 keyboard focus indication, return-to-trigger/reopening, GitHub description and
-activity previews, and hidden-preview ownership. Run the `reply images` and
-`github` test filters with `zig build test`, including the portable renderer.
-The `shared icon controls`, `native choices`, and `native checkout menu` filters
-cover common controls, disabled states, roving focus and real menu activation.
+activity previews, and hidden-preview ownership. From `apps/nano`:
+
+```sh
+zig build test -Dtest-filter="reply images"
+zig build test -Dtest-filter="github"
+zig build test -Dportable=true -Dtest-filter="reply images"
+zig build test -Dtest-filter="shared icon controls"
+zig build test -Dtest-filter="native choices"
+zig build test -Dtest-filter="native checkout menu"
+```
+
+The last three cover common controls, disabled states, roving focus and real
+menu activation.
 OS screen-reader navigation is not covered by these offscreen checks.

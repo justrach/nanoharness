@@ -114,7 +114,7 @@ test "github pane keeps a useful width and its tab joins the body with curved sh
         var h: Harness = undefined;
         try setup(&h, dark, &.{pulls});
         defer h.deinit();
-        try h.t.clickText("Repository");
+        try h.t.clickText("Browse repository");
         h.a.splitPane(.horizontal);
         h.a.openChat("b", null);
         h.a.focusPane(0);
@@ -160,7 +160,7 @@ test "github child stays beside its originating split and retains repository on 
     h.a.focusPane(0);
     git.open(&h.a, .github);
     h.t.settle(1);
-    try h.t.clickText("Repository");
+    try h.t.clickText("Browse repository");
     h.t.settle(1);
     try screenshot(&h, "child-placement");
     const github = textRect(&h, "demo/fieldnotes") orelse return error.NoRepositoryTitle;
@@ -190,7 +190,7 @@ test "github child vertical layout bounds the child to its parent row and hides 
         h.a.focusPane(0);
         git.open(&h.a, .github);
         h.t.settle(1);
-        try h.t.clickText("Repository");
+        try h.t.clickText("Browse repository");
         h.t.settle(0.2);
         const parent = topTextRect(&h, "Navigation polish") orelse return error.MissingParentTab;
         const child = topTextRect(&h, "GitHub") orelse return error.MissingChildTab;
@@ -236,7 +236,7 @@ test "github child description and activity images open a bounded preview withou
     var h: Harness = undefined;
     try setup(&h, true, &.{ pulls, picture_detail, picture_activity });
     defer h.deinit();
-    try h.t.clickText("Repository");
+    try h.t.clickText("Browse repository");
     try h.t.clickText("Polish repository navigation");
     try h.a.panels.github_repository.images.seed("https://raw.githubusercontent.com/demo/repo/media/image.png", @embedFile("testdata/github-preview.png"));
     for (0..2) |i| {
@@ -314,7 +314,7 @@ test "github keyboard cards buttons and disclosures activate exactly once" {
     var h: Harness = undefined;
     try setup(&h, true, &.{ pulls, detail, files });
     defer h.deinit();
-    try h.t.clickText("Repository");
+    try h.t.clickText("Browse repository");
     h.t.settle(0.1);
     // Focus the actual card, just as Tab does, without invoking its pointer path.
     const card_id = for (h.t.ctx.nodes.items) |node| {
@@ -345,7 +345,7 @@ test "github keyboard choice arrows move focus without fetching until committed"
     var h: Harness = undefined;
     try setup(&h, true, &.{ pulls, issues });
     defer h.deinit();
-    try h.t.clickText("Repository");
+    try h.t.clickText("Browse repository");
     h.t.settle(0.1);
     h.t.ctx.focus = try labeledControl(&h, "Pull requests");
     const before = try githubCalls(&h);
@@ -393,7 +393,7 @@ test "repository github browser lists all repository PRs pages filters and issue
         try setup(&h, dark, &.{ pulls, pulls2, pulls, closed, issues });
         defer h.deinit();
         try testing.expect(h.a.panels.github_repository.list == null);
-        try h.t.clickText("Repository");
+        try h.t.clickText("Browse repository");
         h.t.settle(0.1);
         try testing.expect(h.t.hasText("demo/fieldnotes"));
         try testing.expect(h.t.hasText("Repository-wide"));
@@ -437,7 +437,7 @@ test "repository github browser inspects PR summary code and activity natively" 
         var h: Harness = undefined;
         try setup(&h, dark, &.{ pulls, detail, files, activity });
         defer h.deinit();
-        try h.t.clickText("Repository");
+        try h.t.clickText("Browse repository");
         try h.t.clickText("Polish repository navigation");
         h.t.settle(0.1);
         try testing.expect(h.t.hasText("feature/navigation → main"));
@@ -473,7 +473,7 @@ test "repository github browser opens issue details with activity but no PR code
     var h: Harness = undefined;
     try setup(&h, true, &.{ pulls, issues, issue_detail, activity });
     defer h.deinit();
-    try h.t.clickText("Repository");
+    try h.t.clickText("Browse repository");
     try h.t.clickText("Issues");
     try h.t.clickText("Track keyboard navigation");
     try testing.expect(h.t.hasText(issue_detail.detail.?.body));
@@ -530,7 +530,7 @@ test "repository github presentation renders descriptions as native Markdown" {
         var h: Harness = undefined;
         try setup(&h, dark, &.{ pulls, rich });
         defer h.deinit();
-        try h.t.clickText("Repository");
+        try h.t.clickText("Browse repository");
         try h.t.clickText("Polish repository navigation");
         h.t.settle(0.1);
         try screenshot(&h, if (dark) "formatted-summary-dark" else "formatted-summary-light");
@@ -555,7 +555,7 @@ test "repository github list rows keep long titles and metadata inside the card"
     var h: Harness = undefined;
     try setup(&h, false, &.{long});
     defer h.deinit();
-    try h.t.clickText("Repository");
+    try h.t.clickText("Browse repository");
     h.t.resize(760, 780);
     h.t.settle(0.2);
     const title = h.t.findText(entries[0].title) orelse return error.MissingLongTitle;
@@ -599,7 +599,7 @@ test "repository github session empty state does not invent an authentication fa
     defer h.deinit();
     try testing.expect(h.t.hasText("No session-linked pull requests"));
     try testing.expect(!h.t.hasText("No session pull request is available. The host needs gh installed and signed in to GitHub."));
-    try h.t.clickText("Repository");
+    try h.t.clickText("Browse repository");
     try testing.expect(h.t.hasText("Polish repository navigation"));
 }
 
@@ -607,7 +607,7 @@ test "repository github browser masks raw errors rejects changed repo replies an
     var h: Harness = undefined;
     try setup(&h, true, &.{pulls});
     defer h.deinit();
-    try h.t.clickText("Repository");
+    try h.t.clickText("Browse repository");
     flow.load(&h.a, .pulls, 2);
     const id = h.a.panels.github_repository.pending.?;
     const err = try std.fmt.allocPrint(testing.allocator, "{{\"id\":{d},\"err\":\"private provider output\"}}", .{id});
@@ -652,7 +652,7 @@ test "github code review uses numbered colored source rows instead of wrapped pa
         var h: Harness = undefined;
         try setup(&h, dark, &.{ pulls, detail, review_files });
         defer h.deinit();
-        try h.t.clickText("Repository");
+        try h.t.clickText("Browse repository");
         try h.t.clickText("Polish repository navigation");
         try h.t.clickText("Code");
         h.a.view.strip.expanded = .host;
@@ -716,7 +716,7 @@ test "repository github analytics dashboard renders overview charts and filters 
         var h: Harness = undefined;
         try setup(&h, dark, &.{ pulls, dashboard_page });
         defer h.deinit();
-        try h.t.clickText("Repository");
+        try h.t.clickText("Browse repository");
         try h.t.clickText("Issues");
         h.t.settle(0.1);
 

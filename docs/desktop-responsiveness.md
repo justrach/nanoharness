@@ -137,7 +137,7 @@ Run the reproducible gate from the repository root:
 python3 scripts/check-nano-telemetry-proof.py
 ```
 
-It compiles all seven Lean kernels, checks generated witnesses for drift, then
+It compiles every Lean kernel in `apps/nano/lean-proofs/Nano/`, checks generated witnesses for drift, then
 runs the focused Nano telemetry tests. `--update-vectors` regenerates witnesses
 only for an intentional, reviewed policy change. All inputs are synthetic; no
 metrics are sent. The timing test prints microseconds per recorder call and

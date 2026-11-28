@@ -118,16 +118,23 @@ fn toolbar(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     ui.spacer(c);
     const clean = if (p.diff) |d| d.files.len == 0 or d.truncated else true;
-    if (p.scope == .workingTree and kit.iconButton(c, k, .@"trash-bin-minimalistic", .{ .icon = 14, .disabled = clean }))
+    // The footer's "Undo all changes", as an icon: the same name.
+    if (p.scope == .workingTree and kit.iconButton(c, k, .@"trash-bin-minimalistic", .{ .icon = 14, .disabled = clean, .tip = .{ .text = review_undo } }))
         p.discard_confirm = true;
-    if (kit.iconButton(c, k, .@"fold-vertical", .{ .icon = 14 })) foldAll(a);
+    if (kit.iconButton(c, k, .@"fold-vertical", .{ .icon = 14, .tip = .{ .text = if (anyOpen(a)) "Collapse all files" else "Expand all files" } })) foldAll(a);
+}
+
+/// Whether any file of the diff is unfolded: the fold button collapses
+/// them all, else expands them all.
+fn anyOpen(a: *const App) bool {
+    const d = a.panels.diff orelse return false;
+    for (d.files) |f| if (!a.panels.folded.contains(f.path)) return true;
+    return false;
 }
 
 fn foldAll(a: *App) void {
     const d = a.panels.diff orelse return;
-    const any_open = for (d.files) |f| {
-        if (!a.panels.folded.contains(f.path)) break true;
-    } else false;
+    const any_open = anyOpen(a);
     for (d.files) |f| {
         if (a.panels.folded.contains(f.path) != any_open) panels.toggleFold(a, f.path);
     }

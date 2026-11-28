@@ -163,7 +163,11 @@ pub fn entries(a: *const App, gpa: std.mem.Allocator, query: []const u8) ![]Entr
     }
     if (!history) {
         const actions = pal.actionsForContext(query, isDark(a), a.view.full_screen);
-        try out.appendSlice(gpa, actions.slice());
+        const mode = a.settings.uiMode();
+        for (actions.slice()) |e| {
+            if (e == .toggle_part and !pal.partTogglesIn(e.toggle_part, mode)) continue;
+            try out.append(gpa, e);
+        }
     }
     const p = &a.view.palette;
     if (!history and p.external.items.len > 0 and pal.matchesQuery(query, "import conversations from other tools")) try out.append(gpa, .import_all);
@@ -230,7 +234,8 @@ pub fn activate(a: *App, e: Entry) void {
     close(a);
     switch (e) {
         .new_chat => if (replace) a.replaceCurrent(null) else a.newTab(),
-        .new_project => @import("app_open_chooser.zig").open(a, .new_project),
+        // The real New project form, as the sidebar's New project opens it.
+        .new_project => a.addFolder(),
         .settings => @import("view_settings.zig").open(a),
         .theme => unreachable,
         .full_screen => |is_fs| a.setFullScreen(!is_fs),
@@ -245,16 +250,9 @@ pub fn activate(a: *App, e: Entry) void {
         .tab_overview => @import("view_tab_overview.zig").open(a),
         .toggle_side_panel => @import("app_panels.zig").toggleHost(a),
         .toggle_files => @import("app_files.zig").toggle(a),
-        .toggle_terminal => {
-            a.actions.dock_open = !a.actions.dock_open;
-            a.redraw();
-        },
+        .toggle_terminal => @import("app_actions.zig").toggleDock(a),
         .chat_history => toggle(a, .chat_history),
         .custom_theme_studio => @import("view_custom_theme_studio.zig").open(a),
-        .open_design_canvas => {
-            a.settings.applyUiMode(.design);
-            @import("app_panels.zig").openDesignCanvas(a);
-        },
         .custom_theme => |id| if (@import("custom_themes.zig").findPreset(id)) |preset| {
             @import("view_custom_theme_studio.zig").applyPreset(a, preset.*);
         },
@@ -277,7 +275,7 @@ pub fn activate(a: *App, e: Entry) void {
             importExternal(a, &.{.{ .source = x.source, .id = x.id }});
         },
         .import_all => importExternal(a, null),
-        .pane => |ix| a.focusPane(ix),
+        .pane => |ix| @import("view_tab_strip.zig").focus(a, .{ .chat = ix }),
         .open_tab => |t| {
             a.view.settings_open = false;
             if (t.pane_tab) |pt| a.showPaneTab(pt) else a.showTab(t.ws);
@@ -1000,7 +998,6 @@ fn entryIcon(k: theme.Colors, e: Entry) icons.Name {
         .toggle_terminal => .terminal,
         .chat_history => .@"clock-circle",
         .custom_theme_studio, .custom_theme => .@"magic-stick-3",
-        .open_design_canvas => .@"palette-search",
         .ui_mode => |m| switch (m) {
             .zen => .@"magic-stick-3",
             .developer => .terminal,
@@ -1028,7 +1025,6 @@ fn commandHint(a: *const App, e: Entry, buf: []u8) ?[]const u8 {
         .toggle_side_panel => shortcuts.badge(buf, comboFor(a, "toggleChanges")),
         .toggle_files => shortcuts.badge(buf, comboFor(a, "toggleFiles")),
         .toggle_terminal => shortcuts.badge(buf, comboFor(a, "toggleTerminal")),
-        .open_design_canvas => shortcuts.badge(buf, "mod-alt-d"),
         .ui_mode => |m| shortcuts.badge(buf, if (m == .design) "mod-alt-d" else "mod-shift-m"),
         else => null,
     };
@@ -1292,7 +1288,7 @@ fn previewActionsBar(
 }
 
 /// A shortcut's combination as the keymap has it, its default when unset.
-fn comboFor(a: *const App, key: []const u8) []const u8 {
+pub fn comboFor(a: *const App, key: []const u8) []const u8 {
     for (shortcuts.all) |sc| if (std.mem.eql(u8, sc.key, key)) {
         const combo = a.settings.combo(sc);
         return if (combo.len > 0) combo else sc.default;

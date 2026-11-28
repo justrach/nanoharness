@@ -1606,20 +1606,20 @@ pub(crate) fn linked_worktree_root(path: &std::path::Path) -> Option<String> {
     Some(dot_git.parent()?.to_string_lossy().into_owned())
 }
 
-/// Local live statuses win for this device's chats; every other device's rows come
-/// from the registry. Sorted by chat id (stable stream output).
+/// Keep known local outcomes through restart. Only the live watch can
+/// attest to a local active run. Remote rows retain their existing freshness gate.
 fn merge_sessions(device_id: &str, rows: &[Session], local: &[Session]) -> Vec<Session> {
-    let mut merged: std::collections::HashMap<String, Session> = rows
+    let mut merged: std::collections::BTreeMap<String, Session> = rows
         .iter()
-        .filter(|s| s.device_id != device_id)
+        .filter(|s| {
+            s.device_id != device_id
+                || s.status == harness_proto::SessionStatus::Errored
+                || (s.status == harness_proto::SessionStatus::Idle && s.last_completed_turn.is_some())
+        })
         .map(|s| (s.chat_id.clone(), s.clone()))
         .collect();
-    for session in local {
-        merged.insert(session.chat_id.clone(), session.clone());
-    }
-    let mut list: Vec<Session> = merged.into_values().collect();
-    list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
-    list
+    merged.extend(local.iter().map(|s| (s.chat_id.clone(), s.clone())));
+    merged.into_values().collect()
 }
 
 /// Background task: relay-verified presence. Every [`RELAY_PROBE_INTERVAL_MS`],

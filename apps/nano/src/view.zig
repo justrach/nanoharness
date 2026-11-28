@@ -55,6 +55,8 @@ const cluster_x: f32 = @import("window_chrome.zig").leading;
 const cluster_w: f32 = 24 * 3 + 8 + 2;
 
 pub fn view(a: *App, c: *ui.Context) void {
+    // Settings › Appearance's Reduce motion before anything reads it.
+    @import("view_settings_appearance.zig").applyReduceMotion(c, a);
     @import("performance.zig").begin(a, c);
     a.markdown_cache.beginFrame();
     @import("frame_profile.zig").beginPass();
@@ -138,6 +140,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     a.reap();
     @import("app_subagents.zig").settleFrame(a);
     @import("app_browser.zig").settleFrame(a);
+    @import("app_browser.zig").syncPreviewConsumers(a);
     @import("view_settings_theme_import.zig").settleFrame(a);
     @import("view_settings_devices_updates.zig").settleFrame(a);
     @import("view_setup.zig").ensureChecked(a);
@@ -897,7 +900,7 @@ fn keys(c: *ui.Context, a: *App) void {
     }
     if (c.shortcut(.{ .key = ',', .cmd = true })) settings_view.open(a);
     if (boundShortcut(c, a, "newProject")) {
-        @import("app_open_chooser.zig").open(a, .new_project);
+        a.addFolder();
         return;
     }
     if (!a.view.settings_open and boundShortcut(c, a, "openProjectPicker")) {
@@ -928,7 +931,9 @@ fn keys(c: *ui.Context, a: *App) void {
         if (!a.view.search.open) search.toggle(a) else a.view.search.focus = true;
     }
     if (a.selected != null and boundShortcut(c, a, "toggleFiles")) @import("app_files.zig").toggle(a);
-    if (a.selected != null and (boundShortcut(c, a, "toggleChanges") or boundShortcut(c, a, "toggleTerminal"))) @import("app_panels.zig").toggleHost(a);
+    if (a.selected != null and boundShortcut(c, a, "toggleChanges")) @import("app_panels.zig").toggleHost(a);
+    // ⌘J is the title bar's terminal & action-runs button, not a second ⌘R.
+    if (boundShortcut(c, a, "toggleTerminal")) @import("app_actions.zig").toggleDock(a);
     if (boundShortcut(c, a, "newSession") or c.shortcut(.{ .key = 'n', .cmd = true })) a.newTab();
     if (boundShortcut(c, a, "archiveSession")) {
         if (a.selected) |sel| a.setArchived(sel, true);
@@ -1221,26 +1226,46 @@ fn sidebarToggle(c: *ui.Context, a: *App, k: theme.Colors) void {
 
 fn historyAndMode(c: *ui.Context, a: *App, k: theme.Colors, left_cluster: bool) void {
     if (left_cluster) ui.div(c).w(4).end();
-    ui.key(c, "titlebar-chat-history");
-    const history = ui.div(c).row().size(24, 24).center().rounded(6).hover(k.hover).control();
-    icons.icon(c, .@"clock-circle", 16, k.muted, 0);
-    if (history.clicked()) strip.open(a, .history, strip.active(a), c.rects.get(c.node(history.index).id));
+    // The open tabs' list (`strip.open(.history)`), not the palette's
+    // Chat history: its own name and glyph, not the history clock.
+    ui.key(c, "titlebar-open-tabs");
+    const tabs_label = "Open tabs";
+    const history = @import("view_tooltip.zig").on(ui.div(c).row().size(24, 24).center().rounded(6).hover(k.hover).control(), k, .{ .text = tabs_label });
+    const open_tabs = @import("control_behavior.zig").activate(c, history, k, tabs_label, true, false);
+    icons.icon(c, .list, 16, k.muted, 0);
+    if (open_tabs) strip.open(a, .history, strip.active(a), c.rects.get(c.node(history.index).id));
     history.end();
     if (left_cluster) ui.div(c).w(4).end();
-    const dev = a.settings.uiMode() == .developer;
+    const mode = a.settings.uiMode();
+    const dev = mode == .developer;
     const shortcuts = @import("shortcuts.zig");
     var shortcut_buf: [64]u8 = undefined;
     ui.key(c, "titlebar-ui-mode-pill");
     if (kit.iconButton(c, k, if (dev) .terminal else .@"magic-stick-3", .{
         .size = 24,
         .on = dev,
-        .tip = .{ .text = c.print("Toggle Zen / Developer mode ({s})", .{shortcuts.chordBadge(&shortcut_buf, shortcuts.cycle_ui_mode)}) },
+        .tip = .{ .text = c.print("{s} ({s})", .{ modePillTip(mode), shortcuts.chordBadge(&shortcut_buf, shortcuts.cycle_ui_mode) }) },
     })) {
         const was_design = a.settings.uiMode() == .design;
         a.settings.toggleUiMode();
         if (was_design and a.settings.uiMode() != .design) @import("app_panels.zig").closeDesignCanvas(a);
         a.redraw();
     }
+}
+
+/// What the mode pill's click (and ⇧⌘M) does from `mode`: Zen and
+/// Developer swap, and Design returns to Zen (`UiMode.flip`).
+pub fn modePillTip(mode: @import("motion_rules.zig").UiMode) []const u8 {
+    return switch (mode.flip()) {
+        .zen => "Switch to Zen mode",
+        .developer => "Switch to Developer mode",
+        .design => "Switch to Design mode",
+    };
+}
+
+/// The Design canvas button says what a click does now.
+pub fn designCanvasTip(open: bool) []const u8 {
+    return if (open) "Close Design Canvas" else "Open Design Canvas";
 }
 
 /// The reserved right end of the title bar: live utilities and mode toggles (`Nano.UiMode3`).
@@ -1274,30 +1299,32 @@ fn trailing(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (policy.shows_dev_trailing_toggles and eff_cnt >= 3) {
             ui.key(c, "topbar-actions-dock-toggle");
             const act_k = sc.platformBadge(&tip_buf, a.settings.keymap.get("toggleTerminal") orelse "mod-j");
+            const app_actions = @import("app_actions.zig");
+            // Nothing to show: disabled, saying why, rather than lit over nothing.
+            const runs = app_actions.hasVisibleRun(&a.actions, a.selected);
             if (kit.iconButton(c, k, .terminal, .{
                 .size = 28,
-                .on = a.actions.dock_open,
-                .tip = .{ .text = c.print("Toggle terminal & action runs ({s})", .{act_k}) },
-            })) {
-                a.actions.dock_open = !a.actions.dock_open;
-                a.redraw();
-            }
+                .on = runs and a.actions.dock_open,
+                .disabled = !runs,
+                .label = "Toggle terminal & action runs",
+                .tip = .{ .text = if (runs) c.print("Toggle terminal & action runs ({s})", .{act_k}) else app_actions.no_runs_tip },
+            })) app_actions.toggleDock(a);
             ui.key(c, "topbar-files-toggle");
             var files_buf: [32]u8 = undefined;
             const files_k = sc.platformBadge(&files_buf, a.settings.keymap.get("toggleFiles") orelse "mod-e");
             if (kit.iconButton(c, k, .folder, .{
                 .size = 28,
                 .on = a.panels.files_open,
-                .tip = .{ .text = c.print("Toggle file explorer ({s})", .{files_k}) },
+                .tip = .{ .text = c.print("Toggle files panel ({s})", .{files_k}) },
             })) @import("app_panels.zig").toggleFiles(a);
         } else if (policy.shows_design_canvas_toggle and eff_cnt >= 2) {
             ui.key(c, "topbar-design-canvas-toggle");
             const canvas_on = strip.hasHost(a) and if (a.panels.activeTab()) |t| t.kind == .design_canvas else false;
-            const des_k = sc.platformBadge(&tip_buf, "mod-alt-d");
+            // ⌘⌥D leaves Design mode altogether, so it is not this button's key.
             if (kit.iconButton(c, k, .@"palette-search", .{
                 .size = 28,
                 .on = canvas_on,
-                .tip = .{ .text = c.print("Open Design Canvas ({s})", .{des_k}) },
+                .tip = .{ .text = designCanvasTip(canvas_on) },
             })) {
                 if (canvas_on) {
                     @import("app_panels.zig").closeDesignCanvas(a);

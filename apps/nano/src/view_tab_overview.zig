@@ -220,7 +220,8 @@ pub fn keys(c: *ui.Context, a: *App) void {
     const down = !right and !left and c.shortcut(.{ .key = S.down });
     const up = !right and !left and !down and c.shortcut(.{ .key = S.up });
     const enter = c.shortcut(.{ .key = S.enter });
-    const split_key = c.shortcut(S.native(.{ .cmd = true, .key = 'd' }));
+    // The user's Split binding, as the hints show it.
+    const split_key = @import("view.zig").boundShortcut(c, a, "splitTerminal");
     const close_key = c.shortcut(S.native(.{ .cmd = true, .key = S.backspace }));
     if (!right and !left and !down and !up and !enter and !split_key and !close_key) return;
 
@@ -268,6 +269,9 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
     const query = queryOf(c, a);
     const list = items(a, c.alloc(), query) catch return;
     s.selected = @min(s.selected, list.len -| 1);
+    const split_hint = splitHint(c, a);
+    var palette_buf: [32]u8 = undefined;
+    const palette_hint = @import("shortcuts.zig").chordBadge(&palette_buf, @import("shortcuts.zig").command_palette);
 
     const scrim_color = if (a.view.full_screen or k.dark) ui.Color.black.alpha(0.80) else k.background.alpha(0.86);
     ui.key(c, "tab-overview-scrim");
@@ -353,10 +357,10 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
             const pal_btn = tip.on(
                 ui.div(c).row().h(30).px(10).center().rounded(8).bg(k.composer).border(k.border).borderW(1).hover(k.hover).control(),
                 k,
-                .{ .text = "Command switcher (⌘K)", .look = .tab },
+                .{ .text = c.print("Command palette ({s})", .{palette_hint}), .look = .tab },
             );
             defer pal_btn.end();
-            ui.text(c, if (comptime builtin.os.tag == .macos) "\u{2318}K" else "Ctrl+K", .{ .size = 12, .line_height = 16, .weight = theme.ui_medium_weight, .color = k.text.alpha(0.85) });
+            ui.text(c, palette_hint, .{ .size = 12, .line_height = 16, .weight = theme.ui_medium_weight, .color = k.text.alpha(0.85) });
             if (pal_btn.clicked()) action_type = .open_palette;
         }
         {
@@ -441,14 +445,14 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
                             defer btns.end();
                             {
                                 ui.key(c, "overview-card-split");
-                                const sb = tip.on(ui.div(c).size(22, 22).center().rounded(11).bg(k.ink(0.06)).hover(k.hover).control(), k, .{ .text = "Split right (⌘D)" });
+                                const sb = tip.on(ui.div(c).size(22, 22).center().rounded(11).bg(k.ink(0.06)).hover(k.hover).control(), k, .{ .text = c.print("Split right ({s})", .{split_hint}) });
                                 defer sb.end();
                                 icons.icon(c, .@"split-columns", 11, k.text.alpha(0.82), 0);
                                 if (sb.clicked()) child_hit = .split;
                             }
                             if (item.closable) {
                                 ui.key(c, "overview-card-close");
-                                const cb = tip.on(ui.div(c).size(22, 22).center().rounded(11).bg(k.ink(0.06)).hover(k.hover).control(), k, .{ .text = "Close (⌘Del)" });
+                                const cb = tip.on(ui.div(c).size(22, 22).center().rounded(11).bg(k.ink(0.06)).hover(k.hover).control(), k, .{ .text = c.print("Close ({s})", .{close_hint}) });
                                 defer cb.end();
                                 icons.icon(c, .close, 10, k.muted, 0);
                                 if (cb.clicked()) child_hit = .close;
@@ -531,8 +535,8 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (foot.hovered()) any_surface_hovered = true;
         overviewHint(c, k, "← → ↑ ↓", "Navigate");
         overviewHint(c, k, "↵", "Open");
-        overviewHint(c, k, "⌘D", "Split");
-        overviewHint(c, k, "⌘Del", "Close");
+        overviewHint(c, k, split_hint, "Split");
+        overviewHint(c, k, close_hint, "Close");
         overviewHint(c, k, "Esc", "Done");
     }
 
@@ -566,6 +570,15 @@ fn metaChip(c: *ui.Context, k: theme.Colors, glyph: icons.Name, label: []const u
     defer ch.end();
     icons.icon(c, glyph, 10, k.muted, 0);
     kit.ellipsisText(c, label, .{ .size = 10.5, .line_height = 14, .color = k.muted }, 96);
+}
+
+/// The overview's own fixed keys, as this platform writes them.
+const close_hint = if (builtin.os.tag == .macos) "⌘⌫" else "Ctrl+Backspace";
+
+/// Split follows the user's `splitTerminal` binding, as the palette's hint does.
+fn splitHint(c: *ui.Context, a: *const App) []const u8 {
+    const buf = c.alloc().alloc(u8, 48) catch return "";
+    return @import("shortcuts.zig").platformBadge(buf, view_palette.comboFor(a, "splitTerminal"));
 }
 
 fn overviewHint(c: *ui.Context, k: theme.Colors, key: []const u8, label: []const u8) void {

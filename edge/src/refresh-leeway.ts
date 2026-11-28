@@ -19,6 +19,7 @@
  * Worker, which has already checked the presented credential belongs to this account.
  */
 import { issueToken } from "./auth";
+import { readJsonCapped } from "./body";
 import { CodegraffAuthFailed, refresh } from "./codegraff";
 import type { Env } from "./env";
 
@@ -63,7 +64,9 @@ export class RefreshLeeway implements DurableObject {
     if (new URL(request.url).pathname !== "/refresh" || request.method !== "POST") {
       return json({ error: "not_found" }, 404);
     }
-    const body = (await request.json().catch(() => null)) as Body | null;
+    const parsed = await readJsonCapped(request, 64 * 1024);
+    if (!parsed.ok && parsed.status === 413) return json({ error: "too_large" }, 413);
+    const body = parsed.ok ? (parsed.value as Body | null) : null;
     if (typeof body?.userId !== "string" || typeof body.refreshToken !== "string") {
       return json({ error: "bad request" }, 400);
     }

@@ -19,6 +19,7 @@
  * Hibernation discipline: ZERO wall-clock timers; ping/pong rides the
  * auto-response pair; the daily alarm does tombstone GC + the R2 backup.
  */
+import { readJsonCapped } from "./body";
 import { applyOp, validateOp, type Op, type Row } from "./registry-core";
 import { freshPresence, type PresenceBeat } from "./registry-presence";
 import {
@@ -432,10 +433,13 @@ export class RegistryRoom implements DurableObject {
         return json({ ok: true });
       }
       if (request.method === "POST") {
-        let body: Record<string, unknown>;
-        try {
-          body = (await request.json()) as Record<string, unknown>;
-        } catch {
+        const parsed = await readJsonCapped(request, 16 * 1024);
+        if (!parsed.ok) {
+          if (parsed.status === 413) return json({ error: "too_large" }, 413);
+          return json({ error: "bad_request", message: "malformed body" }, 400);
+        }
+        const body = parsed.value as Record<string, unknown>;
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
           return json({ error: "bad_request", message: "malformed body" }, 400);
         }
         const token = typeof body.token === "string" ? body.token : "";
@@ -499,15 +503,16 @@ export class RegistryRoom implements DurableObject {
       const device = url.searchParams.get("device") ?? "";
       const claim = this.claimOrVerifyDevice(device, trustTier, sandboxId);
       if (!claim.ok) return json({ error: claim.code, message: claim.message }, claim.status);
-      // Pre-read cap (the WS path gets this for free from MAX_FRAME_BYTES):
+      // Streaming cap (the WS path gets this for free from MAX_FRAME_BYTES):
       // a legitimate batch is bounded well under this by MAX_BATCH_OPS ×
       // MAX_OP_BYTES; anything larger only burns this room's own CPU.
-      const declared = Number(request.headers.get("content-length") ?? "0");
-      if (declared > 2 * 1024 * 1024) return json({ error: "too_large" }, 413);
-      let frame: Record<string, unknown>;
-      try {
-        frame = (await request.json()) as Record<string, unknown>;
-      } catch {
+      const parsed = await readJsonCapped(request, 2 * 1024 * 1024);
+      if (!parsed.ok) {
+        if (parsed.status === 413) return json({ error: "too_large" }, 413);
+        return json({ error: "bad_push", message: "malformed body" }, 400);
+      }
+      const frame = parsed.value as Record<string, unknown>;
+      if (!frame || typeof frame !== "object" || Array.isArray(frame)) {
         return json({ error: "bad_push", message: "malformed body" }, 400);
       }
       const outcome = this.applyPushBatch(device, frame, trustTier);

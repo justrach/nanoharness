@@ -5,11 +5,15 @@ Each implementation runs its own test against this one file, so none can drift w
 
 | Implementation | Side | Runner | Run it |
 | --- | --- | --- | --- |
-| Rust (`crates/sync`) | client (desktop, engine, Android core) | `crates/sync/tests/chat2_vectors.rs` | `cargo test -p harness-sync --test chat2_vectors` |
+| Rust (`crates/sync`) | client (the engine, for desktop devices) | `crates/sync/tests/chat2_vectors.rs` | `cargo test -p harness-sync --test chat2_vectors` |
 | Swift (`apps/ios/Harness/Sync`) | client (iOS) | `apps/ios/HarnessTests/Chat2VectorTests.swift` | `xcodebuild … -only-testing:HarnessTests/Chat2VectorTests test` |
 | TypeScript (`edge/src/chat-frames.ts`) | server | `edge/src/chat-frames.vectors.test.ts` | `cd edge && npx vitest run src/chat-frames.vectors.test.ts` |
 
-CI runs all three: `ui-tests.yml` (Rust), `parity.yml` (Swift) and `preview-tests.yml` (edge).
+In CI, `parity.yml` runs the Swift runner and `preview-tests.yml` runs the edge runner (`npm test` in `edge`). No
+workflow runs the Rust runner; run it locally when you change a rule.
+
+The desktop client (`apps/nano`) has no chat2 code of its own: it talks to the engine over local RPC, and the engine
+is the chat2 client.
 
 ## What the file pins
 

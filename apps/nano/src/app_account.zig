@@ -11,6 +11,8 @@ const nanoui = @import("nanoui");
 const json = std.json;
 const rpc = @import("rpc.zig");
 const requests = @import("requests.zig");
+const image_url = @import("github_image_url.zig");
+const image_transport = @import("github_image_transport.zig");
 const App = @import("app.zig").App;
 const Allocator = std.mem.Allocator;
 
@@ -656,10 +658,50 @@ fn clearAvatar(acc: *Account, gpa: Allocator) void {
     unlockAvatar(acc);
 }
 
+const max_avatar_bytes: usize = 2 * 1024 * 1024;
+
+/// Allow public HTTPS avatar URLs only. Rejects HTTP/local schemes, credentials,
+/// custom ports, IP literals, single-label hosts, and local/internal domains.
+pub fn validAvatarUrl(url: []const u8) bool {
+    const prefix = "https://";
+    if (url.len > 4096 or !std.ascii.startsWithIgnoreCase(url, prefix)) return false;
+    for (url) |ch| if (ch <= 0x20 or ch == 0x7f or ch == '\\') return false;
+    const rest = url[prefix.len..];
+    const end = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
+    const host = rest[0..end];
+    if (end < rest.len and rest[end] != '/') return false;
+    if (host.len == 0 or host.len > 253) return false;
+    if (std.mem.indexOfAny(u8, host, ":@%[]") != null) return false;
+    if (host[0] == '.' or host[host.len - 1] == '.') return false;
+
+    var dots: usize = 0;
+    var prev_dot = false;
+    var last_label_start: usize = 0;
+    for (host, 0..) |ch, i| {
+        if (ch == '.') {
+            if (prev_dot) return false;
+            prev_dot = true;
+            dots += 1;
+            last_label_start = i + 1;
+        } else {
+            prev_dot = false;
+            if (!std.ascii.isAlphanumeric(ch) and ch != '-') return false;
+        }
+    }
+    if (dots == 0) return false;
+    const tld = host[last_label_start..];
+    // Reject IPv4 dotted-quad / numeric final labels (public DNS TLDs are never numeric).
+    if (tld.len == 0 or std.ascii.isDigit(tld[0])) return false;
+    for ([_][]const u8{ ".localhost", ".local", ".internal", ".home.arpa", ".localdomain" }) |suffix| {
+        if (std.ascii.endsWithIgnoreCase(host, suffix)) return false;
+    }
+    return true;
+}
+
 fn maybeFetchAvatar(a: *App) void {
     const user = a.account.user orelse return clearAvatar(&a.account, a.gpa);
     const url = user.avatar_url orelse return clearAvatar(&a.account, a.gpa);
-    if (!std.mem.startsWith(u8, url, "https://")) return;
+    if (!validAvatarUrl(url)) return;
     if (a.account.avatar_url_loaded) |loaded| {
         if (std.mem.eql(u8, loaded, url)) return;
     }
@@ -690,30 +732,21 @@ fn maybeFetchAvatar(a: *App) void {
 
 fn avatarWorker(a: *App, url: []u8) void {
     defer a.gpa.free(url);
-    const res = std.process.run(a.gpa, a.io, .{
-        .argv = &.{ "/usr/bin/curl", "-fsSL", "--max-time", "5", "--max-filesize", "2097152", "--", url },
-        .stdout_limit = .limited(2 << 20),
-        .stderr_limit = .limited(4096),
-    }) catch {
+    const body = image_transport.fetchWithPolicy(a.gpa, a.io, url, validAvatarUrl) catch {
         lockAvatar(&a.account);
         a.account.avatar_fetching = false;
         unlockAvatar(&a.account);
         return;
     };
-    defer a.gpa.free(res.stderr);
-    const ok = switch (res.term) {
-        .exited => |code| code == 0 and res.stdout.len > 0,
-        else => false,
-    };
-    if (!ok) {
-        a.gpa.free(res.stdout);
+    if (body.len == 0 or body.len > max_avatar_bytes or !image_url.raster(body)) {
+        a.gpa.free(body);
         lockAvatar(&a.account);
         a.account.avatar_fetching = false;
         unlockAvatar(&a.account);
         return;
     }
     const done_url = a.gpa.dupe(u8, url) catch {
-        a.gpa.free(res.stdout);
+        a.gpa.free(body);
         lockAvatar(&a.account);
         a.account.avatar_fetching = false;
         unlockAvatar(&a.account);
@@ -722,7 +755,7 @@ fn avatarWorker(a: *App, url: []u8) void {
     lockAvatar(&a.account);
     if (a.account.avatar_pending_bytes) |old| a.gpa.free(old);
     if (a.account.avatar_pending_url) |old| a.gpa.free(old);
-    a.account.avatar_pending_bytes = res.stdout;
+    a.account.avatar_pending_bytes = body;
     a.account.avatar_pending_url = done_url;
     a.account.avatar_fetching = false;
     unlockAvatar(&a.account);
@@ -746,4 +779,53 @@ fn avatarDelivered(ctx: ?*anyopaque) callconv(.c) void {
         a.account.avatar_url_loaded = u;
     }
     a.redraw();
+}
+
+test "avatar URL policy rejects loopback, private/local hosts, credentials, ports, and unsafe redirects" {
+    const t = std.testing;
+    for ([_][]const u8{
+        "https://avatars.githubusercontent.com/u/1?v=4",
+        "https://lh3.googleusercontent.com/a/synthetic-avatar",
+        "https://cdn.example.com/ada.png",
+    }) |good| try t.expect(validAvatarUrl(good));
+
+    for ([_][]const u8{
+        "http://avatars.githubusercontent.com/u/1",
+        "file:///etc/passwd",
+        "https://localhost/avatar.png",
+        "https://sub.localhost/avatar.png",
+        "https://printer.local/avatar.png",
+        "https://metadata.google.internal/computeMetadata/v1/",
+        "https://127.0.0.1/avatar.png",
+        "https://169.254.169.254/latest/meta-data/",
+        "https://[::1]/avatar.png",
+        "https://2130706433/avatar.png",
+        "https://user@avatars.githubusercontent.com/u/1",
+        "https://avatars.githubusercontent.com:8443/u/1",
+        "https://avatars.githubusercontent.com\\@evil.invalid/u/1",
+        "https://avatars.githubusercontent.com/u/1\n",
+    }) |bad| try t.expect(!validAvatarUrl(bad));
+
+    const base = "https://cdn.example.com/avatar.png";
+    for ([_][]const u8{
+        "http://127.0.0.1:27664/rpc",
+        "https://127.0.0.1/avatar.png",
+        "https://localhost/avatar.png",
+        "https://169.254.169.254/latest/meta-data/",
+        "file:///etc/passwd",
+    }) |target| {
+        try t.expectError(
+            error.ImageRedirectRejected,
+            image_transport.resolveRedirectWith(t.allocator, base, target, 0, validAvatarUrl),
+        );
+    }
+    const ok_hop = try image_transport.resolveRedirectWith(
+        t.allocator,
+        base,
+        "https://avatars.githubusercontent.com/u/42",
+        0,
+        validAvatarUrl,
+    );
+    defer t.allocator.free(ok_hop);
+    try t.expectEqualStrings("https://avatars.githubusercontent.com/u/42", ok_hop);
 }

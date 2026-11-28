@@ -146,9 +146,16 @@ fn drawBrowseViewport(c: *ui.Context, a: *App, k: theme.Colors, b: *Browser) voi
         }
         ui.spacer(c);
         if (st == .connected) {
-            if (browseBtn(c, k, "Open in browse", true)) bc.spawnOp(.show, "", 0, 0);
+            if (browseBtn(c, k, "Open in browse", true)) {
+                // The browse window outlives this tab, and Nano cannot see it.
+                a.preview_consumers.hold(a.gpa, b.url);
+                bc.spawnOp(.show, "", 0, 0);
+            }
         } else if (b.url.len > 0) {
-            if (browseBtn(c, k, "Open externally", false)) _ = @import("app_browser.zig").open_external_url(b.url);
+            if (browseBtn(c, k, "Open externally", false)) {
+                a.preview_consumers.hold(a.gpa, b.url);
+                _ = @import("app_browser.zig").open_external_url(b.url);
+            }
         }
     }
 

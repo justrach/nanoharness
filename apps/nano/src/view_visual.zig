@@ -129,11 +129,15 @@ fn renderButtonOrToggle(
 ) void {
     const is_toggle = node.kind == .toggle;
     const on = node.value != 0.0;
-    const active = !entry.busy and node.handler != null;
+    // A control the script gave no handler does nothing: drawn plain, with
+    // no pointer, rather than as a live button.
+    const dead = node.handler == null;
+    const active = !entry.busy and !dead;
     const label = controlLabel(node);
 
     ui.key(c, c.print("vc-{s}-{d}", .{ entry.part_id, id }));
-    var box = ui.div(c).row().px(14).py(9).rounded(8).border(k.border_strong).borderW(1).itemsCenter().gap(10).bg(if (is_toggle) k.background else k.accent_strong).control();
+    var box = ui.div(c).row().px(14).py(9).rounded(8).border(if (dead) k.border else k.border_strong).borderW(1).itemsCenter().gap(10).bg(if (is_toggle or dead) k.background else k.accent_strong);
+    if (active) box = box.control();
     box.c.node(box.index).style.min_height = 38;
     const it = c.interact(box.index, .{ .focusable = active });
     if (active and (it.hovered or it.focused)) {

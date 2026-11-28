@@ -7,6 +7,8 @@ import Nano.FooterChips
 import Nano.QuestionPanel
 import Nano.SubagentTasks
 import Nano.Telemetry
+import Nano.TabNavModel
+import Nano.SessionOutcome
 
 open Nano
 

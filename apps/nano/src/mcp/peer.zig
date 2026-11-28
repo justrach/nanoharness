@@ -447,8 +447,7 @@ pub const GraffPeer = struct {
 /// running session is on this device, addressed by its ACP session id.
 pub fn peerTarget(chat: json.Value, harness: []const u8, session: ?json.Value, local_device: []const u8) ?[]const u8 {
     if (@import("builtin").os.tag == .windows or !std.mem.eql(u8, harness, "graff")) return null;
-    const sess = session orelse return null;
-    if (!std.mem.eql(u8, u.str(sess, "deviceId") orelse "", local_device)) return null;
+    if (session) |sess| if (!std.mem.eql(u8, u.str(sess, "deviceId") orelse "", local_device)) return null;
     if (!std.mem.eql(u8, u.str(chat, "deviceId") orelse "", local_device)) return null;
     // An empty id is the engine's "do not resume" tombstone.
     const id = u.str(chat, "harnessSessionId") orelse return null;
@@ -631,7 +630,7 @@ test "mcp peer: a room delivery with a long room name is not a person's prompt a
     try testing.expectEqual(@as(u32, 0), ledger.inbound(a, "chat-r", human, now + 30));
 }
 
-test "mcp graff peer: only a working graff chat hosted on this device is addressable" {
+test "mcp graff peer: a graff chat with a session ID is addressable only on its host device" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -640,7 +639,7 @@ test "mcp graff peer: only a working graff chat hosted on this device is address
     try testing.expectEqualStrings("sess-1", peerTarget(chat, "graff", session, "here").?);
     try testing.expect(peerTarget(chat, "claude-code", session, "here") == null);
     try testing.expect(peerTarget(chat, "graff", session, "elsewhere") == null);
-    try testing.expect(peerTarget(chat, "graff", null, "here") == null);
+    try testing.expectEqualStrings("sess-1", peerTarget(chat, "graff", null, "here").?);
     const tomb = try json.parseFromSliceLeaky(json.Value, a, "{\"id\":\"c\",\"deviceId\":\"here\",\"harnessSessionId\":\" \"}", .{});
     try testing.expect(peerTarget(tomb, "graff", session, "here") == null);
 }

@@ -117,8 +117,8 @@ fn customThemeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
         const r = set.row(c, k, false, false);
         defer r.end();
         set.tile(c, k, .@"magic-stick-3");
-        words(c, k, "Backdrop studio", "Synthesize a custom palette + animated canvas from a prompt, or pick from 20 curated scenes.", 108);
-        if (compactAction(c, k, "Open studio", true)) @import("view_custom_theme_studio.zig").open(a);
+        // The studio is right below; no second copy of it in a dialog.
+        words(c, k, "Backdrop studio", "Synthesize a custom palette + animated canvas from a prompt, or pick from 20 curated scenes.", 0);
     }
     ui.div(c).wFull().h(1).bg(k.border.alpha(0.55)).end();
     {
@@ -569,20 +569,45 @@ fn compactAction(c: *ui.Context, k: theme.Colors, label: []const u8, enabled: bo
 
 // Motion.
 
+/// First thing each frame: "Reduce motion" On or Off in place of what the
+/// system asks for; System leaves the system's choice. The platform applies
+/// the override before the next frame too (`reduce_motion_override`).
+pub fn applyReduceMotion(c: *ui.Context, a: *App) void {
+    const forced = a.settings.reduceMotion().override();
+    c.reduce_motion_override = forced;
+    if (forced) |on| {
+        c.reduce_motion = on;
+        c.reduced_motion = on;
+        a.view.motion_forced = true;
+    } else if (a.view.motion_forced) {
+        c.reduce_motion = c.system_reduce_motion;
+        c.reduced_motion = c.system_reduce_motion;
+        a.view.motion_forced = false;
+    }
+}
+
+/// The line under "Reduce motion": what the choice does, and with System,
+/// what the system asks for right now.
+pub fn reduceMotionCaption(pref: @import("settings.zig").ReduceMotion, system_reduces: bool) []const u8 {
+    return switch (pref) {
+        .on => "Animations skip straight to their final state.",
+        .off => "Animations play even if the system asks for less motion.",
+        .system => if (system_reduces)
+            "Following the system, which currently asks for less motion."
+        else
+            "Following the system, which currently allows motion.",
+    };
+}
+
 fn motionCard(c: *ui.Context, a: *App, k: theme.Colors) void {
     const cd = card(c, k);
     defer cd.end();
     {
         const r = set.row(c, k, true, false);
         defer r.end();
-        const value = a.settings.text("reduceMotion") orelse "system";
+        const value = @tagName(a.settings.reduceMotion());
         set.tile(c, k, .@"magic-stick-3");
-        const copy = if (std.mem.eql(u8, value, "on"))
-            "Animations skip straight to their final state."
-        else if (std.mem.eql(u8, value, "off"))
-            "Animations play even if the system asks for less motion."
-        else
-            "Following the system, which currently allows motion.";
+        const copy = reduceMotionCaption(a.settings.reduceMotion(), c.system_reduce_motion);
         // The choices' width: 10 before them, each 10 in a side (its
         // border with them), its words (laid out to the whole point), 6
         // between.
@@ -600,14 +625,16 @@ fn motionCard(c: *ui.Context, a: *App, k: theme.Colors) void {
             chip = if (selected) chip.border(k.accent).bg(if (k.is_harp) k.active else k.accent_wash) else chip.border(k.border).bg(k.raised.alpha(0.28)).hover(k.raised);
             defer chip.end();
             ui.text(c, o[0], .{ .size = 11, .line_height = 11 * phi, .weight = if (selected) .medium else .regular, .color = if (selected) k.accent else k.muted });
-            if (!selected and chip.clicked()) a.settings.setText("reduceMotion", o[1]);
+            if (!selected and chip.clicked()) {
+                a.settings.setText("reduceMotion", o[1]);
+                a.redraw();
+            }
         }
     }
-    const r = set.row(c, k, false, false);
-    defer r.end();
-    set.tile(c, k, .@"action-play");
-    words(c, k, "Pause animations in background", "Hold animations still while Harness isn't the focused window. Saves CPU and battery.", 42);
-    if (switch_(c, k, a.settings.get(.pause_animations_in_background), 10)) a.settings.toggle(.pause_animations_in_background);
+    // No "Pause animations in background" switch: nothing read it, and the
+    // ambient backdrop and sandbox sprite already stop ticking, and loaders
+    // slow to a third, whenever the window isn't focused (view_backdrop.zig,
+    // view_sandbox_strip.zig, view_kit.zig `background_tick_divisor`).
 }
 
 // Fonts and the conversation's width.

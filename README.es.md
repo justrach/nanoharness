@@ -50,32 +50,29 @@ cuanto el socket del adaptador esté activo, activa Exo en
   <br><sub>Los agentes instalados aparecen en <strong>Settings → Agents</strong>. Inicia sesión cuando quieras que otro dispositivo de confianza siga o controle una sesión.</sub>
 </p>
 
-Harness arranca en modo local, sin cuenta. La app de escritorio usa Rust y
-GPUI; su compañera para iOS es una vista en SwiftUI de las sesiones
-sincronizadas.
+Harness arranca en modo local, sin cuenta. La app de escritorio está hecha en
+Zig sobre nanoui y el motor en Rust; su compañera para iOS es una vista en
+SwiftUI de las sesiones sincronizadas.
 
 ## Primeros pasos
 
-Compila desde una copia del repositorio con la versión de Rust indicada en
-[`rust-toolchain.toml`](rust-toolchain.toml):
+Compila desde una copia del repositorio con Zig `0.17.0` y la versión de Rust
+indicada en [`rust-toolchain.toml`](rust-toolchain.toml):
 
 | Plataforma | Ejecuta |
 | --- | --- |
 | macOS | `./scripts/run-macos-dev.sh` |
-| Linux | `cargo build -p harness && ./target/debug/harness` |
-| Windows | `cargo run --locked -p harness` |
+| Linux | `cargo build -p harness-engine --bin harness-engine && (cd apps/nano && zig build) && apps/nano/zig-out/bin/harness-nano` |
+| Windows | `./scripts/package-windows.ps1 -ReleasesUrl https://github.com/justrach/nanoharness/releases/latest/download -CargoProfile release` → `target/package/harness-VERSION-windows-x86_64/harness-nano.exe` |
 
 El script de macOS abre `target/macos-dev/Harness.app`. Los datos de
 desarrollo se guardan en `target/macos-dev/data`, salvo que definas
-`HARNESS_DEV_DATA_DIR`. Cierra la app antes de volver a compilar. Para un
-recorrido sin conexión con sesiones de ejemplo, ejecuta
-`./scripts/dev-demo.sh`.
+`HARNESS_DEV_DATA_DIR`, y su motor usa su propio puerto. Cierra la app antes de
+volver a compilar.
 
 Las versiones portables para Windows usan `harness.exe`; deja
 `harness-update.json` a su lado para las actualizaciones desde la app.
 Consulta [desarrollo en Windows](docs/reference/windows-development.md).
-El navegador de la barra lateral en Linux necesita el
-[entorno del navegador](docs/reference/linux-browser.md).
 
 ### Arch Linux
 
@@ -124,8 +121,9 @@ Los créditos de las imágenes de CodeGraff están en los
 ## Dispositivos y cuentas
 
 Cada dispositivo de escritorio ejecuta un motor y guarda sus sesiones locales.
-La interfaz se conecta a un motor en el puerto IPC local o arranca uno dentro
-del proceso de la app. `harness headless` ejecuta el motor sin ventana.
+La app se conecta al motor en su puerto local (`127.0.0.1:27664`, o
+`HARNESS_IPC_PORT`); si no responde ninguno, arranca `harness headless` como
+proceso aparte, que sigue en marcha al cerrar la app. `harness headless` ejecuta el motor sin ventana.
 
 En la app de escritorio, abre el menú de la cuenta y elige **Enable sync**.
 Inicia sesión con tu cuenta de CodeGraff y decide si llevas el trabajo local

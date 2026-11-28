@@ -121,6 +121,30 @@ const Harness = struct {
 
 const cmd_k: S = .{ .key = 'k', .cmd = true };
 
+test "navigation audit palette pane selection returns input from expanded Host" {
+    var h: Harness = undefined;
+    try h.init(two, "a");
+    defer h.deinit();
+    h.a.offscreen = true;
+    h.a.splitOpening(.horizontal, "b");
+    h.a.focusPane(0);
+    h.a.composer.set("Alpha draft");
+    h.a.view.strip.focused = .host;
+    h.a.view.strip.expanded = .host;
+    h.t.settle(2);
+    h.press(cmd_k);
+    try testing.expect(h.a.view.palette.open);
+    h.typed("beta");
+    h.press(.{ .key = S.enter });
+    try testing.expectEqualStrings("b", h.selected());
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.focus);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.items.items.len);
+    try testing.expectEqualStrings("a", h.a.tabs.layout().?.panes.items[0].?);
+    try testing.expect(@import("app_question.zig").ownsActivePane(&h.a));
+    h.a.openChatInTab("a");
+    try testing.expectEqualStrings("Alpha draft", h.a.composer.text());
+}
+
 test "⌘K opens the palette with its actions and chats; typing narrows it; ↓ Return opens the chat in a new tab, the old one kept" {
     var h: Harness = undefined;
     try h.init(two, "a");

@@ -61,6 +61,10 @@ pub const Pending = struct {
     id: []u8,
     device_id: []u8,
     summary: []u8,
+    /// The engine's `allowOnce`: false where one approval can't cover the
+    /// action (a terminal's every keystroke is its own request), so the row
+    /// offers only Always allow and Deny.
+    allow_once: bool = true,
 };
 
 fn setTo(gpa: Allocator, list: *std.ArrayList(u8), s: []const u8) void {
@@ -174,12 +178,20 @@ fn clearPending(p: *Page, gpa: Allocator) void {
     p.pending.clearRetainingCapacity();
 }
 
-pub fn addPending(p: *Page, gpa: Allocator, id: []const u8, device_id: []const u8, summary: []const u8) void {
+pub fn addPending(p: *Page, gpa: Allocator, id: []const u8, device_id: []const u8, summary: []const u8, allow_once: bool) void {
     p.pending.append(gpa, .{
         .id = gpa.dupe(u8, id) catch return,
         .device_id = gpa.dupe(u8, device_id) catch return,
         .summary = gpa.dupe(u8, summary) catch return,
+        .allow_once = allow_once,
     }) catch {};
+}
+
+/// A `GetRemoteApprovals` item's `allowOnce`; an engine that predates the
+/// field leaves it out, and its rows keep the button they always had.
+pub fn allowOnceOf(item: std.json.ObjectMap) bool {
+    const v = item.get("allowOnce") orelse return true;
+    return v != .bool or v.bool;
 }
 
 fn loadApprovals(a: *App) void {
@@ -203,7 +215,7 @@ fn onApprovals(a: *App, id: u64, r: rpc.Reply) void {
                     const pid = if (item.object.get("id")) |x| (if (x == .string) x.string else "") else "";
                     const device = if (item.object.get("deviceId")) |x| (if (x == .string) x.string else "") else "";
                     const summary = if (item.object.get("summary")) |x| (if (x == .string) x.string else "") else "";
-                    if (pid.len > 0) addPending(p, a.gpa, pid, device, summary);
+                    if (pid.len > 0) addPending(p, a.gpa, pid, device, summary, allowOnceOf(item.object));
                 }
             };
         },
@@ -374,7 +386,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
             defer r.end();
             set.tile(c, k, .@"remote-server");
             set.words(c, k, "Approve remote action", item.summary, 168);
-            if (action(c, k, null, "Allow once", false)) resolvePending(a, item.id, true, false);
+            if (item.allow_once and action(c, k, null, "Allow once", false)) resolvePending(a, item.id, true, false);
             if (action(c, k, null, "Always allow", false)) resolvePending(a, item.id, true, true);
             if (action(c, k, null, "Deny", false)) resolvePending(a, item.id, false, false);
         }
@@ -576,6 +588,37 @@ test "native updater settings describe hourly checks without an inert restart to
     t.settle(0.1);
     try std.testing.expect(a.settings.get(.automatically_install_updates));
     try std.testing.expect(!a.updates.app_downloading);
+}
+
+test "a parked remote action offers Allow once only where the engine says one approval covers it" {
+    theme.registerFonts();
+    var a: App = .init(std.testing.allocator, std.testing.io, 1);
+    defer a.deinit();
+    a.settings.setSection(.devices);
+    set.open(&a);
+    var t: ui.Tester = undefined;
+    try t.init(std.testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1200, .height = 780 });
+    defer t.deinit();
+    // A terminal keystroke from a made-up phone: each keystroke is its own
+    // request, so Allow once would cover a single one.
+    addPending(&a.view.devices, a.gpa, "pending-terminal", "phone-synthetic", "WriteTerminal from Synthetic Phone", false);
+    t.settle(0.1);
+    try testing.expect(t.hasText("Approve remote action"));
+    try testing.expect(t.hasText("Always allow"));
+    try testing.expect(t.hasText("Deny"));
+    try testing.expect(!t.hasText("Allow once"));
+    addPending(&a.view.devices, a.gpa, "pending-git", "phone-synthetic", "ApplyCheckoutGitAction from Synthetic Phone", true);
+    t.settle(0.1);
+    try testing.expect(t.hasText("Allow once"));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"a","allowOnce":false},{"id":"b","allowOnce":true},{"id":"c"}]
+    , .{});
+    defer parsed.deinit();
+    const items = parsed.value.array.items;
+    try testing.expect(!allowOnceOf(items[0].object));
+    try testing.expect(allowOnceOf(items[1].object));
+    try testing.expect(allowOnceOf(items[2].object));
 }
 
 test "presence, last seen, the subtitle and the id chip as the GPUI app's" {

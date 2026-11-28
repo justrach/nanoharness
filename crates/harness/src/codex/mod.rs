@@ -1989,6 +1989,31 @@ mod tests {
     }
 
     #[test]
+    fn live_codex_catalog_uses_advertised_speed_tiers() {
+        let page = json!({"data":[
+            {"model":"gpt-6.2-sol",
+             "serviceTiers":[{"id":"priority","name":"Fast"},{"id":"ultrafast","name":"Ultrafast"}],
+             "additionalSpeedTiers":["fast","ultrafast"]},
+            {"model":"gpt-6.2-astra", "serviceTiers":[{"id":"priority","name":"Fast"}]},
+            {"model":"gpt-6.2-sol-disabled", "serviceTiers":[], "additionalSpeedTiers":[]},
+            {"model":"gpt-6.1-sol"}
+        ]});
+        let (models, _) = parse_model_list_page(&page);
+        let choice_ids = |index: usize| -> Vec<&str> {
+            models[index]
+                .0
+                .options
+                .iter()
+                .flat_map(|option| option.choices.iter().map(|choice| choice.id.as_str()))
+                .collect()
+        };
+        assert_eq!(choice_ids(0), vec!["default", "fast", "ultrafast"]);
+        assert_eq!(choice_ids(1), vec!["default", "fast"]);
+        assert!(choice_ids(2).is_empty());
+        assert!(choice_ids(3).is_empty());
+    }
+
+    #[test]
     fn approval_questions_are_yes_no() {
         let q = approval_question(
             "item/commandExecution/requestApproval",

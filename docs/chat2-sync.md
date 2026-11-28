@@ -1,7 +1,17 @@
 # chat2: dumb-relay session sync + thin docs
 
-Status: PLANNED · Author: 2026-08-09 investigation (whale-doc dissection + t3code comparison)
+Status: implemented. This is the design record of the 2026-08-09 investigation (whale-doc dissection + t3code
+comparison); the workstreams and migration steps below are the plan as it was written.
 Prior art: `docs/registry-sync.md` (the same argument, applied to the workspace index).
+
+Where it lives now:
+
+- Edge room: `edge/src/chat-room.ts`, `chat-log.ts`, `chat-frames.ts`.
+- Rust client: `crates/sync/src/chat_client.rs` (`plan_catch_up`, `next_row_cursor`), run by the engine; the
+  desktop client (`apps/nano`) reaches chat2 through the engine.
+- Swift client: `apps/ios/Harness/Sync/ChatRoomClient.swift` (`chatPlanCatchUp`, `chatNextRowCursor`).
+- The rules every implementation must agree on: `protocol/chat2-vectors.json`, with a runner for each client and
+  the edge; see [`protocol/README.md`](../protocol/README.md).
 
 ## Why
 

@@ -135,7 +135,7 @@ test "shortcut edge: chooser cancellation never changes the source draft or crea
         draft(&h, "local-project");
         const source = h.a.tabs.active;
         const count = h.a.tabs.items.items.len;
-        chooser.open(&h.a, .new_project);
+        chooser.open(&h.a, .new_tab);
         h.t.settle(1);
         try h.t.clickText("Build box");
         h.t.settle(1);
@@ -156,7 +156,7 @@ test "shortcut edge: chooser cancellation never changes the source draft or crea
     }
 }
 
-test "shortcut edge: repeated Cmd Shift N chooser creates one tab and supports an explicit projectless remote" {
+test "shortcut edge: repeated new-tab chooser creates one tab and supports an explicit projectless remote" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
@@ -164,7 +164,7 @@ test "shortcut edge: repeated Cmd Shift N chooser creates one tab and supports a
     const source = h.a.tabs.active;
     const count = h.a.tabs.items.items.len;
     for (0..3) |_| {
-        chooser.open(&h.a, .new_project);
+        chooser.open(&h.a, .new_tab);
         h.t.settle(1);
     }
     try testing.expect(h.a.view.open_chooser.open);
@@ -211,7 +211,7 @@ test "shortcut edge: Cmd Shift D is inert in empty drafts chooser device menus a
         switch (surface) {
             .canvas => {},
             .projectless => h.a.pickDraftDevice("remote"),
-            .chooser => chooser.open(&h.a, .new_project),
+            .chooser => chooser.open(&h.a, .new_tab),
             .device => strip.open(&h.a, .device, .{ .chat = 0 }, .{ .x = 750, .y = 24, .w = 80, .h = 14 }),
             .host => {
                 h.a.panels.host_open = true;
@@ -244,7 +244,7 @@ test "shortcut edge: opening and cancelling folder setup preserves the source dr
     defer h.deinit();
     draft(&h, "local-project");
     const count = h.a.tabs.items.items.len;
-    chooser.open(&h.a, .new_project);
+    chooser.open(&h.a, .new_tab);
     h.t.settle(1);
     chooser.pickDevice(&h.a, "remote");
     chooser.newProject(&h.a);
@@ -262,7 +262,7 @@ test "shortcut edge: folder setup honors a remote choice from an established loc
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
-    chooser.open(&h.a, .new_project);
+    chooser.open(&h.a, .new_tab);
     h.t.settle(1);
     chooser.pickDevice(&h.a, "remote");
     chooser.newProject(&h.a);
@@ -279,7 +279,7 @@ test "shortcut edge: finishing folder setup parks the unchanged source and opens
     draft(&h, "local-project");
     const source = h.a.tabs.active;
     const count = h.a.tabs.items.items.len;
-    chooser.open(&h.a, .new_project);
+    chooser.open(&h.a, .new_tab);
     h.t.settle(1);
     chooser.pickDevice(&h.a, "remote");
     chooser.newProject(&h.a);

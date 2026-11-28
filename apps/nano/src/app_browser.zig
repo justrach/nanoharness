@@ -208,7 +208,23 @@ pub fn openInternalLink(a: *App, parent: []const u8, url: []const u8) void {
 
 pub fn openExternalLink(a: *App, parent: []const u8, url: []const u8) void {
     if (linkOwner(a, parent, url) == null) return;
+    a.preview_consumers.hold(a.gpa, url);
     _ = open_external_url(url);
+}
+
+/// codegraff #941: graff stops a still-listening preview only once this app
+/// writes an explicit 0 for its port. Every frame, after tabs settle, the
+/// writer is given the web tabs that exist now; it writes only on change.
+/// A tab hidden behind another conversation still counts.
+pub fn syncPreviewConsumers(a: *App) void {
+    if (a.preview_consumers.dir == null) return;
+    var urls: std.ArrayList([]const u8) = .empty;
+    defer urls.deinit(a.gpa);
+    for (a.panels.tabs.items) |t| if (t.browser) |b| {
+        if (b.usesEmbeddedWebView() or b.url.len == 0) continue;
+        urls.append(a.gpa, b.url) catch return;
+    };
+    a.preview_consumers.sync(a.gpa, a.io, urls.items);
 }
 
 /// Transcript links are explicit HTTP(S), not address-bar guesses. A bad

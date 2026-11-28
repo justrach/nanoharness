@@ -1398,6 +1398,17 @@ impl DocHost {
         &self.inner.config.device_id
     }
 
+    /// A device row's name, for texts a person reads; `None` when unnamed.
+    pub(crate) fn device_name(&self, device_id: &str) -> Option<String> {
+        self.workspace()?
+            .read_devices()
+            .ok()?
+            .into_iter()
+            .find(|device| device.id == device_id)
+            .map(|device| device.name.trim().to_string())
+            .filter(|name| !name.is_empty())
+    }
+
     /// Open (or return) the chat's doc handle: load the local snapshot (or init fresh),
     /// start the change-driven task, and request budgeted sync when configured.
     pub fn open(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
@@ -5125,7 +5136,16 @@ impl DocHost {
             .sessions()
             .ok_or_else(|| EngineError::Other("executor unavailable".into()))?;
         if self.park_unapproved_remote(&sessions, &handle, &entry) {
-            return Err(EngineError::Other(harness_rpc::RELAY_NEEDS_APPROVAL.into()));
+            tracing::info!(chat = %chat_id, device = %entry.issued_by, caller = "unapproved",
+                reason = "needs_approval", "relayed command refused");
+            let text = harness_rpc::relay_refusal_text(
+                harness_rpc::RelayAdmit::NeedsApproval,
+                true,
+                self.device_name(self.device_id()).as_deref(),
+                self.device_name(&entry.issued_by).as_deref(),
+            )
+            .unwrap_or_default();
+            return Err(EngineError::Other(text));
         }
         let commands = handle.doc.read_commands()?;
         let messages = handle.doc.read_entries().unwrap_or_default();
@@ -5476,6 +5496,8 @@ impl DocHost {
             command_id: Some(entry.id.clone()),
             method: None,
             summary,
+            allow_once: true,
+            request_digest: None,
         });
         true
     }

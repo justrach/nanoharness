@@ -237,6 +237,15 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     }
     defer ui.end(c);
     var drawn: Drawn = .{ .box = c.node(scroll).id };
+    const viewport_chat = if (subagent == null) chat_id else null;
+    const restored_position = if (viewport_chat) |id| a.transcriptPosition(id) else null;
+    const just_stuck = subagent == null and t == &a.transcript and a.view.stick_end;
+    if (just_stuck) if (restored_position) |position| {
+        // An explicit new send wins over the startup viewport restoration.
+        position.pending = false;
+        position.restored = false;
+    };
+    const restored_viewport = if (restored_position) |position| position.restored else false;
     const entries_ = t.entries.items;
     const streaming = entries_.len > 0 and entries_[entries_.len - 1].status == .streaming;
     // Keep the prompt and current reply near the top, with enough runway
@@ -258,7 +267,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         const session = if (chat_id) |id| @import("workspace.zig").sessionOf(a.sessions.items, id) else null;
         const pending = if (chat_id) |id| @import("app_send_feedback.zig").active(a, id, t) != null else false;
         const live = streaming or (entries_[entries_.len - 1].role == .user and (pending or (session != null and session.?.status == .working)));
-        if (live or (previous != null and previous.?.turn == turn)) {
+        if (!restored_viewport and (live or (previous != null and previous.?.turn == turn))) {
             const slot = a.view.reply_anchors.getOrPut(a.gpa, drawn.box) catch null;
             if (slot) |s| {
                 if (!s.found_existing or s.value_ptr.turn != turn) s.value_ptr.* = .{
@@ -272,7 +281,6 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     }
     // Just sent: past the end, which layout clamps to it, and moving the
     // offset there makes the box follow its end again (`follow_end`).
-    const just_stuck = subagent == null and t == &a.transcript and a.view.stick_end;
     if (just_stuck and anchor != null) {
         a.view.stick_end = false;
         anchor.?.pending = true;
@@ -329,7 +337,6 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     defer body.end();
     // Loading does not itself imply work; the session row does, even when
     // no assistant part has arrived yet.
-    _ = loading;
     const scroll_rect = c.rects.get(drawn.box);
     const sel_owner_mod = @import("selection_owner.zig");
     const sel_surface = sel_owner_mod.state(c).surface;
@@ -394,6 +401,10 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     // What of the open chat's replies can be quoted into its draft.
     var quotable: quote_view.Rows = .{};
     const quote_rows: ?*quote_view.Rows = if (subagent == null and t == &a.transcript) &quotable else null;
+    var restore_entry_exists = false;
+    var restore_entry_rect: ?ui.Rect = null;
+    var captured_visible = false;
+    const capture_ready = viewport_chat != null and !loading and (if (restored_position) |position| !position.pending else true);
     var turn_node: ?u32 = null;
     defer if (turn_node != null) c.end();
     for (entries_, 0..) |*e, i| {
@@ -426,9 +437,17 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         if (i > 0) _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
         ui.key(c, c.print("entry-{s}-{s}", .{ chat_id orelse "", e.id }));
         const row_id = c.peekId(null);
+        const restore_target = if (restored_position) |position|
+            position.pending and position.entry != null and std.mem.eql(u8, position.entry.?, e.id)
+        else
+            false;
+        if (restore_target) {
+            restore_entry_exists = true;
+            restore_entry_rect = c.rects.get(row_id);
+        }
         const row_pinned = sel_pin.isPinned(row_id);
         const quoted = quote_rows != null and quote_view.wants(a, e.id);
-        const can_cull = !row_pinned and !quoted and (!just_stuck or i + 1 < entries_.len) and !(anchor != null and i == turn_start.?) and e.status != .streaming;
+        const can_cull = !row_pinned and !quoted and !restore_target and (!just_stuck or i + 1 < entries_.len) and !(anchor != null and i == turn_start.?) and e.status != .streaming;
         if (can_cull and i < cold_cutoff and e.cached_h == 0 and c.rects.get(row_id) == null) {
             const est = estimateEntryHeight(e, col);
             _ = c.leaf(.{ .width = .fill, .height = .{ .px = est } }, .none, null);
@@ -436,6 +455,19 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
             continue;
         }
         const stand = spacer(c, cull, &remeasure, can_cull, e, &e.cached_h, &e.cached_w, &e.measured_w);
+        if (restore_target and restore_entry_rect == null) restore_entry_rect = if (stand) |st_| st_.rect else c.rects.get(row_id);
+        if (!captured_visible and capture_ready) {
+            const rect = if (stand) |st_| st_.rect else c.rects.get(row_id);
+            if (rect) |r| if (scroll_rect) |viewport| {
+                if (r.y + r.h > viewport.y and r.y < viewport.y + viewport.h) {
+                    const visible_offset = c.scroll.get(drawn.box) orelse 0;
+                    const max_offset = c.scroll_max.get(drawn.box) orelse visible_offset;
+                    const follow = c.scroll_follow.get(drawn.box) orelse true;
+                    a.captureTranscriptPosition(viewport_chat.?, e.id, r.y - viewport.y, visible_offset, max_offset, follow);
+                    captured_visible = true;
+                }
+            };
+        }
         if (stand) |st_| {
             sel_pin.noteCulled();
             if (e.isHumanPrompt()) {
@@ -464,6 +496,51 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         }
         if (!probing) sel_pin.observe(c, row_id, row_start);
     }
+    // A frame can rebuild the tree more than once before layout. Its rects
+    // must be combined with the offset from that layout, not a correction
+    // made earlier in the same frame.
+    if (restored_position) |position| if (position.pending and !loading and t.complete and position.alignment_frame != c.frame) {
+        if (c.scroll_max.get(drawn.box)) |max_offset| {
+            var next_offset: ?f32 = null;
+            var follow_end = false;
+            var confirm_alignment = false;
+            const current = c.scroll.get(drawn.box) orelse 0;
+            if (position.at_end) {
+                const sync = @import("motion_rules.zig").stickEndScroll(max_offset);
+                next_offset = sync.scroll;
+                follow_end = sync.follow;
+            } else if (!restore_entry_exists) {
+                // The saved message disappeared from a complete snapshot;
+                // only now use its bounded offset fallback.
+                next_offset = @min(position.fallback, max_offset);
+            } else if (restore_entry_rect) |rect| {
+                if (scroll_rect) |viewport| {
+                    next_offset = @max(0, @min(max_offset, current + rect.y - viewport.y - position.inset));
+                    confirm_alignment = true;
+                }
+            }
+            if (next_offset) |restored_offset| {
+                position.alignment_frame = c.frame;
+                c.scroll.put(c.gpa, drawn.box, restored_offset) catch {};
+                c.scroll_seen.put(c.gpa, drawn.box, restored_offset) catch {};
+                c.scroll_follow.put(c.gpa, drawn.box, follow_end) catch {};
+                _ = c.scroll_cap.remove(drawn.box);
+                a.view.stream_sig = 0;
+                // An initial jump can replace estimated spacers with measured
+                // rows. Confirm against the resulting layout before handing
+                // control back, with a bounded number of frame corrections.
+                position.alignment_frames += 1;
+                position.aligned_frames = if (@abs(current - restored_offset) <= 1) position.aligned_frames + 1 else 0;
+                position.pending = confirm_alignment and position.aligned_frames < 2 and position.alignment_frames < 8;
+                c.changed = true;
+                if (position.pending) c.frameIn(0);
+            } else {
+                c.frameIn(0);
+            }
+        } else {
+            c.frameIn(0);
+        }
+    };
     remeasure.apply(c, drawn.box);
     const trailer_start = c.nodes.items.len;
     if (subagent == null) {

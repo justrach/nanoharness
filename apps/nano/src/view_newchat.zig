@@ -264,12 +264,15 @@ pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
             if (lay.slots[ix(.follow)].w > 0) composer.followUpChip(c, a, k, lay.slots[ix(.follow)].label == 0);
             // Keep the execution target beside the draft, not only in the
             // titlebar. Picking another host clears an incompatible project.
+            // Once crushed, both move to the second row: drawn there only.
             var computer: ?ui.Rect = null;
-            if (lay.labels[ix(.computer)]) |label| {
-                if (footerChipAt(c, k, "picker-computer", .monitor, label, lay.slots[ix(.computer)], &computer))
-                    strip.open(a, .device, strip.active(a), computer);
+            if (!lay.need_target_row) {
+                if (lay.labels[ix(.computer)]) |label| {
+                    if (footerChipAt(c, k, "picker-computer", .monitor, label, lay.slots[ix(.computer)], &computer))
+                        strip.open(a, .device, strip.active(a), computer);
+                }
+                if (lay.labels[ix(.project)]) |label| projectChip(c, a, k, label, lay.slots[ix(.project)]);
             }
-            if (lay.labels[ix(.project)]) |label| projectChip(c, a, k, label, lay.slots[ix(.project)]);
             if (lay.git_chrome) if (space) |s| if (s.git) {
                 if (lay.labels[ix(.checkout)]) |label| if (footerChipAt(c, k, "picker-checkout", if (a.new_checkout_local) .folder else .@"folder-with-files", label, lay.slots[ix(.checkout)], &a.view.checkout_anchor)) {
                     a.view.checkout_menu = !a.view.checkout_menu;
@@ -319,11 +322,8 @@ pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
             var row2_space: ?ui.Rect = null;
             const state = &a.view.strip;
             const hit = footerChipAt(c, k, "picker-project", .folder, pl, proj_slot, &row2_space);
-            // The first row's chip is the keyboard's, unless it had no room.
-            const opened = state.menu == .folder and state.footer_folder and state.footer_second;
-            if (row2_space) |r| if (hit or opened or a.view.space_anchor == null) {
-                a.view.space_anchor = r;
-            };
+            // The only Project chip: the keyboard's and the menu's anchor.
+            if (row2_space) |r| a.view.space_anchor = r;
             if (hit) {
                 state.footer_second = true;
                 toggleSpaceMenu(a);

@@ -161,8 +161,7 @@ the new delivery/resource guarantees.
 documents, cumulative document loads, retention reasons, durable batch/job counts, Linux descriptor count
 and the Unix soft descriptor limit. A per-chat `state` and additive
 `ChatConnectivity.syncState` distinguish local, queued, connecting, synchronized,
-offline and storage-error states. The selected chat's connection caption displays
-queued sync or persistence trouble without exposing internal limits.
+offline and storage-error states.
 
 Relevant checks:
 
@@ -171,7 +170,6 @@ cargo test --locked -p harness-engine --test sync_resources -- --nocapture
 cargo test --locked -p harness-engine --lib --test session_publication --test restart_resume --test local_profiles --test born_chat2_race --test codex_subagents --test message_queue --test transcript_salvage
 cargo test --locked -p harness-sync --lib
 cargo test --locked -p harness-rpc --test device_room
-cargo check --locked -p harness-ui
 cd edge
 npm run typecheck
 npm test

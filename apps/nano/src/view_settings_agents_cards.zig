@@ -131,20 +131,25 @@ pub fn deviceMenu(c: *ui.Context, a: *App, k: theme.Colors, at: ui.Rect) void {
 /// Harness, so their screenshots use its macOS grant.
 pub fn screenAccess(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (comptime @import("builtin").os.tag != .macos) return;
+    screenAccessFor(c, a, k, shots.capabilities().capture == .ready);
+}
+
+/// The card with the grant as given. Nano can't relaunch itself, so after
+/// asking it says to quit and reopen rather than offering a restart button.
+pub fn screenAccessFor(c: *ui.Context, a: *App, k: theme.Colors, granted: bool) void {
     const p = &a.view.agents;
-    const granted = shots.capabilities().capture == .ready;
     const status = if (granted) "Allowed" else "Off";
     const allow = !granted and !p.screen_requested;
     const after = !granted and p.screen_requested;
     var controls_w = badgeW(c, status);
     if (allow) controls_w += 8 + actionW(c, "Allow");
-    if (after) controls_w += 8 + actionW(c, "Open System Settings") + 8 + actionW(c, "Restart Harness");
+    if (after) controls_w += 8 + actionW(c, "Open System Settings");
     const description = if (granted)
         "Agents can take screenshots, for example to check a UI they built."
     else if (p.screen_requested)
-        "Turn on Harness under Screen Recording, then restart Harness. Running agents stop on restart; your chats are kept."
+        "Turn on Harness under Screen Recording, then quit and reopen Harness. Running agents stop when Harness quits; your chats are kept."
     else
-        "Lets agents take screenshots, for example to check a UI they built. macOS asks once, and the change applies after Harness restarts.";
+        "Lets agents take screenshots, for example to check a UI they built. macOS asks once, and the change applies after you quit and reopen Harness.";
     const inner = cardInner();
     // The words take what the controls leave, at least 200; less, and
     // the controls wrap under them.
@@ -173,7 +178,6 @@ pub fn screenAccess(c: *ui.Context, a: *App, k: theme.Colors) void {
         };
         if (after) {
             if (shots.action(c, k, "Open System Settings")) _ = nanoui.shell.openUrl("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture");
-            if (shots.action(c, k, "Restart Harness")) a.setNotice("Restarting isn't in Harness Nano yet: quit and open it again.");
         }
     }
     set.space(c, 4);

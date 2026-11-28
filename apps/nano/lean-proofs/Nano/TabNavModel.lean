@@ -126,4 +126,37 @@ theorem push_preserves_nonempty_bounds (maxCap : Nat) (h : NavHistory) (entry : 
       · simp [List.length_drop]; omega
       · simp
 
+/-! Session-list selection (App.openChatInTab). The open conversations are
+    flattened to their identities without counting empty draft slots. -/
+
+def openTabs (tabs : List Nat) (id : Nat) : List Nat :=
+  if id ∈ tabs then tabs else tabs ++ [id]
+
+theorem focusing_existing_preserves_slots (tabs : List Nat) (id : Nat) (h : id ∈ tabs) :
+    openTabs tabs id = tabs := by
+  simp [openTabs, h]
+
+theorem opening_adds_one (tabs : List Nat) (id : Nat) (h : id ∉ tabs) :
+    (openTabs tabs id).length = tabs.length + 1 := by
+  simp [openTabs, h]
+
+theorem opening_preserves_unique (tabs : List Nat) (id : Nat) (hu : tabs.Nodup) :
+    (openTabs tabs id).Nodup := by
+  by_cases h : id ∈ tabs
+  · simpa [openTabs, h] using hu
+  · simp [openTabs, h, List.nodup_append, hu]
+    intro a ha eq
+    exact h (eq ▸ ha)
+
+theorem repeat_open_preserves_slots (tabs : List Nat) (id : Nat) :
+    openTabs (openTabs tabs id) id = openTabs tabs id := by
+  apply focusing_existing_preserves_slots
+  by_cases h : id ∈ tabs <;> simp [openTabs, h]
+
+theorem session_selections_preserve_unique (tabs selections : List Nat)
+    (hu : tabs.Nodup) : (selections.foldl openTabs tabs).Nodup := by
+  induction selections generalizing tabs with
+  | nil => exact hu
+  | cons id rest ih => exact ih (openTabs tabs id) (opening_preserves_unique tabs id hu)
+
 end Nano.TabNavModel

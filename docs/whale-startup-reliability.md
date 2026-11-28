@@ -23,8 +23,8 @@ startup cursor amnesty repeatedly downloads the uncheckpointed rows.
   to hand their worker cores to other tasks. This preserves existing synchronous
   commit-before-send APIs. Current-thread runtimes retain synchronous behavior;
   production desktop and headless runtimes are multithreaded.
-- Desktop owns a default-sized runtime and gives its handle to `gpui_tokio`.
-  Large transcript/tail materialization and checkpoint preparation also run on
+- `harness-engine` runs on a default-sized multithreaded Tokio runtime
+  (`crates/engine/src/bin/harness-engine.rs`). Large transcript/tail materialization and checkpoint preparation also run on
   the blocking pool.
 - Verified snapshot cursors skip legacy amnesty. Old snapshots still receive
   one repair; missing causal dependencies and actual server resets still invoke
@@ -64,10 +64,9 @@ they are not 146 production room sockets. The separate contention test exercises
 real TCP progress. #385's transport fault suite also passes; its previously
 recorded Cloudflare results are in `docs/transport-reliability.md`.
 
-Regression suites passed: 1,077 UI tests (including animation/history behavior),
-199 engine unit tests, 19 engine integration tests (profiles, restart, publication,
-subagents), 53 sync unit tests, 14 RPC unit tests, 24 RPC/sync integration tests,
-8 updater tests, and 56 edge tests. Fixture-dependent tests remain ignored by
+Regression suites passed: 199 engine unit tests, 19 engine integration tests
+(profiles, restart, publication, subagents), 53 sync unit tests, 14 RPC unit
+tests, 24 RPC/sync integration tests, and 56 edge tests. Fixture-dependent tests remain ignored by
 default. Edge typechecking passes. The full workerd run exits successfully but
 emits its Vitest shutdown-state diagnostic; the focused checkpoint run is clean.
 
@@ -76,8 +75,6 @@ emits its Vitest shutdown-state diagnostic; the focused checkpoint run is clean.
 ```sh
 cargo test -p harness-sync -p harness-rpc --features harness-sync/mock-server
 cargo test -p harness-engine --lib --test session_publication --test restart_resume --test local_profiles --test codex_subagents
-cargo test -p harness-update
-cargo test -p harness-ui --lib -- --test-threads=1
 npm --prefix edge run typecheck
 npm --prefix edge test
 HARNESS_WHALE_SNAPSHOT=/path/to/private-copy.bin cargo test -p harness-engine --lib real_whale_replay_keeps_146_heartbeats_running_on_two_workers -- --ignored --nocapture
@@ -88,5 +85,4 @@ HARNESS_WHALE_SNAPSHOT=/path/to/private-copy.bin cargo test -p harness-engine --
 The larger checkpoint cap requires the edge deployment, and persistence/runtime
 changes require updated desktop/host binaries. Dev must run a version that can
 upload the whale checkpoint. No production deployment or work-laptop launch is
-claimed by these local results. Historical tool-animation suppression is retained;
-the existing UI history/replay tests pass.
+claimed by these local results.

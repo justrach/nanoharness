@@ -19,8 +19,7 @@ xcodebuild -project Harness.xcodeproj -scheme Harness \
 Or open `Harness.xcodeproj` in Xcode and run. Dependencies (SPM, resolved
 automatically): [loro-swift 1.13.x](https://github.com/loro-dev/loro-swift)
 (matches the engine's loro 1.13), [swift-markdown](https://github.com/swiftlang/swift-markdown)
-(cmark-gfm: tables/strikethrough/tasklists — the same feature set as the
-desktop's pulldown-cmark config).
+(cmark-gfm: tables, strikethrough and task lists).
 
 The Xcode project, scheme, and application use the Harness name.
 
@@ -50,9 +49,9 @@ group, and submit it for TestFlight review. Internal-only builds cannot later
 be made external; upload a new build with the correct audience.
 
 The workflow executes the mobile contract/parity and performance tests before
-archiving, including the requirement for explicit performance-sharing consent.
-The broader iOS job in `ui-tests.yml` is still disabled; passing this narrow
-release check does not establish that every layout/UI test passes.
+archiving. No CI job runs the full iOS unit suite or the UI tests
+(`HarnessUITests`); passing this narrow release check does not establish that
+every layout/UI test passes.
 
 ### Privacy and beta metadata
 
@@ -73,12 +72,13 @@ reports are unlinked analytics. None of these categories is used for advertising
 tracking. Keep the manifest, public policy, and App Store Connect answers aligned
 when changing collection or providers.
 
-iOS performance sharing starts off under `share-performance-consent-v1` and is
-enabled only by choosing the toggle in Settings → Diagnostics → Performance.
-The older `share-performance` setting is not treated as consent. Reports contain
+iOS performance sharing is on by default (`PerfSharing.defaultEnabled`) and can
+be turned off in Settings → Diagnostics → Performance. The latest explicit
+choice wins, under `share-performance-consent-v2`, `share-performance-consent-v1`
+or the older `share-performance`, so earlier opt-outs hold. Reports contain
 histograms, app/OS versions, hardware model, refresh rate, and a per-launch random
-ID, and the statistics service retains them for 90 days. Android's existing
-default remains represented separately in the shared parity fixtures.
+ID, and the statistics service retains them for 90 days. See
+[the performance monitor](../parity/PERFORMANCE.md).
 
 Before submitting a build, check TestFlight's beta description, feedback email,
 privacy URL, review contact, review notes, and build-specific What to Test. Live
@@ -165,7 +165,7 @@ execution hosts), and `-sethomefilter <spaceId>` (an empty value selects All).
 Sync/
   LoroProtocol.swift    loro-protocol 0.3 wire codec (byte-compatible port of
                         the crate's encoding.rs: magic/varBytes/type/payload)
-  RoomClient.swift      room.rs port: join with oplog VV, snapshot backfill,
+  RoomClient.swift      join with oplog VV, snapshot backfill,
                         resubmit-from-server-VV, DocUpdate+Ack, fragments,
                         %EPH presence sub-room, ping/pong lease, backoff
   WorkspaceStore.swift  ws3/{org}/{user} mirror: devices/spaces/chats/sessions
@@ -176,13 +176,13 @@ Sync/
 Markdown/
   MarkdownModel.swift   block model + incremental tail re-parser (re-parse
                         from the 2nd-to-last top-level block; link-defs force
-                        full parses) — parser.rs port
+                        full parses)
   Highlight.swift       line tokenizer with carry state, paint-only
   MarkdownBlockView.swift  mobile metrics: body 17/26, headings 23/31…17/26,
                         code 14/21 (Dynamic Type scaled line rows), violet inline code,
                         accent blockquotes, hairline tables
 Transcript/
-  TranscriptRows.swift  rows_for_entry port: block-granularity rows, stable
+  TranscriptRows.swift  block-granularity rows, stable
                         ids ({msg}#{part}.{block}, {msg}#g{n}), fingerprint
                         versions, consecutive-tool grouping
   NativeTranscriptTable.swift  UIKit row reuse, gesture anchoring and
@@ -193,31 +193,32 @@ Transcript/
                         1−(1−p)^1.6 curve)
 Composer/               glass pill, Send→Steer→Stop morph, QuestionPanel
                         (paged, numbered options, 220ms auto-advance)
-Theme/                  theme.rs port: oklch→sRGB converter, exact palette,
+Theme/                  oklch→sRGB converter, exact palette,
                         Geist/Geist Mono, motion timings + flavour words
 ```
 
 ### Parity notes (desktop ⇄ mobile translations)
 
+How a desktop pattern reads on the phone.
+
 | Desktop | iOS |
 | --- | --- |
-| Sidebar: Spaces + attention-sorted Sessions | Home screen sections (same sort ranks: awaiting > errored > working > completed > idle) |
-| Horizontal session tabs per space | Space detail: vertical session list (creation order) |
-| Tab close = archive | Swipe-to-archive |
-| Archived shelf under the sidebar list (open by default, Show-more paging, hover-swap Unarchive) | Same shelf under Home/space lists; unarchive is swipe-to-unarchive |
-| Status word in the row corner (muted dots; Done keeps its pop; spinner rides bottom-right) | Same, same colors |
-| Composer `white_alpha(0.03)` pill + hairline | Liquid Glass pill (`glassEffect`) + hairline |
-| Harness brand SVG marks (icons.rs) | Same path data via a native SVG path parser (`BrandMarks.swift`) |
-| Harness/model picker popover + curated catalogs | Brand-mark cards + catalog menu + reasoning-ladder chips (`HarnessCatalog.swift`, ported from crates/harness) |
-| Add-space palette (device + folder browser) | New-space sheet: device tabs + remote folder browser (ListFolders over the device-room relay, git repos badged) |
+| Sidebar: spaces and attention-sorted sessions | Home screen sections (same sort ranks: awaiting > errored > working > completed > idle) |
+| Chat tabs | Space detail: vertical session list (creation order) |
+| Archive a session from its tab or row | Swipe-to-archive |
+| Archived shelf under the sidebar list | Same shelf under Home/space lists; unarchive is swipe-to-unarchive |
+| Status mark on each session row | Same, same colors |
+| Composer pill + hairline | Liquid Glass pill (`glassEffect`) + hairline |
+| Harness brand SVG marks (`apps/nano/assets/icons`) | Same path data via a native SVG path parser (`BrandMarks.swift`) |
+| Agent and model picker + curated catalogs | Brand-mark cards + catalog menu + reasoning-ladder chips (`HarnessCatalog.swift`, ported from crates/harness) |
+| Add folder (device + folder browser) | New-space sheet: device tabs + remote folder browser (ListFolders over the device-room relay, git repos badged) |
 | ControlRpc over device-room relay | `DeviceRelayClient` — binary `uleb128(len)+header+payload` frames, `{"s","k","to","from"}` header, ndjson ControlRpc; used for ListFolders + direct-to-host `Mutate {createSpace}` (local doc-write fallback when the host is offline) |
-| Hover timestamps / copy | Always-visible timestamp and whole-message copy footer; prompt context menus remain available |
-| Long user messages: Show more / Show less | Five-line preview, 44pt disclosure target, expansion retained per session |
-| gpui `list()` sum-tree virtualization | Native table row reuse with SwiftUI content, stable row ids and version fingerprints |
-| Stick-to-bottom spring, wheel-up breaks pin | Gesture-owned follow, composer-sized viewport with glass underlap, retained local prompt runway |
+| Message timestamps and copy | Always-visible timestamp and whole-message copy footer; prompt context menus remain available |
+| Long user messages | Five-line preview, 44pt disclosure target, expansion retained per session |
+| Viewport-culled transcript rows | Native table row reuse with SwiftUI content, stable row ids and version fingerprints |
+| Transcript follows the end while pinned | Gesture-owned follow, composer-sized viewport with glass underlap, retained local prompt runway |
 
-Status colors, font families, veil timing, command-ledger shapes, and wire
-protocol follow desktop. Text sizes and touch targets are adapted for phones;
+Status colors, command-ledger shapes and the wire protocol follow desktop. Text sizes and touch targets are adapted for phones;
 see [mobile polish and simulator coverage](../../docs/mobile-polish.md).
 
 ### Writer discipline (what the phone writes)

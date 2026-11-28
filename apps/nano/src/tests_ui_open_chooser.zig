@@ -90,7 +90,7 @@ test "project shortcut: Cmd Shift D does nothing, including with a folder menu o
     }
 }
 
-test "project shortcut: Cmd Shift N asks for a project before creating a top-level tab while Cmd T opens directly" {
+test "project shortcut: Cmd Shift N opens the New project form over the split while Cmd T opens a tab directly" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
@@ -98,27 +98,20 @@ test "project shortcut: Cmd Shift N asks for a project before creating a top-lev
     h.a.composer.set("Parked split prompt");
     h.t.settle(1);
     h.press(.{ .key = 'n', .cmd = true, .shift = true });
-    try testing.expect(h.a.view.open_chooser.open);
+    try testing.expect(h.a.view.project_setup.open);
+    try testing.expect(!h.a.view.open_chooser.open);
     try testing.expectEqual(@as(usize, 1), h.a.tabs.items.items.len);
     try testing.expectEqual(@as(usize, 2), strip.chatCount(&h.a));
     try testing.expectEqualStrings("Parked split prompt", h.a.composer.text());
-    try h.t.clickText("Build box");
+    @import("app_project_setup.zig").dismiss(&h.a);
     h.t.settle(1);
-    h.press(.{ .key = @import("nanoui").ui.Shortcut.enter });
-    try testing.expect(!h.a.view.open_chooser.open);
-    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
-    try testing.expect(h.a.tabs.layout() == null);
-    try testing.expect(h.a.selected == null);
-    try testing.expectEqualStrings("remote-project", h.a.newChatSpace().?.id);
-    try testing.expectEqualStrings("remote", h.a.draftDevice().?);
-    try testing.expectEqualStrings("", h.a.composer.text());
-    h.a.showTab(0);
-    h.t.settle(1);
+    try testing.expect(!h.a.view.project_setup.open);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.items.items.len);
     try testing.expectEqual(@as(usize, 2), strip.chatCount(&h.a));
     try testing.expectEqualStrings("Parked split prompt", h.a.composer.text());
     h.press(.{ .key = 't', .cmd = true });
     try testing.expect(!h.a.view.open_chooser.open);
-    try testing.expectEqual(@as(usize, 3), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
     try testing.expect(h.a.tabs.layout() == null);
 }
 
@@ -177,20 +170,20 @@ test "shared sheet split reveal starts at the old spans and ends at the even spl
     try testing.expectApproxEqAbs(target, view.revealSpan(total, true, r, 1, target, 1), 0.01);
 }
 
-test "shared sheet opens from the rebindable New project shortcut" {
+test "the rebindable New project shortcut opens the project form, not the shared sheet" {
     var h: Harness = undefined;
     try h.init(false);
     defer h.deinit();
     h.press(.{ .key = 'n', .cmd = true, .shift = true });
-    try testing.expect(h.a.view.open_chooser.open);
-    try testing.expectEqual(@import("app_open_chooser.zig").Intent.new_project, h.a.view.open_chooser.intent);
+    try testing.expect(h.a.view.project_setup.open);
+    try testing.expect(!h.a.view.open_chooser.open);
 }
 
-test "shared sheet new project begins in the same sheet and opens the name form" {
+test "shared sheet Open a folder opens the New project name form" {
     var a: App = .init(testing.allocator, testing.io, 1);
     defer a.deinit();
     a.device_id = try testing.allocator.dupe(u8, "local");
-    @import("app_open_chooser.zig").open(&a, .new_project);
+    @import("app_open_chooser.zig").open(&a, .new_tab);
     try testing.expect(a.view.open_chooser.open);
     try testing.expect(a.view.project_setup.open == false);
     @import("app_open_chooser.zig").newProject(&a);

@@ -85,15 +85,44 @@ jobs:
     needs: changes
     if: needs.changes.outputs.win_ui == 'true'
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
+      # `zig build test` reports nothing until every test is done, so a hang
+      # never names its test. Build the test binary, run the other checks
+      # `test` runs (`test-support`), then run the binary with its stderr in a
+      # file: off a terminal it prints `N/M <name>...` as each test starts.
+      - name: Build Nano UI tests
+        working-directory: apps/nano
+        timeout-minutes: 45
+        run: zig build test-build --summary all
+      - name: Nano Rust math and Luau helper tests
+        working-directory: apps/nano
+        timeout-minutes: 25
+        run: zig build test-support --summary all
       - name: Nano UI tests
         working-directory: apps/nano
-        run: zig build test --summary all
+        timeout-minutes: 25
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'nano-ui-tests.log'
+          $out = Join-Path $env:RUNNER_TEMP 'nano-ui-tests.out'
+          $exe = (Resolve-Path -LiteralPath 'zig-out\bin\test.exe').Path
+          $p = Start-Process -FilePath $exe -WorkingDirectory $PWD.Path -NoNewWindow -PassThru `
+            -RedirectStandardError $log -RedirectStandardOutput $out
+          $null = $p.Handle  # keeps ExitCode readable after the process exits
+          if (-not $p.WaitForExit(20 * 60 * 1000)) {
+            & taskkill.exe /T /F /PID $p.Id | Out-Null
+            Get-Content -LiteralPath $out, $log
+            $last = Select-String -LiteralPath $log -Pattern '^\d+/\d+ ' | Select-Object -Last 1
+            Write-Host "::error::Nano UI tests hung for 20 minutes in: $($last.Line)"
+            exit 1
+          }
+          $p.WaitForExit()
+          Get-Content -LiteralPath $out, $log
+          exit $p.ExitCode
 
   app:
     name: tests (app and packaging)

@@ -56,10 +56,12 @@ the edited row retains its place in the queue.
 
 ## Composer and compatibility
 
-Desktop defaults to Queue. Settings → Shortcuts → Messages while the agent is
-working chooses Queue or Steer independently of the Enter/Cmd/Ctrl+Enter submit
-preference. The composer offers Queue, Steer and Stop and send for a single
-message without changing that default. When steering is unavailable, the
+The desktop app steers by default for GPT-6.0+ models (and Codex before a model
+is known) and queues for everything else (`defaultFollowUpFor` in
+`apps/nano/src/app_queue.zig`). Settings → Shortcuts → Messages while the agent
+is working chooses Queue or Steer independently of the Enter/Cmd/Ctrl+Enter submit
+preference. Each queued row offers Edit, Steer, Remove and **Send now**, which interrupts
+the turn and sends that row. When steering is unavailable, the
 effective action is Queue and the composer explains why. iOS holds active-turn
 messages until turn end and has no Queue/Steer preference.
 
@@ -114,8 +116,9 @@ numbers. Older hosts retain the existing command-send path.
 - Engine queue tests cover drain serialization, awaiting-input behavior,
   steering, attachments, Cancel/restart recovery, protected edits and removal.
 - Device-routing tests race local and remote consumers over the same row.
-- Desktop tests cover action selection, modifier submission, optimistic echo,
-  settings compatibility and transcript anchoring.
+- Desktop tests in `apps/nano/src` cover the queue controls in narrow and wrapped
+  composer docks (`zig build test -Dtest-filter="composer dock"` from
+  `apps/nano`).
 - `apps/ios/HarnessTests/MessageQueueTests.swift` covers projection, policy,
   attachment text, action acknowledgements and keyboard submission. Run with
   the iOS Xcode test suite on macOS.

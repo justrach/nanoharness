@@ -8,32 +8,39 @@ are shown only in an existing chat.
 
 | Command | Action |
 | --- | --- |
-| `/model` | Choose agent, model, and reasoning |
-| `/new` | Start a new conversation |
-| `/resume` | Search and open conversations |
+| `/model` | Choose agent, model and reasoning |
+| `/new` | Start a new session |
+| `/resume` | Resume a Harness session |
 | `/settings` | Open Harness settings |
-| `/diff` | Open a changes tab |
-| `/files` | Open project files |
-| `/terminal` | Open a terminal tab |
-| `/rename` | Open the conversation rename dialog |
-| `/stop` | Interrupt the current run |
+| `/help` | Show keyboard shortcuts |
+| `/custom-theme` | Create or pick a custom theme and animated backdrop |
+| `/zen` | Toggle Zen / Developer workspace mode |
+| `/design` | Toggle Design mode (Paper canvas) |
+| `/diff` | Open changes (in a chat) |
+| `/files` | Open files (in a chat) |
+| `/terminal` | Open terminal (in a chat) |
+| `/rename` | Rename this session (in a chat) |
+| `/stop` | Stop the current run (in a chat) |
+
+The list is `native` in `apps/nano/src/composer_completion.zig`.
 
 Provider commands remain available alongside these actions. When a provider owns
 the same name, its command keeps the name and the Harness action gets a `harness:`
-prefix, for example `/harness:model`. A provider command and a workspace action are
+prefix, for example `/harness:model`. Until the provider's catalog has loaded,
+every Harness action uses the `harness:` prefix. A provider command and a workspace action are
 distinct entries, even when they have the same purpose. `/` completion works at
-any word boundary in the draft, including later lines, just like `@` and `$`.
+any word boundary in the draft, including later lines.
 Code, URLs and paths remain literal.
 
 Selecting a workspace action consumes only its trigger, preserving surrounding
-text, attachments and queued edits. Removing the trigger is undoable. Provider
+text, attachments and queued edits. Provider
 commands and skills insert references into the draft and are delivered on Send;
 provider command execution still follows its protocol's leading-command rules.
 Typing an unselected inline `/word` does not execute a local action.
 
 | Harness | Additional provider commands |
 | --- | --- |
-| Codex | Native `/compact` and `/review`; eleven total entries in an existing chat before skills |
+| Codex | Native `/compact` and `/review` |
 | Claude Code | Project-scoped commands from its initialize catalog |
 | OpenCode | Project-scoped server command catalog |
 | Pi | Native `get_commands`, including extension commands and `skill:*` invocations |
@@ -44,24 +51,12 @@ This does not imply that every command in a provider's terminal UI can execute
 through its SDK. Provider-only operations without a corresponding protocol or
 Harness action are not advertised as executable commands.
 
-## Skill preferences
+## Skills in the pickers
 
-Settings → Shortcuts → Composer completion has two independent controls for
-each installed, enabled agent on this device. Agents that are disabled or not
-installed do not appear in this section.
-
-- **$ for skills** enables the skill picker after `$`.
-- **Separate / commands** removes skills from the `/` picker.
-
-Codex defaults to both enabled. Other harnesses default to both disabled, keeping
-skills available through `/`. To use Claude Code or OpenCode with `$` for skills
-and `/` for commands, enable both controls for that harness. Enabling `$` alone
-makes skills available in both pickers. The preferences are saved per harness;
-existing “Show skills in / menu” preferences are preserved until overridden.
-
-These controls change completion, not arbitrary typed text. Selecting a skill
-stores its identity in the composer. Literal dollar signs, code, and unselected
-text retain their meaning.
+Skills are offered after both `/` and `$`. A `$` followed by a digit is not a
+trigger, so prices stay text. Selecting a skill stores its identity in the
+composer; literal dollar signs, code, and unselected text keep their meaning.
+Settings → Shortcuts → Composer completion has no per-agent switches.
 
 ## Discovery and delivery
 
@@ -80,8 +75,7 @@ At delivery, Codex receives typed skill inputs. A leading skill selection with a
 native command for the current harness becomes that command, preserving its
 arguments. Other selections include an explicit skill reference in the prompt.
 Native command metadata is scoped to its harness, so switching agents does not
-invoke another agent’s same-named command. Only catalog entries identified as
-skills are removed from the slash picker when separation is enabled.
+invoke another agent’s same-named command.
 
 File discovery covers the standard directories implemented by each adapter;
 custom plugin paths and provider configuration are exposed where the native

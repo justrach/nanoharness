@@ -152,14 +152,20 @@ fn remote_control_reply(registry: &HarnessRegistry) -> serde_json::Value {
     serde_json::json!({ "enabled": registry.remote_control() })
 }
 
+/// Device-row name for an id, for refusal texts; `None` when unnamed.
+pub type DeviceNames = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// Host-relay wrapper: the same [`EngineRpc`] the local IPC socket serves,
-/// with [`harness_rpc::admit_relay_action`] in front. Compromised-edge frames
+/// with [`harness_rpc::admit_relay_caller`] in front. Compromised-edge frames
 /// cannot flip the gate (`SetRemoteControl` is local-only), cannot apply
 /// updates or autonomy, and first execution / file write / terminal from a
 /// remote caller parks until a person on this computer approves.
 pub struct RelayRpc {
     inner: std::sync::Arc<dyn RpcService>,
     registry: std::sync::Arc<HarnessRegistry>,
+    /// This computer's device id, and the names refusals read from.
+    host_device_id: String,
+    names: Option<DeviceNames>,
 }
 
 impl RelayRpc {
@@ -167,7 +173,38 @@ impl RelayRpc {
         inner: std::sync::Arc<dyn RpcService>,
         registry: std::sync::Arc<HarnessRegistry>,
     ) -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self { inner, registry })
+        std::sync::Arc::new(Self {
+            inner,
+            registry,
+            host_device_id: String::new(),
+            names: None,
+        })
+    }
+
+    /// [`Self::wrap`], naming this computer and the caller in refusals.
+    pub fn wrap_named(
+        inner: std::sync::Arc<dyn RpcService>,
+        registry: std::sync::Arc<HarnessRegistry>,
+        host_device_id: impl Into<String>,
+        names: DeviceNames,
+    ) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            inner,
+            registry,
+            host_device_id: host_device_id.into(),
+            names: Some(names),
+        })
+    }
+
+    fn name_of(&self, device_id: &str) -> Option<String> {
+        if device_id.is_empty() {
+            return None;
+        }
+        self.names
+            .as_ref()
+            .and_then(|names| names(device_id))
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
     }
 }
 
@@ -189,6 +226,48 @@ fn relay_caller_device(params: &serde_json::Value) -> String {
         .to_string()
 }
 
+/// SHA-256 over a relayed request's params with object keys sorted, so the
+/// same request digests the same however its sender ordered them. Called
+/// after `relayDeviceId` is stripped: the caller is bound separately.
+pub fn relay_request_digest(params: &serde_json::Value) -> String {
+    fn canonical(value: &serde_json::Value, out: &mut String) {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                out.push('{');
+                for (ix, key) in keys.into_iter().enumerate() {
+                    if ix > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&serde_json::Value::String(key.clone()).to_string());
+                    out.push(':');
+                    canonical(&map[key], out);
+                }
+                out.push('}');
+            }
+            serde_json::Value::Array(items) => {
+                out.push('[');
+                for (ix, item) in items.iter().enumerate() {
+                    if ix > 0 {
+                        out.push(',');
+                    }
+                    canonical(item, out);
+                }
+                out.push(']');
+            }
+            scalar => out.push_str(&scalar.to_string()),
+        }
+    }
+    use sha2::Digest as _;
+    let mut text = String::new();
+    canonical(params, &mut text);
+    sha2::Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 #[async_trait]
 impl RpcService for RelayRpc {
     async fn handle(
@@ -200,42 +279,90 @@ impl RpcService for RelayRpc {
         if let Some(obj) = params.as_object_mut() {
             obj.remove("relayDeviceId");
         }
+        let identified = harness_rpc::relay_caller_identified(&caller);
         let approved = self.registry.is_sandbox_host()
-            || (!caller.is_empty() && self.registry.remote_device_approved(&caller));
-        match harness_rpc::admit_relay_action(self.registry.remote_control(), method, approved) {
-            harness_rpc::RelayAdmit::Allow => self.inner.handle(method, params).await,
-            harness_rpc::RelayAdmit::RemoteControlOff => {
-                Err(RpcError::Failed(harness_rpc::REMOTE_CONTROL_OFF.into()))
-            }
-            harness_rpc::RelayAdmit::LocalOnly => {
-                Err(RpcError::Failed(harness_rpc::RELAY_LOCAL_ONLY.into()))
-            }
-            harness_rpc::RelayAdmit::NeedsApproval => {
-                let device_id = if caller.is_empty() {
-                    "unknown".into()
-                } else {
-                    caller.clone()
-                };
-                self.registry
-                    .park_remote_approval(harness_rpc::RemoteApproval {
-                        id: crate::new_id(),
-                        kind: "rpc".into(),
-                        device_id,
-                        chat_id: params
-                            .get("chatId")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string),
-                        command_id: None,
-                        method: Some(method.to_string()),
-                        summary: if caller.is_empty() {
-                            format!("{method} from another device")
-                        } else {
-                            format!("{method} from {caller}")
-                        },
-                    });
-                Err(RpcError::Failed(harness_rpc::RELAY_NEEDS_APPROVAL.into()))
+            || (identified && self.registry.remote_device_approved(&caller));
+        let mut verdict = harness_rpc::admit_relay_caller(
+            self.registry.remote_control(),
+            method,
+            &caller,
+            approved,
+        );
+        let allow_once = harness_rpc::relay_allow_once_method(method);
+        let mut request_digest = None;
+        if verdict == harness_rpc::RelayAdmit::NeedsApproval && allow_once {
+            // Remote control is on, the method is gated and not local-only,
+            // and the caller is identified but unapproved: only here may an
+            // "Allow once" for this exact request stand in for approval.
+            let digest = relay_request_digest(&params);
+            if self.registry.take_relay_once_grant(
+                &caller,
+                method,
+                &digest,
+                std::time::Instant::now(),
+            ) {
+                tracing::info!(method, device = %caller, "relay: remote action admitted by Allow once");
+                verdict = harness_rpc::RelayAdmit::Allow;
+            } else {
+                request_digest = Some(digest);
             }
         }
+        if verdict == harness_rpc::RelayAdmit::Allow {
+            return self.inner.handle(method, params).await;
+        }
+        let caller_class = if !identified {
+            "unidentified"
+        } else if approved {
+            "approved"
+        } else {
+            "unapproved"
+        };
+        let logged_device = if identified { caller.as_str() } else { "-" };
+        tracing::info!(
+            method,
+            reason = harness_rpc::relay_refusal_reason(verdict),
+            caller = caller_class,
+            device = %logged_device,
+            "relay: remote action refused"
+        );
+        let device_name = if identified {
+            self.name_of(&caller)
+        } else {
+            None
+        };
+        if verdict == harness_rpc::RelayAdmit::NeedsApproval {
+            // A name is the peer's own to set, so the owner also sees the id
+            // it asserted (its first 8 characters, as Settings shows ids).
+            let short_id: String = caller.chars().take(8).collect();
+            let label = match &device_name {
+                Some(name) => format!("{name} ({short_id})"),
+                None => caller.clone(),
+            };
+            self.registry
+                .park_remote_approval(harness_rpc::RemoteApproval {
+                    id: crate::new_id(),
+                    kind: "rpc".into(),
+                    device_id: caller.clone(),
+                    chat_id: params
+                        .get("chatId")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    command_id: None,
+                    method: Some(method.to_string()),
+                    summary: format!("{method} from {label}"),
+                    allow_once,
+                    request_digest,
+                });
+        }
+        let host_name = self.name_of(&self.host_device_id);
+        let text = harness_rpc::relay_refusal_text(
+            verdict,
+            allow_once,
+            host_name.as_deref(),
+            device_name.as_deref(),
+        )
+        .unwrap_or_default();
+        Err(RpcError::Failed(text))
     }
 }
 
@@ -1245,6 +1372,81 @@ impl EngineRpc {
                 .map_err(|error| RpcError::Failed(error.to_string()))?;
             RpcReply::value(&result)
         })
+    }
+
+    /// Accept only a checkout already named by a local chat, contained in a
+    /// local space, or registered as a local repository (including linked
+    /// worktrees of any of those). Prevents arbitrary filesystem probing via
+    /// git/diff RPCs.
+    async fn authorized_checkout_root(&self, cwd: &str) -> Result<std::path::PathBuf, RpcError> {
+        let requested = std::path::PathBuf::from(crate::repos::expand_home(cwd));
+        let requested_canon = std::fs::canonicalize(&requested).ok();
+        let path_matches = |candidate: &str| {
+            let cand = std::path::PathBuf::from(crate::repos::expand_home(candidate));
+            if cand == requested {
+                return true;
+            }
+            if let (Some(req), Ok(c)) = (requested_canon.as_ref(), std::fs::canonicalize(&cand)) {
+                return req == &c;
+            }
+            false
+        };
+        let local_device = self.doc_host.device_id();
+        let mut chats_rx = self.workspace.watch_chats();
+        let mut spaces_rx = self.workspace.watch_spaces();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+        loop {
+            let chats = chats_rx.borrow_and_update().clone();
+            if chats.iter().any(|chat| {
+                chat.device_id == local_device && chat.cwd.as_deref().is_some_and(&path_matches)
+            }) {
+                return Ok(requested);
+            }
+
+            let spaces = spaces_rx.borrow_and_update().clone();
+            for space in spaces
+                .iter()
+                .filter(|space| space.device_id == local_device)
+            {
+                if path_matches(&space.path) {
+                    return Ok(requested);
+                }
+                if let Some(checkout) = self
+                    .repos
+                    .workspace_checkout(std::path::Path::new(&space.path), &requested)
+                    .await
+                {
+                    return Ok(checkout);
+                }
+            }
+
+            for repo_path in self.repos.registered_paths() {
+                if repo_path == requested
+                    || requested_canon
+                        .as_ref()
+                        .zip(std::fs::canonicalize(&repo_path).ok())
+                        .is_some_and(|(a, b)| a == &b)
+                {
+                    return Ok(requested);
+                }
+                if let Some(checkout) = self.repos.workspace_checkout(&repo_path, &requested).await
+                {
+                    return Ok(checkout);
+                }
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::select! {
+                _ = chats_rx.changed() => {}
+                _ = spaces_rx.changed() => {}
+                _ = tokio::time::sleep_until(deadline) => break,
+            }
+        }
+        Err(RpcError::BadParams(
+            "cwd is not a known checkout on this device".into(),
+        ))
     }
 
     /// Accept only a checkout already named by a local chat or contained in a
@@ -3712,9 +3914,10 @@ impl RpcService for EngineRpc {
                         commit_sha: Option<String>,
                     }
                     let p: P = parse_params(params)?;
+                    let authorized_cwd = self.authorized_checkout_root(&p.cwd).await?;
                     let identity = self
                         .repos
-                        .checkout_identity(std::path::Path::new(&p.cwd))
+                        .checkout_identity(&authorized_cwd)
                         .await
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
                     let root = identity.root.as_path();
@@ -3907,10 +4110,10 @@ impl RpcService for EngineRpc {
                 // state in `EngineRpc::handle`'s stack frame.
                 Box::pin(async move {
                     let p: harness_proto::GetCheckoutFileDiffTextRequest = parse_params(params)?;
-                    let identity =
-                        Box::pin(self.repos.checkout_identity(std::path::Path::new(&p.cwd)))
-                            .await
-                            .map_err(|error| RpcError::Failed(error.to_string()))?;
+                    let authorized_cwd = self.authorized_checkout_root(&p.cwd).await?;
+                    let identity = Box::pin(self.repos.checkout_identity(&authorized_cwd))
+                        .await
+                        .map_err(|error| RpcError::Failed(error.to_string()))?;
                     if identity.id != p.checkout_id {
                         return Err(RpcError::Failed("checkoutId does not match cwd".into()));
                     }
@@ -4097,18 +4300,20 @@ impl RpcService for EngineRpc {
             }
             methods::LIST_BRANCHES => {
                 let p: RepoPathParams = parse_params(params)?;
+                let repo_path = self.authorized_checkout_root(&p.repo_path).await?;
                 let branches = self
                     .repos
-                    .branches(std::path::Path::new(&p.repo_path))
+                    .branches(&repo_path)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&branches)
             }
             methods::LIST_REFS => {
                 let p: RepoPathParams = parse_params(params)?;
+                let repo_path = self.authorized_checkout_root(&p.repo_path).await?;
                 let refs = self
                     .repos
-                    .refs(std::path::Path::new(&p.repo_path))
+                    .refs(&repo_path)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&refs)
@@ -4127,9 +4332,10 @@ impl RpcService for EngineRpc {
                     crate::repos::GIT_HISTORY_DEFAULT_LIMIT
                 }
                 let p: P = parse_params(params)?;
+                let cwd = self.authorized_checkout_root(&p.cwd).await?;
                 let history = self
                     .repos
-                    .history(std::path::Path::new(&p.cwd), p.cursor, p.limit)
+                    .history(&cwd, p.cursor, p.limit)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&history)
@@ -4149,9 +4355,10 @@ impl RpcService for EngineRpc {
                     crate::repos::GIT_HISTORY_DEFAULT_LIMIT
                 }
                 let p: P = parse_params(params)?;
+                let cwd = self.authorized_checkout_root(&p.cwd).await?;
                 let history = self
                     .repos
-                    .search_history(std::path::Path::new(&p.cwd), &p.query, p.cursor, p.limit)
+                    .search_history(&cwd, &p.query, p.cursor, p.limit)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&history)
@@ -4176,6 +4383,7 @@ impl RpcService for EngineRpc {
                     crate::repos::GIT_HISTORY_DEFAULT_LIMIT
                 }
                 let p: P = parse_params(params)?;
+                let cwd = self.authorized_checkout_root(&p.cwd).await?;
                 let authors: Vec<_> = p
                     .authors
                     .into_iter()
@@ -4185,7 +4393,7 @@ impl RpcService for EngineRpc {
                     .collect();
                 let avatar_paths = self
                     .repos
-                    .history_avatar_urls(std::path::Path::new(&p.cwd), &authors, p.cursor, p.limit)
+                    .history_avatar_urls(&cwd, &authors, p.cursor, p.limit)
                     .await;
                 let mut avatars = std::collections::HashMap::new();
                 for (email, path) in avatar_paths {
@@ -4200,8 +4408,9 @@ impl RpcService for EngineRpc {
             }
             methods::FETCH_ALL => {
                 let p: RepoPathParams = parse_params(params)?;
+                let repo_path = self.authorized_checkout_root(&p.repo_path).await?;
                 self.repos
-                    .fetch_all(std::path::Path::new(&p.repo_path))
+                    .fetch_all(&repo_path)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 // Remote refs are repository state too. Force the checkout
@@ -4212,9 +4421,10 @@ impl RpcService for EngineRpc {
             }
             methods::SWITCH_REF => {
                 let p: SwitchRefParams = parse_params(params)?;
+                let repo_path = self.authorized_checkout_root(&p.repo_path).await?;
                 let branch = self
                     .repos
-                    .switch_ref(std::path::Path::new(&p.repo_path), &p.ref_name)
+                    .switch_ref(&repo_path, &p.ref_name)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "branch": branch }))
@@ -4401,11 +4611,21 @@ impl RpcService for EngineRpc {
             }
             methods::DELETE_WORKTREE => {
                 let p: DeleteWorktreeParams = parse_params(params)?;
+                let repo_path = self.authorized_checkout_root(&p.repo_path).await?;
+                let worktree_path = std::path::PathBuf::from(&p.worktree_path);
+                if worktree_path.exists()
+                    && self
+                        .repos
+                        .workspace_checkout(&repo_path, &worktree_path)
+                        .await
+                        .is_none()
+                {
+                    return Err(RpcError::BadParams(
+                        "worktreePath does not belong to repoPath".into(),
+                    ));
+                }
                 self.repos
-                    .delete_worktree(
-                        std::path::Path::new(&p.repo_path),
-                        std::path::Path::new(&p.worktree_path),
-                    )
+                    .delete_worktree(&repo_path, &worktree_path)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
@@ -4540,22 +4760,35 @@ impl RpcService for EngineRpc {
             }
             methods::OPEN_TERMINAL => {
                 let p: OpenTerminalParams = parse_params(params)?;
-                // Prefer an explicit real path (new-chat canvas has no row
-                // yet). `space-canvas:{spaceId}` names the selected project
-                // so a missing/tilde cwd still lands in that folder.
-                let chat_cwd = self
-                    .workspace
-                    .chat(&p.chat_id)
-                    .ok()
-                    .flatten()
-                    .and_then(|chat| chat.cwd);
-                let space_cwd = canvas_space_id(&p.chat_id).and_then(|space_id| {
-                    self.workspace
-                        .space(space_id)
-                        .ok()
-                        .flatten()
-                        .map(|space| space.path)
-                });
+                let local_device = self.doc_host.device_id();
+                let chat = self.workspace.chat(&p.chat_id).ok().flatten();
+                if let Some(chat) = chat.as_ref()
+                    && chat.device_id != local_device
+                {
+                    return Err(RpcError::BadParams("chat belongs to another device".into()));
+                }
+                let chat_cwd = chat.and_then(|chat| chat.cwd);
+                let space = canvas_space_id(&p.chat_id)
+                    .and_then(|space_id| self.workspace.space(space_id).ok().flatten());
+                if let Some(space) = space.as_ref()
+                    && space.device_id != local_device
+                {
+                    return Err(RpcError::BadParams(
+                        "space belongs to another device".into(),
+                    ));
+                }
+                let space_cwd = space.map(|space| space.path);
+                if let Some(explicit) = meaningful_cwd(p.cwd.clone()) {
+                    let expanded = std::path::PathBuf::from(crate::repos::expand_home(&explicit));
+                    let is_home = expanded == home_dir()
+                        || std::fs::canonicalize(&expanded)
+                            .ok()
+                            .zip(std::fs::canonicalize(home_dir()).ok())
+                            .is_some_and(|(a, b)| a == b);
+                    if !is_home {
+                        self.authorized_checkout_root(&explicit).await?;
+                    }
+                }
                 let cwd = resolve_open_terminal_cwd(p.cwd, chat_cwd, space_cwd);
                 let session = self
                     .terminals
@@ -4841,12 +5074,14 @@ impl RpcService for EngineRpc {
             }
             methods::READ_ATTACHMENT_CHUNK => {
                 let p: ReadAttachmentChunkParams = parse_params(params)?;
-                // Path jail: the uploads dir plus every workspace-known chat cwd.
+                let local_device = self.doc_host.device_id();
+                // Path jail: the uploads dir plus chat cwds hosted by THIS device.
                 let roots: Vec<std::path::PathBuf> = self
                     .workspace
                     .read_chats()
                     .unwrap_or_default()
                     .into_iter()
+                    .filter(|chat| chat.device_id == local_device)
                     .filter_map(|chat| chat.cwd)
                     .map(std::path::PathBuf::from)
                     .collect();

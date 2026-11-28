@@ -10,6 +10,7 @@
  * out what the admin list needs, so nothing on the phone has to agree with it.
  */
 import { withPg, type PgEnv } from "./pg";
+import { readCapped } from "./body";
 
 /** One upload: the phone sends what it has in batches no larger than this. */
 export const MAX_CRASH_UPLOAD_BYTES = 1024 * 1024;
@@ -197,9 +198,9 @@ export const crashReportRoute = async (
 ): Promise<Response | null> => {
   if (parts[0] !== "diagnostics" || parts[1] !== "crash-reports" || parts.length !== 2) return null;
   if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
-  const declared = Number(request.headers.get("content-length") ?? 0);
-  if (declared > MAX_CRASH_UPLOAD_BYTES) return json({ error: "too_large" }, 413);
-  const reports = parseUpload(await request.text());
+  const bytes = await readCapped(request, MAX_CRASH_UPLOAD_BYTES);
+  if (!bytes) return json({ error: "too_large" }, 413);
+  const reports = parseUpload(new TextDecoder().decode(bytes));
   if (!Array.isArray(reports)) return json({ error: reports.error }, reports.status);
   if (!env.HYPERDRIVE) return json({ error: "unavailable" }, 503);
   try {

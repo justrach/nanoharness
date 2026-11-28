@@ -3,19 +3,25 @@
 ## Linux (implemented)
 
 ```sh
-scripts/package-linux.sh            # release build (thin LTO, stripped)
+scripts/package-linux.sh                 # size-optimized engine (`headless` profile)
+PROFILE=release scripts/package-linux.sh # quicker optimized engine build
 PROFILE=debug scripts/package-linux.sh   # fast smoke package
 ```
 
-Produces `target/package/harness-<version>-linux-<arch>.tar.gz` containing:
+The script builds `harness-engine` with Cargo and the desktop app and CLI with
+`zig build -Doptimize=ReleaseSafe -Dcpu=baseline` in `apps/nano`. It produces
+`target/package/harness-<version>-linux-<arch>.tar.gz` containing:
 
-- `harness` — the binary (headed by default; `harness headless` runs the engine alone)
+- `harness` — the CLI (`harness` opens the desktop app; `harness headless` runs the engine alone)
+- `harness-engine` — the engine
+- `harness-nano` — the desktop app
 - `harness.desktop` — XDG desktop entry
 - `harness.png` — 1024×1024 Harness app icon
 - `install.sh` — installs into `~/.local/{bin,share/applications,share/icons}`
+- `LICENSE`, `THIRD_PARTY_NOTICES.md` and `licenses/`
 
-The release profile in the root `Cargo.toml` sets `lto = "thin"` and
-`strip = "symbols"` for distribution builds.
+The `headless` profile in the root `Cargo.toml` inherits the fat-LTO `dist`
+profile and optimizes for size (`opt-level = "z"`).
 
 ## macOS
 

@@ -215,7 +215,9 @@ test "desktop parity composer alignment matches the reference and compact width 
     try testing.expectApproxEqAbs(@as(f32, 10), model.x - pill.x, 0.01);
     try testing.expectApproxEqAbs(pill.y + pill.h + 8, model.y, 0.01);
     try testing.expectApproxEqAbs(model.y + 12, mode.y + mode.h / 2, 0.01);
-    try testing.expectApproxEqAbs(model.y + 12, project.y + project.h / 2, 0.01);
+    // Too narrow for its words, the project chip is drawn once, centred in
+    // the targets' own row under the first (24 + 2 gap + 22 / 2).
+    try testing.expectApproxEqAbs(model.y + 37, project.y + project.h / 2, 0.01);
     const last = textNode(&h.t, "Tour this project") orelse return error.NoStarter;
     const chip = h.t.ctx.node(h.t.ctx.node(last).parent).rect;
     try testing.expectApproxEqAbs(@as(f32, 24), pill.y - chip.y - chip.h, 0.01);
@@ -229,11 +231,11 @@ test "desktop parity composer alignment matches the reference and compact width 
     try testing.expect(h.a.view.composer_anchor.?.h >= composer.expanded_min);
 }
 
-test "desktop parity sidebar history has a six point trailing gap and a 350ms tooltip" {
+test "desktop parity sidebar history is the footer's last control and has a 350ms tooltip" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
-    var controls: [2]ui.Rect = undefined;
+    var controls: [1]ui.Rect = undefined;
     var count: usize = 0;
     for (h.t.ctx.nodes.items) |node| {
         const r = node.rect;
@@ -243,8 +245,8 @@ test "desktop parity sidebar history has a six point trailing gap and a 350ms to
             count += 1;
         }
     }
-    try testing.expectEqual(@as(usize, 2), count);
-    try testing.expectApproxEqAbs(@as(f32, 6), controls[1].x - controls[0].x - controls[0].w, 0.01);
+    // The title row's "New session" is the only "+"; none repeats it here.
+    try testing.expectEqual(@as(usize, 1), count);
     h.t.moveTo(controls[0].x + 13, controls[0].y + 13);
     h.t.advance(0.3);
     try testing.expect(h.t.tooltipText() == null);
@@ -610,19 +612,19 @@ test "retention 794 New workspace remains distinct from the pane New tab action"
     try testing.expectEqual(workspaces, h.a.tabs.items.items.len);
     @import("app_open_chooser.zig").close(&h.a);
     h.t.settle(1);
+    // The sidebar title row's "+" ("New session") makes a workspace; the
+    // footer no longer repeats it.
     var create: ?ui.Rect = null;
-    for (h.t.ctx.nodes.items) |node| {
-        const r = node.rect;
-        if (r.w == 26 and r.h == 26 and r.y >= 736 and r.x < sidebar.widthOf(&h.a)) {
-            if (create == null or r.x > create.?.x) create = r;
-        }
+    for (h.t.ctx.a11y_items.items) |item| {
+        const r = h.t.ctx.nodes.items[item.node_index].rect;
+        if (std.mem.eql(u8, item.label, "New session") and r.x < sidebar.widthOf(&h.a)) create = r;
     }
     const button = create orelse return error.NoWorkspaceCreate;
-    h.t.moveTo(button.x + 13, button.y + 13);
+    h.t.moveTo(button.x + button.w / 2, button.y + button.h / 2);
     h.t.advance(0.4);
-    try testing.expectEqualStrings("New workspace", h.t.tooltipText() orelse return error.NoWorkspaceTooltip);
+    try testing.expectEqualStrings("New session", h.t.tooltipText() orelse return error.NoWorkspaceTooltip);
     h.snap("retention-794-new-workspace-label");
-    h.t.click(button.x + 13, button.y + 13);
+    h.t.click(button.x + button.w / 2, button.y + button.h / 2);
     h.t.settle(1);
     try testing.expectEqual(workspaces + 1, h.a.tabs.items.items.len);
     try testing.expectEqual(old_panes, h.a.tabs.splits.items[0].?.panes.items.len);
@@ -721,6 +723,22 @@ fn gitDraft(h: *Harness) !void {
     h.t.frame();
 }
 
+/// The draft's target chips moved to their own row under the footer's
+/// first when they had no room for their words.
+fn targetRowControls(h: *Harness, out: []ui.Rect) ![]ui.Rect {
+    const model = h.a.view.chip_anchor orelse return error.NoModelChip;
+    const pill = h.a.view.composer_anchor orelse return error.NoComposer;
+    var n: usize = 0;
+    for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (r.h != 20 or r.w <= 0 or r.x < pill.x or r.y < model.y + 24 or r.y + r.h > model.y + 50) continue;
+        if (n >= out.len) return error.ExtraFooterControl;
+        out[n] = r;
+        n += 1;
+    }
+    return out[0..n];
+}
+
 /// The footer's controls after the model chip: every 20-point box in its
 /// 24-point row.
 fn footerControls(h: *Harness, out: []ui.Rect) ![]ui.Rect {
@@ -759,9 +777,13 @@ test "draft footer controls end inside the composer in split panes" {
         if (window_w == 1200) h.snap("draft-footer-split-pane");
         const pill = h.a.view.composer_anchor orelse return error.NoComposer;
         const controls = try footerControls(&h, &buf);
-        // Mode, computer, project, checkout and ref: none left out, none
-        // past the row's 10-point inset, each whole or its 28-point glyph.
-        try testing.expectEqual(@as(usize, 5), controls.len);
+        var row2_buf: [4]ui.Rect = undefined;
+        const targets = try targetRowControls(&h, &row2_buf);
+        // Mode, computer, project, checkout and ref, across the two rows:
+        // none left out or drawn twice, none past the row's 10-point inset,
+        // each whole or its 28-point glyph.
+        try testing.expectEqual(@as(usize, 5), controls.len + targets.len);
+        for (targets) |r| try testing.expect(r.x + r.w <= pill.x + pill.w - 10 + 0.01);
         for (controls, 0..) |r, i| {
             try testing.expect(r.x + r.w <= pill.x + pill.w - 10 + 0.01);
             try testing.expect(r.w >= 28);
@@ -1420,7 +1442,8 @@ test "sidebar star banner, right-click menu, bottom account row, and compact mod
     try testing.expect(settings_left_card and settings_right_card);
     try testing.expect(!duplicate_back_row);
     try testing.expect(!topbar_nav_control);
-    try testing.expect(esc_badge_count >= 2);
+    // One way out of Settings, Back to chats with its esc hint; no second Close pill.
+    try testing.expectEqual(@as(usize, 1), esc_badge_count);
 
     // Pressing Escape exits Zen Settings cleanly; reopening and clicking "Back to chats" also exits.
     _ = h.t.shortcut(.{ .key = @import("nanoui").ui.Shortcut.escape });
@@ -1668,7 +1691,8 @@ test "session footer renders account usage ring alongside context ring, opens ac
     try testing.expect(h.t.hasText("Context"));
 }
 
-test "zen topbar session pill left edge aligns flush with the right rounded-12 card in both chat and settings" {
+test "zen topbar right-aligns a lone chat caption while two tabs and settings stay flush with the right rounded-12 card" {
+    const rendering = @import("view_tab_strip.zig").rendering;
     const Find = struct {
         fn rightCard(ctx: *ui.Context, side_w: f32) ?ui.Rect {
             for (ctx.nodes.items) |n| {
@@ -1678,7 +1702,8 @@ test "zen topbar session pill left edge aligns flush with the right rounded-12 c
             }
             return null;
         }
-        fn activePill(ctx: *ui.Context) ?ui.Rect {
+        /// The first title-bar pill in node order: the lone chat caption, or the strip's leftmost tab.
+        fn firstPill(ctx: *ui.Context) ?ui.Rect {
             for (ctx.nodes.items) |n| {
                 if (n.rect.y < 38 and @abs(n.rect.h - 28) < 0.5 and n.style.radius == 7 and n.style.control) {
                     return n.rect;
@@ -1686,52 +1711,103 @@ test "zen topbar session pill left edge aligns flush with the right rounded-12 c
             }
             return null;
         }
+        /// Where #225 ends a lone windowed Zen caption: beside the device picker and the
+        /// trailing controls (the anchor of `tests_ui_tab_strip.zig`'s single-chat test).
+        fn captionEnd(a: *const App, ctx: *ui.Context) f32 {
+            const utilities = @import("view_tab_strip.zig").rendering.utilityWidth(a);
+            return ctx.size.w - @import("window_chrome.zig").trailing - utilities - 10 - @import("panel_chrome.zig").device_room - 12;
+        }
     };
 
     var h: Harness = undefined;
     try h.init(false);
     defer h.deinit();
+    // Two synthetic devices show the device picker the caption ends beside, and a
+    // second conversation in the same project lets the strip hold two tabs later.
+    const devices = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"synthetic-device","name":"Synthetic studio"},{"id":"synthetic-remote","name":"Synthetic build box"}]
+    , .{});
+    defer devices.deinit();
+    try h.a.devices.replace(devices.value);
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"synthetic-chat","deviceId":"synthetic-device","title":"Synthetic navigation conversation","spaceId":"synthetic-project","archived":false},
+        \\ {"id":"synthetic-second","deviceId":"synthetic-device","title":"Synthetic follow-up conversation","spaceId":"synthetic-project","archived":false}]
+    , .{});
+    defer chats.deinit();
+    try h.a.chats.replace(chats.value);
     h.a.settings.applyUiMode(.zen);
     h.a.openChatInTab("synthetic-chat");
     h.t.settle(1);
 
-    // Default sidebarWidth (224): pill left edge is flush with right card (sidebar_width + 3 = 227) and clears [⋯].
+    // Default sidebarWidth (224), one chat: the lone windowed caption ends beside the
+    // device picker and trailing controls (#225) and still clears [⋯] and the traffic lights.
+    try testing.expect(rendering.usesWindowedChatCaption(&h.a));
+    {
+        const pill = Find.firstPill(&h.t.ctx) orelse return error.MissingActivePill;
+        const more = h.a.view.more_anchor orelse return error.MissingMoreAnchor;
+        try testing.expectApproxEqAbs(Find.captionEnd(&h.a, &h.t.ctx), pill.x + pill.w, 1);
+        try testing.expect(more.x + more.w + 12 <= pill.x);
+        try testing.expect(pill.x >= @import("window_chrome.zig").leading);
+    }
+
+    // Wider sidebar (300), one chat: the right card follows (303) but the caption keeps its right-hand anchor.
+    h.a.settings.setNumber("sidebarWidth", 300);
+    h.t.settle(0.5);
+    try testing.expect(rendering.usesWindowedChatCaption(&h.a));
     {
         const card = Find.rightCard(&h.t.ctx, h.a.view.sidebar_width) orelse return error.MissingRightCard;
-        const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
+        const pill = Find.firstPill(&h.t.ctx) orelse return error.MissingActivePill;
         const more = h.a.view.more_anchor orelse return error.MissingMoreAnchor;
-        try testing.expectApproxEqAbs(card.x, pill.x, 0.5);
+        try testing.expectApproxEqAbs(@as(f32, 303), card.x, 0.5);
+        try testing.expectApproxEqAbs(Find.captionEnd(&h.a, &h.t.ctx), pill.x + pill.w, 1);
         try testing.expect(more.x + more.w + 12 <= pill.x);
     }
 
-    // Wider sidebar (300): pill follows right card edge (303) instead of pinning near left sidebar controls.
-    h.a.settings.setNumber("sidebarWidth", 300);
-    h.t.settle(0.5);
+    // Settings open: no lone caption; the pill is flush with the Zen Settings right rounded-12 card.
+    try h.t.clickText("Sign in");
+    h.t.settle(0.4);
+    try testing.expect(h.a.view.settings_open);
+    try testing.expect(!rendering.usesWindowedChatCaption(&h.a));
     {
         const card = Find.rightCard(&h.t.ctx, h.a.view.sidebar_width) orelse return error.MissingRightCard;
-        const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
+        const pill = Find.firstPill(&h.t.ctx) orelse return error.MissingActivePill;
         try testing.expectApproxEqAbs(@as(f32, 303), card.x, 0.5);
         try testing.expectApproxEqAbs(card.x, pill.x, 0.5);
     }
 
-    // Settings open: pill stays flush with the Zen Settings right rounded-12 card.
-    try h.t.clickText("Sign in");
+    // Back in chats with a second tab: no lone caption; the strip's first tab is flush with the right card (303).
+    try h.t.clickText("Back to chats");
     h.t.settle(0.4);
-    try testing.expect(h.a.view.settings_open);
+    h.a.openChatInTab("synthetic-second");
+    h.t.settle(1);
+    try testing.expectEqual(@as(usize, 2), rendering.singleSpec(&h.a).n);
+    try testing.expect(!rendering.usesWindowedChatCaption(&h.a));
     {
         const card = Find.rightCard(&h.t.ctx, h.a.view.sidebar_width) orelse return error.MissingRightCard;
-        const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
+        const pill = Find.firstPill(&h.t.ctx) orelse return error.MissingActivePill;
+        try testing.expectApproxEqAbs(@as(f32, 303), card.x, 0.5);
         try testing.expectApproxEqAbs(card.x, pill.x, 0.5);
     }
 
-    // Return to chats and collapse sidebar: pill clears traffic lights, toggle, history, and mode controls.
-    try h.t.clickText("Back to chats");
-    h.t.settle(0.4);
+    // Two tabs at the default sidebarWidth (224): the first tab follows the card back to 227 and clears [⋯].
+    h.a.settings.setNumber("sidebarWidth", 224);
+    h.t.settle(0.5);
+    {
+        const card = Find.rightCard(&h.t.ctx, h.a.view.sidebar_width) orelse return error.MissingRightCard;
+        const pill = Find.firstPill(&h.t.ctx) orelse return error.MissingActivePill;
+        const more = h.a.view.more_anchor orelse return error.MissingMoreAnchor;
+        try testing.expectApproxEqAbs(@as(f32, 227), card.x, 0.5);
+        try testing.expectApproxEqAbs(card.x, pill.x, 0.5);
+        try testing.expect(more.x + more.w + 12 <= pill.x);
+    }
+
+    // Two tabs, sidebar collapsed: the strip starts after the traffic lights, toggle, history, and mode controls.
     _ = h.t.shortcut(.{ .key = 'b', .cmd = true });
     h.t.settle(0.5);
     try testing.expect(h.a.view.sidebar_width < 0.5);
+    try testing.expect(!rendering.usesWindowedChatCaption(&h.a));
     {
-        const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
+        const pill = Find.firstPill(&h.t.ctx) orelse return error.MissingActivePill;
         const min_x = @import("window_chrome.zig").leading + 24 + 56 + 14;
         try testing.expect(pill.x >= min_x - 0.5);
     }

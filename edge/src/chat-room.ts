@@ -310,14 +310,13 @@ export class ChatRoom implements DurableObject {
         this.recordPush(device, false);
         return json({ error: "bad_push" }, 400);
       }
-      // Pre-read cap (the WS runtime closes 1 MiB messages before the DO
-      // runs; HTTP needs the explicit twin). appendRow re-checks post-read.
-      const declared = Number(request.headers.get("content-length") ?? "0");
-      if (declared > MAX_ROW_BYTES + 4096) {
+      // Streaming cap (the WS runtime closes 1 MiB messages before the DO
+      // runs; HTTP needs the explicit twin, including chunked uploads).
+      const payload = await readCapped(request, MAX_ROW_BYTES + 4096);
+      if (!payload) {
         this.recordPush(device, false);
         return json({ error: "too_large" }, 413);
       }
-      const payload = new Uint8Array(await request.arrayBuffer());
       const attributed = await this.attributeDevice(payload, device);
       if (!attributed.ok) {
         this.recordPush(device, false);

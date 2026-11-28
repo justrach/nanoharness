@@ -4,11 +4,16 @@
 //! preferences into `nano-ui-settings.json` once, so the two apps can keep
 //! different sidebar and display choices without either rewriting the other.
 const std = @import("std");
+const builtin = @import("builtin");
 const json = std.json;
+const engine_cli = @import("engine_cli.zig");
 const icons = @import("icons.zig");
 const shortcuts = @import("shortcuts.zig");
 const Allocator = std.mem.Allocator;
 
+/// The GPUI app's Appshots section is left out: Nano has no capture path,
+/// so its switches would promise captures nothing takes. A file that saved
+/// it as the open section opens on the default one.
 pub const Section = enum {
     account,
     appearance,
@@ -22,7 +27,6 @@ pub const Section = enum {
     extensions,
     github_ci,
     devices,
-    appshots,
     usage,
     archived,
 
@@ -40,7 +44,6 @@ pub const Section = enum {
             .browsing => "Links & browsing",
             .notifications => "Notifications",
             .shortcuts => "Shortcuts",
-            .appshots => "Appshots",
             .usage => "Usage",
             .archived => "Archived sessions",
             .mcp => "MCP servers",
@@ -55,14 +58,14 @@ pub const Section = enum {
             .account => "Account",
             .appearance, .notifications, .shortcuts, .files, .browsing => "General",
             .harnesses, .agents, .mcp, .extensions, .github_ci => "Agents",
-            .devices, .appshots, .usage, .archived => "Devices and data",
+            .devices, .usage, .archived => "Devices and data",
         };
     }
 
     pub fn icon(s: Section) icons.Name {
         return switch (s) {
             .account => .@"user-rounded",
-            .devices, .appshots => .monitor,
+            .devices => .monitor,
             .usage => .widget,
             .harnesses => .widget,
             .agents => .@"key-minimalistic",
@@ -126,7 +129,8 @@ pub const Prefs = struct {
     sidebar_show_branch: bool = true,
     sidebar_show_project_label: bool = false,
     sidebar_show_archived: bool = true,
-    // Settings › Appshots.
+    // The GPUI app's Appshots choices. Nano has no capture path and shows no
+    // Appshots page; the file keeps them as they were.
     appshots_enabled: bool = false,
     appshot_sound_enabled: bool = true,
     // Settings › Devices. Installation defaults on, independently of the legacy restart switch.
@@ -170,6 +174,31 @@ pub const Flag = enum {
     automatically_install_updates,
     restart_to_install_updates,
     star_banner_dismissed,
+};
+
+/// Settings › Appearance's "Reduce motion", as saved in `reduceMotion`.
+pub const ReduceMotion = enum {
+    system,
+    on,
+    off,
+
+    pub fn fromKey(k: ?[]const u8) ReduceMotion {
+        return std.meta.stringToEnum(ReduceMotion, k orelse return .system) orelse .system;
+    }
+
+    /// What the choice forces, or null to follow the system.
+    pub fn override(p: ReduceMotion) ?bool {
+        return switch (p) {
+            .system => null,
+            .on => true,
+            .off => false,
+        };
+    }
+
+    /// Whether motion is reduced, given what the system asks for.
+    pub fn resolve(p: ReduceMotion, system_reduces: bool) bool {
+        return p.override() orelse system_reduces;
+    }
 };
 
 pub const sidebar_min: f32 = 224;
@@ -400,6 +429,10 @@ pub const Store = struct {
     /// A number the file holds under `key`, if it holds one.
     pub fn number(s: *const Store, key: []const u8) ?f64 {
         return jsonNumber(s.doc.get(key));
+    }
+
+    pub fn reduceMotion(s: *const Store) ReduceMotion {
+        return ReduceMotion.fromKey(s.text("reduceMotion"));
     }
 
     /// The accent preset's name, or null for the theme's own.
@@ -656,16 +689,19 @@ pub const Store = struct {
         s.doc.put(a, k, v) catch {};
     }
 
-    /// The file in Harness's data folder: `HARNESS_DATA_DIR`, else
-    /// `~/.harness`.
+    /// The file in Harness's data folder, found the way the engine finds it
+    /// (`engine_cli.resolveDataDir`): `HARNESS_DATA_DIR`, `DATA_DIR`, then
+    /// `%LOCALAPPDATA%\Harness` on Windows or `~/.harness` elsewhere. The
+    /// engine's IPC token and lock live there too, so a different folder
+    /// leaves the app unable to authenticate (#229).
     pub fn open(gpa: Allocator, io: std.Io, env: *const std.process.Environ.Map) Store {
-        if (env.get("HARNESS_DATA_DIR")) |dir| return openIn(gpa, io, dir);
-        if (env.get("HOME")) |home| {
-            const dir = std.fs.path.join(gpa, &.{ home, ".harness" }) catch return .{ .gpa = gpa, .io = io };
-            defer gpa.free(dir);
-            return openIn(gpa, io, dir);
-        }
-        return .{ .gpa = gpa, .io = io };
+        return openFor(gpa, io, env, builtin.os.tag == .windows);
+    }
+
+    fn openFor(gpa: Allocator, io: std.Io, env: *const std.process.Environ.Map, windows: bool) Store {
+        const dir = engine_cli.resolveDataDirFor(gpa, io, env, windows) catch return .{ .gpa = gpa, .io = io };
+        defer gpa.free(dir);
+        return openIn(gpa, io, dir);
     }
 
     /// Opens Nano's own file in `dir`. On first run after the split, adopts
@@ -1489,4 +1525,32 @@ test "star banner dismissal and skipped updates persist per row version token" {
     try testing.expect(!s.isUpdateSkipped("agent:local:codex", "0.170.0"));
     s.clearSkippedUpdate("agent:local:codex");
     try testing.expect(!s.isUpdateSkipped("agent:local:codex", "0.169.0"));
+}
+
+test "Windows without HOME finds the engine's IPC token in LOCALAPPDATA/Harness (#229)" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // What the engine writes on start: `{data_dir}/ipc-token-{port}`.
+    try tmp.dir.createDirPath(io, "Harness");
+    try tmp.dir.writeFile(io, .{ .sub_path = "Harness/ipc-token-27664", .data = "synthetic-admin-token" });
+    const relative = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(relative);
+    const local = try std.Io.Dir.cwd().realPathFileAlloc(io, relative, gpa);
+    defer gpa.free(local);
+
+    // A Start-menu launch on Windows: LOCALAPPDATA set, HOME and HARNESS_DATA_DIR not.
+    var env = std.process.Environ.Map.init(gpa);
+    defer env.deinit();
+    try env.put("LOCALAPPDATA", local);
+    var s = Store.openFor(gpa, io, &env, true);
+    defer s.deinit();
+
+    const want = try std.fs.path.join(gpa, &.{ local, "Harness" });
+    defer gpa.free(want);
+    try testing.expectEqualStrings(want, s.dataDir() orelse return error.NoDataDir);
+    const tok = @import("ws.zig").resolveIpcToken(gpa, io, null, s.dataDir(), 27664, false) orelse return error.NoIpcToken;
+    defer gpa.free(tok);
+    try testing.expectEqualStrings("synthetic-admin-token", tok);
 }

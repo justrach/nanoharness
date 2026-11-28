@@ -1,7 +1,8 @@
 # Nano's Browser pane
 
 Nano keeps its native UI. A Browser side tab embeds the system WKWebView on
-macOS; it does not put the app itself in a webview. The sidebar, transcript,
+macOS; it does not put the app itself in a webview. On Linux and Windows the
+tab says "The integrated browser is available on macOS." The sidebar, transcript,
 composer and browser controls still use Harness's original SVGs and native
 layout.
 
@@ -12,12 +13,13 @@ native toolbar. Each Browser tab belongs to its conversation. Switching away
 or closing the pane hides its native view; closing the tab destroys it at a
 safe frame boundary.
 
-Click a Markdown HTTP(S) link to open a new Browser tab in that conversation.
-Links in a subagent or a Markdown file preview keep the containing chat as
-their owner. Link destinations appear on hover. A queued activation is
-abandoned if the selected conversation changes before the next frame.
-Privileged schemes, malformed URLs and embedded credentials are rejected;
-they never fall through to a system-browser launch.
+**Open in Harness** on a link's context menu opens it in a new Browser tab
+of that conversation; a plain click opens the system browser, except GitHub
+links, which follow **Open GitHub links in Harness** (see
+[transcript links](transcript-browser-links.md)). Links in a subagent or a
+Markdown file preview keep the containing chat as their owner. Privileged
+schemes, malformed URLs and embedded credentials are rejected; they never fall
+through to a system-browser launch.
 
 A tool's generated-page chip opens its saved HTML or MCP App in the pane.
 These are host-local: an unknown or different host is not guessed. Only a
@@ -34,12 +36,28 @@ handles. WebKit is allocated only when a nonempty Browser tab is actually
 shown; the normal native app's startup does not create browser processes.
 Browser navigation is event driven, not polled.
 
+## Preview consumers
+
+graff stops a background server that is still listening only when
+`~/.codegraff/preview-consumers.json` holds an explicit 0 for its port
+(codegraff #941). Nano writes that file: the number of web tabs that show
+each loopback port (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`), and
+0 once the last of them closes or Nano quits. Each Nano process also keeps
+its own counts in the file, so the next one to start retires the counts of
+a process that crashed. A port Nano handed to a browser it cannot see (a
+transcript link opened in the system browser, **Open externally**, **Open
+in browse**) is never written as 0 while that Nano runs. Zeros expire after
+a day. Updates take a lock beside the file and rename a complete file into
+place. `apps/nano/src/preview_consumers_vectors.json` pins the contract;
+graff runs an identical copy. Hidden, scripted and replayed runs, tests and
+scenes do not write it.
+
 ## Checks
 
-From `apps/nano`, using the same local nanoui dependency as the release app:
+From `apps/nano` (nanoui is the in-tree copy at `apps/nano/nanoui`):
 
 ```sh
-../../scripts/heavy-build.sh zig build test --fork=/path/to/nanoui
+../../scripts/heavy-build.sh zig build test
 ```
 
 `tests_ui_surfaces.zig` drives the native controls, transcript links and agent

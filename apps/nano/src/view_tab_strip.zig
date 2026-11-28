@@ -208,20 +208,21 @@ pub fn settle(a: *App) void {
             panels.showTab(a, ix);
         },
         .close_host_tab => |ix| panels.closeTab(a, ix),
-        .folder => |pick| {
-            focus(a, pick.panel);
+        .folder => |pick| folder: {
             const space = if (pick.index) |ix| (if (ix < a.spaces.items.len) a.spaces.items[ix].id else return) else null;
+            focus(a, pick.panel);
             if (a.selected) |sel| {
                 const cur_space = if (a.findChat(sel)) |ch| ch.space_id else null;
                 const same_space = if (cur_space) |cs| (if (space) |sp| std.mem.eql(u8, cs, sp) else false) else space == null;
-                if (!same_space) {
-                    a.tabs.setCurrent(null);
-                    a.select(null, space);
-                }
-            } else {
-                if (space == null) a.pickDraftDevice(a.draftDevice());
-                a.select(null, space);
+                if (same_space) break :folder;
+                // A project pick on an established chat creates a fresh tab,
+                // just like Cmd+T. Only a draft can change projects in place.
+                const tab_count = a.tabs.items.items.len;
+                a.newTab();
+                if (a.tabs.items.items.len == tab_count) break :folder;
             }
+            if (space == null) a.pickDraftDevice(a.draftDevice());
+            a.select(null, space);
             a.new_no_project = space == null;
             if (space == null) {
                 if (a.space) |old| a.gpa.free(old);

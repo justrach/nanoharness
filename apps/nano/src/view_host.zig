@@ -47,7 +47,8 @@ fn subagentSurface(c: *ui.Context, a: *App, k: theme.Colors, s: *@import("app_su
 
     // Resolve live state and model from the parent transcript + WatchToolProgress.
     var model: []const u8 = "";
-    var sub_state: aw.AgentState = if (!s.frozen and !s.transcript.complete) .running else .completed;
+    // Without its chip in a loaded parent, a settled child's outcome is unknown.
+    var sub_state: aw.AgentState = if (!s.frozen and !s.transcript.complete) .running else .ended;
     const session = @import("workspace.zig").sessionOf(a.sessions.items, s.parent);
     const parent_working = if (session) |row| row.status == .working else false;
     const selected_parent = if (a.selected) |id| std.mem.eql(u8, id, s.parent) else false;
@@ -87,18 +88,19 @@ fn subagentSurface(c: *ui.Context, a: *App, k: theme.Colors, s: *@import("app_su
             const pill_bg = switch (sub_state) {
                 .running => k.accent.alpha(0.14),
                 .failed => k.danger.alpha(0.14),
-                .completed, .cancelled => k.ink(0.06),
+                .completed, .cancelled, .ended => k.ink(0.06),
             };
             const pill_fg = switch (sub_state) {
                 .running => k.accent,
                 .failed => k.danger,
-                .completed, .cancelled => k.muted,
+                .completed, .cancelled, .ended => k.muted,
             };
             const pill_label = switch (sub_state) {
                 .running => "Running",
                 .completed => "Done",
                 .failed => "Failed",
                 .cancelled => "Stopped",
+                .ended => "Ended",
             };
             const pill = ui.div(c).row().h(22).px(8).gap(5).itemsCenter().rounded(11).bg(pill_bg);
             if (sub_state == .running) vaw.paintSpinner(c, 10, 1.35, k.accent, k.accent.alpha(0.22));
@@ -112,6 +114,14 @@ fn subagentSurface(c: *ui.Context, a: *App, k: theme.Colors, s: *@import("app_su
         }
     }
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
+
+    // The feed's error, in the transcript's error style, while it retries.
+    if (s.error_text) |message| {
+        ui.key(c, "subagent-feed-error");
+        const pad = ui.div(c).column().wFull().px(14).pt(12);
+        defer pad.end();
+        @import("view_transcript.zig").noticeChip(c, &a.view.copy_feedback, k, "Couldn't load this subagent's transcript", message).end();
+    }
 
     // 2. Scrollable subagent transcript.
     _ = @import("view_transcript.zig").entries(

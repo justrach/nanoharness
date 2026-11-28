@@ -104,17 +104,17 @@ Run **Flint INT4** locally on Apple Silicon alongside NanoHarness and a compatib
 
 ## Build from source
 
-Build from a checkout with Zig `0.17.0` and the Rust toolchain in [`rust-toolchain.toml`](rust-toolchain.toml):
+Build from a checkout with Zig `0.17.0` and the Rust toolchain in [`rust-toolchain.toml`](rust-toolchain.toml). The desktop app and the `harness` CLI are Zig (`apps/nano`); the engine they run is the Rust `harness-engine`.
 
 | Platform | Run |
 | --- | --- |
 | **macOS** | `./scripts/run-macos-dev.sh` |
-| **Linux** | `cargo build -p harness && ./target/debug/harness` |
-| **Windows** | `cargo run --locked -p harness` |
+| **Linux** | `cargo build -p harness-engine --bin harness-engine && (cd apps/nano && zig build) && apps/nano/zig-out/bin/harness-nano` |
+| **Windows** | `./scripts/package-windows.ps1 -ReleasesUrl https://github.com/justrach/nanoharness/releases/latest/download -CargoProfile release`, then run `harness-nano.exe` from `target/package/harness-VERSION-windows-x86_64` |
 
-The macOS script opens `target/macos-dev/Harness.app`. Development data lives in `target/macos-dev/data` unless `HARNESS_DEV_DATA_DIR` is set. Quit the app before rebuilding. For an offline tour with seeded sessions, run `./scripts/dev-demo.sh`.
+The macOS script builds `harness-engine` and the Zig app into `target/macos-dev/Harness.app` and opens it, with its own data in `target/macos-dev/data` (or `HARNESS_DEV_DATA_DIR`) and its own engine port, `49777` (or `HARNESS_DEV_IPC_PORT`). Quit the app before rebuilding. On Linux, `harness-nano` starts its engine through the `harness` beside it, which finds `target/debug/harness-engine` in the checkout.
 
-See [Windows development](docs/reference/windows-development.md) and the [Linux browser runtime](docs/reference/linux-browser.md) for platform-specific details.
+See [Windows development](docs/reference/windows-development.md) for platform-specific details, and [`apps/nano/README.md`](apps/nano/README.md) for tests and offscreen scenes.
 
 ## CodeGraff
 
@@ -136,7 +136,7 @@ The CodeGraff images are credited in [third-party notices](THIRD_PARTY_NOTICES.m
 
 ## Devices and accounts
 
-Each desktop device runs an engine and stores its local sessions. The GUI connects to an engine on the local IPC port or starts one in the app process. `harness headless` runs the engine without a window.
+Each desktop device runs an engine and stores its local sessions. The desktop app connects to the engine on its local port (`127.0.0.1:27664`, or `HARNESS_IPC_PORT`); when none answers, it starts `harness headless` as a separate process, which keeps running after the app quits. `harness headless` runs the engine without a window.
 
 Off-by-default agents (Antigravity, Cursor, and the others that are not Graff / Codex / Claude Code) are enabled on a desktop in **Settings → Agents**. On a headless Linux host, write the same setting to `{data_dir}/harness-prefs.json` under the `optedIn` key (default data dir `~/.harness`, override with `HARNESS_DATA_DIR`):
 

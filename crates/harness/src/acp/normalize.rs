@@ -37,6 +37,75 @@ pub(crate) fn cap_text(text: &str, cap: usize) -> String {
     out
 }
 
+/// Longest subagent failure reason shown, in bytes. graff bounds its own to
+/// 280; this holds whatever an engine sends.
+pub(crate) const REASON_CAP: usize = 512;
+
+/// A subagent's failure `reason` from graff (`_meta["graff/subagent"]`, or a
+/// background `terminal` event): untrusted display text, never interpreted.
+/// Control and direction-override characters become spaces, whitespace runs
+/// collapse to one line, and it is cut at [`REASON_CAP`] on a character
+/// boundary with an ellipsis. Absent, non-string or blank: `None`.
+pub(crate) fn subagent_reason(value: Option<&Value>) -> Option<String> {
+    let raw = value?.as_str()?;
+    let cleaned: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    let line = harness_proto::view::single_line(&cleaned);
+    if line.is_empty() {
+        return None;
+    }
+    if line.len() <= REASON_CAP {
+        return Some(line);
+    }
+    let mut end = REASON_CAP - '…'.len_utf8();
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(format!("{}…", line[..end].trim_end()))
+}
+
+/// graff's last progress row for a failed or cancelled child names its
+/// reason (newer engines only). Settle the spawn chip from it: the reason
+/// as the chip's one-line tail, then the child's Done. A detached child's
+/// spawn call resolved as success long before, and the progress row itself
+/// is live-only, so without this the outcome is lost after the turn.
+fn graff_subagent_settled(update: &Value, id: &str) -> Vec<AgentEvent> {
+    let Some(meta) = update.pointer("/_meta/graff~1subagent") else {
+        return Vec::new();
+    };
+    let status = match meta.get("state").and_then(Value::as_str) {
+        Some("failed") => harness_proto::DoneStatus::Errored,
+        Some("cancelled") => harness_proto::DoneStatus::Cancelled,
+        _ => return Vec::new(),
+    };
+    let Some(reason) = subagent_reason(meta.get("reason")) else {
+        return Vec::new();
+    };
+    let tagged = |event: AgentEvent| AgentEvent::Subagent {
+        parent_tool_use_id: id.to_owned(),
+        event: Box::new(event),
+    };
+    vec![
+        tagged(AgentEvent::SubagentProgress {
+            summary: reason.clone(),
+        }),
+        tagged(AgentEvent::Done {
+            status,
+            result: None,
+            error: Some(reason),
+            session_id: None,
+        }),
+    ]
+}
+
 /// The text of a `ContentBlock` (`{type: "text", text}`); non-text blocks
 /// (image, audio, resource, resource_link) render as nothing.
 pub(crate) fn content_block_text(block: &Value) -> Option<&str> {
@@ -568,6 +637,7 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
                 // and this is its live output (graff streams a subagent's
                 // rolling log this way). It replaces the last one and never
                 // resolves the call.
+                let settled = graff_subagent_settled(update, &id);
                 events.push(AgentEvent::ToolProgress {
                     id,
                     output,
@@ -576,16 +646,19 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
                         .and_then(Value::as_str)
                         .map(str::to_owned),
                 });
+                events.extend(settled);
             } else if let Some(state) = update
                 .pointer("/_meta/graff~1subagent/state")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
             {
+                let settled = graff_subagent_settled(update, &id);
                 events.push(AgentEvent::ToolProgress {
                     id,
                     output: String::new(),
                     state: Some(state.to_owned()),
                 });
+                events.extend(settled);
             }
             events
         }
@@ -969,6 +1042,65 @@ mod tests {
         ));
         // A bare status-less update with no content stays silent.
         assert!(map_update(&json!({"sessionUpdate": "tool_call_update", "toolCallId": "spawn-1"})).is_empty());
+    }
+
+    // graff's last progress row for a failed or cancelled child carries the
+    // reason on `_meta["graff/subagent"]`. It settles the spawn chip, so the
+    // outcome outlives the live-only progress row (a detached child's spawn
+    // call resolved as success long before).
+    #[test]
+    fn graff_subagent_last_progress_row_reason_settles_the_chip() {
+        let row = |state: &str, reason: Option<&str>| {
+            let mut meta = json!({"sessionId": "sa-1", "name": "Inspect example", "state": state});
+            if let Some(reason) = reason {
+                meta["reason"] = json!(reason);
+                meta["failureKind"] = json!("invalid");
+            }
+            json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "spawn-1",
+                "content": [{"type": "content", "content": {"type": "text", "text": "▸ read_file\n✗ failed"}}],
+                "_meta": {"graff/subagent": meta},
+            })
+        };
+        let reason = "synthetic bad argument [invalid-arguments failure, 1 attempt]";
+        let tagged = |event: AgentEvent| AgentEvent::Subagent {
+            parent_tool_use_id: "spawn-1".into(),
+            event: Box::new(event),
+        };
+        assert_eq!(
+            map_update(&row("failed", Some(reason))),
+            vec![
+                AgentEvent::ToolProgress {
+                    id: "spawn-1".into(),
+                    output: "▸ read_file\n✗ failed".into(),
+                    state: Some("failed".into()),
+                },
+                tagged(AgentEvent::SubagentProgress {
+                    summary: reason.into()
+                }),
+                tagged(AgentEvent::Done {
+                    status: harness_proto::DoneStatus::Errored,
+                    result: None,
+                    error: Some(reason.into()),
+                    session_id: None,
+                }),
+            ]
+        );
+        let cancelled = map_update(&row("cancelled", Some("Interrupted")));
+        assert!(
+            matches!(cancelled.last(), Some(AgentEvent::Subagent { event, .. })
+            if matches!(event.as_ref(), AgentEvent::Done { status: harness_proto::DoneStatus::Cancelled, .. }))
+        );
+        // An older engine's row, without a reason, is only live progress.
+        assert_eq!(
+            map_update(&row("failed", None)),
+            vec![AgentEvent::ToolProgress {
+                id: "spawn-1".into(),
+                output: "▸ read_file\n✗ failed".into(),
+                state: Some("failed".into()),
+            }]
+        );
     }
 
     #[test]

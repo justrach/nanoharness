@@ -23,6 +23,7 @@
 import { bearerFromRequest, verifyRefreshCredential, verifyToken } from "./auth";
 import { ACCOUNT_DELETE_URL, CodegraffAuthFailed, codegraffAccess } from "./codegraff";
 import { AUTH_USER_HEADER, type Env } from "./env";
+import { readJsonCapped } from "./body";
 import { AUTH_ORG_HEADER, roomActorStub, roomStore, userRoomIds } from "./room-actor";
 
 const json = (value: unknown, status = 200): Response =>
@@ -102,7 +103,9 @@ export const deleteAccount = async (request: Request, env: Env): Promise<Respons
   if (!caller) return json({ error: "invalid or missing bearer token" }, 401);
   if (caller.trustTier === "sandbox") return json({ error: "trust_tier_denied" }, 403);
 
-  const body = (await request.json().catch(() => null)) as { refreshToken?: unknown; confirm?: unknown } | null;
+  const parsed = await readJsonCapped(request, 32 * 1024);
+  if (!parsed.ok && parsed.status === 413) return json({ error: "too_large" }, 413);
+  const body = parsed.ok ? (parsed.value as { refreshToken?: unknown; confirm?: unknown } | null) : null;
   if (body?.confirm !== "delete") return json({ error: "confirm_required" }, 400);
   if (typeof body.refreshToken !== "string") return json({ error: "missing refreshToken" }, 400);
   const credential = await verifyRefreshCredential(env, body.refreshToken);

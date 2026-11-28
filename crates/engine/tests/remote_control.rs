@@ -6,7 +6,8 @@
 //! pre-#179 main, while `sandbox_runtime_admits_remote_commands_and_relay_actions_while_blocking_local_only`,
 //! `enabling_remote_control_drains_previously_parked_remote_commands`, and
 //! `relay_upload_commit_with_device_id_is_admitted_for_approved_caller` fail on
-//! pre-fix `main` (`e9e410fa`).
+//! pre-fix `main` (`e9e410fa`). The Allow once, unidentified-caller and
+//! refusal-text tests fail on `6f978f72`; each says how.
 
 #![allow(clippy::result_large_err)]
 
@@ -85,6 +86,345 @@ async fn relay_rpc_refuses_queue_command_until_remote_control_is_on() {
         .await
         .expect("QueueCommand is served once this caller is approved");
     assert_eq!(queued["method"], methods::QUEUE_COMMAND);
+}
+
+/// Synthetic `ApplyCheckoutGitAction` params as a peer device sends them.
+fn git_commit_params(device: &str, message: &str) -> serde_json::Value {
+    json!({
+        "relayDeviceId": device,
+        "chatId": "chat-synthetic",
+        "checkoutId": "checkout-synthetic",
+        "expectedChecksum": "checksum-synthetic",
+        "action": { "kind": "commit", "message": message },
+        "targetDeviceId": "host-synthetic",
+    })
+}
+
+/// The owner's report: "Allow once" on a parked relayed action granted
+/// nothing, so the retry was refused with the same text. Fails on `main`
+/// (`6f978f72`): the retry is refused again.
+#[tokio::test]
+async fn allow_once_admits_the_same_devices_retry_exactly_once() {
+    let registry = Arc::new(HarnessRegistry::new());
+    registry.set_remote_control(true);
+    let client = harness_rpc::memory_client(RelayRpc::wrap(Arc::new(Inner), registry.clone()));
+    let params = git_commit_params("phone-1", "synthetic commit");
+
+    client
+        .call(methods::APPLY_CHECKOUT_GIT_ACTION, params.clone())
+        .await
+        .expect_err("an unapproved device's first git action parks");
+    let pending = registry.pending_remote_approvals();
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert!(registry.resolve_remote_approval(&pending[0].id, true, false));
+    assert!(registry.pending_remote_approvals().is_empty());
+
+    let admitted = client
+        .call(methods::APPLY_CHECKOUT_GIT_ACTION, params.clone())
+        .await
+        .expect("Allow once admits the same device's retry of the same action");
+    assert_eq!(admitted["method"], methods::APPLY_CHECKOUT_GIT_ACTION);
+
+    client
+        .call(methods::APPLY_CHECKOUT_GIT_ACTION, params)
+        .await
+        .expect_err("Allow once is spent by the first retry");
+    assert!(
+        !registry.remote_device_approved("phone-1"),
+        "Allow once must not persist the device"
+    );
+}
+
+/// Park `params` from its device and resolve the item with Allow once.
+async fn park_and_allow_once(
+    client: &harness_rpc::RpcClient,
+    registry: &HarnessRegistry,
+    method: &str,
+    params: serde_json::Value,
+) {
+    client
+        .call(method, params)
+        .await
+        .expect_err("an unapproved device's first action parks");
+    let pending = registry.pending_remote_approvals();
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert!(pending[0].allow_once, "{pending:?}");
+    assert!(registry.resolve_remote_approval(&pending[0].id, true, false));
+}
+
+fn without_caller(mut params: serde_json::Value) -> serde_json::Value {
+    params.as_object_mut().unwrap().remove("relayDeviceId");
+    params
+}
+
+/// Fails on `main` (`6f978f72`): there is no grant to spend at the end.
+#[tokio::test]
+async fn allow_once_admits_no_other_device_method_request_or_local_only_action() {
+    let registry = Arc::new(HarnessRegistry::new());
+    registry.set_remote_control(true);
+    let client = harness_rpc::memory_client(RelayRpc::wrap(Arc::new(Inner), registry.clone()));
+    let git = methods::APPLY_CHECKOUT_GIT_ACTION;
+    let params = git_commit_params("phone-1", "synthetic commit");
+    park_and_allow_once(&client, &registry, git, params.clone()).await;
+
+    let other_device = client
+        .call(git, git_commit_params("phone-2", "synthetic commit"))
+        .await
+        .expect_err("another device's identical request");
+    assert!(
+        other_device.to_string().contains("needs approval"),
+        "{other_device}"
+    );
+    let other_method = client
+        .call(
+            methods::DISCARD_WORKING_TREE,
+            json!({
+                "relayDeviceId": "phone-1",
+                "chatId": "chat-synthetic",
+                "checkoutId": "checkout-synthetic",
+                "expectedChecksum": "checksum-synthetic",
+            }),
+        )
+        .await
+        .expect_err("another gated method from the same device");
+    assert!(
+        other_method.to_string().contains("needs approval"),
+        "{other_method}"
+    );
+    let other_request = client
+        .call(git, git_commit_params("phone-1", "a different message"))
+        .await
+        .expect_err("the same method with different params");
+    assert!(
+        other_request.to_string().contains("needs approval"),
+        "{other_request}"
+    );
+    for method in [
+        methods::SET_AUTONOMY,
+        methods::SET_REMOTE_CONTROL,
+        methods::APPROVE_REMOTE_ACTION,
+        methods::APPLY_UPDATE,
+    ] {
+        let err = client
+            .call(method, git_commit_params("phone-1", "synthetic commit"))
+            .await
+            .expect_err(method);
+        assert!(
+            err.to_string().contains("only be done on the computer"),
+            "{method}: {err}"
+        );
+    }
+    assert!(!registry.remote_device_approved("phone-1"));
+
+    // None of those spent it: the approved request still goes through, once.
+    client
+        .call(git, params.clone())
+        .await
+        .expect("the approved request is still admitted");
+    client.call(git, params).await.expect_err("and only once");
+}
+
+/// The off/on half also holds on `main` (where no grant ever existed); the
+/// expiry half pins the lifetime against an injected clock through
+/// `take_relay_once_grant`, which `main` does not have.
+#[tokio::test]
+async fn allow_once_is_withdrawn_when_remote_control_goes_off_and_expires() {
+    let registry = Arc::new(HarnessRegistry::new());
+    registry.set_remote_control(true);
+    let client = harness_rpc::memory_client(RelayRpc::wrap(Arc::new(Inner), registry.clone()));
+    let git = methods::APPLY_CHECKOUT_GIT_ACTION;
+    let params = git_commit_params("phone-1", "synthetic commit");
+
+    park_and_allow_once(&client, &registry, git, params.clone()).await;
+    registry.set_remote_control(false);
+    let off = client
+        .call(git, params.clone())
+        .await
+        .expect_err("nothing is admitted while remote control is off");
+    assert!(off.to_string().contains("Remote control is off"), "{off}");
+    registry.set_remote_control(true);
+    let again = client
+        .call(git, params.clone())
+        .await
+        .expect_err("turning remote control back on does not revive the grant");
+    assert!(again.to_string().contains("needs approval"), "{again}");
+
+    // Lifetime: the grant is gone once RELAY_ALLOW_ONCE_TTL has passed.
+    let pending = registry.pending_remote_approvals();
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert!(registry.resolve_remote_approval(&pending[0].id, true, false));
+    let digest = harness_engine::relay_request_digest(&without_caller(params.clone()));
+    let later = std::time::Instant::now() + harness_rpc::RELAY_ALLOW_ONCE_TTL;
+    assert!(
+        !registry.take_relay_once_grant("phone-1", git, &digest, later),
+        "an expired grant admits nothing"
+    );
+    let expired = client
+        .call(git, params.clone())
+        .await
+        .expect_err("the expired grant was dropped");
+    assert!(expired.to_string().contains("needs approval"), "{expired}");
+
+    // Before it expires, the injected clock sees the same grant as usable.
+    let pending = registry.pending_remote_approvals();
+    assert!(registry.resolve_remote_approval(&pending[0].id, true, false));
+    let soon = std::time::Instant::now() + harness_rpc::RELAY_ALLOW_ONCE_TTL / 2;
+    assert!(registry.take_relay_once_grant("phone-1", git, &digest, soon));
+}
+
+/// Regression guard: passes on `main` too. Always allow persists the device
+/// and Deny grants nothing.
+#[tokio::test]
+async fn always_allow_still_persists_and_deny_still_denies() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(HarnessRegistry::new());
+    registry.load_prefs(dir.path());
+    registry.set_remote_control(true);
+    let client = harness_rpc::memory_client(RelayRpc::wrap(Arc::new(Inner), registry.clone()));
+    let git = methods::APPLY_CHECKOUT_GIT_ACTION;
+
+    let denied = git_commit_params("phone-2", "synthetic commit");
+    client.call(git, denied.clone()).await.expect_err("parks");
+    let pending = registry.pending_remote_approvals();
+    assert!(!registry.resolve_remote_approval(&pending[0].id, false, false));
+    client
+        .call(git, denied)
+        .await
+        .expect_err("Deny admits nothing");
+
+    let params = git_commit_params("phone-1", "synthetic commit");
+    client.call(git, params.clone()).await.expect_err("parks");
+    let pending = registry.pending_remote_approvals();
+    let item = pending
+        .iter()
+        .find(|p| p.device_id == "phone-1")
+        .expect("phone-1 parked");
+    assert!(registry.resolve_remote_approval(&item.id, true, true));
+    for message in ["synthetic commit", "another synthetic commit"] {
+        client
+            .call(git, git_commit_params("phone-1", message))
+            .await
+            .expect("Always allow admits the device's requests");
+    }
+    let reloaded = HarnessRegistry::new();
+    reloaded.load_prefs(dir.path());
+    assert!(reloaded.remote_device_approved("phone-1"));
+    assert!(!reloaded.remote_device_approved("phone-2"));
+}
+
+/// Fails on `main` (`6f978f72`): the request was parked under "unknown",
+/// a row no button could ever approve.
+#[tokio::test]
+async fn a_request_naming_no_device_is_refused_and_parks_nothing() {
+    let registry = Arc::new(HarnessRegistry::new());
+    registry.set_remote_control(true);
+    let client = harness_rpc::memory_client(RelayRpc::wrap(Arc::new(Inner), registry.clone()));
+    for params in [
+        without_caller(git_commit_params("x", "synthetic commit")),
+        git_commit_params("unknown", "synthetic commit"),
+    ] {
+        let err = client
+            .call(methods::APPLY_CHECKOUT_GIT_ACTION, params)
+            .await
+            .expect_err("an unidentified caller is refused");
+        assert!(
+            err.to_string()
+                .contains("couldn't tell which device sent it"),
+            "{err}"
+        );
+    }
+    assert!(registry.pending_remote_approvals().is_empty());
+}
+
+/// Fails on `main` (`6f978f72`): one text served every case and named
+/// neither computer.
+#[tokio::test]
+async fn each_refusal_names_its_case_the_host_and_the_device() {
+    let registry = Arc::new(HarnessRegistry::new());
+    let names: harness_engine::DeviceNames = Arc::new(|id: &str| match id {
+        "host-synthetic" => Some("Studio Mac".to_string()),
+        "phone-1" => Some("Pocket".to_string()),
+        _ => None,
+    });
+    let client = harness_rpc::memory_client(RelayRpc::wrap_named(
+        Arc::new(Inner),
+        registry.clone(),
+        "host-synthetic",
+        names,
+    ));
+    let git = methods::APPLY_CHECKOUT_GIT_ACTION;
+    let err = |e: RpcError| match e {
+        RpcError::Failed(text) => text,
+        other => panic!("unexpected {other:?}"),
+    };
+
+    let off = err(client
+        .call(git, git_commit_params("phone-1", "m"))
+        .await
+        .unwrap_err());
+    assert_eq!(
+        off,
+        "Remote control is off on Studio Mac. On Studio Mac, turn on Settings → Devices → \
+         Allow remote control, then try again."
+    );
+    registry.set_remote_control(true);
+    let needs = err(client
+        .call(git, git_commit_params("phone-1", "m"))
+        .await
+        .unwrap_err());
+    assert_eq!(
+        needs,
+        "This action from Pocket needs approval on Studio Mac. On Studio Mac, open \
+         Settings → Devices and choose Allow once or Always allow, then try again."
+    );
+    let terminal = err(client
+        .call(
+            methods::WRITE_TERMINAL,
+            json!({ "relayDeviceId": "phone-1", "terminalId": "t1", "data": "ls\n" }),
+        )
+        .await
+        .unwrap_err());
+    assert_eq!(
+        terminal,
+        "This action from Pocket needs approval on Studio Mac. On Studio Mac, open \
+         Settings → Devices and choose Always allow, then try again."
+    );
+    let unnamed = err(client
+        .call(git, git_commit_params("phone-9", "m"))
+        .await
+        .unwrap_err());
+    assert!(
+        unnamed.starts_with("This action from this device needs approval on Studio Mac."),
+        "{unnamed}"
+    );
+    let unidentified = err(client
+        .call(git, without_caller(git_commit_params("x", "m")))
+        .await
+        .unwrap_err());
+    assert_eq!(
+        unidentified,
+        "This action wasn't run: Studio Mac couldn't tell which device sent it, so it \
+         can't be approved. Update Harness on this device, then try again."
+    );
+
+    let pending = registry.pending_remote_approvals();
+    let git_row = pending
+        .iter()
+        .find(|p| p.device_id == "phone-1" && p.method.as_deref() == Some(git))
+        .expect("git row");
+    assert_eq!(
+        git_row.summary,
+        "ApplyCheckoutGitAction from Pocket (phone-1)"
+    );
+    assert!(git_row.allow_once);
+    let terminal_row = pending
+        .iter()
+        .find(|p| p.method.as_deref() == Some(methods::WRITE_TERMINAL))
+        .expect("terminal row");
+    assert!(
+        !terminal_row.allow_once,
+        "Allow once can't cover a terminal"
+    );
 }
 
 #[tokio::test]

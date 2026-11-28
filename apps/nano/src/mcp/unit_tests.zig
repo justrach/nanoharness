@@ -277,14 +277,14 @@ const mock_claude =
 ;
 
 /// An in-process engine with made-up spaces and chats, and the tools over it.
-const WorldFixture = struct {
+pub const WorldFixture = struct {
     arena: std.heap.ArenaAllocator,
     world: World = undefined,
     peer: FakePeer = undefined,
     bots: FakeBots = undefined,
     t: tools.Tools = undefined,
 
-    fn create(origin: tools.Origin) !*WorldFixture {
+    pub fn create(origin: tools.Origin) !*WorldFixture {
         const gpa = testing.allocator;
         const f = try gpa.create(WorldFixture);
         f.* = .{ .arena = std.heap.ArenaAllocator.init(gpa) };
@@ -305,12 +305,12 @@ const WorldFixture = struct {
         return f;
     }
 
-    fn destroy(f: *WorldFixture) void {
+    pub fn destroy(f: *WorldFixture) void {
         f.arena.deinit();
         testing.allocator.destroy(f);
     }
 
-    fn call(f: *WorldFixture, name: []const u8, args: []const u8) !tools.Outcome {
+    pub fn call(f: *WorldFixture, name: []const u8, args: []const u8) !tools.Outcome {
         const a = f.arena.allocator();
         return f.t.call(a, name, try json.parseFromSliceLeaky(Value, a, args, .{}));
     }
@@ -326,7 +326,7 @@ const WorldFixture = struct {
     }
 };
 
-fn ok(o: tools.Outcome) !Value {
+pub fn ok(o: tools.Outcome) !Value {
     return switch (o) {
         .ok => |v| v,
         .err => |m| {
@@ -336,7 +336,7 @@ fn ok(o: tools.Outcome) !Value {
     };
 }
 
-fn expectErr(o: tools.Outcome, want: []const u8) !void {
+pub fn expectErr(o: tools.Outcome, want: []const u8) !void {
     switch (o) {
         .ok => return error.TestExpectedError,
         .err => |m| try testing.expectEqualStrings(want, m),

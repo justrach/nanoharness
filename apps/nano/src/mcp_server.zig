@@ -449,5 +449,5 @@ test {
     _ = @import("mcp/unicode_alnum.zig");
     _ = @import("mcp/bots.zig");
     _ = @import("mcp/tools.zig");
-    _ = @import("mcp/unit_tests.zig");
+    _ = @import("mcp/peer_delivery_tests.zig");
 }

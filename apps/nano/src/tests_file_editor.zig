@@ -566,6 +566,27 @@ test "file editor blank canvas uses explicit space checkout target and returns t
     }
 }
 
+test "session parity followup dirty file in another pane does not occupy this blank pane" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try connect(&h, writable);
+    h.a.newTab();
+    h.a.select(null, "local-project");
+    const e = try open(&h);
+    edit(e, "Keep these draft file edits");
+    h.a.splitPane(.horizontal);
+    const workspace = h.a.tabs.active;
+    h.a.openChatInTab("b");
+    try testing.expectEqualStrings("b", h.a.selected.?);
+    try testing.expectEqual(workspace, h.a.tabs.active);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.focus);
+    h.a.focusPane(0);
+    try testing.expect(h.a.selected == null);
+    try testing.expect(e.dirty());
+    try testing.expect(e.matchesCurrent(&h.a));
+}
+
 test "file editor closed blank canvas recovers an owner without replacing surviving chat work" {
     var h: Harness = undefined;
     try h.init(true);

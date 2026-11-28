@@ -32,8 +32,8 @@ Watch and acknowledgement revisions are monotonic within an engine attachment, n
 cargo test --locked -p harness-proto --lib
 cargo test --locked -p harness-doc --lib
 cargo test --locked -p harness-engine --lib
-cargo test --locked -p harness-ui --lib -- --test-threads=1
+(cd apps/nano && zig build test -Dtest-filter="pin")
 cd edge && npm run typecheck && npm test
 ```
 
-Run `HarnessTests/PinnedSessionsTests` on an iOS simulator for Swift key parity, dense insertion, membership, persistence and ignored old preferences. Registry tests cover independent concurrent moves, move/unpin races, duplicated delivery, restarts and capacity overflow. Workerd tests verify single-pin writes and unchanged session activity on real SQLite. Native UI and RPC tests cover filtered movement, drag gaps, empty targets, animated returns, successful-drop animation suppression, serialization, failures, timeouts and late acknowledgements.
+Run `HarnessTests/PinnedSessionsTests` on an iOS simulator for Swift key parity, dense insertion, membership, persistence and ignored old preferences. Registry tests cover independent concurrent moves, move/unpin races, duplicated delivery, restarts and capacity overflow. Workerd tests verify single-pin writes and unchanged session activity on real SQLite. The desktop's pin rules are tested in `apps/nano/src/pins.zig`: pins lead without changing unpinned recency, a filtered reorder keeps every other pin's relative order, invalid or no-op moves are rejected, cleanup keeps archived pins and prunes deleted ones, and rows slide toward the drop gap.

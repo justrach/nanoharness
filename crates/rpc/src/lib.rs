@@ -40,9 +40,10 @@ pub use harness_sync::device_crypto::{
     wrap_workspace_key,
 };
 pub use remote_control::{
-    RELAY_LOCAL_ONLY, RELAY_NEEDS_APPROVAL, REMOTE_CONTROL_OFF, RelayAdmit, RemoteApproval,
-    RemoteCommandAdmit, admit_relay_action, admit_relay_rpc, admit_remote_command,
-    relay_first_action_method,
+    RELAY_ALLOW_ONCE_TTL, RELAY_DEVICE_FALLBACK, RELAY_HOST_FALLBACK, RELAY_LOCAL_ONLY, RelayAdmit,
+    RelayOnceGrant, RemoteApproval, RemoteCommandAdmit, UNKNOWN_CALLER, admit_relay_action,
+    admit_relay_caller, admit_relay_rpc, admit_remote_command, relay_allow_once_method,
+    relay_caller_identified, relay_first_action_method, relay_refusal_reason, relay_refusal_text,
 };
 pub use server::{IpcAuth, serve_connection, serve_ws_listener, serve_ws_listener_authenticated};
 

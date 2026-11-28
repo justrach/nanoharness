@@ -1216,6 +1216,9 @@ pub(crate) async fn read_diff_file_text_at(
 /// Resolve the parent used as a commit diff's old side. Root commits compare
 /// against Git's canonical empty tree.
 pub(crate) async fn commit_diff_base(root: &Path, sha: &str) -> String {
+    if crate::repos::validate_git_ref_arg(sha).is_err() {
+        return EMPTY_TREE_SHA.to_string();
+    }
     let parent_spec = format!("{sha}^");
     let parent = capture_git(root, &["rev-parse", "--verify", &parent_spec], 256)
         .await
@@ -1668,6 +1671,7 @@ pub async fn capture_commit_diff(
     root: &Path,
     sha: &str,
 ) -> Result<DiffSnapshot, EngineError> {
+    crate::repos::validate_git_ref_arg(sha)?;
     let base = commit_diff_base(root, sha).await;
     let branch = repos
         .current_branch(root)
@@ -1755,6 +1759,7 @@ pub async fn capture_commit_diff(
 /// `git merge-base <base_ref> HEAD` — the diff base for "Branch changes".
 /// Errors when the ref is unknown or the histories are unrelated.
 pub async fn merge_base(root: &Path, base_ref: &str) -> Result<String, EngineError> {
+    crate::repos::validate_git_ref_arg(base_ref)?;
     let capture = capture_git(root, &["merge-base", base_ref, "HEAD"], 256).await?;
     let sha = String::from_utf8_lossy(&capture.stdout).trim().to_string();
     if sha.is_empty() {
@@ -2172,5 +2177,21 @@ mod watch_budget_tests {
             untracked_patch("my file.txt", "one\ntwo"),
             "diff --git \"a/my file.txt\" \"b/my file.txt\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/my file.txt\"\n@@ -0,0 +1,2 @@\n+one\n+two\n"
         );
+    }
+
+    #[tokio::test]
+    async fn commit_diff_and_merge_base_reject_git_flag_injection() {
+        let dir = tempfile::tempdir().unwrap();
+        let repos =
+            crate::Repos::with_worktrees_root(dir.path(), "device", dir.path().join("worktrees"));
+        let marker = dir.path().join("git-diff-output-pwn");
+        let bad_sha = format!("--output={}", marker.display());
+        assert!(
+            super::capture_commit_diff(&repos, dir.path(), &bad_sha)
+                .await
+                .is_err()
+        );
+        assert!(!marker.exists(), "git diff must not execute --output");
+        assert!(super::merge_base(dir.path(), "--all").await.is_err());
     }
 }

@@ -201,14 +201,15 @@ func effectiveStatus(_ row: SessionRow?, now: Int64) -> SessionStatus? {
     }
 }
 
-/// entities.rs:147 — live Working/AwaitingInput win; Errored only if unseen;
-/// else unseen ⇒ Completed; else Idle.
+/// Show completion attention for an unseen reply with a settled session row.
+/// Missing or stale status provides no completion evidence.
 func chatIndicator(chat: Chat, live: SessionStatus?) -> ChatIndicator {
     switch live {
     case .working: return .working
     case .awaitingInput: return .awaitingInput
     case .errored: return chat.unseen ? .errored : .idle
-    default: return chat.unseen ? .completed : .idle
+    case .idle: return chat.unseen ? .completed : .idle
+    case nil: return .idle
     }
 }
 

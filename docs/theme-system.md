@@ -2,54 +2,44 @@
 
 Harness themes are complete, source-neutral theme definitions stored in
 `apps/nano/themes.json` and loaded by `apps/nano/src/themes.zig`. Runtime
-components consume only Harness semantic roles. VS Code workbench ids and
-TextMate selectors stop at the source compiler.
+components consume only Harness semantic roles (`theme.Colors` in
+`apps/nano/src/theme.zig`). VS Code workbench ids and TextMate selectors stop
+at the importer.
 
 ## Runtime model
 
-- `ThemeFamily` groups related variants.
-- `ThemeVariant` is one completely resolved light or dark palette.
-- `ThemeSelection` stores independent light and dark variant ids.
-- `AccentSelection::ThemeDefault` preserves the variant's authored accent.
-- `AccentSelection::Preset` derives a contrast-checked interaction overlay.
-- Every variant records a recommended `SurfaceTreatment`: Harness
-  recommends frost, while Codegraff (the default) and VS Code-derived themes
-  recommend opaque surfaces.
-- `SurfacePreference` is a separate device-local choice: `Theme default`,
-  `Frosted`, or `Opaque`. It does not change appearance, theme, or accent
-  selection. Settings shows it as one **Frosted glass** switch reflecting the
-  look in effect; flipping it stores `Frosted` or `Opaque`.
-- Terminal background, foreground, selection and ANSI16 colors belong to the
-  variant instead of the terminal renderer.
+- A family groups related variants; a variant (`themes.Variant`) is one
+  completely resolved light or dark palette.
+- The settings keep independent light and dark choices
+  (`themeSelection.light`, `themeSelection.dark`). New installs use
+  `codegraff-light` and `codegraff-dark`.
+- Settings → Appearance switches between **System**, **Light** and **Dark**.
+- `accent` is `themeDefault` (the variant's authored accent) or the name of a
+  preset, which derives a contrast-checked interaction overlay. The accent
+  affects controls, focus, selections, caret, activity and the three-tone
+  glyph. It does not recolor syntax, terminal ANSI, status, or diff semantics.
+- Every variant records a recommended surface treatment. Harness, Codegraff,
+  Warm Harp and Harp recommend frost; the others recommend opaque surfaces.
+- The surface preference is a separate device-local choice, stored as
+  `surface`: `frosted`, `opaque`, or absent for the variant's recommendation
+  (`apps/nano/src/surface_palette.zig`). It does not change appearance, theme
+  or accent. Settings shows it as one **Frosted glass** switch reflecting the
+  look in effect; flipping it stores `frosted` or `opaque`.
+- Terminal ANSI colors belong to the variant.
 
-Accent overlays affect controls, focus, selections, caret, activity and the
-three-tone glyph. They do not recolor syntax, terminal ANSI, status, or diff
-semantics.
+Frost derives the window, card, overlay and composer tints from the variant's
+own shell roles rather than fixed greys, and thickens a tint when needed to
+keep text readable against the desktop behind it. macOS and Windows let the
+window shell show through; elsewhere the shell stays opaque.
 
-Surface preference affects only surface composition. Theme default preserves
-the variant's recommendation; either override remains active while users move
-between built-in, imported, and linked themes. Forced frost derives window,
-floating, input, card, and hover tints from the variant's mapped shell roles
-instead of fixed Harness greys. Its window tint becomes denser when necessary to
-keep primary text at 4.5:1 and muted text at 3:1 against the adverse desktop
-luminance. Floating overlays, settings cards, and inputs run the same
-composited-background check independently; a delicate palette can therefore
-receive a thicker material on one surface without disabling frost everywhere.
+## Built-in themes
 
-macOS and Windows can frost the main window (native vibrancy and Acrylic,
-respectively). Linux keeps the main window opaque because compositor blur is
-not guaranteed. Supported floating surfaces can frost on macOS, Linux, and
-Windows using their in-app renderers. Windows uses the bounded Direct3D
-`BackdropBlur` implementation; native window Acrylic remains independent.
-The preference remains portable even where a particular surface cannot honor blur.
+`apps/nano/themes.json` has 37 variants across 22 families:
 
-New installs select Codegraff Light and Dark. The built-in registry contains
-33 variants across 20 families:
-
-- OpenCodex Light and Dark (an independently adapted Codex-inspired palette)
-- Codegraff Light and Dark
 - Harness Light and Dark
-- VS Code Light+ and Dark+
+- Codegraff Light and Dark
+- OpenCodex Light and Dark (an independently adapted Codex-inspired palette)
+- VS Code Default: Light+ and Dark+
 - Catppuccin Latte and Mocha
 - Tokyo Night Light and Tokyo Night
 - Dracula
@@ -60,104 +50,77 @@ New installs select Codegraff Light and Dark. The built-in registry contains
 - Nord
 - One Dark Pro
 - Atom One Dark
-- Night Owl and Night Owl Light
-- Winter is Coming Dark Blue and Light
+- Night Owl Light and Night Owl
+- Winter is Coming Light and Dark Blue
 - Palenight
 - SynthWave '84
 - Cobalt2
 - Andromeda
+- Warm Harp Light and Dark
+- Harp Light and Dark
 
-Every bundled variant records source URL, exact upstream revision, license, and
-a SHA-256 hash of the resolved curated definition.
+Every bundled variant records its source URL, upstream revision, license, and
+a SHA-256 hash of the resolved definition. The file is maintained by hand in
+this repository.
 
-Appearance settings keep light and dark choices in ordinary settings rows.
-Each row opens a palette-preview menu, which allows the catalog to grow without
-turning the page into a grid of bespoke buttons. Accent remains a compact
-right-aligned swatch control; its three-tone first swatch means “Theme default.”
-Glass is an adjacent conventional settings row with a compact
-`Theme default` / `Frosted` / `Opaque` selector.
+Appearance settings keep the light and dark choices in ordinary settings rows.
+Each row opens a menu ("Light themes" or "Dark themes") with a small palette
+preview per variant, so the catalog can grow without turning the page into a
+grid of buttons. Accent is a compact row of swatches; the first means "Theme
+default".
 
 ## VS Code import
 
-The importer supports JSONC, trailing commas,
-`include` inheritance, inline or external token rules, TextMate plist files,
-workbench colors, semantic token colors, and terminal ANSI colors.
+The importer (`apps/nano/src/theme_import.zig`) reads JSONC (comments,
+trailing commas), `include` inheritance up to 32 levels, inline or external
+token rules, TextMate `.tmTheme`/plist files, workbench colors and semantic
+token colors.
 
-Appearance settings accept a single theme file, an extension `package.json`, or
-an extension folder. Packages are detected from `contributes.themes`; variants
-are classified by `uiTheme`, an explicit theme `type`, or the resolved editor
-background. Each package variant compiles independently so a broken variant is
-reported without hiding valid siblings. Users can select all or individual
-variants, preview representative workbench/code/terminal/diff roles, and open
-the optional mapping review.
+Settings → Appearance → **Add theme** accepts a theme file, an extension
+`package.json`, or an extension folder. Packages are detected from
+`contributes.themes`; variants are classified by `uiTheme` or the resolved
+editor background. Each package variant compiles independently, so a broken
+variant is reported without hiding valid siblings. **Theme mapping** shows,
+per variant, every role mapping, adjustment, fallback and warning.
 
-The importer records `Opaque` as the variant's recommended surface treatment
-and reports that inference. This preserves the source palette by default while
-still allowing the independent Harness surface preference to force frost.
+The importer records `opaque` as an imported variant's recommended surface
+treatment and says so in the report; the Frosted glass switch can still
+force frost.
 
-After source mapping, a deterministic hardening pass checks Harness's shared
-roles across every solid surface where they are painted. It keeps VS Code's
-semantic distinctions (`foreground`, `descriptionForeground`,
-`editor.foreground`, and component-specific foregrounds), promotes a stronger
-related source role when the preferred one cannot carry the Harness role, and
-only then adjusts the original color toward a contrast-safe anchor. Primary,
-muted, button, terminal, focus/status, and interaction roles are covered.
-Foundational surfaces with alpha are flattened against the resolved theme
-background so an opaque import cannot accidentally expose the desktop. Syntax,
-terminal ANSI, diff, warning, error, and success identity remain theme-owned;
-their unresolved quality findings stay visible in the report.
+After mapping, a hardening pass checks Harness's shared roles where they are
+painted and adjusts a color toward a contrast-safe anchor only when no
+related source role can carry it. Syntax, terminal ANSI, diff, warning, error
+and success identity stay theme-owned.
 
-The custom library has four source forms:
+The custom library (`apps/nano/src/theme_library.zig`) has four source forms:
 
-- `ImportedSnapshot` persists a self-contained compiled copy.
-- `LinkedFile` follows one source theme file.
-- `LinkedPackage` follows a VS Code extension package.
-- `EditableFile` follows a native resolved-family JSON file created by
-  “Duplicate as editable”.
+- an imported snapshot, a self-contained compiled copy;
+- a linked file, which follows one source theme file;
+- a linked package, which follows a VS Code extension package;
+- an editable file, a native resolved-family JSON file created by
+  **Duplicate as editable**.
 
-Linked and editable sources reload explicitly. A failed reload or validation
-stores a quiet warning and continues using the last successfully compiled
-family. All four forms resolve to the same `ThemeFamily` model as built-ins, so
-runtime components remain unaware of VS Code tokens. Library mutations are
-activated only after the updated library is persisted successfully. The library is stored in
-`{data_dir}/theme-library.json` and is loaded before the first palette is
-installed.
+Linked sources reload on **Reload**. All four resolve to the same variant
+model as the built-ins, so runtime components never see VS Code tokens. The
+library is `theme-library.json` in Harness's data folder. Harness does not
+fetch or run VSIX packages; custom sources are local files compiled into
+resolved data.
 
-Custom VS Code theme files and extension packages are compiled natively by
-Nano's importer in `apps/nano/src/theme_import.zig` and validated against the
-shared parity vectors in `apps/parity/vectors/theme-import.json`.
+The importer's output is pinned by `apps/parity/vectors/theme-import.json`.
 
-The report records every source mapping, hardening adjustment, fallback,
-unsupported font style, invalid color, validation result, and accent candidate
-without truncating the advanced mapping review. Structural errors such as
-duplicate ids or incomplete provenance block installation. Contrast findings
-remain reviewable because compiled imports and runtime native-theme resolution
-apply deterministic safeguards rather than rejecting an otherwise valid
-source. Harness does not fetch or execute VSIX packages at runtime; custom
-sources are local files and folders compiled into resolved data.
+## Tests and review
 
-## Acceptance and visual QA
+From `apps/nano`:
 
-`ThemeRegistry::validate` checks unique ids, provenance, text contrast,
-interaction contrast, on-accent contrast, and terminal foreground contrast.
-Issues are classified as structural or contrast so callers cannot accidentally
-treat a repairable quality finding as corrupt data. Tests also exercise every
-preset against both appearances and adverse frosted backdrops.
+```sh
+zig build test -Dtest-filter="theme-import vectors"
+zig build test -Dtest-filter="JSONC"
+zig build test -Dtest-filter="every built-in variant"
+```
 
-Before adding or updating a bundled variant, review both appearances where
-available across every `VisualFixture` scene:
-
-1. Sidebar
-2. Transcript Markdown
-3. Transcript code
-4. Composer
-5. Picker/popover
-6. Appearance settings
-7. Diff
-8. Terminal
-9. Empty state
-10. Dialog
-
-Review normal, hover, active, focused, selected, disabled, working, warning,
-error, and success states. Importer reports and automated contrast checks are
-gates, not substitutes for this visual pass.
+Before adding or updating a bundled variant, look at both appearances where
+available: the sidebar, transcript Markdown and code, the composer, a picker,
+Settings → Appearance, a diff, the terminal, an empty state and a dialog.
+Check normal, hover, active, focused, selected, disabled, working, warning,
+error, and success states. Importer reports and contrast checks do not replace
+that visual pass.

@@ -208,9 +208,9 @@ pub(crate) fn static_models() -> Vec<Model> {
         model(
             "gpt-6.2-astra",
             "GPT-6.2-Astra",
-            "Latest frontier reasoning model with Ultra Fast speed.",
+            "Latest frontier reasoning model.",
             ULTRA_LADDER,
-            vec![service_tier_ultrafast()],
+            vec![service_tier()],
         ),
         model(
             "gpt-6.1-sol",
@@ -318,7 +318,7 @@ mod tests {
                 let has_ultra = tier.choices.iter().any(|c| c.id == "ultrafast");
                 assert_eq!(
                     has_ultra,
-                    matches!(m.id.as_str(), "gpt-6.2-sol" | "gpt-6.2-astra"),
+                    m.id == "gpt-6.2-sol",
                     "{} ultrafast mismatch",
                     m.id
                 );

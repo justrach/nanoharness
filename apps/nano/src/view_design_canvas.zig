@@ -59,7 +59,7 @@ fn toolbar(c: *ui.Context, a: *App, k: theme.Colors, s: *design.State, audit: de
     }
 
     // Zoom controls (click percentage pill to reset to 100%)
-    if (kit.iconButton(c, k, .@"alt-arrow-left", .{ .size = 22, .icon = 11, .tip = .{ .text = "Zoom out" } })) {
+    if (kit.iconButton(c, k, .minus, .{ .size = 22, .icon = 11, .tip = .{ .text = "Zoom out" } })) {
         s.stepZoom(false);
         a.redraw();
     }
@@ -67,7 +67,7 @@ fn toolbar(c: *ui.Context, a: *App, k: theme.Colors, s: *design.State, audit: de
         s.resetZoom();
         a.redraw();
     }
-    if (kit.iconButton(c, k, .@"alt-arrow-right", .{ .size = 22, .icon = 11, .tip = .{ .text = "Zoom in" } })) {
+    if (kit.iconButton(c, k, .plus, .{ .size = 22, .icon = 11, .tip = .{ .text = "Zoom in" } })) {
         s.stepZoom(true);
         a.redraw();
     }

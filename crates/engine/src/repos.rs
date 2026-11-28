@@ -500,6 +500,11 @@ impl Repos {
         repos
     }
 
+    /// Known registered repository paths as stored on disk.
+    pub(crate) fn registered_paths(&self) -> Vec<PathBuf> {
+        self.load_paths().into_iter().map(PathBuf::from).collect()
+    }
+
     /// Remember an existing repository the user pointed us at.
     pub async fn add(&self, path: &str) -> Result<Repo, EngineError> {
         let abs = absolutize(Path::new(path));
@@ -522,16 +527,14 @@ impl Repos {
     /// `git clone <url>` under `{data_dir}/repos`. (Named `clone_repo` to keep
     /// `Clone::clone` unambiguous on the service handle.)
     pub async fn clone_repo(&self, url: &str) -> Result<Repo, EngineError> {
-        let trimmed = url.trim().trim_end_matches('/');
-        let name = trimmed
-            .trim_end_matches(".git")
-            .rsplit(['/', ':'])
-            .next()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("repo")
-            .to_string();
+        let (trimmed, name) = validate_clone_target(url)?;
         let repos_dir = self.inner.data_dir.join("repos");
         let target = repos_dir.join(&name);
+        if target.parent() != Some(repos_dir.as_path()) {
+            return Err(EngineError::Other(format!(
+                "Invalid repository destination: {name}"
+            )));
+        }
         if target.exists() {
             return Err(EngineError::Other(format!(
                 "Already exists: {}",
@@ -539,7 +542,7 @@ impl Repos {
             )));
         }
         std::fs::create_dir_all(&repos_dir)?;
-        self.git(&["clone", trimmed, &target.to_string_lossy()], None)
+        self.git(&["clone", "--", &trimmed, &target.to_string_lossy()], None)
             .await?;
         self.register(&target.to_string_lossy())?;
         self.to_repo(&target).await
@@ -1223,12 +1226,14 @@ impl Repos {
     /// already checked out in another worktree fails with git's own message.
     /// Returns the resulting current branch.
     pub async fn switch_ref(&self, cwd: &Path, ref_name: &str) -> Result<String, EngineError> {
+        validate_git_ref_arg(ref_name)?;
         let local = self
             .git(
                 &[
                     "show-ref",
                     "--verify",
                     "--quiet",
+                    "--",
                     &format!("refs/heads/{ref_name}"),
                 ],
                 Some(cwd),
@@ -1245,6 +1250,7 @@ impl Repos {
                         "show-ref",
                         "--verify",
                         "--quiet",
+                        "--",
                         &format!("refs/remotes/{remote}"),
                     ],
                     Some(cwd),
@@ -1386,6 +1392,7 @@ impl Repos {
                     "add",
                     "-b",
                     &branch_name,
+                    "--",
                     &path.to_string_lossy(),
                     &base_ref,
                 ],
@@ -1419,6 +1426,7 @@ impl Repos {
     /// object id. Qualify branches so a same-named tag cannot make Git's DWIM
     /// lookup fail, but retain remote refs (and their upstream setup behavior).
     async fn worktree_base_ref(&self, path: &Path, base: &str) -> Result<String, EngineError> {
+        validate_git_ref_arg(base)?;
         if matches!(base.len(), 40 | 64) && base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             // `git worktree add -b` can prefer a branch named like an object id.
             // Peeling forces object-expression resolution for recorded snapshots.
@@ -1640,6 +1648,7 @@ impl Repos {
                     "worktree",
                     "remove",
                     "--force",
+                    "--",
                     &worktree_path.to_string_lossy(),
                 ],
                 Some(repo_path),
@@ -1648,7 +1657,9 @@ impl Repos {
         }
         let _ = self.git(&["worktree", "prune"], Some(repo_path)).await;
         if managed {
-            let _ = self.git(&["branch", "-D", &branch], Some(repo_path)).await;
+            let _ = self
+                .git(&["branch", "-D", "--", &branch], Some(repo_path))
+                .await;
         }
         Ok(())
     }
@@ -2795,6 +2806,39 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     out
 }
 
+/// Reject empty, control-bearing, or option-like (`-...`) Git ref/revision arguments
+/// before passing them to `git` subcommands where `--` denotes pathspecs.
+pub(crate) fn validate_git_ref_arg(value: &str) -> Result<&str, EngineError> {
+    if value.is_empty() || value.starts_with('-') || value.chars().any(|c| c.is_control()) {
+        return Err(EngineError::Other(format!("Invalid git ref: {value}")));
+    }
+    Ok(value)
+}
+
+/// Validate a `git clone` URL and derive a single safe destination directory name
+/// under `{data_dir}/repos`.
+fn validate_clone_target(url: &str) -> Result<(String, String), EngineError> {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.is_empty() || trimmed.starts_with('-') || trimmed.chars().any(|c| c.is_control()) {
+        return Err(EngineError::Other(format!("Invalid repository URL: {url}")));
+    }
+    let name = trimmed
+        .trim_end_matches(".git")
+        .rsplit(['/', ':', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("repo");
+    if matches!(name, "." | "..")
+        || name.contains(['/', '\\', '\0'])
+        || name.chars().any(|c| c.is_control())
+    {
+        return Err(EngineError::Other(format!(
+            "Invalid repository name: {name}"
+        )));
+    }
+    Ok((trimmed.to_string(), name.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3614,5 +3658,65 @@ tmpfs /run tmpfs rw 0 0
         let project_paths: Vec<&str> = project_entries.iter().map(|e| e.path.as_str()).collect();
         assert!(project_paths.contains(&"Library/Caches/big/skip.txt"));
         assert!(project_paths.contains(&"Projects/a/b/c/d/e/too-deep.txt"));
+    }
+
+    #[test]
+    fn validate_clone_target_blocks_git_options_and_path_escapes() {
+        for bad in [
+            "",
+            "   ",
+            "--upload-pack=touch /tmp/pwn",
+            "-c core.sshCommand=sh",
+            "https://example.com/org/..",
+            "https://example.com/org/..git",
+            "https://example.com/org/.",
+            "https://example.com/org/..git/",
+            "https://example.com/org/repo\n--upload-pack=x",
+        ] {
+            // Note: `..git` trims `.git` to `.`!
+            assert!(
+                validate_clone_target(bad).is_err(),
+                "expected clone target rejection for {bad:?}"
+            );
+        }
+        assert_eq!(
+            validate_clone_target("https://github.com/org/demo.git").unwrap(),
+            ("https://github.com/org/demo.git".into(), "demo".into())
+        );
+        assert_eq!(
+            validate_clone_target("git@github.com:org/demo.git/").unwrap(),
+            ("git@github.com:org/demo.git".into(), "demo".into())
+        );
+    }
+
+    #[test]
+    fn validate_git_ref_arg_rejects_flag_injection() {
+        for bad in ["", "-", "--orphan", "-b", "--output=/tmp/x", "main\n--flag"] {
+            assert!(
+                validate_git_ref_arg(bad).is_err(),
+                "expected ref rejection for {bad:?}"
+            );
+        }
+        for good in ["main", "feature/foo", "HEAD~1", "origin/main", "deadbeef"] {
+            assert!(validate_git_ref_arg(good).is_ok(), "{good:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn clone_repo_and_switch_ref_reject_flag_injection_before_spawning_git() {
+        let data = tempfile::tempdir().unwrap();
+        let repos =
+            Repos::with_worktrees_root(data.path(), "device", data.path().join("worktrees"));
+        let marker = data.path().join("pwned-by-upload-pack");
+        let attack = format!("--upload-pack=touch {}", marker.display());
+        assert!(repos.clone_repo(&attack).await.is_err());
+        assert!(!marker.exists(), "git must not execute --upload-pack");
+        assert!(
+            repos
+                .clone_repo("https://example.com/org/..")
+                .await
+                .is_err()
+        );
+        assert!(repos.switch_ref(data.path(), "--orphan").await.is_err());
     }
 }

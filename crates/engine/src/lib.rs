@@ -84,7 +84,7 @@ pub use registry::{
     parse_opted_in_list,
 };
 pub use repos::{CheckoutIdentity, Repos, is_own_branch, worktree_branch_from_title};
-pub use rpc::{EngineRpc, RelayRpc};
+pub use rpc::{DeviceNames, EngineRpc, RelayRpc, relay_request_digest};
 pub use run_journal::{JournalError, RunJournal};
 pub use sessions::{JournaledEvent, SessionsEngine, SteerOutcome};
 pub use source_control::{
@@ -592,8 +592,16 @@ impl EngineCore {
     /// Devices → Allow remote control so a compromised edge cannot drive
     /// commands on a machine that never opted in.
     pub fn relay_rpc_service(&self) -> std::sync::Arc<dyn harness_rpc::RpcService> {
+        let doc_host = self.doc_host.clone();
+        let names: crate::rpc::DeviceNames =
+            std::sync::Arc::new(move |device_id: &str| doc_host.device_name(device_id));
         std::sync::Arc::new(rpc::RemoteRelayRpc::new(
-            crate::rpc::RelayRpc::wrap(self.rpc_service(), self.registry.clone()),
+            crate::rpc::RelayRpc::wrap_named(
+                self.rpc_service(),
+                self.registry.clone(),
+                self.device_id.clone(),
+                names,
+            ),
             self.device_id.clone(),
         ))
     }

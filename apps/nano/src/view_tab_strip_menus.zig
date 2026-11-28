@@ -174,14 +174,17 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (row(c, a, k, .@"alt-arrow-down", "Split down", false)) strip.queue(a, .{ .split_down = target });
         if (a.tabs.layout()) |s| {
             const vertical = s.axis == .vertical;
-            if (target.chat > 0) if (row(c, a, k, if (vertical) .@"alt-arrow-down" else .@"alt-arrow-left", if (vertical) "Move panel up" else "Move panel left", false)) strip.queue(a, .{ .move_left = target });
-            if (target.chat + 1 < s.panes.items.len) if (row(c, a, k, if (vertical) .@"alt-arrow-down" else .@"alt-arrow-right", if (vertical) "Move panel down" else "Move panel right", false)) strip.queue(a, .{ .move_right = target });
+            if (target.chat > 0) if (row(c, a, k, if (vertical) .@"alt-arrow-up" else .@"alt-arrow-left", if (vertical) "Move pane up" else "Move pane left", false)) strip.queue(a, .{ .move_left = target });
+            if (target.chat + 1 < s.panes.items.len) if (row(c, a, k, if (vertical) .@"alt-arrow-down" else .@"alt-arrow-right", if (vertical) "Move pane down" else "Move pane right", false)) strip.queue(a, .{ .move_right = target });
         }
     }
     if (strip.count(a) > 1) {
         separator(c, k);
-        if (row(c, a, k, .@"split-columns", if (a.view.strip.expanded != null) "Restore panels" else "Expand panel", false)) strip.queue(a, .{ .zoom = target });
-        if (row(c, a, k, .close, "Close panel", false)) strip.queue(a, .{ .close = target });
+        // A chat column is a pane (Settings' "Zoom the pane"); the side and
+        // files panels keep "panel".
+        const pane = target == .chat;
+        if (row(c, a, k, .@"split-columns", if (a.view.strip.expanded != null) "Restore panes" else if (pane) "Zoom pane" else "Zoom panel", false)) strip.queue(a, .{ .zoom = target });
+        if (row(c, a, k, .close, if (pane) "Close pane" else "Close panel", false)) strip.queue(a, .{ .close = target });
     }
 }
 

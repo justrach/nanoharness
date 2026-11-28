@@ -6,16 +6,33 @@ packages offer in-app updates through GitHub; keep `harness-update.json` beside
 
 ## Build and run
 
-Install stable MSVC Rust, Visual Studio C++ build tools, Windows SDK, CMake,
-and Git for Windows, then run:
+Install stable MSVC Rust (the toolchain in `rust-toolchain.toml`), Visual Studio
+C++ build tools, the Windows SDK, Zig 0.17.0 and Git for Windows. Build the
+engine, then the desktop app and the `harness` CLI from `apps/nano`:
 
 ```powershell
-cargo run --locked -p harness
+cargo build --locked -p harness-engine --bin harness-engine
+cd apps/nano
+zig build -Dtarget=x86_64-windows-msvc
+.\zig-out\bin\harness-nano.exe
 ```
 
-Close the app before rebuilding. For release builds, use
-`cargo build --release --locked -p harness`. If shader compiler discovery fails,
-set `GPUI_FXC_PATH` to the Windows SDK's `fxc.exe`.
+`harness-nano.exe` starts `harness.exe headless` from its own folder when no
+engine answers, and `harness.exe` finds `harness-engine.exe` beside it or in the
+repository's `target\debug` (or `release`, `dist`, `app-dev`). Close the app
+before rebuilding.
+
+The portable package is built by the release script:
+
+```powershell
+./scripts/package-windows.ps1 -ReleasesUrl https://github.com/justrach/nanoharness/releases/latest/download
+```
+
+It builds the engine with the `headless` profile and the app with
+`-Doptimize=ReleaseSafe`, downloads the WebView2 SDK's `WebView2Loader.dll`, and
+writes `target/package/harness-<version>-windows-x86_64.zip` holding
+`harness.exe`, `harness-nano.exe`, `harness-engine.exe`, `WebView2Loader.dll`,
+`harness-update.json` and the license notices.
 
 ## Configuration and agent support
 
@@ -48,39 +65,32 @@ shutdown/drop log failures. Processes started through external services or
 brokers are outside this ownership. Closing a terminal or exiting its shell also
 terminates processes detached inside that job (including `start` children).
 
-Frosted window chrome uses native Acrylic and requires Windows **Settings >
-Personalization > Colors > Transparency effects**. Content cards and popovers
-remain opaque because in-app backdrop blur is not supported. The pinned
-[Zui DirectX fix](https://github.com/zeronsh/zui/pull/7) supplies the renderer
-layout and edge-fade corrections.
+The integrated Browser tab is available on macOS only.
 
 ## Verification
 
-[Windows CI](../../.github/workflows/windows.yml) builds the release application
-and tests application startup, agent discovery/protocols, process cleanup,
-ConPTY, locking, UI behavior, and shader layouts. Shared Rust regressions run
-on Linux and macOS. To run the engine and harness checks locally:
+[Windows CI](../../.github/workflows/windows.yml) runs the Zig client's tests
+(`zig build test` in `apps/nano`), builds and packages the app with
+`scripts/package-windows.ps1`, runs `scripts/test-windows-startup.ps1`, and runs
+the engine and adapter tests below. To run the same checks locally:
 
 ```powershell
+cd apps/nano; zig build test; cd ../..
 cargo test --locked -p harness-engine -p harness-adapters --lib
 cargo test --locked -p harness-adapters --features native-fixture --test codex_availability --test windows_native
-cargo test --locked -p harness-engine --test codex_catalog --test codex_login_resolution --test auth
+cargo test --locked -p harness-engine --test codex_catalog --test codex_login_resolution --test auth --test workspace_files --test desktop_requests
 ```
 
 Fixtures use synthetic agents, so these tests do not establish authenticated
-provider compatibility. GUI probes are optional CI dispatch checks and can
-also run on an interactive Windows desktop after building the release app:
+provider compatibility. The app lifecycle probe is an optional CI dispatch
+check and can also run on an interactive Windows desktop. It launches
+`target\release\harness.exe` by default (`-Exe` names another) with isolated
+data and provider homes, and writes results to an ignored
+`target/windows-lifecycle-*` directory:
 
 ```powershell
-cargo build --release --locked -p harness-ui --example windows-render-fixture --features windows-render-fixture
+cargo build --release --locked -p harness-engine --bin harness-engine
+cd apps/nano; zig build -Doptimize=ReleaseSafe cli; cd ../..
+Copy-Item ./apps/nano/zig-out/bin/harness.exe ./target/release/harness.exe
 ./scripts/test-windows-lifecycle.ps1 -Runs 5
-./scripts/test-windows-rendering.ps1
 ```
-
-The lifecycle probe uses isolated data and provider homes. The renderer probe
-captures only its synthetic window. Results go to ignored
-`target/windows-lifecycle-*` and `target/windows-render-*` directories.
-
-Remaining acceptance work includes authenticated provider runs and shutdown,
-broader GPU/DPI coverage, accessibility, native browser and cross-device parity,
-concurrent-launch log rotation, and invalid-window teardown diagnostics.

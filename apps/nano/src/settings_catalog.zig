@@ -16,7 +16,6 @@ pub fn description(section: Section) []const u8 {
         .extensions => "Trusted native plugin panels and actions",
         .github_ci => "Repositories, CI runners and checks",
         .devices => "Connected computers and app updates",
-        .appshots => "Capture app screenshots",
         .usage => "Local model usage, token counts by Harness, Codex and Antigravity",
         .archived => "Find and restore archived conversations",
     };
@@ -36,7 +35,6 @@ fn keywords(section: Section) []const u8 {
         .extensions => "plugins extensions native panels controls callbacks github runners workers",
         .github_ci => "continuous integration build test runner repository GitHub",
         .devices => "update release version hourly install automatic background download restart computer host remote desktop control relay approve approval chip",
-        .appshots => "screenshot capture permission",
         .usage => "tokens model usage token counts local usage codex",
         .archived => "archive restore recover sessions chats history",
     };

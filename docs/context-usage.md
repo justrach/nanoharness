@@ -1,11 +1,19 @@
 # Context usage
 
-Every selected conversation has a context ring beneath its composer, including
-project-less and remote conversations. Hovering shows measured tokens and
-remaining capacity. The ring turns amber at 75% and red at 90%; its drawing clamps
-at a full circle while the label preserves over-capacity measurements. A dash
-means the harness has not reported enough data to calculate a percentage. Measured
-zero is displayed as 0%.
+Every selected conversation whose agent reports a context window has a context
+ring at the right of its composer footer, including project-less and remote
+conversations (`apps/nano/src/view_context.zig`). The ring stays muted, turns to
+the warning color at 75% and the danger color at 90%; its drawing clamps at a
+full circle while the label keeps over-capacity measurements. In a narrow split
+footer it shows the ring without the percentage. An agent that reports no window
+gets no ring at all.
+
+Resting the pointer on the ring for half a second opens the context card:
+its "Context" heading, the count against the window, a 62-segment bar split by
+what fills it (chat history or its summary, files, commands and "System & other", estimated from
+the transcript since its last compaction and scaled to the reported total), its
+legend, a status line, the prompt cache share when known, graff's savings meter
+and the exact numbers (`apps/nano/src/context_window.zig`).
 
 The host normalizes context occupancy separately from billing `Usage` events:
 
@@ -33,6 +41,5 @@ provider calls, filesystem access, or new remote endpoint.
 
 Validation covers adapter normalization, compaction to zero, cache accounting,
 subagent isolation, snapshot and incremental import, thin rebuilds, context-only
-watch updates, reconnects, and old/new watch compatibility. Screenshots use the
-native desktop attached to a viewing engine; a separate host sends deterministic
-Claude protocol fixtures through a local relay. The measurements are test data.
+watch updates, reconnects, and old/new watch compatibility. The desktop ring and
+card are tested in `apps/nano/src/tests_ui_chat_context.zig`.

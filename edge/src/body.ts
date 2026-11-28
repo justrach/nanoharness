@@ -10,7 +10,7 @@
 export const readCapped = async (request: Request, max: number): Promise<Uint8Array | undefined> => {
   const declared = Number(request.headers.get("content-length") ?? 0);
   const stream = request.body;
-  if (declared > max) {
+  if (Number.isFinite(declared) && declared > max) {
     await stream?.cancel().catch(() => {});
     return undefined;
   }
@@ -18,7 +18,7 @@ export const readCapped = async (request: Request, max: number): Promise<Uint8Ar
   const reader = stream.getReader();
   // A declared length is taken whole (no second copy of a large checkpoint);
   // an undeclared body grows from 64 KiB, never past the limit.
-  let out = new Uint8Array(Math.min(max, declared > 0 ? declared : 64 * 1024));
+  let out = new Uint8Array(Math.min(max, Number.isFinite(declared) && declared > 0 ? declared : 64 * 1024));
   let total = 0;
   for (;;) {
     const { done, value } = await reader.read();

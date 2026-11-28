@@ -422,7 +422,7 @@ fn parsePart(gpa: Allocator, o: json.ObjectMap) !Part {
             p.output_bytes = uint(o.get("outputBytes"));
             if (string(o.get("subagentRef"))) |s| p.subagent_ref = try gpa.dupe(u8, s);
             const raw_sub_st = string(o.get("subagentStatus")) orelse "";
-            p.subagent_status = if (std.mem.eql(u8, raw_sub_st, "completed")) .done else std.meta.stringToEnum(@import("agent_link.zig").Status, raw_sub_st);
+            p.subagent_status = @import("agent_link.zig").Status.parse(raw_sub_st);
             if (string(o.get("subagentTail"))) |s| p.subagent_tail = try gpa.dupe(u8, s);
             if (o.get("view")) |v| p.saved_view = @import("saved_view.zig").View.parse(v);
             try diffStats(gpa, &p, o);

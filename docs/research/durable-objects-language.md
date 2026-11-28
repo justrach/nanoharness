@@ -26,10 +26,10 @@ only CPU-heavy path (compaction/snapshot export) while adding real risk.
 - Ecosystem: production CRDT-DO backends (pluv, y-durableobjects, PartyKit-style) are TS + wasm cores.
 
 ## Consequences for harness
-- apps/edge (session-room, device-room, worker front, auth, R2 attachments) carries over as the
+- `edge/` (session-room, device-room, worker front, auth, R2 attachments) carries over as the
   TS edge — port/adapt, don't rewrite. All 14 smoke assertions already exist.
-- Rust backend + gpui app use the `loro` Rust crate 1.13.7; binary format identical to JS 1.13.7
-  (stable since 1.0, lockstep releases) — cross-language sync is guaranteed.
+- The Rust engine uses the `loro` Rust crate (1.13.x, `Cargo.toml`); its binary format is identical
+  to JS loro of the same version (stable since 1.0, lockstep releases) — cross-language sync is guaranteed.
 - Revisit only if workers-rs lands #832/workerd #5211 AND a profiled bottleneck appears in the
   orchestration layer.
 

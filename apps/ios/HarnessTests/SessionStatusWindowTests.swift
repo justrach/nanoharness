@@ -92,7 +92,7 @@ final class SessionStatusWindowTests: XCTestCase {
 
     func testReadingReplyKeepsCounterMarksAndDestinationsConsistent() {
         let model = makeModel(count: 3)
-        model.demo!.sessions["chat-1"] = nil
+        model.demo!.sessions["chat-1"]?.status = .idle
         let before = SessionPaging.entries(model: model, including: "chat-0")
         XCTAssertEqual(SessionPaging.pageSet(of: "chat-0", in: before).count, 3)
         model.markSeen(chatId: "chat-1")
@@ -102,6 +102,32 @@ final class SessionStatusWindowTests: XCTestCase {
         XCTAssertEqual(SessionPaging.position(of: "chat-0", in: after)?.count, set.count)
         XCTAssertEqual(SessionPaging.neighbors(of: "chat-0", in: after).next, "chat-2")
         XCTAssertEqual(SessionStatusWindow(ids: set.map(\.id), current: "chat-0", limit: 1).hiddenCount, 1)
+    }
+
+    func testMissingOrOfflineRunDoesNotMarkUnseenPartialOutputCompleted() {
+        let now: Int64 = 50_000
+        let chat = Chat(id: "chat", deviceId: "host", title: "Chat", archived: false,
+                        lastMessageAt: 45_000, createdAt: 1)
+        var session = SessionRow(chatId: chat.id, deviceId: "host", status: .working,
+                                 startedAt: 1_000, updatedAt: 49_000)
+
+        XCTAssertEqual(SessionStatusWindow.resolvedIndicator(
+            chat: chat, sessionRow: nil, entries: [], hostStatus: .unknown, nowMs: now
+        ), .idle)
+        XCTAssertEqual(SessionStatusWindow.resolvedIndicator(
+            chat: chat, sessionRow: session, entries: [], hostStatus: .offline, nowMs: now
+        ), .idle)
+        XCTAssertEqual(SessionStatusWindow.resolvedIndicator(
+            chat: chat, sessionRow: session, entries: [], hostStatus: .online, nowMs: now
+        ), .working)
+        session.updatedAt = 1_000
+        XCTAssertEqual(SessionStatusWindow.resolvedIndicator(
+            chat: chat, sessionRow: session, entries: [], hostStatus: .online, nowMs: now
+        ), .idle)
+        session.status = .errored
+        XCTAssertEqual(SessionStatusWindow.resolvedIndicator(
+            chat: chat, sessionRow: session, entries: [], hostStatus: .offline, nowMs: now
+        ), .errored)
     }
 
     private func makeModel(count: Int) -> AppModel {

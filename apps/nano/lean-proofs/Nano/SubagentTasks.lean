@@ -5,9 +5,10 @@
   and `apps/nano/src/view_agent_work.zig`:
   1. `resolveAgentState`: merges live cross-turn `WatchToolProgress` states
      (`running | completed | failed | cancelled | disconnected`), persisted
-     `subagentStatus` (`running | completed | failed | stopped`), and tool
-     resolution (`resolved`, `isError`, `turnLive`) without ever leaving an
-     untracked subagent stuck in `running` after its turn settles.
+     `subagentStatus` (`running | completed | failed | stopped | unknown`),
+     and tool resolution (`resolved`, `isError`, `turnLive`) without ever
+     leaving an untracked subagent stuck in `running` after its turn settles,
+     or calling a child `done` that never said it completed.
   2. `stepStates`: maps the latest `Todo` checklist (`done : List Bool`),
      `turnLive`, and `hasQuestion` (`AsksFirst`) into `StepState` rows with at
      most one `active` step, and zero `active` steps once the turn settles.
@@ -32,6 +33,7 @@ inductive DocSubagentStatus where
   | completed
   | failed
   | stopped
+  | unknown
 deriving DecidableEq, Repr, BEq
 
 inductive AgentState where
@@ -39,6 +41,7 @@ inductive AgentState where
   | done
   | failed
   | stopped
+  | ended
 deriving DecidableEq, Repr, BEq
 
 inductive StepState where
@@ -67,12 +70,15 @@ def resolveAgentState
     | some .failed    => .failed
     | some .stopped   => .stopped
     | some .running   =>
-      if !resolved && turnLive then .running
-      else if isError then .failed else .done
+      if isError then .failed
+      else if turnLive then .running else .ended
+    | some .unknown   =>
+      if isError then .failed
+      else if !resolved && turnLive then .running else .ended
     | none =>
       if isError then .failed
-      else if resolved || !turnLive then .done
-      else .running
+      else if resolved then .done
+      else if turnLive then .running else .ended
 
 /-- Theorem: with no live ACP progress or explicit running doc status, a
 finished turn never leaves a subagent row in `.running`. -/
@@ -90,6 +96,15 @@ theorem live_progress_authoritative
     resolveAgentState (some s) d1 r1 e1 l1
       = resolveAgentState (some s) d2 r2 e2 l2 := by
   cases s <;> rfl
+
+/-- Theorem: a child whose own status still says `running` (or is unknown)
+is never reported `done` once live progress is gone. -/
+theorem running_or_unknown_never_done
+    (d : DocSubagentStatus) (h : d = .running ∨ d = .unknown)
+    (resolved isError turnLive : Bool) :
+    resolveAgentState none (some d) resolved isError turnLive ≠ .done := by
+  rcases h with h | h <;> subst h <;>
+    cases resolved <;> cases isError <;> cases turnLive <;> decide
 
 /-- Assigns `StepState` to each item in the latest `Todo` list, promoting only
 the first unfinished step while `turnLive` holds, and appending a gated
@@ -231,7 +246,7 @@ def liveDomain : List (Option LiveProgressState) :=
   [none, some .running, some .completed, some .failed, some .cancelled, some .disconnected]
 
 def docDomain : List (Option DocSubagentStatus) :=
-  [none, some .running, some .completed, some .failed, some .stopped]
+  [none, some .running, some .completed, some .failed, some .stopped, some .unknown]
 
 def bools : List Bool := [false, true]
 
@@ -258,7 +273,9 @@ def agentStateCube : Bool :=
             (if l == none && d == none && !tl then st != .running else true) &&
             (if l == some .running then st == .running else true) &&
             (if l == some .completed then st == .done else true) &&
-            (if l == some .failed then st == .failed else true))))))
+            (if l == some .failed then st == .failed else true) &&
+            (if l == none && (d == some .running || d == some .unknown) then st != .done else true) &&
+            (if l == none && d.isSome && e then st == .failed || d == some .completed || d == some .stopped else true))))))
 
 def stepTimelineCube : Bool :=
   todoLists.all (fun items =>

@@ -1,41 +1,43 @@
 # Image annotation
 
-Point at parts of an image before sending it to the agent: draw boxes, number them, add a note to each, and drop free text.
+Point at parts of an image before asking the agent about it: drop numbered pins on the image and give each one a note.
 
 ## Flow
 
-1. Click an image in the chat or a staged thumbnail in the composer. On macOS, **Annotate** is centered beneath the image and filename.
-2. Annotate shows centered, opaque tools beneath the image: Text, Rectangle (the default), four colors (red, the default, then blue, green, yellow), Undo, then Cancel and Done. Narrow Mac windows stack the tool and action groups; the image keeps the same position when entering the editor.
-3. Drag on the image to draw a box. It gets a numbered pin, and an **Add a note…** popover opens under it (above it near the bottom edge). Enter commits the note. The x deletes the box.
-4. With the Text tool, click to place text and type it. Enter commits; an empty text mark is dropped.
-5. Click a box or its pin to select it. Backspace or Delete removes the selection, ⌘Z (Ctrl+Z) undoes, Esc commits an open note or leaves annotate mode.
-6. Done flattens the marks into a new PNG named `NAME-annotated.png`. From the composer it replaces the original attachment; from the chat it is staged in the active composer. Cancel discards everything.
+1. Click an image in the chat (a reply's picture or one you sent). It opens in the image preview; see [image preview and zoom](image-preview.md).
+2. Choose **Annotate** in the preview's toolbar. The hint line changes to "Click image to drop callout pins · Click a pin to edit its note · Esc to exit annotate".
+3. Click the image to drop a numbered pin, up to eight. Its note field opens in the list under the image. Clicking an existing pin edits its note instead of adding another.
+4. The × beside a note deletes that pin. **Undo** removes the last pin and **Clear** removes them all.
+5. **Send feedback (N)** attaches the image to the chat's composer, adds the notes to the draft (after any text already there) and closes the preview. Nothing is sent until you send the message.
 
-The thumbnail of an annotated attachment carries a small pen badge. On send, the notes go with the prompt:
+Esc first leaves the note you are typing in, then annotate mode, then closes the preview.
+
+The draft gets one line per pin, its position as a percentage of the image's width and height:
 
 ```
-Annotations on billing-annotated.png (boxes are x,y,w,h in image pixels):
-1. [box 968,204,176,60] Make this the primary button
-2. [box 304,280,408,60] Show the percentage next to the bar
-Text on the image:
-- [text 440,410] "Add a download link here"
+Image feedback on billing.png:
+1. (62%, 18%): Make this the primary button
+2. (31%, 44%): (marked area)
 ```
+
+A pin with no note reads `(marked area)`. Pins are not drawn into the image; the agent gets the original picture and the text.
 
 ## Code
 
-- `crates/ui/src/annotate.rs`: the model (`Annotations`: add, select, recolor, remove, undo, pin numbers), the prompt text, and flattening. Flattening renders an SVG overlay with resvg (bundled Geist for text) and composites it onto the decoded image. Marks are drawn at screen size and the overlay is scaled by image pixels per screen pixel, so the file looks like what was on screen.
-- `crates/ui/src/annotate/editor.rs`: the editor view inside the lightbox.
-- `crates/ui/src/attachments.rs`: `PreviewImage::annotatable` and the Annotate pill.
-- `crates/ui/src/composer.rs`, `transcript.rs`, `shell.rs`: wiring for staged and chat images.
-- `apps/parity/vectors/annotations.json`: the prompt format, for a future phone port.
+- `apps/nano/src/image_annotate.zig`: pin state (add, remove, undo, clear), screen-to-image mapping under zoom, and the feedback text.
+- `apps/nano/src/view_image_preview.zig`: the Annotate button, pins, notes and the feedback handoff.
+- `apps/nano/src/app_attachment_images.zig`: the preview's state.
 
-## Tests and screenshots
+## Tests
 
-- `cargo test -p harness-ui --lib annotate`: the model, the prompt format and parity vectors, flattening (size, strokes, pins, scaling, text chips, transparency, SVG sources), and a headless end-to-end run through the lightbox.
-- `cargo run -p harness-ui --example annotate-fixture --features appshots-fixture -- IMAGE OUT_DIR` with `HARNESS_FIXTURE_APPEARANCE=light|dark` captures every step.
+From `apps/nano`:
+
+```sh
+zig build test -Dtest-filter="image annotation"
+zig build test -Dtest-filter="Annotate"
+```
 
 ## Limits
 
-- Flattening runs on Done on the UI thread. It is not timed or moved off the thread yet, so very large images may pause the UI (decode is capped at 8192 px a side).
-- Marks cannot be moved or resized after drawing; delete and redraw.
-- Phones (iOS SwiftUI, Android) do not annotate yet. The prompt format is in the parity vectors so a port can match it.
+- Pins cannot be moved; delete one and drop another.
+- The iOS app does not annotate.

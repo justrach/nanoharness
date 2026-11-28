@@ -74,6 +74,10 @@ pub const State = struct {
     app_installed: [32]u8 = undefined,
     app_installed_len: usize = 0,
     app_downloading: bool = false,
+    restart_after_verify: bool = false,
+    test_relaunch_count: u32 = 0,
+    test_relaunch_version: [32]u8 = undefined,
+    test_relaunch_version_len: usize = 0,
     app_checking: bool = false,
     app_checked_ms: i64 = 0,
     app_failed: [160]u8 = undefined,
@@ -394,7 +398,9 @@ pub fn updateSummary(buf: []u8, a: *const App, now_ms: i64) UpdateSummary {
         };
     }
     if (a.updates.app_downloading) {
-        const line = if (latest) |ver|
+        const line = if (a.updates.restart_after_verify)
+            "Checking and installing the latest update…"
+        else if (latest) |ver|
             std.fmt.bufPrint(buf, "Downloading v{s}…", .{ver}) catch "Downloading update…"
         else
             "Downloading update…";
@@ -488,7 +494,7 @@ fn automaticallyInstall(a: *App) void {
     if (std.mem.eql(u8, ver, "preview")) return;
     initialize(a);
     if (!a.updates.app_can_install) return;
-    startAppDownload(a);
+    startAppDownload(a, false);
 }
 
 pub fn triggerAppUpdate(a: *App, ver: []const u8) void {
@@ -500,23 +506,27 @@ pub fn triggerAppUpdate(a: *App, ver: []const u8) void {
     }
     if (a.updates.app_downloading) return;
     const latest = appUpdateVersion(a) orelse return;
-    if (appRestartVersion(a) != null and std.mem.eql(u8, latest, ver)) {
-        restartIntoUpdate(a, latest);
-        return;
+    if (appRestartVersion(a)) |ready| {
+        if (std.mem.eql(u8, ready, ver) and std.mem.eql(u8, latest, ver)) {
+            startAppDownload(a, true);
+            return;
+        }
     }
     // A stale click must never restart into an older bundle. If the latest
     // target is already ready, wait for a click on that version's control.
-    if (appRestartVersion(a) == null) startAppDownload(a);
+    if (appRestartVersion(a) == null) startAppDownload(a, false);
 }
 
-fn startAppDownload(a: *App) void {
+fn startAppDownload(a: *App, restart_after_verify: bool) void {
     if (a.updates.app_downloading) return;
+    a.updates.restart_after_verify = restart_after_verify;
     a.updates.app_downloading = true;
     a.updates.app_failed_len = 0;
     a.redraw();
     if (a.offscreen or builtin.is_test) return;
     const t = std.Thread.spawn(.{}, appUpdateWorker, .{a}) catch {
         a.updates.app_downloading = false;
+        a.updates.restart_after_verify = false;
         a.updates.setAppFailed("couldn't start background installer");
         a.redraw();
         return;
@@ -699,17 +709,35 @@ fn appUpdateDelivered(ctx: ?*anyopaque) callconv(.c) void {
     const pending = a.updates.app_install_result;
     a.updates.app_install_result = null;
     a.updates.release();
+    const restart = a.updates.restart_after_verify;
+    a.updates.restart_after_verify = false;
     const result = pending orelse return;
     a.updates.setAppInstalled(result.installed[0..result.installed_len]);
     a.updates.setAppFailed(result.failure[0..result.failure_len]);
     a.updates.app_downloading = false;
     // Applying an update is not permission to stop agents or close a window.
-    // A separate, explicit Restart click is required after installation.
+    // A separate, explicit Restart click starts a fresh manifest check, and
+    // only that check's verified on-disk target may be relaunched.
+    if (restart and result.installed_len > 0 and result.failure_len == 0) {
+        const installed = result.installed[0..result.installed_len];
+        const superseded = if (a.release.succeeded) (if (a.release.version()) |latest|
+            @import("updates_host.zig").versionNewer(latest, installed)
+        else
+            false) else false;
+        if (!superseded) restartIntoUpdate(a, installed);
+    }
     a.redraw();
 }
 
 fn restartIntoUpdate(a: *App, target: []const u8) void {
-    if (builtin.is_test or a.offscreen) return;
+    if (builtin.is_test) {
+        a.updates.test_relaunch_count += 1;
+        const n = @min(target.len, a.updates.test_relaunch_version.len);
+        @memcpy(a.updates.test_relaunch_version[0..n], target[0..n]);
+        a.updates.test_relaunch_version_len = n;
+        return;
+    }
+    if (a.offscreen) return;
     if (builtin.os.tag == .macos) {
         const exe = std.process.executablePathAlloc(a.io, a.gpa) catch return;
         defer a.gpa.free(exe);
@@ -734,6 +762,7 @@ fn restartIntoUpdate(a: *App, target: []const u8) void {
         })) |child| {
             var c = child;
             _ = &c;
+            a.flushRememberedTabs();
             @import("engine_start.zig").stopForUpdate(a);
             std.process.exit(0);
         } else |_| {
@@ -901,12 +930,16 @@ fn sidebarAppUpdateRow(c: *ui.Context, a: *App, k: theme.Colors, ver: []const u8
         const failed = !ready and !a.updates.app_downloading and a.updates.appFailed() != null;
         const hint = if (ready)
             c.print("Harness v{s} is ready. Click to restart into it.", .{ver})
+        else if (a.updates.restart_after_verify)
+            "Checking and installing the latest release before restart."
         else if (failed)
             c.print("Updating to v{s} failed: {s}. Click to retry.", .{ ver, a.updates.appFailed().? })
         else
             c.print("Harness v{s} is available. {s}", .{ ver, if (a.updates.app_install_checked and !a.updates.app_can_install) "Click to view the release; install manually." else "Click to update." });
         const label = if (ready)
             "Restart to update"
+        else if (a.updates.restart_after_verify)
+            "Checking latest update…"
         else if (a.updates.app_downloading)
             c.print("Downloading v{s}…", .{ver})
         else if (a.updates.app_install_checked and !a.updates.app_can_install)
@@ -1078,6 +1111,8 @@ pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const Unifi
             const ready = appRestartVersion(a) != null;
             const detail = if (ready)
                 (std.fmt.allocPrint(alloc, "{s} \u{2192} {s} · Ready", .{ cur, ver }) catch "Ready to restart")
+            else if (a.updates.app_downloading and a.updates.restart_after_verify)
+                "Checking and installing the latest update…"
             else if (a.updates.app_downloading)
                 (std.fmt.allocPrint(alloc, "Downloading v{s}…", .{ver}) catch "Downloading…")
             else if (a.updates.appFailed()) |err|
@@ -2109,6 +2144,105 @@ test "multi-surface updater never offers Restart before installed target matches
     a.updates.setAppInstalled(ver_c);
     try std.testing.expectEqualStrings(ver_c, appRestartVersion(&a).?);
     try std.testing.expectEqualStrings(ver_c, updateSummary(&sum_buf, &a, a.nowMs()).action.restart);
+}
+
+fn deliverTestAppInstall(a: *App, installed: []const u8, failure: []const u8) void {
+    var result: AppInstallResult = .{};
+    result.installed_len = @min(installed.len, result.installed.len);
+    @memcpy(result.installed[0..result.installed_len], installed[0..result.installed_len]);
+    result.failure_len = @min(failure.len, result.failure.len);
+    @memcpy(result.failure[0..result.failure_len], failure[0..result.failure_len]);
+    a.updates.acquire();
+    a.updates.app_install_result = result;
+    a.updates.release();
+    appUpdateDelivered(@ptrCast(a));
+}
+
+test "restart refreshes the feed and relaunches only its verified current result" {
+    const b = "99.0.1";
+    const c = "99.0.2";
+    const d = "99.0.3";
+    var a: App = .init(std.testing.allocator, std.testing.io, 1);
+    defer a.deinit();
+    a.updates.app_install_checked = true;
+    a.updates.app_can_install = true;
+    a.release.succeeded = true;
+    a.updates.setAppInstalled(b);
+    @memcpy(a.release.latest[0..b.len], b);
+    a.release.latest_len = b.len;
+
+    triggerAppUpdate(&a, b);
+    try std.testing.expect(a.updates.app_downloading);
+    try std.testing.expect(a.updates.restart_after_verify);
+    try std.testing.expectEqual(@as(u32, 0), a.updates.test_relaunch_count);
+
+    // The feed changes after the Restart button was rendered. The worker's
+    // fresh updater result is vC, so the single relaunch must use vC.
+    @memcpy(a.release.latest[0..c.len], c);
+    a.release.latest_len = c.len;
+    deliverTestAppInstall(&a, c, "");
+    try std.testing.expect(!a.updates.app_downloading);
+    try std.testing.expect(!a.updates.restart_after_verify);
+    try std.testing.expectEqual(@as(u32, 1), a.updates.test_relaunch_count);
+    try std.testing.expectEqualStrings(c, a.updates.test_relaunch_version[0..a.updates.test_relaunch_version_len]);
+
+    // A confirmed vB no-op remains restartable when the refreshed feed is
+    // still vB; a failed refresh must leave the running app alone.
+    var same: App = .init(std.testing.allocator, std.testing.io, 1);
+    defer same.deinit();
+    same.updates.app_install_checked = true;
+    same.updates.app_can_install = true;
+    same.release.succeeded = true;
+    same.updates.setAppInstalled(b);
+    @memcpy(same.release.latest[0..b.len], b);
+    same.release.latest_len = b.len;
+    triggerAppUpdate(&same, b);
+    deliverTestAppInstall(&same, b, "");
+    try std.testing.expectEqual(@as(u32, 1), same.updates.test_relaunch_count);
+    try std.testing.expectEqualStrings(b, same.updates.test_relaunch_version[0..same.updates.test_relaunch_version_len]);
+
+    var failed: App = .init(std.testing.allocator, std.testing.io, 1);
+    defer failed.deinit();
+    failed.updates.app_install_checked = true;
+    failed.updates.app_can_install = true;
+    failed.release.succeeded = true;
+    failed.updates.setAppInstalled(b);
+    @memcpy(failed.release.latest[0..b.len], b);
+    failed.release.latest_len = b.len;
+    triggerAppUpdate(&failed, b);
+    deliverTestAppInstall(&failed, "", "synthetic download failure");
+    try std.testing.expectEqual(@as(u32, 0), failed.updates.test_relaunch_count);
+    try std.testing.expect(!failed.updates.restart_after_verify);
+    try std.testing.expectEqualStrings("synthetic download failure", failed.updates.appFailed().?);
+
+    // A normal update/Retry can never inherit permission to restart.
+    var normal: App = .init(std.testing.allocator, std.testing.io, 1);
+    defer normal.deinit();
+    normal.updates.app_install_checked = true;
+    normal.updates.app_can_install = true;
+    normal.release.succeeded = true;
+    @memcpy(normal.release.latest[0..c.len], c);
+    normal.release.latest_len = c.len;
+    triggerAppUpdate(&normal, c);
+    try std.testing.expect(!normal.updates.restart_after_verify);
+    deliverTestAppInstall(&normal, c, "");
+    try std.testing.expectEqual(@as(u32, 0), normal.updates.test_relaunch_count);
+
+    // If the UI already knows about a newer release than the worker verified,
+    // keep the app open rather than relaunching into a superseded version.
+    var superseded: App = .init(std.testing.allocator, std.testing.io, 1);
+    defer superseded.deinit();
+    superseded.updates.app_install_checked = true;
+    superseded.updates.app_can_install = true;
+    superseded.release.succeeded = true;
+    superseded.updates.setAppInstalled(b);
+    @memcpy(superseded.release.latest[0..b.len], b);
+    superseded.release.latest_len = b.len;
+    triggerAppUpdate(&superseded, b);
+    @memcpy(superseded.release.latest[0..d.len], d);
+    superseded.release.latest_len = d.len;
+    deliverTestAppInstall(&superseded, c, "");
+    try std.testing.expectEqual(@as(u32, 0), superseded.updates.test_relaunch_count);
 }
 
 test "unified agent update row exposes Cancel during installing" {

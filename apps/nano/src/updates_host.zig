@@ -14,10 +14,12 @@
 //! (`Http`, `proc_seam.Runner`, `Restarter`, `Processes`) so tests answer from
 //! made-up releases and never install or restart anything.
 const std = @import("std");
+const Io = std.Io;
 const builtin = @import("builtin");
 const json = std.json;
 const Allocator = std.mem.Allocator;
 const proc = @import("proc_seam.zig");
+const io_deadline = @import("io_deadline.zig");
 
 pub const check_interval_ms: i64 = 60 * 60 * 1000;
 pub const check_backoff_ms = [_]i64{ 60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000 };
@@ -904,7 +906,7 @@ fn downloadErrorText(e: anyerror) []const u8 {
 /// when it hasn't moved for `idle_ms`, shuts the socket down.
 const IdleWatchdog = struct {
     io: std.Io,
-    handle: std.Io.net.Socket.Handle,
+    stream: std.Io.net.Stream,
     idle_ms: u32,
     progress: std.atomic.Value(u64) = .init(0),
     done: std.atomic.Value(bool) = .init(false),
@@ -929,7 +931,7 @@ const IdleWatchdog = struct {
             still_ms += 20;
             if (still_ms >= self.idle_ms) {
                 self.fired.store(true, .release);
-                @import("auth_host.zig").shutdownSocket(self.handle);
+                @import("auth_host.zig").shutdownSocket(self.io, self.stream);
                 return;
             }
         }
@@ -947,6 +949,24 @@ const IdleWatchdog = struct {
         return self.fired.load(.acquire);
     }
 };
+
+const FetchProgress = struct {
+    io: Io,
+    idle_watchdog: ?*IdleWatchdog = null,
+    deadline: ?*io_deadline.Progress = null,
+
+    fn tick(self: *FetchProgress) void {
+        if (self.idle_watchdog) |watchdog| watchdog.tick();
+        if (self.deadline) |progress| progress.tick(self.io);
+    }
+};
+
+fn disposeLateStep(gpa: Allocator, result: anyerror!Step) void {
+    if (result) |step| switch (step) {
+        .done => {},
+        .redirect => |next| gpa.free(next),
+    } else |_| {}
+}
 
 pub const FetchLimits = struct { idle_ms: u32 = read_idle_ms, max_bytes: u64 };
 
@@ -968,11 +988,33 @@ pub fn fetchInto(gpa: Allocator, io: std.Io, url: []const u8, limits: FetchLimit
             .headers = .{ .user_agent = .{ .override = "harness-engine-zig" } },
         });
         defer req.deinit();
-        var dog: IdleWatchdog = .{ .io = io, .handle = req.connection.?.stream_reader.stream.socket.handle, .idle_ms = limits.idle_ms };
-        dog.arm();
-        const step = fetchStep(gpa, &req, limits, sink, hash, &dog);
-        const fired = dog.disarm();
-        if (fired) return error.Timeout;
+        const step = if (comptime builtin.os.tag == .windows) blk: {
+            var deadline = io_deadline.Progress.init(io);
+            var progress: FetchProgress = .{ .io = io, .deadline = &deadline };
+            const outcome = try io_deadline.run(io, limits.idle_ms, &deadline, fetchStep, .{ gpa, &req, limits, sink, hash, &progress });
+            switch (outcome) {
+                .finished => |result| break :blk result,
+                .timed_out => |result| {
+                    disposeLateStep(gpa, result);
+                    return error.Timeout;
+                },
+                .canceled => |result| {
+                    disposeLateStep(gpa, result);
+                    return error.Canceled;
+                },
+            }
+        } else blk: {
+            var dog: IdleWatchdog = .{ .io = io, .stream = req.connection.?.stream_reader.stream, .idle_ms = limits.idle_ms };
+            dog.arm();
+            var progress: FetchProgress = .{ .io = io, .idle_watchdog = &dog };
+            const result = fetchStep(gpa, &req, limits, sink, hash, &progress);
+            const fired = dog.disarm();
+            if (fired) {
+                disposeLateStep(gpa, result);
+                return error.Timeout;
+            }
+            break :blk result;
+        };
         switch (try step) {
             .done => |d| return d,
             .redirect => |next| {
@@ -992,11 +1034,11 @@ pub fn fetchInto(gpa: Allocator, io: std.Io, url: []const u8, limits: FetchLimit
 
 const Step = union(enum) { done: Download, redirect: []u8 };
 
-fn fetchStep(gpa: Allocator, req: *std.http.Client.Request, limits: FetchLimits, sink: *std.Io.Writer, hash: *std.crypto.hash.sha2.Sha256, dog: *IdleWatchdog) !Step {
+fn fetchStep(gpa: Allocator, req: *std.http.Client.Request, limits: FetchLimits, sink: *std.Io.Writer, hash: *std.crypto.hash.sha2.Sha256, progress: *FetchProgress) !Step {
     try req.sendBodiless();
     var redirect_buf: [8 * 1024]u8 = undefined;
     var response = try req.receiveHead(&redirect_buf);
-    dog.tick();
+    progress.tick();
     const status: u16 = @backingInt(response.head.status);
     if (status >= 300 and status < 400) {
         if (response.head.location) |loc| return .{ .redirect = try absoluteLocation(gpa, req.uri, loc) };
@@ -1022,7 +1064,7 @@ fn fetchStep(gpa: Allocator, req: *std.http.Client.Request, limits: FetchLimits,
             if (size > limits.max_bytes) return error.TooLarge;
             hash.update(buf[0..n]);
             try sink.writeAll(buf[0..n]);
-            dog.tick();
+            progress.tick();
         }
         if (n < buf.len) break;
     }

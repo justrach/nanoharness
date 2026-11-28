@@ -1,5 +1,5 @@
 //! The Settings page, as the GPUI app's: its sidebar (shell.rs
-//! `render_settings_nav`: search, the sections under their groups, Back)
+//! `render_settings_nav`: Back, search, the sections under their groups)
 //! in place of the sessions list, and each section's page built from the
 //! same kit (settings/widgets.rs). ⌘, opens it, at the section last shown.
 const std = @import("std");
@@ -66,8 +66,9 @@ pub fn space(c: *ui.Context, h: f32) void {
     _ = c.leaf(.{ .width = .{ .px = 1 }, .height = .{ .px = h } }, .none, null);
 }
 
-/// In the sidebar's place: "Settings", the search, the sections under their
-/// groups, and Back at the foot.
+/// In the sidebar's place: Back, the search, and the sections under their
+/// groups. The top Back is Settings' one close control in every mode and
+/// width (Settings always shows this sidebar); Escape closes it too.
 pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
     const chrome = @import("panel_chrome.zig");
     const panel_chrome = @import("view_panel_chrome.zig");
@@ -91,7 +92,7 @@ fn navBody(c: *ui.Context, a: *App, k: theme.Colors, zen: bool) void {
             const h = ui.div(c).row().wFull().pt(4).pb(8).itemsCenter();
             defer h.end();
             ui.key(c, "settings-top-back");
-            const top_back = kit.pressFeedback(ui.div(c).row().wFull().h(30).px(8).gap(7).itemsCenter().rounded(7).hover(k.hover).control());
+            const top_back = kit.pressFeedback(ui.div(c).row().wFull().h(32).px(8).gap(7).itemsCenter().rounded(7).hover(k.hover).control());
             const top_hot = top_back.hovered();
             icons.icon(c, .@"arrow-left", 14, if (top_hot) k.text else k.muted, 0);
             ui.text(c, if (zen) "Back to chats" else "Back", st(c, 13, .{ .weight = .medium, .color = if (top_hot) k.text else k.muted }));
@@ -120,7 +121,9 @@ fn navBody(c: *ui.Context, a: *App, k: theme.Colors, zen: bool) void {
             anim_h.update(std.mem.asBytes(&salt));
             _ = c.anims.remove(anim_h.final());
             _ = ui.textField(c, &a.view.settings_search, .{ .placeholder = "Search settings", .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 14, .line_height = 22.75 });
-            if (zen and a.view.settings_search.text().len == 0) kit.kbdHint(c, k, "⌘F");
+            // The search's key, in every mode now the page header has no
+            // second way in.
+            if (a.view.settings_search.text().len == 0) kit.kbdHint(c, k, "⌘F");
         }
         space(c, 8);
         const rows = ui.div(c).column().wFull().grow().h(0).gap(2).scrollY();
@@ -162,20 +165,6 @@ fn navBody(c: *ui.Context, a: *App, k: theme.Colors, zen: bool) void {
     }
     // A running cloud sandbox stays in view on every settings page too.
     if (!a.offscreen) @import("view_sandbox_strip.zig").strip(c, a, k, 4);
-    if (!zen) {
-        const foot = ui.div(c).column().wFull().px(8).pb(12);
-        defer foot.end();
-        ui.key(c, "settings-back");
-        const back_bg = k.ink(if (k.dark) 0.05 else 0.035);
-        const back = kit.pressFeedback(ui.div(c).row().wFull().h(34).px(10).gap(7).itemsCenter().rounded(8).bg(back_bg).border(k.border).borderW(1).hover(k.hover).control());
-        defer back.end();
-        const hot = back.hovered();
-        icons.icon(c, .@"arrow-left", 14, if (hot) k.text else k.text.alpha(0.9), 0);
-        ui.text(c, "Back", st(c, 13, .{ .weight = .medium, .color = if (hot) k.text else k.text.alpha(0.9) }));
-        ui.spacer(c);
-        kit.kbdHint(c, k, "esc");
-        if (back.clicked()) close(a);
-    }
 }
 
 fn navRow(c: *ui.Context, k: theme.Colors, s: Section, selected: bool, searching: bool, width: f32) bool {
@@ -227,21 +216,11 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         const main_w = c.size.w - sidebar.widthOf(a);
         inner_w = @min(main_w, 768) - 2 * 24;
         {
+            // Where this page sits. Closing is the sidebar's Back (or
+            // Escape) and searching its field (or ⌘F), not repeated here.
             const context = ui.div(c).row().wFull().pb(16).gap(6).itemsCenter();
             defer context.end();
             ui.text(c, c.print("Settings / {s}", .{a.settings.section.group()}), st(c, 11, .{ .color = k.muted }));
-            ui.spacer(c);
-            if (ghost(c, k, "Find a setting")) {
-                a.view.settings_search_focus = true;
-                a.redraw();
-            }
-            ui.key(c, "settings-page-esc");
-            const esc_btn = kit.pressFeedback(ui.div(c).row().px(10).py(6).gap(6).itemsCenter().rounded(8).hover(k.ink(0.06)).control());
-            const esc_hot = esc_btn.hovered();
-            ui.text(c, "Close", st(c, 13, .{ .color = if (esc_hot) k.text else k.muted }));
-            kit.kbdHint(c, k, "esc");
-            if (esc_btn.clicked()) close(a);
-            esc_btn.end();
         }
         // Appearance's theme menu doesn't outlive its page.
         if (a.settings.section != .appearance) a.view.theme_menu = null;
@@ -256,7 +235,6 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
             .appearance => @import("view_settings_appearance.zig").page(c, a, k),
             .mcp => @import("view_settings_mcp.zig").page(c, a, k),
             .extensions => @import("view_settings_extensions.zig").page(c, a, k),
-            .appshots => @import("view_settings_appshots.zig").page(c, a, k),
             .github_ci => @import("view_settings_github_ci.zig").page(c, a, k),
             .harnesses => @import("view_settings_agents.zig").page(c, a, k),
             .agents => @import("view_settings_accounts.zig").page(c, a, k),

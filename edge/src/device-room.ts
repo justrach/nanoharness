@@ -260,7 +260,12 @@ export class DeviceRoom implements DurableObject {
     if (url.pathname === "/nudge" && request.method === "POST") {
       if (trustTier === "sandbox" && !sandboxAllowed()) return json({ error: "trust_tier_denied" }, 403);
       if (!owner || owner !== userId) return json({ error: "forbidden" }, owner ? 403 : 404);
-      const body = (await request.json().catch(() => null)) as { chatId?: string } | null;
+      const parsed = await readJsonCapped(request, 8 * 1024);
+      if (!parsed.ok) {
+        if (parsed.status === 413) return json({ error: "too_large" }, 413);
+        return json({ error: "bad_chat_id" }, 400);
+      }
+      const body = parsed.value as { chatId?: string } | null;
       const chatId = body?.chatId;
       if (!chatId || !CHAT_ID_RE.test(chatId)) return json({ error: "bad_chat_id" }, 400);
       const queued = enqueueNudge(this.ctx.storage.sql, chatId);

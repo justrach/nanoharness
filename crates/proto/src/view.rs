@@ -63,11 +63,12 @@ pub fn effective_indicator(session: Option<&Session>, now: DateTime<Utc>) -> Ind
     }
 }
 
-/// The full display status for a chat row / tab dot: live states win, then the
-/// synced seen marker decides completed-vs-idle. Staleness gating rides on
-/// [`effective_indicator`]; the derivation itself is [`crate::chat_indicator`].
+/// Completed attention requires a settled session row and an unseen message.
+/// Staleness gating only removes active rows. See [`crate::chat_indicator`].
 pub fn display_status(chat: &Chat, session: Option<&Session>, now: DateTime<Utc>) -> ChatIndicator {
-    let live = session.filter(|s| effective_indicator(Some(s), now) != Indicator::None);
+    let live = session.filter(|s| {
+        s.status == SessionStatus::Idle || effective_indicator(Some(s), now) != Indicator::None
+    });
     crate::chat_indicator(chat, live)
 }
 

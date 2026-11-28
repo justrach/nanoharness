@@ -439,6 +439,12 @@ pub fn agentGlyph(c: *ui.Context, k: theme.Colors, state: aw.AgentState, size: f
             const bar = c.alloc().dupe(ui.Point, &.{ .{ .x = cy - 2.5, .y = cy }, .{ .x = cy + 2.5, .y = cy } }) catch return;
             cv.polyline(bar, .{ .width = 1.4, .color = k.muted });
         },
+        // No outcome to show: an empty ring, neither a check nor a cross.
+        .ended => {
+            const cv = ui.canvas(c, .{ .width = .{ .px = size }, .height = .{ .px = size } });
+            const cy = size / 2;
+            cv.ring(.{ .x = cy, .y = cy }, size * 0.38, 1.35, k.muted);
+        },
     }
 }
 

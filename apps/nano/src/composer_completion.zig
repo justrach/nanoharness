@@ -278,7 +278,8 @@ pub fn refresh(a: *App, caret: usize) ?rules.Token {
     return tok;
 }
 
-const Native = struct { action: Action, name: []const u8, description: []const u8, chat: bool = false };
+/// `chat`: needs an open chat; `run`: needs its run to be going.
+const Native = struct { action: Action, name: []const u8, description: []const u8, chat: bool = false, run: bool = false };
 const native = [_]Native{
     .{ .action = .model, .name = "model", .description = "Choose agent, model and reasoning" },
     .{ .action = .new, .name = "new", .description = "Start a new session" },
@@ -292,8 +293,25 @@ const native = [_]Native{
     .{ .action = .files, .name = "files", .description = "Open files", .chat = true },
     .{ .action = .terminal, .name = "terminal", .description = "Open terminal", .chat = true },
     .{ .action = .rename, .name = "rename", .description = "Rename this session", .chat = true },
-    .{ .action = .stop, .name = "stop", .description = "Stop the current run", .chat = true },
+    .{ .action = .stop, .name = "stop", .description = "Stop the current run", .chat = true, .run = true },
 };
+
+/// Whether the slash menu offers a native command: chat commands need an
+/// open chat, and `/stop` a run to stop.
+fn nativeOffered(n: Native, has_chat: bool, running: bool) bool {
+    if (n.chat and !has_chat) return false;
+    return !n.run or running;
+}
+
+test "slash menu offers /stop only while a run goes" {
+    const stop = for (native) |n| {
+        if (n.action == .stop) break n;
+    } else unreachable;
+    try std.testing.expect(!nativeOffered(stop, false, false));
+    try std.testing.expect(!nativeOffered(stop, true, false));
+    try std.testing.expect(nativeOffered(stop, true, true));
+    for (native) |n| if (!n.run) try std.testing.expectEqual(!n.chat, nativeOffered(n, false, false));
+}
 
 pub fn entries(a: *App, gpa: Allocator, tok: rules.Token) ![]Entry {
     var all: std.ArrayList(Entry) = .empty;
@@ -304,8 +322,9 @@ pub fn entries(a: *App, gpa: Allocator, tok: rules.Token) ![]Entry {
         if (!skill_command) try all.append(gpa, command);
     };
     try all.appendSlice(gpa, a.completion.skills.items);
+    const running = a.selectedStatus() == .working;
     if (tok.prefix == '/') for (native) |n| {
-        if (n.chat and a.selected == null) continue;
+        if (!nativeOffered(n, a.selected != null, running)) continue;
         // Until provider discovery completes, use an explicitly local namespace
         // rather than temporarily stealing a provider's unqualified command.
         var name = if (a.completion.commands_done) n.name else try std.fmt.allocPrint(gpa, "harness:{s}", .{n.name});

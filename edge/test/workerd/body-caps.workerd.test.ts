@@ -1,6 +1,7 @@
 import { env } from "cloudflare:test";
 import { expect, it } from "vitest";
 import { AUTH_USER_HEADER } from "../../src/env";
+import { MAX_ROW_BYTES } from "../../src/chat-log";
 import { MAX_DEVICE_SIDECAR_BYTES } from "../../src/device-room";
 import { VAULT_LIMITS } from "../../src/vault-room";
 
@@ -60,4 +61,41 @@ it("a chat's sidecar and the vault keep their limits through the bounded reader"
   // A bodyless read still answers.
   const state = await vault.fetch("https://vault/vault", { headers: { [AUTH_USER_HEADER]: "owner" } });
   expect(state.status, await state.text()).toBe(200);
+});
+
+it("refuses oversized payloads on chat /rows, registry /push-target + /push, and device /nudge", async () => {
+  const chat = env.CHAT_ROOMS.get(env.CHAT_ROOMS.idFromName(crypto.randomUUID()));
+  const bigRow = await chat.fetch("https://chat/rows?device=dev1&batchId=b1", {
+    method: "POST",
+    headers: { [AUTH_USER_HEADER]: "owner" },
+    body: new Uint8Array(MAX_ROW_BYTES + 4097)
+  });
+  expect(bigRow.status).toBe(413);
+  expect(await bigRow.json()).toEqual({ error: "too_large" });
+
+  const reg = env.REGISTRY_ROOMS.get(env.REGISTRY_ROOMS.idFromName(crypto.randomUUID()));
+  const bigPushTarget = await reg.fetch("https://reg/push-target?device=dev1", {
+    method: "POST",
+    headers: { [AUTH_USER_HEADER]: "owner" },
+    body: new Uint8Array(32 * 1024).fill(32)
+  });
+  expect(bigPushTarget.status).toBe(413);
+  expect(await bigPushTarget.json()).toEqual({ error: "too_large" });
+
+  const bigPush = await reg.fetch("https://reg/push?device=dev1", {
+    method: "POST",
+    headers: { [AUTH_USER_HEADER]: "owner" },
+    body: new Uint8Array(2 * 1024 * 1024 + 1).fill(32)
+  });
+  expect(bigPush.status).toBe(413);
+  expect(await bigPush.json()).toEqual({ error: "too_large" });
+
+  const device = await claimedDevice();
+  const bigNudge = await device.fetch("https://test/nudge", {
+    method: "POST",
+    headers: { [AUTH_USER_HEADER]: "owner" },
+    body: new Uint8Array(16 * 1024).fill(32)
+  });
+  expect(bigNudge.status).toBe(413);
+  expect(await bigNudge.json()).toEqual({ error: "too_large" });
 });

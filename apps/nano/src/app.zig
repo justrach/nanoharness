@@ -41,6 +41,24 @@ pub const SplitReveal = struct {
     started: ?f64 = null,
 };
 
+/// A transcript's stable first-visible row, or its end-follow state.
+pub const TranscriptPosition = struct {
+    chat: []u8,
+    entry: ?[]u8 = null,
+    inset: f32 = 0,
+    fallback: f32 = 0,
+    at_end: bool = true,
+    pending: bool = false,
+    restored: bool = false,
+    alignment_frame: ?u64 = null,
+    alignment_frames: u8 = 0,
+    aligned_frames: u8 = 0,
+};
+
+pub fn transcriptScrollBox(chat: []const u8) u64 {
+    return std.hash.Wyhash.hash(0x5452_414e_5343_5250, chat);
+}
+
 /// The window's own state, apart from the engine's.
 pub const View = struct {
     sidebar_open: bool = true,
@@ -61,6 +79,8 @@ pub const View = struct {
     steer: @import("steer_order.zig").Store = .{},
     /// Each transcript owns its current-turn anchor, including split peers.
     reply_anchors: std.AutoHashMapUnmanaged(u64, @import("view_transcript.zig").TurnAnchor) = .empty,
+    /// Captured and pending durable viewport state, keyed by the chat's scroll box.
+    transcript_positions: std.AutoHashMapUnmanaged(u64, TranscriptPosition) = .empty,
     /// The jump pill is up. It stays until the reader is near the end.
     jump_shown: bool = false,
     jump_box: u64 = 0,
@@ -136,9 +156,9 @@ pub const View = struct {
     /// Settings › Shortcuts: the shortcut whose chip waits for keys, and
     /// why the last combination was refused.
     recording: ?usize = null,
-    /// Settings › Appshots asked for Screen Recording or Accessibility once.
-    capture_asked: bool = false,
-    text_asked: bool = false,
+    /// Settings › Appearance forced reduced motion on or off last frame
+    /// (view_settings_appearance.zig `applyReduceMotion`).
+    motion_forced: bool = false,
     /// A session row being dragged toward a split target (view_drag.zig).
     drag: @import("view_drag.zig").Drag = .{},
     /// A session row's menu and the dialogs it leads to.
@@ -279,6 +299,12 @@ pub const View = struct {
         @import("text_buffer.zig").deinit(&v.strip.query);
         v.tool_ui.deinit(gpa);
         v.reply_anchors.deinit(gpa);
+        var viewport_it = v.transcript_positions.valueIterator();
+        while (viewport_it.next()) |position| {
+            gpa.free(position.chat);
+            if (position.entry) |id| gpa.free(id);
+        }
+        v.transcript_positions.deinit(gpa);
         v.github_ci.deinit(gpa);
         v.palette.deinit(gpa);
         v.model_picker.deinit(gpa);
@@ -563,6 +589,8 @@ pub const App = struct {
     nav_restoring: bool = false,
     /// `justrach/browse` Connected Apps (`v1-p256-sig`) client, lazily created.
     browse_conn: ?*@import("browse_connect.zig").Client = null,
+    /// codegraff #941: tells graff when a preview's last browser tab closed.
+    preview_consumers: @import("preview_consumers_file.zig").Sink = .{},
 
     pub fn init(gpa: Allocator, io: std.Io, port: u16) App {
         return .{
@@ -625,6 +653,7 @@ pub const App = struct {
             a.gpa.destroy(b);
         }
         a.tool_blobs.deinit(a.gpa);
+        a.flushRememberedTabs();
         a.spaces.deinit();
         a.chats.deinit();
         a.sessions.deinit();
@@ -634,11 +663,6 @@ pub const App = struct {
             a.sound_seen.deinit(a.gpa);
         }
         a.devices.deinit();
-        a.rememberTabs();
-        if (a.tabs_dirty) {
-            a.tabs_dirty = false;
-            a.settings.flushOpenTabsAndLayout();
-        }
         a.tabs.deinit();
         for (a.peers.items) |*p| {
             p.transcript.deinit();
@@ -658,6 +682,9 @@ pub const App = struct {
         question.deinit(a);
         queue_mod.deinit(a);
         a.panels.deinit();
+        // Its tabs are gone with it: graff may stop what only they showed.
+        a.preview_consumers.leave(a.gpa, a.io);
+        a.preview_consumers.deinit(a.gpa);
         if (a.browse_conn) |bc| {
             bc.deinit();
             a.gpa.destroy(bc);
@@ -1025,6 +1052,7 @@ pub const App = struct {
             _ = a.findChat(only) orelse return;
             a.tabs.setCurrent(only);
             a.tabs.clearShown();
+            a.seedTranscriptPosition(only, null, 0, 0, true, true);
             a.select(only, null);
             return;
         }
@@ -1045,7 +1073,71 @@ pub const App = struct {
         if (wanted == 0) return;
         a.tabs.active = active_ix orelse 0;
         a.tabs.clearShown();
+        for (a.tabs.items.items) |id| if (id) |chat| a.seedTranscriptPosition(chat, null, 0, 0, true, true);
         a.select(a.tabs.current(), null);
+    }
+
+    pub fn transcriptPosition(a: *App, chat: []const u8) ?*TranscriptPosition {
+        const position = a.view.transcript_positions.getPtr(transcriptScrollBox(chat)) orelse return null;
+        return if (std.mem.eql(u8, position.chat, chat)) position else null;
+    }
+
+    pub fn seedTranscriptPosition(
+        a: *App,
+        chat: []const u8,
+        entry: ?[]const u8,
+        inset: f32,
+        fallback: f32,
+        at_end: bool,
+        restored: bool,
+    ) void {
+        const box = transcriptScrollBox(chat);
+        const slot = a.view.transcript_positions.getOrPut(a.gpa, box) catch return;
+        const owned_chat = a.gpa.dupe(u8, chat) catch {
+            if (!slot.found_existing) _ = a.view.transcript_positions.remove(box);
+            return;
+        };
+        const owned_entry = if (entry) |id| a.gpa.dupe(u8, id) catch {
+            a.gpa.free(owned_chat);
+            if (!slot.found_existing) _ = a.view.transcript_positions.remove(box);
+            return;
+        } else null;
+        if (slot.found_existing) {
+            a.gpa.free(slot.value_ptr.chat);
+            if (slot.value_ptr.entry) |old| a.gpa.free(old);
+        }
+        slot.value_ptr.* = .{
+            .chat = owned_chat,
+            .entry = owned_entry,
+            .inset = inset,
+            .fallback = fallback,
+            .at_end = at_end,
+            .pending = restored,
+            .restored = restored,
+        };
+    }
+
+    pub fn captureTranscriptPosition(
+        a: *App,
+        chat: []const u8,
+        entry: []const u8,
+        inset: f32,
+        offset: f32,
+        max_offset: f32,
+        follow: bool,
+    ) void {
+        var position = a.transcriptPosition(chat) orelse blk: {
+            a.seedTranscriptPosition(chat, null, 0, offset, follow, false);
+            break :blk a.transcriptPosition(chat) orelse return;
+        };
+        if (position.pending) return;
+        position.fallback = @max(0, offset);
+        position.at_end = follow or max_offset - offset <= 1;
+        position.inset = inset;
+        if (position.entry == null or !std.mem.eql(u8, position.entry.?, entry)) {
+            if (position.entry) |old| a.gpa.free(old);
+            position.entry = a.gpa.dupe(u8, entry) catch null;
+        }
     }
 
     /// Publishes every open chat tab, and the active one, into the GPUI
@@ -1069,6 +1161,13 @@ pub const App = struct {
         } else {
             a.settings.flushOpenTabsAndLayout();
         }
+    }
+
+    pub fn flushRememberedTabs(a: *App) void {
+        a.rememberTabs();
+        if (!a.tabs_dirty) return;
+        a.tabs_dirty = false;
+        a.settings.flushOpenTabsAndLayout();
     }
 
     fn addTabId(a: *App, ids: *std.ArrayList([]const u8), id: ?[]const u8) void {
@@ -1096,13 +1195,13 @@ pub const App = struct {
         if (a.findChat(chat_id) == null) return;
         a.view.settings_open = false;
         if (a.selected) |s| if (std.mem.eql(u8, s, chat_id)) {
-            a.view.focus_composer = true;
-            return a.redraw();
+            return a.revealSelectedChat();
         };
         if (a.tabs.find(chat_id)) |at| {
             if (at.tab != a.tabs.active) a.showTab(at.tab);
             if (at.pane) |ix| a.focusPane(ix);
             if (at.panel_tab) |ix| a.showPaneTab(ix);
+            if (a.selected) |s| if (std.mem.eql(u8, s, chat_id)) a.revealSelectedChat();
             return;
         }
         const chat = a.findChat(chat_id).?;
@@ -1124,9 +1223,9 @@ pub const App = struct {
             return;
         }
         const destination: ?usize = if (project != null) blk: {
-            if (sameProject(a.workspaceProject(a.tabs.active), project)) break :blk a.tabs.active;
+            if (a.canGroupLiveSession(a.tabs.active, project)) break :blk a.tabs.active;
             for (0..a.tabs.items.items.len) |ix| {
-                if (sameProject(a.workspaceProject(ix), project)) break :blk ix;
+                if (a.canGroupLiveSession(ix, project)) break :blk ix;
             }
             break :blk null;
         } else if ((if (a.tabs.layout()) |s| s.panes.items.len > 1 else false) and a.workspaceProject(a.tabs.active) == null)
@@ -1145,14 +1244,40 @@ pub const App = struct {
         a.select(chat_id, project);
     }
 
+    /// Selection can stay on the chat while another surface owns input.
+    /// A reveal returns to the chat without reselecting it or resetting its draft.
+    fn revealSelectedChat(a: *App) void {
+        const pane: @import("view_tab_strip.zig").Panel = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
+        a.view.write_open = false;
+        a.bots.page = .none;
+        a.view.strip.focused = pane;
+        if (a.view.strip.expanded != null) a.view.strip.expanded = pane;
+        a.view.focus_composer = true;
+        a.redraw();
+    }
+
     fn isBlankNewTab(a: *const App) bool {
-        if (a.selected != null) return false;
+        if (a.selected != null or a.tabs.current() != null) return false;
         if (std.mem.trim(u8, a.composer.text(), " \t\r\n").len > 0) return false;
-        if (a.attachments.items.items.len > 0) return false;
+        if (@import("app_attachments.zig").count(a) > 0) return false;
         for (a.panels.tabs.items) |tab| {
-            if (tab.editor) |e| if (e.target.chatId == null and e.dirty()) return false;
+            if (tab.editor) |e| if (e.matchesCurrent(a) and e.dirty()) return false;
         }
         return true;
+    }
+
+    fn canGroupLiveSession(a: *const App, ix: usize, project: ?[]const u8) bool {
+        // A standalone archive view is for reading, not a live project workspace.
+        const standalone = if (a.tabs.splits.items[ix]) |s|
+            s.panes.items.len == 1 and s.groups[0].count() == 1
+        else
+            true;
+        if (standalone) {
+            if (a.tabs.items.items[ix]) |id| if (a.findChat(id)) |chat| {
+                if (chat.archived) return false;
+            };
+        }
+        return sameProject(a.workspaceProject(ix), project);
     }
 
     /// The workspace's selected conversation or parked draft owns its project.
@@ -1160,6 +1285,7 @@ pub const App = struct {
     pub fn workspaceProject(a: *const App, ix: usize) ?[]const u8 {
         if (ix >= a.tabs.items.items.len) return null;
         if (a.tabs.items.items[ix]) |id| if (a.findChat(id)) |chat| return chat.space_id;
+        if (a.tabs.splits.items[ix]) |s| if (s.drafts.items[s.focus]) |d| return if (d.no_project) null else d.space;
         if (a.tabs.drafts.items[ix]) |d| return if (d.no_project) null else d.space;
         if (ix == a.tabs.active) if (a.newChatSpace()) |space| return space.id;
         return null;
@@ -1180,12 +1306,6 @@ pub const App = struct {
         a.view.settings_open = false;
         a.tabs.setCurrent(chat_id);
         a.select(chat_id, null);
-    }
-
-    /// The active tab's new-chat draft, parked with it.
-    fn park(a: *App) void {
-        const d = drafts.canvas(a) catch return;
-        a.tabs.park(a.tabs.active, null, d);
     }
 
     fn freshPanelDraft(a: *App, draft: tabs_mod.Draft) !tabs_mod.Draft {
@@ -1210,9 +1330,13 @@ pub const App = struct {
     pub fn newTab(a: *App) void {
         var d = drafts.canvas(a) catch return;
         const fresh = a.freshPanelDraft(d) catch return d.deinit(a.gpa);
-        const focus_pane = if (a.tabs.layout()) |s| s.focus else null;
-        a.tabs.park(a.tabs.active, focus_pane, d);
+        @import("app_navigation.zig").parkActiveDraft(a, d);
+        const count = a.tabs.items.items.len;
         a.tabs.newTab();
+        if (a.tabs.items.items.len == count) {
+            var unused = fresh;
+            return unused.deinit(a.gpa);
+        }
         a.view.strip.focused = .{ .chat = 0 };
         a.view.strip.expanded = null;
         a.view.strip.menu = null;
@@ -1249,7 +1373,7 @@ pub const App = struct {
         a.tabs.isolateWorkspace() catch return;
         var d = drafts.canvas(a) catch return;
         const fresh = a.freshPanelDraft(d) catch return d.deinit(a.gpa);
-        a.tabs.park(a.tabs.active, null, d);
+        @import("app_navigation.zig").parkActiveDraft(a, d);
         if (at_end) a.tabs.appendTab() else a.tabs.newTab();
         a.view.strip.focused = .{ .chat = 0 };
         a.view.strip.expanded = null;
@@ -1281,7 +1405,8 @@ pub const App = struct {
     /// draft back as it was left (`load_chat_tab`).
     pub fn showTab(a: *App, i: usize) void {
         if (i >= a.tabs.items.items.len or i == a.tabs.active) return;
-        a.park();
+        const outgoing = drafts.canvas(a) catch return;
+        @import("app_navigation.zig").parkActiveDraft(a, outgoing);
         a.tabs.active = i;
         a.tabs.noteShown();
         @import("app_navigation.zig").validateCurrent(a);
@@ -1294,17 +1419,9 @@ pub const App = struct {
         const focus_pane = if (a.tabs.layout()) |s| s.focus else null;
         a.view.strip.focused = .{ .chat = focus_pane orelse 0 };
         a.select(a.tabs.current(), null);
-        if (a.tabs.unpark(i, focus_pane)) |d| {
-            if (a.selected == null) drafts.adopt(a, d) else {
-                var unused = d;
-                unused.deinit(a.gpa);
-            }
-        } else if (a.tabs.unpark(i, null)) |d| {
-            if (a.selected == null) drafts.adopt(a, d) else {
-                var unused = d;
-                unused.deinit(a.gpa);
-            }
-        }
+        // A populated chat has its own prompt. The pane still owns its canvas
+        // picks, which adopt restores without touching that chat's prompt.
+        if (a.tabs.unpark(i, focus_pane) orelse a.tabs.unpark(i, null)) |d| drafts.adopt(a, d);
     }
 
     pub fn isOnlyNewChat(a: *const App) bool {
@@ -1403,10 +1520,7 @@ pub const App = struct {
         @import("app_navigation.zig").validateCurrent(a);
         const back = a.tabs.unpark(a.tabs.active, ix);
         a.select(a.tabs.current(), null);
-        if (back) |b| {
-            var x = b;
-            if (a.selected == null) drafts.adopt(a, b) else x.deinit(a.gpa);
-        }
+        if (back) |incoming| drafts.adopt(a, incoming);
     }
 
     /// ⌘] / ⌘[: the next pane in a split, else the next tab.
@@ -1897,7 +2011,12 @@ pub const App = struct {
         if (!same) a.selected = if (chat_id) |c| a.gpa.dupe(u8, c) catch null else null;
         // Focusing an already-visible peer preserves its scroll offset and
         // retires any stale bottom-follow request left by an empty pane.
-        if (!same) a.view.stick_end = !promoted_peer;
+        // A restored viewport owns the initial position until it is applied.
+        const restoring_viewport = if (chat_id) |id|
+            (if (a.transcriptPosition(id)) |position| position.pending else false)
+        else
+            false;
+        if (!same) a.view.stick_end = !promoted_peer and !restoring_viewport;
         if (space_id) |s| {
             if (a.space) |old| a.retireSlice(old);
             a.space = a.gpa.dupe(u8, s) catch null;
@@ -2122,7 +2241,12 @@ pub const App = struct {
             const studio = @import("view_custom_theme_studio.zig");
             if (n > 0) return studio.openWithPrompt(a, arg_buf[0..n]) else return studio.open(a);
         }
-        if (prompt.len == 0 or a.engine.state != .connected) return;
+        if (prompt.len == 0) return;
+        if (a.engine.state != .connected) {
+            // The Send button is dimmed for this; a click or Return says why.
+            a.setNotice("The engine isn't connected yet, so nothing was sent. Your message is kept; send it once Harness reconnects.");
+            return a.redraw();
+        }
         if (a.selected == null and !a.new_chat_mode and !a.new_no_project and
             a.space != null and a.newChatSpace() == null)
         {
@@ -2167,7 +2291,7 @@ pub const App = struct {
                 model = c.model;
                 reasoning = agent_mod.sendReasoning(a, harness orelse "graff", model, c.reasoning);
                 orchestrator = c.orchestrator;
-                service_tier = c.service_tier;
+                service_tier = agent_mod.sendServiceTier(a, harness orelse "graff", model, c.service_tier);
                 acp_v2_preview = if (c.acp_v2_preview) true else null;
                 sandbox = c.sandbox orelse sandbox;
                 if (c.cwd) |d| cwd = d;

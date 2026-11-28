@@ -20,8 +20,6 @@ pub const fast_retry_delay_ms: i64 = 30 * 1000;
 /// the 10-minute schedule.
 pub const retry_delay_ms: i64 = 2 * 60 * 1000;
 
-var capture_seq: std.atomic.Value(u64) = .init(0);
-
 /// Pure backoff policy for Codegraff update failures: keep auto-updates retrying
 /// silently on transient errors, and only fall back to the manual `Available`
 /// prompt on repeated failures or explicit user/disabled-auto-update checks.
@@ -355,15 +353,17 @@ pub fn extractAndSwapArchive(
     stage_dir: []const u8,
     managed_path: []const u8,
 ) bool {
-    if (sums_bytes) |sums| {
-        const actual = sha256FileHex(gpa, io, tar_path) orelse {
-            std.log.warn("harness-nano: graff update checksum read failed for {s}", .{tar_path});
-            return false;
-        };
-        if (!verifySha256Sums(sums, asset, &actual)) {
-            std.log.warn("harness-nano: graff {s} SHA256SUMS verification failed", .{asset});
-            return false;
-        }
+    const sums = sums_bytes orelse {
+        std.log.warn("harness-nano: graff {s} SHA256SUMS missing; refusing unverified update", .{asset});
+        return false;
+    };
+    const actual = sha256FileHex(gpa, io, tar_path) orelse {
+        std.log.warn("harness-nano: graff update checksum read failed for {s}", .{tar_path});
+        return false;
+    };
+    if (!verifySha256Sums(sums, asset, &actual)) {
+        std.log.warn("harness-nano: graff {s} SHA256SUMS verification failed", .{asset});
+        return false;
     }
 
     std.Io.Dir.cwd().deleteTree(io, stage_dir) catch {};
@@ -459,13 +459,12 @@ fn downloadAndSwap(gpa: std.mem.Allocator, io: std.Io, home: []const u8, managed
         std.log.warn("harness-nano: graff {s} download failed", .{tag});
         return false;
     }
-    var sums_bytes: ?[]u8 = null;
-    defer if (sums_bytes) |b| gpa.free(b);
-    if (curlDownload(io, sums_url, sums_path)) {
-        sums_bytes = std.Io.Dir.cwd().readFileAlloc(io, sums_path, gpa, .limited(256 * 1024)) catch return false;
-    } else {
-        std.log.warn("harness-nano: graff {s} SHA256SUMS unavailable", .{tag});
+    if (!curlDownload(io, sums_url, sums_path)) {
+        std.log.warn("harness-nano: graff {s} SHA256SUMS unavailable; refusing unverified update", .{tag});
+        return false;
     }
+    const sums_bytes = std.Io.Dir.cwd().readFileAlloc(io, sums_path, gpa, .limited(256 * 1024)) catch return false;
+    defer gpa.free(sums_bytes);
 
     const stage = std.fmt.allocPrint(gpa, "{s}/.graff-update-stage", .{bin_dir}) catch return false;
     defer gpa.free(stage);
@@ -538,25 +537,17 @@ fn curlDownload(io: std.Io, url: []const u8, dest_path: []const u8) bool {
 }
 
 fn runCapture(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8, max_bytes: usize) ?[]u8 {
-    var tmp_buf: [128]u8 = undefined;
-    const seed = std.Io.Clock.real.now(io).nanoseconds;
-    const seq = capture_seq.fetchAdd(1, .monotonic);
-    const out_path = std.fmt.bufPrint(&tmp_buf, "/tmp/harness-graff-upd-{d}-{d}.tmp", .{ seed, seq }) catch return null;
-    const file = std.Io.Dir.cwd().createFile(io, out_path, .{}) catch return null;
-    defer std.Io.Dir.cwd().deleteFile(io, out_path) catch {};
-    var file_open = true;
-    defer if (file_open) file.close(io);
-    var child = std.process.spawn(io, .{
+    const res = std.process.run(gpa, io, .{
         .argv = argv,
-        .stdin = .ignore,
-        .stdout = .{ .file = file },
-        .stderr = .ignore,
+        .stdout_limit = .limited(max_bytes),
+        .stderr_limit = .limited(4096),
     }) catch return null;
-    file.close(io);
-    file_open = false;
-    const term = child.wait(io) catch return null;
-    if (term != .exited or term.exited != 0) return null;
-    return std.Io.Dir.cwd().readFileAlloc(io, out_path, gpa, .limited(max_bytes)) catch null;
+    defer gpa.free(res.stderr);
+    if (res.term != .exited or res.term.exited != 0) {
+        gpa.free(res.stdout);
+        return null;
+    }
+    return res.stdout;
 }
 
 fn latestTag(gpa: std.mem.Allocator, io: std.Io) ?[]u8 {
@@ -776,6 +767,12 @@ test "graff extractAndSwapArchive verifies checksum, unpacks, validates --versio
     });
     const tar_term = try tar_child.wait(io);
     try testing.expect(tar_term == .exited and tar_term.exited == 0);
+
+    // Missing SHA256SUMS must fail closed and leave the existing binary untouched.
+    try testing.expect(!extractAndSwapArchive(gpa, io, "graff-aarch64-macos.tar.gz", tar_path, null, stage_dir, managed));
+    const missing_out = versionOutput(gpa, io, managed) orelse return error.MissingOldVersion;
+    defer gpa.free(missing_out);
+    try testing.expect(std.mem.indexOf(u8, missing_out, "0.302.74.80") != null);
 
     // Mismatched SHA256SUMS must leave existing managed binary untouched.
     const bad_sums = "0000000000000000000000000000000000000000000000000000000000000000  graff-aarch64-macos.tar.gz\n";

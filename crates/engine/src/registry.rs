@@ -324,6 +324,9 @@ pub struct HarnessRegistry {
     remote_approvals: tokio::sync::watch::Sender<Vec<harness_rpc::RemoteApproval>>,
     /// Command ids the user approved once (not persisted).
     one_shot_commands: Mutex<HashSet<String>>,
+    /// "Allow once" on parked relayed RPCs: each admits one retry of that
+    /// request from that device (not persisted, spent on use, short-lived).
+    relay_once_grants: Mutex<Vec<harness_rpc::RelayOnceGrant>>,
     /// Per-device Ed25519 + X25519, loaded from `{data_dir}/device-keys.json`.
     device_keys: Mutex<Option<harness_sync::DeviceKeypair>>,
     /// Whether this engine runs inside a headless cloud sandbox
@@ -353,6 +356,7 @@ impl HarnessRegistry {
             pending_remote: Mutex::new(Vec::new()),
             remote_approvals: tokio::sync::watch::Sender::new(Vec::new()),
             one_shot_commands: Mutex::new(HashSet::new()),
+            relay_once_grants: Mutex::new(Vec::new()),
             device_keys: Mutex::new(None),
             sandbox_host: AtomicBool::new(false),
             prefs_path: Mutex::new(None),
@@ -655,6 +659,11 @@ impl HarnessRegistry {
     pub fn set_remote_control(&self, enabled: bool) {
         self.prefs().remote_control = enabled;
         self.persist_prefs();
+        if !enabled {
+            // Turning remote control off withdraws every unspent "Allow
+            // once": turning it back on later must not revive them.
+            self.relay_once_grants().clear();
+        }
     }
 
     pub fn e2ee(&self) -> bool {
@@ -701,7 +710,7 @@ impl HarnessRegistry {
     }
 
     pub fn approve_remote_device(&self, device_id: &str) {
-        if device_id.is_empty() || device_id == "unknown" {
+        if !harness_rpc::relay_caller_identified(device_id) {
             return;
         }
         {
@@ -722,6 +731,37 @@ impl HarnessRegistry {
             .approved_remote_devices
             .retain(|id| id != device_id);
         self.persist_prefs();
+        self.relay_once_grants()
+            .retain(|grant| grant.device_id != device_id);
+    }
+
+    fn relay_once_grants(&self) -> MutexGuard<'_, Vec<harness_rpc::RelayOnceGrant>> {
+        self.relay_once_grants
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Spend the "Allow once" grant that admits this exact request from this
+    /// device at `now`, if there is one. Expired grants are dropped on the
+    /// way. Check and removal happen under one lock, so concurrent retries
+    /// cannot both be admitted.
+    pub fn take_relay_once_grant(
+        &self,
+        device_id: &str,
+        method: &str,
+        request_digest: &str,
+        now: std::time::Instant,
+    ) -> bool {
+        let mut grants = self.relay_once_grants();
+        grants.retain(|grant| !grant.expired(now));
+        let Some(ix) = grants
+            .iter()
+            .position(|grant| grant.admits(device_id, method, request_digest, now))
+        else {
+            return false;
+        };
+        grants.swap_remove(ix);
+        true
     }
 
     pub fn pending_remote_approvals(&self) -> Vec<harness_rpc::RemoteApproval> {
@@ -756,6 +796,18 @@ impl HarnessRegistry {
     }
 
     pub fn resolve_remote_approval(&self, id: &str, allow: bool, always: bool) -> bool {
+        self.resolve_remote_approval_at(id, allow, always, std::time::Instant::now())
+    }
+
+    /// [`Self::resolve_remote_approval`] with the clock a new "Allow once"
+    /// grant starts from.
+    pub fn resolve_remote_approval_at(
+        &self,
+        id: &str,
+        allow: bool,
+        always: bool,
+        now: std::time::Instant,
+    ) -> bool {
         let mut pending = self
             .pending_remote
             .lock()
@@ -770,6 +822,18 @@ impl HarnessRegistry {
         if allow {
             if always {
                 self.approve_remote_device(&item.device_id);
+            } else if item.kind == "rpc"
+                && item.allow_once
+                && let (Some(method), Some(request_digest)) = (&item.method, &item.request_digest)
+                && harness_rpc::relay_allow_once_method(method)
+                && harness_rpc::relay_caller_identified(&item.device_id)
+            {
+                self.relay_once_grants().push(harness_rpc::RelayOnceGrant {
+                    device_id: item.device_id.clone(),
+                    method: method.clone(),
+                    request_digest: request_digest.clone(),
+                    granted_at: now,
+                });
             }
             if let Some(command_id) = item.command_id {
                 self.one_shot_commands
@@ -2313,6 +2377,8 @@ mod title_tests {
             command_id: Some("cmd-1".into()),
             method: None,
             summary: "run 1".into(),
+            allow_once: true,
+            request_digest: None,
         });
         registry.park_remote_approval(harness_rpc::RemoteApproval {
             id: "a2".into(),
@@ -2322,6 +2388,8 @@ mod title_tests {
             command_id: Some("cmd-2".into()),
             method: None,
             summary: "run 2".into(),
+            allow_once: true,
+            request_digest: None,
         });
         registry.park_remote_approval(harness_rpc::RemoteApproval {
             id: "a3".into(),
@@ -2331,6 +2399,8 @@ mod title_tests {
             command_id: None,
             method: Some("OpenTerminal".into()),
             summary: "rpc".into(),
+            allow_once: false,
+            request_digest: None,
         });
 
         let chats = registry.take_parked_command_chats();

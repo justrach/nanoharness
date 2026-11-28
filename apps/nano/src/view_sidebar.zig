@@ -361,7 +361,6 @@ fn openChatMark(c: *ui.Context, a: *const App, k: theme.Colors, chat_id: ?[]cons
 }
 
 fn zenNavRows(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const mac = builtin.os.tag == .macos;
     const box = ui.div(c).column().wFull().px(8).pt(8).pb(4).gap(2);
     defer box.end();
 
@@ -375,7 +374,10 @@ fn zenNavRows(c: *ui.Context, a: *App, k: theme.Colors) void {
             icons.icon(c, .plus, 15, if (hot) k.text else k.muted, 0);
             ui.text(c, "New chat", .{ .size = 13, .line_height = 17, .weight = theme.ui_medium_weight, .color = k.text.alpha(if (hot) 0.98 else 0.88) });
             ui.spacer(c);
-            ui.text(c, if (mac) "⌘N" else "Ctrl+N", .{ .size = 11, .line_height = 14, .color = k.faint });
+            // The rebindable New chat key (⌘T by default), as the palette shows it.
+            var key_buf: [48]u8 = undefined;
+            const new_key = @import("shortcuts.zig").platformBadge(&key_buf, @import("view_palette.zig").comboFor(a, "newSession"));
+            ui.text(c, new_key, .{ .size = 11, .line_height = 14, .color = k.faint });
         }
         if (clicked) a.newTab();
     }
@@ -393,7 +395,8 @@ fn zenNavRows(c: *ui.Context, a: *App, k: theme.Colors) void {
             icons.icon(c, .magnifer, 15, if (searching or hot) k.text else k.muted, 0);
             ui.text(c, "Search", .{ .size = 13, .line_height = 17, .weight = theme.ui_medium_weight, .color = k.text.alpha(if (searching or hot) 0.98 else 0.88) });
             ui.spacer(c);
-            ui.text(c, if (mac) "⌘F" else "Ctrl+F", .{ .size = 11, .line_height = 14, .color = k.faint });
+            var key_buf: [48]u8 = undefined;
+            ui.text(c, @import("shortcuts.zig").platformBadge(&key_buf, "mod-f"), .{ .size = 11, .line_height = 14, .color = k.faint });
         }
         if (clicked) @import("view_sidebar_search.zig").toggle(a);
     }
@@ -1727,10 +1730,7 @@ fn sessionRowWith(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, 
     const drag = @import("view_drag.zig");
     const it = r.interaction();
     if (it.pressed and c.input.pressed) drag.press(c, a, ch.id, it.rect);
-    if (r.clicked() and !drag.dragging(a)) {
-        // A Bots page sits in the chat's place: its own row brings it back.
-        if (selected) @import("bots.zig").close(a) else a.openChatInTab(ch.id);
-    }
+    if (r.clicked() and !drag.dragging(a)) a.openChatInTab(ch.id);
 }
 
 fn statusSlot(c: *ui.Context, k: theme.Colors, mark: workspace.Mark) void {
@@ -1893,7 +1893,7 @@ fn zenFooter(c: *ui.Context, a: *App, k: theme.Colors, archived_count: usize) vo
         const btn = tip.on(
             ui.div(c).row().grow().w(0).h(30).px(5).gap(8).itemsCenter().rounded(7).hover(k.hover).control(),
             k,
-            .{ .text = c.print("Account: {s} (click for card, right-click for menu)", .{label}), .delay = tip.quick },
+            .{ .text = c.print("Account: {s} (click for settings, right-click for menu)", .{label}), .delay = tip.quick },
         );
         const clicked = btn.clicked();
         const rclick = kit.secondaryClicked(btn);
@@ -2110,10 +2110,5 @@ fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
         icons.icon(c, .@"clock-circle", 15, k.muted, 0);
         if (history.clicked()) @import("view_palette.zig").toggle(a, .chat_history);
     }
-    ui.div(c).w(0).end();
-    ui.key(c, "sidebar-session-create");
-    const b = tip.on(ui.div(c).row().size(26, 26).center().rounded(7).hover(k.hover).control(), k, .{ .text = "New workspace", .delay = tip.quick });
-    defer b.end();
-    icons.icon(c, .plus, 15, k.muted, 0);
-    if (b.clicked()) a.newWorkspaceSession();
+    // No second "+" here: the title row's "New session" is the same action.
 }

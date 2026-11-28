@@ -29,6 +29,8 @@ pub const Node = struct {
     /// Built using the preceding size; a size change needs another frame.
     layout_dependent: bool = false,
     measured: types.Size = .{},
+    /// The width `measured` was worked out at in this layout (NaN: not yet).
+    measured_at: f32 = std.math.nan(f32),
     rect: types.Rect = .{},
 };
 
@@ -273,10 +275,24 @@ pub const Context = struct {
     motion: @import("motion.zig").State = .{},
     /// The system's Reduce Motion: springs and tweens are their target.
     reduce_motion: bool = false,
+    /// What the system itself asks for, before an app's own preference.
+    system_reduce_motion: bool = false,
+    /// An app's own Reduce Motion choice, or null to follow the system. The
+    /// platform applies it to `reduce_motion`/`reduced_motion` before each
+    /// frame (and before that frame's scrolling), with the system's value
+    /// kept in `system_reduce_motion`.
+    reduce_motion_override: ?bool = null,
     /// Horizontal offsets of `scroll_x` boxes, by id.
     scroll_x: std.AutoHashMapUnmanaged(u64, f32) = .empty,
     truncates: std.AutoHashMapUnmanaged(u64, text.Cut) = .empty,
     text_warmed: bool = false,
+    /// Boxes the last layout measured (`layout.measure`), each time it
+    /// worked one out: tests check layout's cost with it.
+    layout_measures: u32 = 0,
+    /// A box measured again at the width it was last measured at keeps
+    /// that size, its boxes theirs. Off, it is worked out again, as it was
+    /// before: the tests compare the two.
+    layout_reuse: bool = true,
     time_driven: enum { none, slow, fast } = .none,
     painting_group: bool = false,
 

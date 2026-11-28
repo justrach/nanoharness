@@ -47,11 +47,10 @@ pub fn capture(c: *ui.Context, a: *App) void {
     if (kp.memChord(cand, &kp.fixed_window_chords) or shortcuts.isWorkspaceModeBinding(combo)) {
         return refuse(a, c.print("{s} is a fixed window shortcut.", .{shortcuts.display(&shown, combo)}));
     }
-    // One past the page's shortcuts: the Appshots page's.
-    for (shortcuts.all ++ [_]shortcuts.Shortcut{shortcuts.appshot}, 0..) |other, j| if (j != ix and std.mem.eql(u8, a.settings.combo(other), combo)) {
+    for (shortcuts.all, 0..) |other, j| if (j != ix and std.mem.eql(u8, a.settings.combo(other), combo)) {
         return refuse(a, c.print("{s} is already assigned to {s}.", .{ shortcuts.display(&shown, combo), other.title }));
     };
-    a.settings.setCombo(if (ix == shortcuts.all.len) shortcuts.appshot else shortcuts.all[ix], combo);
+    a.settings.setCombo(shortcuts.all[ix], combo);
     a.view.recording = null;
     a.view.shortcut_notice.clearRetainingCapacity();
 }

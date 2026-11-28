@@ -78,9 +78,8 @@ pub fn toolbarHeight(a: *const App) f32 {
 
 /// The run dock's height under the chat, with its hairline: none while shut.
 pub fn dockHeight(a: *const App) f32 {
-    if (!a.actions.dock_open) return 0;
-    for (a.actions.runs.items) |r| if (r.visible(a.selected)) return dock_h + 1;
-    return 0;
+    if (!a.actions.dock_open or !actions.hasVisibleRun(&a.actions, a.selected)) return 0;
+    return dock_h + 1;
 }
 
 /// Release desktop keeps project actions inside the conversation panel.

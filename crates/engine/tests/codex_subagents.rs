@@ -49,6 +49,8 @@ async fn check_persistence(
     alpha_status: SubagentStatus,
     alpha_text: &str,
     alpha_users: &str,
+    alpha_statuses: &[MessageStatus],
+    alpha_failure: Option<&str>,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let (core, profile) = assemble(dir.path());
@@ -142,11 +144,27 @@ async fn check_persistence(
     assert_eq!(text(&alpha, MessageRole::Assistant), alpha_text);
     assert_eq!(text(&alpha, MessageRole::User), alpha_users);
     assert!(text(&beta, MessageRole::Assistant).contains("beta answer"));
+    // A child turn that finished stays Complete; one that failed is frozen
+    // Aborted with its reason as an error part. Beta always finishes.
+    assert_eq!(
+        alpha.iter().map(|e| e.status).collect::<Vec<_>>(),
+        alpha_statuses.iter().copied().map(Some).collect::<Vec<_>>(),
+        "{alpha:#?}"
+    );
+    for entry in alpha
+        .iter()
+        .filter(|e| e.status == Some(MessageStatus::Aborted))
+    {
+        assert!(
+            entry.parts.iter().any(|p| matches!(p,
+                MessagePart::Error { message, .. } if Some(message.as_str()) == alpha_failure)),
+            "{entry:#?}"
+        );
+    }
     assert!(
-        alpha
-            .iter()
-            .chain(&beta)
-            .all(|e| e.status == Some(MessageStatus::Complete))
+        beta.iter()
+            .all(|e| e.status == Some(MessageStatus::Complete)),
+        "{beta:#?}"
     );
     core.shutdown().await;
     drop(core);
@@ -222,6 +240,8 @@ async fn v1_children_persist_under_their_spawn_chips() {
         SubagentStatus::Done,
         "alpha answer",
         "Inspect alpha",
+        &[MessageStatus::Complete, MessageStatus::Complete],
+        None,
     )
     .await;
 }
@@ -233,6 +253,14 @@ async fn v2_followup_appends_to_the_original_document_and_updates_the_original_c
         SubagentStatus::Failed,
         "first alpha\n\nsecond alpha\n\n",
         "First assignment",
+        // The first turn completed; the follow-up turn failed
+        // (`alpha-turn-2`, status "failed", "followup failed").
+        &[
+            MessageStatus::Complete,
+            MessageStatus::Complete,
+            MessageStatus::Aborted,
+        ],
+        Some("followup failed"),
     )
     .await;
 }

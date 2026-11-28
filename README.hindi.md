@@ -18,7 +18,7 @@ Cursor, Devin, Grok, Hermes, Pi, OpenCode और Antigravity को साथ �
 | <img src="docs/media/readme/nanoharness-agents-light.png" alt="Light Mode थीम में Harness की वर्तमान एजेंट सेटिंग" width="520"> | <img src="docs/media/readme/nanoharness-workspace-light.png" alt="Light Mode थीम में graff का नमूना संवाद" width="520"> |
 
 मॉडल चुनें, बातचीत के साथ बदलाव जाँचें और ऐप में ही फ़ाइलें व ब्राउज़र खोलें।
-डेस्कटॉप ऐप Rust/GPUI पर बना है; iOS साथी ऐप SwiftUI में सिंक हुए सत्र दिखाता है।
+डेस्कटॉप ऐप nanoui पर Zig में बना है और इंजन Rust में; iOS साथी ऐप SwiftUI में सिंक हुए सत्र दिखाता है।
 
 ### CodeGraff के साथ
 
@@ -30,18 +30,16 @@ Harness में [CodeGraff](https://github.com/justrach/codegraff) का व�
 
 ## स्रोत से चलाएँ
 
-[`rust-toolchain.toml`](rust-toolchain.toml) में दिए गए Rust संस्करण का उपयोग करें।
+Zig `0.17.0` और [`rust-toolchain.toml`](rust-toolchain.toml) में दिए गए Rust संस्करण का उपयोग करें।
 
 | प्लेटफ़ॉर्म | कमांड |
 | --- | --- |
 | macOS | `./scripts/run-macos-dev.sh` |
-| Linux | `cargo build -p harness && ./target/debug/harness` |
-| Windows | `cargo run --locked -p harness` |
+| Linux | `cargo build -p harness-engine --bin harness-engine && (cd apps/nano && zig build) && apps/nano/zig-out/bin/harness-nano` |
+| Windows | `./scripts/package-windows.ps1 -ReleasesUrl https://github.com/justrach/nanoharness/releases/latest/download -CargoProfile release` → `target/package/harness-VERSION-windows-x86_64/harness-nano.exe` |
 
-macOS स्क्रिप्ट `target/macos-dev/Harness.app` खोलती है। उदाहरण सत्रों वाला
-ऑफ़लाइन डेमो चलाने के लिए `./scripts/dev-demo.sh` उपयोग करें।
-[Windows](docs/reference/windows-development.md) और [Linux ब्राउज़र](docs/reference/linux-browser.md)
-के निर्देश अलग से उपलब्ध हैं।
+macOS स्क्रिप्ट अपने डेटा और इंजन पोर्ट के साथ `target/macos-dev/Harness.app` बनाकर खोलती है।
+[Windows](docs/reference/windows-development.md) के निर्देश अलग से उपलब्ध हैं।
 
 ## यह कैसे काम करता है
 

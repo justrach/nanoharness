@@ -577,6 +577,7 @@ test "what needs looking at: a question first, then a failure, a finished run, a
         .{ .chat_id = "c-triage", .status = .errored, .updated_ms = at },
         .{ .chat_id = "c-deps", .status = .awaiting_input, .updated_ms = at },
         .{ .chat_id = "c-busy", .status = .working, .updated_ms = at },
+        .{ .chat_id = "c-notes", .status = .idle, .last_completed_turn = "notes-result", .updated_ms = at },
     };
     const got = items(arena.allocator(), &bots, &chats, &sessions, at);
     try testing.expectEqual(@as(usize, 4), got.len);
@@ -589,7 +590,6 @@ test "what needs looking at: a question first, then a failure, a finished run, a
     try testing.expectEqual(Kind.missed, got[3].kind);
     try testing.expectEqualStrings("r1", got[3].routine);
     try testing.expectEqual(@as(i64, 2), got[3].count);
-    // A bot with no chat, one working, and one already read are not items.
     for (got) |it| for ([_][]const u8{ "ada", "busy", "read" }) |quiet| try testing.expect(!std.mem.eql(u8, it.bot, quiet));
 }
 
@@ -617,6 +617,7 @@ test "the main bot's work is the chats its thread started, in any project" {
     const sessions = [_]workspace.Session{
         .{ .chat_id = "w-old", .status = .working, .updated_ms = at },
         .{ .chat_id = "w-ask", .status = .awaiting_input, .updated_ms = at },
+        .{ .chat_id = "w-done", .status = .idle, .last_completed_turn = "deps-result", .updated_ms = at },
     };
     const got = work(arena.allocator(), main_bot, &chats, &sessions, at);
     // Newest first, and never an archived chat or another bot's.
@@ -626,7 +627,6 @@ test "the main bot's work is the chats its thread started, in any project" {
     try testing.expectEqualStrings("w-old", got[2].chat.id);
     try testing.expectEqual(@as(usize, 2), openCount(got));
     try testing.expect(!got[1].open());
-    // A bot that has not started its thread has started nothing.
     try testing.expectEqual(@as(usize, 0), work(arena.allocator(), made("main", "", &.{}), &chats, &sessions, at).len);
     try testing.expectEqual(@as(usize, 0), work(arena.allocator(), null, &chats, &sessions, at).len);
 

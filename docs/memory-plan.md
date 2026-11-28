@@ -7,9 +7,8 @@ Problem: Activity Monitor shows Harness at 450–600MB on viewer-only laptops an
 ## 1. What we measured
 
 Engine benchmarks ran the real `harness headless` debug binary (v0.1.12) with the
-mock harness, offline, on Linux/glibc; RSS sampled from `/proc`. Scripts:
-`/tmp/harness-mem-test/{run,bench2,bench3}.sh` (to be promoted to
-`scripts/mem-smoke.sh`, phase 0).
+mock harness, offline, on Linux/glibc; RSS sampled from `/proc`, using temporary
+scripts that were not checked in.
 
 | Measurement | Result |
 |---|---|
@@ -48,20 +47,19 @@ verified 2026-08-03).
 
 ## 3. Phase 0 — measurement first
 
-- Promote the bench scripts to `scripts/mem-smoke.sh`: boot baseline, N-chat
-  stream, reopen latency, idle-flatness; assert thresholds; run in CI (Linux).
+- A memory smoke script: boot baseline, N-chat stream, reopen latency,
+  idle-flatness; assert thresholds; run in CI (Linux). Not written yet.
 - macOS one-pager in the script header: `footprint -p <pid>` / `vmmap
   --summary` to split MALLOC vs IOSurface/Metal when a report comes in.
-- Every phase below lands with before/after mem-smoke numbers in the PR.
+- Every phase below lands with before/after memory numbers in the PR.
 
 ## 4. Phase 1 — zero feel risk
 
 | Item | Change | Evidence | Expected |
 |---|---|---|---|
-| Allocator | mimalloc (or jemalloc) as global alloc in `apps/harness` | system malloc watermark; churn sources below | watermark becomes recoverable; biggest single lever on macOS |
-| Image lifecycle | Call gpui `remove_asset` when transcript rows drop / adopt an LRU image cache with byte budget; bound the global encoded-bytes cache `attachments.rs:462` (no eviction today); clear staged attachments on chat delete | decoded RGBA + atlas tile + encoded bytes ≈ 2.5× decoded size per image, permanent; one screenshot ≈ 48MB decoded | 100MB+ on image-heavy use |
+| Allocator | mimalloc (or jemalloc) as global alloc in the engine binary | system malloc watermark; churn sources below | watermark becomes recoverable; biggest single lever on macOS |
 | Doc delete eviction | `DeleteChat`/`DeleteSpace` drop the doc handle, close the room, delete the snapshot row (`doc_host.rs:125` handles map is insert-only; `rpc.rs:636-693` leaks) | audit §1 | correctness + a few MB per deleted chat |
-| Bound channels | `RpcClient::subscribe` unbounded (`client.rs:123`) → conflating/bounded (watch semantics are latest-wins); terminal PTY + subscriber channels (`terminals.rs:211,243`) → bounded with drop policy; offline local-update queue (`room.rs:341`, drains only on connect) → byte cap + full-resync on overflow | leak-shaped under slow consumer / disconnect | removes the balloon modes (dev builds, sleep/wake, firehose terminals) |
+| Bound channels | `RpcClient::subscribe` unbounded (`client.rs:123`) → conflating/bounded (watch semantics are latest-wins); terminal PTY + subscriber channels (`terminals.rs:211,243`) → bounded with drop policy; offline local-update queue (drains only on connect) → byte cap + full-resync on overflow | leak-shaped under slow consumer / disconnect | removes the balloon modes (dev builds, sleep/wake, firehose terminals) |
 | Hygiene | clear codex `streamed_text` per turn; evict idle journal fds; prune `dial_locks` | audit §3/§9/§7 | small, stops slow creep |
 
 ## 5. Phase 2 — bounded docs + delta streaming (the structural fix)
@@ -76,9 +74,9 @@ verified 2026-08-03).
    even with no subscriber (`doc_host.rs:142,229`); materialize only while a
    watch is attached.
 3. **Delta doc-watch** — `WatchDocMessages` currently re-serializes the whole
-   transcript per 120ms commit through 4 copies (`engine/src/rpc.rs:775` →
-   `rpc/src/client.rs:139` → `ui/state.rs:902` → `transcript.rs:1199`;
-   measured 1.13MB/frame on a 1.6MB chat). Send per-entry deltas. Also fixes
+   transcript per 120ms commit through 4 copies from the engine's RPC handler
+   through `rpc/src/client.rs` to the desktop's transcript (measured
+   1.13MB/frame on a 1.6MB chat). Send per-entry deltas. Also fixes
    streaming CPU — same pipeline as the remote-streaming chunkiness work.
 4. **Fold O(n²)** — `fold_event_into_parts` clones the whole parts vec per
    event (`parts.rs:85`); mutate in place. `render_parts` clone per tick
@@ -90,23 +88,20 @@ verified 2026-08-03).
    whole-container scan on every 120ms `is_host` check.
 
 Expected after phases 1–2: streaming multiplication ~11.6× → ~2–3× raw text;
-viewer-laptop steady state ≈ gpui baseline + selected chat ≈ 150–250MB, flat.
+viewer-laptop steady state ≈ 150–250MB, flat.
 
 ## 6. Phase 3 — larger surfaces, more care
 
-- **Terminals**: purge `terminal/panel.rs:239` chats map on chat delete;
+- **Terminals**: purge per-chat terminal state on chat delete;
   scrollback 10k → configurable ~2k lines (24B/cell ⇒ 30–50MB per
   fully-scrolled terminal today); count replay bytes raw, not base64.
 - **Diff pane**: watch carries every checkout's ≤3MiB patch, resident engine +
-  UI (`diff_sync.rs:106`, `changes.rs:480`); send summaries, fetch patch on
+  desktop (`diff_sync.rs:106`); send summaries, fetch patch on
   demand; stop the 120s repair tick re-capturing unchanged checkouts
   (`diff_sync.rs:486`).
-- **Transcript render caches**: byte-budget `tree_cache`/`RenderCache`/
-  `HighlightStore` to viewport±K rows (today they grow with every row ever
-  scrolled past, freed only on chat switch).
 - **Shallow snapshots** (deferred, correctness-sensitive): client-side trim to
   the edge's compaction frontier would cut in-memory doc 2.5–4× → ~1×; needs
-  the stale-peer story (`room.rs:132` gives up rather than rebuilding).
+  the stale-peer story (the room client gives up rather than rebuilding).
 - **Tail-first cold open** (`materialize_tail` exists unwired,
   `schema.rs:738`): paint last-64 for never-opened remote chats while the doc
   backfills. Perceived-latency win, not a memory item.
@@ -115,13 +110,11 @@ viewer-laptop steady state ≈ gpui baseline + selected chat ≈ 150–250MB, fl
 
 Phases 1–2 landed on `harness/harness-memory-usage-investigation` (phase 3
 deliberately skipped — terminals get their own pass with the terminal bug
-work). Shipped: mimalloc in both binaries; attachment-image LRU (64MB encoded
-budget) with gpui asset release on eviction + staged-attachment purge on chat
-delete; doc eviction on DeleteChat/DeleteSpace; doc LRU (12 warm docs / 80MB
+work). Shipped in the engine: mimalloc; doc eviction on DeleteChat/DeleteSpace; doc LRU (12 warm docs / 80MB
 estimate, pinned: watched, live-writer, host-pending-commands) with lazy
 mirror; in-place event fold; container-scoped doc reads + single-row workspace
 `chat()`; delta `WatchDocMessages` protocol (reset + per-entry upserts + text-append
-ops, desync → resubscribe) across engine/UI — measured on a 1.6MB
+ops, desync → resubscribe) — measured on a 1.6MB
 streamed reply: 257MB of watch frames before, 2.3MB after (110×; median
 frame 2.7KB, one full-entry frame at turn completion); bounded RPC stream queues (256,
 backpressure); offline room queue drained during backoff; codex/journal-fd/
@@ -146,23 +139,20 @@ thread its own 64MB arena (default cap 8 × cores) and trims only the top of a
 heap, so threads that come and go (harness readers, the tokio blocking pool)
 leave freed pages resident; upstream saw a headless engine reach 7.2GB RSS
 after a day, 6.6GB of it in 129 anonymous ~64MB mappings. Long-running modes on
-Linux/glibc (`apps/harness/src/main.rs`) now run a `malloc-trim` thread that
+Linux/glibc (`spawn_malloc_trimmer` in `crates/engine/src/bin/harness-engine.rs`)
+run a `malloc-trim` thread that
 calls `malloc_trim(0)` once a minute; unlike the automatic top-of-heap trim it
 returns the free pages inside every arena. Capping arenas (`M_ARENA_MAX=2`)
 was measured first and rejected: it reclaimed less and cost ~6x the engine's
 CPU in arena-lock contention while chats streamed. Each trim pass takes ~25ms.
 An explicit `MALLOC_*`/`GLIBC_TUNABLES` setting still applies on top.
 
-Known follow-ups: GPU atlas tiles for raw-bytes images still free only on
-window close (needs a small gpui-fork patch exposing a drop path for
-`ImageSource::Image`); UI-side full-transcript clone per frame
-(`transcript.rs` sync) could move to Arc-per-entry; boot-time warm-open of
-recent chats (PARITY gap) is unchanged.
+Known follow-up: boot-time warm-open of recent chats is unchanged.
 
 ## 8. Acceptance
 
 - Viewer laptop after browsing 20 chats incl. images: **<250MB** (from ~600).
 - RSS flat ±10% over 8h mixed use (no monotonic ratchet).
-- mem-smoke thresholds in CI: engine idle <40MB; stream-retention <3× raw
+- Memory smoke thresholds in CI: engine idle <40MB; stream-retention <3× raw
   text; reopen p95 <100ms; idle creep <1MB/10min.
 - No feel-budget regression (§2), verified per landing PR.

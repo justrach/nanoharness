@@ -35,7 +35,6 @@ pub const Entry = union(enum) {
     toggle_terminal,
     chat_history,
     custom_theme_studio,
-    open_design_canvas,
     custom_theme: []const u8,
     ui_mode: @import("motion_rules.zig").UiMode,
     toggle_part: @import("motion_rules.zig").MovingPart,
@@ -68,12 +67,11 @@ pub const Entry = union(enum) {
             .split_down => "Split pane down",
             .close_tab => "Close tab or pane",
             .tab_overview => "Tab overview",
-            .toggle_side_panel => "Toggle right panel",
+            .toggle_side_panel => "Toggle side panel",
             .toggle_files => "Toggle files panel",
             .toggle_terminal => "Toggle terminal",
             .chat_history => "Chat history",
             .custom_theme_studio => "Open Backdrop & Scene Studio",
-            .open_design_canvas => "Open Design Canvas",
             .custom_theme => |id| if (@import("custom_themes.zig").findPreset(id)) |p| p.name else null,
             .ui_mode => |m| switch (m) {
                 .zen => "Switch to Zen mode (simple flat view)",
@@ -152,6 +150,13 @@ pub fn matchesQuery(query: []const u8, text: []const u8) bool {
     return true;
 }
 
+/// Whether flipping `part` changes anything in `mode`: Zen draws its one
+/// filter row whatever the project & activity setting says
+/// (`view_sidebar.filterRow`), so that toggle is not offered there.
+pub fn partTogglesIn(part: @import("motion_rules.zig").MovingPart, mode: @import("motion_rules.zig").UiMode) bool {
+    return !(part == .multi_axis_filters and mode == .zen);
+}
+
 /// The actions a query keeps, in their order; `Switch theme` and
 /// `Default system theme` stay in the core list so typing `"switch theme"`
 /// or opening ⌘K always offers them, while explicit light/dark actions stay
@@ -211,7 +216,6 @@ pub fn actionsForContext(query: []const u8, is_dark: bool, full_screen: bool) Ac
             .{ .theme = opposite },
             .{ .theme = current },
             .custom_theme_studio,
-            .open_design_canvas,
             .{ .ui_mode = .zen },
             .{ .ui_mode = .developer },
             .{ .ui_mode = .design },
