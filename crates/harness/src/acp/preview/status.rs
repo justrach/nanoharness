@@ -99,7 +99,8 @@ impl Status {
         if update["sessionUpdate"] != "state_update" {
             return None;
         }
-        if update["state"] != "requires_action" {
+        let value = update["_meta"].get("graff/childActivity");
+        if update["state"] != "requires_action" || value.is_some_and(Value::is_null) {
             self.requests.retain(|(session, _)| session != owner);
             self.candidates.remove(owner);
             return self
@@ -107,14 +108,7 @@ impl Status {
                 .remove(owner)
                 .then(|| child_event(owner, "cleared"));
         }
-        let value = update["_meta"].get("graff/childActivity")?;
-        if value.is_null() {
-            self.candidates.remove(owner);
-            return self
-                .active
-                .remove(owner)
-                .then(|| child_event(owner, "cleared"));
-        }
+        let value = value?;
         let candidate = activity(
             value["kind"].as_str()?,
             &value["requestId"],
