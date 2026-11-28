@@ -96,6 +96,16 @@ pub fn trailer(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, t
     const pending = @import("app_send_feedback.zig").active(a, id, t);
     const session = workspace.sessionOf(a.sessions.items, id);
     const build_wait = @import("app_progress.zig").waitingSince(a, id);
+    for (@import("app_progress.zig").forChat(a, id).items) |item| {
+        if (!std.mem.startsWith(u8, item.tool_id, "harness:acp-preview:")) continue;
+        const state = item.state orelse continue;
+        const label = if (std.mem.eql(u8, state, "waiting")) "Recovering agent connection" else if (std.mem.eql(u8, state, "child-permission")) "Subagent requested permission" else if (std.mem.eql(u8, state, "child-elicitation")) "Subagent requested input" else continue;
+        const row = ui.div(c).row().wFull().pt(14).gap(8).itemsCenter().control();
+        defer row.end();
+        kit.snake(c, k);
+        ui.text(c, label, kit.style(c, 12, 18, .{ .color = k.muted }));
+        return;
+    }
     const now = a.nowMs();
     const quiet = if (pending != null or build_wait != null) false else if (session) |s|
         now - s.updated_ms > workspace.stale_ms

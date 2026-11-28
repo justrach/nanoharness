@@ -115,6 +115,8 @@ pub fn chipContent(arena: std.mem.Allocator, call: std.json.ObjectMap) Chip {
     const eq = std.mem.eql;
     const raw: struct { []const u8, []const u8 } = if (eq(u8, kind, "exec"))
         .{ "Run", S.str(call, "command") orelse "" }
+    else if (@import("agent_link.zig").communication(call)) |outgoing|
+        .{ "Agent communication", if (outgoing) "sent" else "received" }
     else if (eq(u8, kind, "readFile"))
         .{ "Read", S.str(call, "path") orelse "" }
     else if (eq(u8, kind, "writeFile"))
@@ -178,7 +180,6 @@ pub fn singleLine(arena: std.mem.Allocator, text: []const u8) []const u8 {
     }
     return out.items;
 }
-
 
 const testing = std.testing;
 

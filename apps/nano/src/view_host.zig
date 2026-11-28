@@ -124,6 +124,7 @@ fn subagentSurface(c: *ui.Context, a: *App, k: theme.Colors, s: *@import("app_su
         14,
     );
 
+    if (s.read_only) return;
     // 3. Mid-task Steer subagent bar (routes through parent session, never FocusChat/Run on s.doc).
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
     {
@@ -161,7 +162,7 @@ fn subagentSurface(c: *ui.Context, a: *App, k: theme.Colors, s: *@import("app_su
 }
 
 pub fn submitSubagentSteer(a: *App, s: *const @import("app_subagents.zig").Agent, text: []const u8) void {
-    if (!s.belongsTo(a.selected) or a.engine.state != .connected) return;
+    if (s.read_only or !s.belongsTo(a.selected) or a.engine.state != .connected) return;
     const selected_parent = if (a.selected) |id| std.mem.eql(u8, id, s.parent) else false;
     const q = @import("app_queue.zig");
     const prompt = std.fmt.allocPrint(a.gpa, "For subagent \"{s}\": {s}", .{ s.title, text }) catch return;

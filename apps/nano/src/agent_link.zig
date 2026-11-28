@@ -23,6 +23,25 @@ pub fn isAgent(call: std.json.ObjectMap) bool {
         (std.mem.eql(u8, str(call, "kind") orelse "", "unknown") and std.mem.startsWith(u8, n, "Wait for agent"));
 }
 
+pub fn communication(call: std.json.ObjectMap) ?bool {
+    if (!std.mem.eql(u8, str(call, "kind") orelse "", "agentCommunication")) return null;
+    const outgoing = call.get("outgoing") orelse return null;
+    return if (outgoing == .bool) outgoing.bool else null;
+}
+
+pub fn ownedCommunicationRef(parent: []const u8, key: []const u8, doc: []const u8) bool {
+    const prefix = "acp2-child:";
+    if (!std.mem.startsWith(u8, key, prefix) or key.len != prefix.len + 64) return false;
+    for (key[prefix.len..]) |ch| if (!std.ascii.isHex(ch)) return false;
+    const separator = "--sub--";
+    if (doc.len != parent.len + separator.len + 16 or !std.mem.startsWith(u8, doc, parent)) return false;
+    if (!std.mem.eql(u8, doc[parent.len..][0..separator.len], separator)) return false;
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(key, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest[0..8].*, .lower);
+    return std.mem.eql(u8, doc[parent.len + separator.len ..], &hex);
+}
+
 fn taskTitle(text: []const u8) ?[]const u8 {
     var t = std.mem.trim(u8, text, " \t\r\n");
     if (std.mem.startsWith(u8, t, "Wait for agent")) {

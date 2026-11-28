@@ -17,6 +17,14 @@ fn scoped(owner: &str, kind: &str, id: &str) -> String {
     format!("acp2:{}", json!([owner, kind, id]))
 }
 
+pub(super) fn child_key(root: &str, child: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "acp2-child:{:x}",
+        Sha256::digest(json!([root, child]).to_string().as_bytes())
+    )
+}
+
 fn safe_text(text: &str) -> String {
     text.chars()
         .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
@@ -34,7 +42,12 @@ impl Display {
         replay: bool,
     ) -> Vec<AgentEvent> {
         let mut events = Vec::new();
-        for (key, (outgoing, content)) in reducer.communications(root) {
+        for ((key, child, outgoing), content) in reducer.communications(root) {
+            let id = scoped(
+                root,
+                "session_message",
+                &json!([key, child, outgoing]).to_string(),
+            );
             let text: String = content
                 .iter()
                 .filter(|block| block["type"] == "text")
@@ -43,20 +56,14 @@ impl Display {
                 .take(8192)
                 .collect();
             let text = safe_text(&text);
-            if text.trim().is_empty() || !self.communications.insert(key.to_owned()) || replay {
+            if text.trim().is_empty() || !self.communications.insert(id.clone()) || replay {
                 continue;
             }
-            let id = scoped(root, "session_message", key);
             events.push(AgentEvent::ToolCall {
                 id: id.clone(),
-                call: ToolCall::Unknown {
-                    name: if outgoing {
-                        "Agent communication · sent"
-                    } else {
-                        "Agent communication · received"
-                    }
-                    .into(),
-                    input: None,
+                call: ToolCall::AgentCommunication {
+                    child_key: child_key(root, child),
+                    outgoing,
                 },
             });
             events.push(AgentEvent::ToolResult {

@@ -40,6 +40,10 @@ for line in sys.stdin:
     req = json.loads(line)
     if 'method' not in req:
         record('client-response', req['id'], json.dumps(req['result'], sort_keys=True))
+        if mode.startswith('child-activity-') and req['id'] == 'approval':
+            assert req['result'] == ({'action': 'decline'} if mode.endswith('elicitation') else {'outcome': {'outcome': 'cancelled'}})
+            update('child', 'state_update', state='idle')
+            update(session_id, 'state_update', state='idle', stopReason='end_turn')
         if req['id'] == 'owned-form':
             update(session_id, 'state_update', state='idle', stopReason='end_turn')
             update(session_id, 'state_update', state='idle', background=[])
@@ -76,7 +80,11 @@ for line in sys.stdin:
             if mode != 'missing-child-barrier':
                 update('child', 'replay_complete')
                 update('child', 'state_update', state='unknown')
-            update(session_id, 'state_update', state='idle')
+            if mode.startswith('retry-'):
+                update(session_id, 'state_update', state='idle', stopReason='refusal',
+                       background=[{'type': 'tool_call', 'toolCallId': 'retry-background'}])
+            else:
+                update(session_id, 'state_update', state='idle')
         result = {'sessionId': session_id}
         if version == 2:
             result['availableCommands'] = [
@@ -98,9 +106,28 @@ for line in sys.stdin:
         assert params['sessionId'] == session_id
         if version == 1:
             assert key == 'v1'
+            if mode == 'recovery':
+                update(session_id, 'state_update', state='running', _meta={'graff/networkRecovery': {'phase': 'waiting', 'cause': 'stream_dropped', 'attempt': 2, 'retryInMs': 1200}})
             result = {'stopReason': 'end_turn'}
         else:
             assert 1 <= len(key) <= 255
+            if mode.startswith('retry-'):
+                assert key.startswith('harness:')
+                # A newer message and terminal do not belong to the retry of A.
+                update(session_id, 'user_message', messageId='newer-b', content=[])
+                update(session_id, 'state_update', state='idle', stopReason='refusal')
+                result = {'messageId': 'older-a'}
+                reason = mode.removeprefix('retry-')
+                if reason != 'live':
+                    outcome = {'stopReason': reason}
+                    if reason == 'error':
+                        outcome['error'] = {'code': -32603, 'message': 'Synthetic saved error'}
+                    result['_meta'] = {'graff/turnOutcome': outcome}
+                write({'id': req['id'], 'result': result})
+                update(session_id, 'user_message', messageId='older-a', content=[])
+                update(session_id, 'state_update', state='idle', stopReason='end_turn' if reason == 'live' else 'refusal')
+                update(session_id, 'state_update', state='idle', background=[])
+                continue
             if mode == 'drop':
                 break
             if mode == 'invalid-ack':
@@ -118,6 +145,33 @@ for line in sys.stdin:
             if mode.startswith('communication-'):
                 update(session_id, 'subagent_update', sessionId='child', title='Synthetic child')
                 communication()
+                update('child', 'agent_message', messageId='child-reply', content=[{'type': 'text', 'text': 'Synthetic child reply'}])
+            if mode == 'recovery':
+                update(session_id, 'state_update', state='running', _meta={'graff/networkRecovery': {'phase': 'waiting', 'cause': 'stream_dropped', 'attempt': 2, 'retryInMs': 1200}})
+                update(session_id, 'state_update', state='running')
+                update('foreign', 'state_update', state='running', _meta={'graff/networkRecovery': {'phase': 'waiting', 'cause': 'connection_lost', 'attempt': 99, 'retryInMs': 1}})
+            if mode.startswith('child-activity-'):
+                update(session_id, 'subagent_update', sessionId='child', title='Synthetic child')
+                activity = {'kind': 'permission', 'requestId': 'approval', 'toolCallId': 'tool'}
+                request = {'id': 'approval', 'method': 'session/request_permission', 'params': {'sessionId': 'child', 'subject': {'type': 'tool_call', 'toolCall': {'toolCallId': 'tool'}}}}
+                update(session_id, 'state_update', state='requires_action', _meta={'graff/childActivity': activity})
+                if mode.endswith('elicitation'):
+                    activity['kind'] = 'elicitation'
+                    request['method'] = 'elicitation/create'
+                    request['params'] = {'sessionId': 'child', 'toolCallId': 'tool', 'mode': 'form', 'message': 'Synthetic question', 'requestedSchema': {'type': 'object', 'properties': {}}}
+                if mode.endswith('stale'):
+                    update('child', 'state_update', state='requires_action', _meta={'graff/childActivity': activity})
+                    update('child', 'state_update', state='running')
+                    request['params']['sessionId'] = 'foreign'
+                    write(request)
+                    continue
+                if mode.endswith('request-first'):
+                    write(request)
+                update('child', 'state_update', state='requires_action', _meta={'graff/childActivity': activity})
+                if not mode.endswith('request-first'):
+                    write(request)
+                update('child', 'state_update', state='requires_action', _meta={'graff/childActivity': activity})
+                continue
             if mode == 'interaction':
                 update(session_id, 'tool_call_update', toolCallId='same', title='Root tool', status='pending')
                 update('foreign', 'tool_call_update', toolCallId='same', title='Foreign tool', status='pending')

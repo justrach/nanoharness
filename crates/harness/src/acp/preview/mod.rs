@@ -5,6 +5,7 @@ pub(super) mod cancel;
 mod display;
 mod interaction;
 mod reducer;
+mod status;
 
 pub(super) const PROTOCOL_OPTION: &str = "harnessAcpV2Preview";
 
@@ -222,11 +223,25 @@ impl Foreground {
         }
     }
 
-    fn end(&self) -> Option<&Value> {
+    fn outcome(&self) -> Option<Outcome> {
         self.ack
             .as_ref()
             .filter(|id| Some(*id) == self.observed_user.as_ref())?;
-        self.idle.as_ref()
+        let idle = self.idle.as_ref()?;
+        Some(
+            idle["stopReason"]
+                .as_str()
+                .and_then(|reason| terminal_outcome(reason, None))
+                .unwrap_or_else(|| {
+                    (
+                        DoneStatus::Disconnected,
+                        Some(
+                            "ACP Preview agent is idle but did not report a recognized outcome"
+                                .into(),
+                        ),
+                    )
+                }),
+        )
     }
 }
 
@@ -345,15 +360,20 @@ pub(super) async fn run(mut session: Session, init: Value, target_controls: canc
         .map(|origin| origin.chat_id.clone());
     let mut route = chat.as_deref().map(|chat| target_controls.attach(chat));
     let mut foreground_reported = false;
+    let mut transient_status = status::Status::default();
     let exit = run_inner(
         &mut session,
         &init,
         &mut started,
         &mut foreground_reported,
+        &mut transient_status,
         route.as_mut().map(|(receiver, _)| receiver),
     )
     .await;
     drop(route);
+    for event in transient_status.clear() {
+        let _ = send(&session.event_tx, event).await;
+    }
     let (status, error) = match exit {
         Ok(outcome) => outcome,
         Err(error) => (DoneStatus::Errored, Some(error.to_string())),
@@ -375,11 +395,28 @@ pub(super) async fn run(mut session: Session, init: Value, target_controls: canc
 
 type Outcome = (DoneStatus, Option<String>);
 
+fn terminal_outcome(reason: &str, error: Option<&str>) -> Option<Outcome> {
+    Some(match reason {
+        "end_turn" | "max_tokens" | "max_turn_requests" => (DoneStatus::Completed, None),
+        "cancelled" => (DoneStatus::Interrupted, None),
+        "error" => (
+            DoneStatus::Errored,
+            Some(error.unwrap_or("ACP Preview foreground work failed").into()),
+        ),
+        "refusal" => (
+            DoneStatus::Errored,
+            Some("ACP Preview agent refused the request".into()),
+        ),
+        _ => return None,
+    })
+}
+
 async fn run_inner(
     session: &mut Session,
     init: &Value,
     started: &mut Option<String>,
     foreground_reported: &mut bool,
+    transient_status: &mut status::Status,
     mut targets: Option<&mut mpsc::Receiver<cancel::Command>>,
 ) -> Result<Outcome, HarnessError> {
     let interrupt = session.controls.interrupt.clone();
@@ -448,6 +485,7 @@ async fn run_inner(
     let ack_deadline = tokio::time::sleep(session.handshake_timeout);
     tokio::pin!(ack_deadline);
     let mut foreground = Foreground::default();
+    let mut retry_outcome = None;
     let mut display = display::Display::default();
     if session.request.resume.is_some() {
         display.communications(&projection, &id, true);
@@ -472,33 +510,15 @@ async fn run_inner(
         if *foreground_reported && !display.has_background() {
             return Ok((DoneStatus::Completed, None));
         }
-        if !*foreground_reported && let Some(idle) = foreground.end() {
+        if !*foreground_reported
+            && let Some(outcome) = retry_outcome.take().or_else(|| foreground.outcome())
+        {
             for event in display.communications(&projection, &id, false) {
                 let _ = send(&event_tx, event).await;
             }
             if let Some((request_id, _, _)) = form.take() {
                 client.respond(&request_id, json!({"action": "cancel"}));
             }
-            let outcome = match idle["stopReason"].as_str() {
-                Some("end_turn" | "max_tokens" | "max_turn_requests") => {
-                    (DoneStatus::Completed, None)
-                }
-                Some("cancelled") => (DoneStatus::Interrupted, None),
-                Some("error") => (
-                    DoneStatus::Errored,
-                    Some("ACP Preview foreground work failed".into()),
-                ),
-                Some("refusal") => (
-                    DoneStatus::Errored,
-                    Some("ACP Preview agent refused the request".into()),
-                ),
-                _ => (
-                    DoneStatus::Disconnected,
-                    Some(
-                        "ACP Preview agent is idle but did not report a recognized outcome".into(),
-                    ),
-                ),
-            };
             if !display.has_background() || cancelled {
                 return Ok(outcome);
             }
@@ -535,6 +555,16 @@ async fn run_inner(
                 };
                 let Some(message_id) = ack["messageId"].as_str().filter(|id| !id.is_empty()) else { return Ok(uncertain_delivery()); };
                 foreground.ack = Some(message_id.to_owned());
+                // Only this Graff prompt ACK correlates a stored outcome with the
+                // submitted key. Replay state describes the session, not this turn.
+                if session.harness == super::HarnessId::Graff {
+                    let saved = &ack["_meta"]["graff/turnOutcome"];
+                    if let Some(reason) = saved["stopReason"].as_str() {
+                        let error = &saved["error"];
+                        let message = error["code"].as_i64().and_then(|_| error["message"].as_str());
+                        retry_outcome = terminal_outcome(reason, message);
+                    }
+                }
             }
             _ = &mut ack_deadline, if foreground.ack.is_none() && !cancelled => return Ok(uncertain_delivery()),
             answers = async { (&mut form.as_mut().unwrap().2).await }, if form.is_some() => {
@@ -559,6 +589,13 @@ async fn run_inner(
                     }
                 }
                 Some(Incoming::Request { id: request_id, method, params }) => {
+                    if session.harness == super::HarnessId::Graff && !cancelled
+                        && let Some(owner) = params["sessionId"].as_str()
+                        && projection.session(owner).is_some_and(|child| child.parent.is_some())
+                        && let Some(event) = transient_status.child_request(owner, &method, &request_id, &params)
+                    {
+                        let _ = send(&event_tx, event).await;
+                    }
                     if let Some(questions) = (method == "elicitation/create" && !cancelled && !*foreground_reported && form.is_none()
                         && update_for(&params, &id).is_some() && foreground.observed_user.is_some())
                         .then(|| interaction::form(&params)).flatten()
@@ -573,10 +610,34 @@ async fn run_inner(
                     if projection.apply(&params) != Ok(reducer::Applied::Live) { continue; }
                     let Some(owner) = params["sessionId"].as_str() else { continue; };
                     let update = &params["update"];
+                    if session.harness == super::HarnessId::Graff
+                        && let Some(event) = transient_status.update(owner, update)
+                    {
+                        let _ = send(&event_tx, event).await;
+                    }
+                    if session.harness == super::HarnessId::Graff && !cancelled && owner != id
+                        && let Some(event) = transient_status.child_update(owner, update)
+                    {
+                        let _ = send(&event_tx, event).await;
+                    }
                     for event in display.update(&projection, owner, update) {
                         let _ = send(&event_tx, event).await;
                     }
-                    if owner != id || *foreground_reported { continue; }
+                    if owner != id {
+                        if projection.session(owner).and_then(|child| child.parent.as_deref()) == Some(&id) {
+                            let event = match update["sessionUpdate"].as_str() {
+                                Some("agent_message_chunk") if update["content"]["type"] == "text" => update["content"]["text"].as_str().map(|text| AgentEvent::TextDelta { text: text.into() }),
+                                Some("agent_message") => update["content"].as_array().map(|blocks| AgentEvent::TextDelta { text: blocks.iter().filter(|block| block["type"] == "text").filter_map(|block| block["text"].as_str()).collect() }),
+                                Some("state_update") if update["state"] == "idle" => Some(AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: None }),
+                                _ => None,
+                            };
+                            if let Some(event) = event && !matches!(&event, AgentEvent::TextDelta { text } if text.is_empty()) {
+                                let _ = send(&event_tx, AgentEvent::Subagent { parent_tool_use_id: display::child_key(&id, owner), event: Box::new(event) }).await;
+                            }
+                        }
+                        continue;
+                    }
+                    if *foreground_reported { continue; }
                     foreground.update(update);
                     match update["sessionUpdate"].as_str() {
                         Some("available_commands_update") => if let Some(commands) = commands(&update["availableCommands"]) {

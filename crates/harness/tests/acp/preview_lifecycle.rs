@@ -1,6 +1,124 @@
 use super::*;
 
 #[tokio::test]
+async fn preview_retry_outcome_is_correlated_and_finishes_once() {
+    for (mode, graff, status, error) in [
+        ("retry-end_turn", true, DoneStatus::Completed, None),
+        ("retry-cancelled", true, DoneStatus::Interrupted, None),
+        (
+            "retry-error",
+            true,
+            DoneStatus::Errored,
+            Some("Synthetic saved error"),
+        ),
+        ("retry-live", true, DoneStatus::Completed, None),
+        (
+            "retry-end_turn",
+            false,
+            DoneStatus::Errored,
+            Some("ACP Preview agent refused the request"),
+        ),
+    ] {
+        let (root, _, mut req) = fixture(mode, true);
+        let harness = if graff {
+            AcpHarness::graff()
+        } else {
+            AcpHarness::grok()
+        }
+        .with_executable(root.path().join("agent.py"))
+        .with_preview_stdio(true);
+        req.resume = Some("synthetic-session".into());
+        let mut ctl = controls().0;
+        ctl.origin = Some(harness_adapters::RunOrigin {
+            chat_id: "synthetic-chat".into(),
+            submission_id: Some("older-a".into()),
+            ..Default::default()
+        });
+        let events = run_to_end(&harness, req, ctl).await;
+        assert_eq!(
+            dones(&events),
+            [(status, error.map(str::to_owned))],
+            "{mode}, Graff={graff}"
+        );
+        let done = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::Done { .. }))
+            .unwrap();
+        assert!(
+            events[done + 1..]
+                .iter()
+                .any(|e| matches!(e, AgentEvent::BackgroundTask { running: false, .. }))
+        );
+    }
+}
+
+#[tokio::test]
+async fn preview_child_activity_matches_real_requests_in_either_order() {
+    for order in ["request-first", "metadata-first"] {
+        let (root, _, req) = fixture(&format!("child-activity-{order}"), true);
+        let harness = AcpHarness::graff()
+            .with_executable(root.path().join("agent.py"))
+            .with_preview_stdio(true);
+        let events = run_to_end(&harness, req, controls().0).await;
+        assert_eq!(events.iter().filter(|e| matches!(e, AgentEvent::ToolProgress { state, .. } if state.as_deref() == Some("child-permission"))).count(), 1);
+        assert!(traffic(&root).contains("approval {\"outcome\": {\"outcome\": \"cancelled\"}}"));
+    }
+}
+
+#[tokio::test]
+async fn preview_status_stale_unauthorized_and_elicitation_are_fail_closed() {
+    for (mode, expected) in [
+        ("child-activity-stale", 0),
+        ("child-activity-elicitation", 1),
+    ] {
+        let (root, _, req) = fixture(mode, true);
+        let harness = AcpHarness::graff()
+            .with_executable(root.path().join("agent.py"))
+            .with_preview_stdio(true);
+        let mut ctl = controls().0;
+        ctl.request_input = Box::new(|_| panic!("child status must not solicit input"));
+        let events = run_to_end(&harness, req, ctl).await;
+        assert_eq!(dones(&events), [(DoneStatus::Completed, None)]);
+        assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::ToolProgress { state, .. } if matches!(state.as_deref(), Some("child-permission" | "child-elicitation")))).count(), expected);
+    }
+    let (root, _, req) = fixture("recovery", false);
+    let harness = AcpHarness::graff().with_executable(root.path().join("agent.py"));
+    let (ctl, _steer, _) = controls();
+    let mut events = harness.run(req, ctl).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while let Some(event) = events.next().await {
+            let event = event.unwrap();
+            assert!(!matches!(event, AgentEvent::ToolProgress { ref id, .. } if id.starts_with("harness:acp-preview:")));
+            if matches!(event, AgentEvent::Done { status: DoneStatus::Completed, .. }) { return; }
+        }
+        panic!("v1 did not complete");
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn preview_reports_only_live_owned_network_recovery() {
+    let (root, _, req) = fixture("recovery", true);
+    let harness = AcpHarness::graff()
+        .with_executable(root.path().join("agent.py"))
+        .with_preview_stdio(true);
+    let events = run_to_end(&harness, req, controls().0).await;
+    let status: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolProgress { id, output, state }
+                if id.starts_with("harness:acp-preview:") =>
+            {
+                Some((output.as_str(), state.as_deref()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(status.len(), 2, "one report and one terminal clear");
+    assert!(status[0].0.contains("stream_dropped"));
+    assert_eq!(status[1].1, Some("cleared"));
+}
+
+#[tokio::test]
 async fn preview_session_message_parent_to_child() {
     check_session_message("outgoing").await;
 }
@@ -39,10 +157,11 @@ async fn check_session_message(direction: &str) {
             );
             for events in [&live, &replayed] {
                 assert_eq!(dones(events), [(DoneStatus::Completed, None)]);
-                assert!(!events.iter().any(|event| matches!(
-                    event,
-                    AgentEvent::UserMessage { .. } | AgentEvent::Subagent { .. }
-                )));
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, AgentEvent::UserMessage { .. }))
+                );
                 assert!(!events.iter().any(|event| matches!(event, AgentEvent::TextDelta { text } if text.contains("handoff"))));
             }
             let rows = |events: &[AgentEvent]| {
@@ -51,12 +170,13 @@ async fn check_session_message(direction: &str) {
                     .filter_map(|event| match event {
                         AgentEvent::ToolCall {
                             id,
-                            call: ToolCall::Unknown { name, .. },
-                        } if name.starts_with("Agent communication") => Some(id.clone()),
+                            call: ToolCall::AgentCommunication { outgoing, .. },
+                        } if *outgoing == (direction == "outgoing") => Some(id.clone()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
             };
+            assert!(live.iter().any(|event| matches!(event, AgentEvent::Subagent { event, .. } if matches!(event.as_ref(), AgentEvent::TextDelta { text } if text == "Synthetic child reply"))));
             let live_rows = rows(&live);
             let replay_rows = rows(&replayed);
             println!(

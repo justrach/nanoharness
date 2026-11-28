@@ -1028,6 +1028,17 @@ impl SessionDoc {
         status: Option<&str>,
         tail: Option<&str>,
     ) -> Result<bool, DocError> {
+        self.update_tool_child(part_id, subagent_ref, status, tail, |call| call.is_subagent_spawn())
+    }
+
+    /// Bind only the typed communication row for this exact child key.
+    pub fn update_agent_communication_link(&self, part_id: &str, child_key: &str, doc_id: &str, status: &str) -> Result<bool, DocError> {
+        self.update_tool_child(part_id, Some(doc_id), Some(status), None, |call| {
+            matches!(call, harness_proto::ToolCall::AgentCommunication { child_key: key, .. } if key == child_key)
+        })
+    }
+
+    fn update_tool_child(&self, part_id: &str, subagent_ref: Option<&str>, status: Option<&str>, tail: Option<&str>, accepts: impl FnOnce(harness_proto::ToolCall) -> bool) -> Result<bool, DocError> {
         let messages = self.doc.get_list("messages");
         for i in (0..messages.len()).rev() {
             let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
@@ -1060,15 +1071,15 @@ impl SessionDoc {
                     // claude's background shells settled through the
                     // subagent subtype, 2026-08-20) must not decorate an
                     // ordinary chip with a ref to a doc it never had.
-                    let is_spawn = part
+                    let is_target = part
                         .get("call")
                         .and_then(|v| match v {
                             loro::ValueOrContainer::Value(v) => serde_json::to_value(v).ok(),
                             _ => None,
                         })
                         .and_then(|j| serde_json::from_value::<harness_proto::ToolCall>(j).ok())
-                        .is_some_and(|c| c.is_subagent_spawn());
-                    if !is_spawn {
+                        .is_some_and(accepts);
+                    if !is_target {
                         return Ok(false);
                     }
                     if let Some(r) = subagent_ref {
@@ -2440,7 +2451,14 @@ mod tests {
                 },
             ),
         ];
+        let mut parts = parts;
+        parts.push(tool("communication", harness_proto::ToolCall::AgentCommunication { child_key: "owned".into(), outgoing: true }));
         w.sync(&parts).unwrap();
+        drop(w);
+        assert!(!doc.update_agent_communication_link("communication", "wrong", "foreign", "done").unwrap());
+        assert!(doc.update_agent_communication_link("communication", "owned", "local-child", "running").unwrap());
+        assert!(doc.update_agent_communication_link("communication", "owned", "local-child", "done").unwrap());
+        assert!(matches!(&doc.read_entries().unwrap()[0].parts[2], MessagePart::Tool { subagent_ref: Some(reference), subagent_status: Some(SubagentStatus::Done), .. } if reference == "local-child"));
         assert!(
             doc.update_subagent_chip(
                 "toolu_spawn",

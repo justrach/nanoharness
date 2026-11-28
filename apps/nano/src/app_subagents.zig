@@ -12,6 +12,7 @@ pub const Agent = struct {
     doc: []u8,
     title: []u8,
     frozen: bool,
+    read_only: bool = false,
     transcript: Transcript,
     watch: ?u64 = null,
     fetch: ?u64 = null,
@@ -125,9 +126,11 @@ pub const Agent = struct {
 /// Retain targets now, activate at the next frame boundary. A nested
 /// agent click must not free/reallocate the transcript being laid out.
 pub fn open(a: *App, parent: []const u8, part: *const @import("transcript.zig").Part) void {
-    if (!part.agent or part.subagent_ref.len == 0 or part.subagent_title.len == 0) return;
+    if ((!part.agent and !part.agent_communication) or part.subagent_ref.len == 0 or part.subagent_title.len == 0) return;
+    if (part.agent_communication and !@import("agent_link.zig").ownedCommunicationRef(parent, part.communication_child_key, part.subagent_ref)) return;
     const frozen = if (part.subagent_status) |s| s != .running else false;
     const next = Agent.create(a, parent, part.subagent_ref, part.subagent_title, frozen) catch return;
+    next.read_only = part.agent_communication;
     if (a.panels.pending_agent) |old| old.destroy();
     a.panels.pending_agent = next;
     a.redraw();
@@ -141,7 +144,7 @@ pub fn settleFrame(a: *App) void {
     p.pending_agent = null;
     if (!next.belongsTo(a.selected)) return next.destroy();
     for (p.tabs.items, 0..) |*t, i| if (t.agent) |s| {
-        if (!std.mem.eql(u8, s.doc, next.doc) or !std.mem.eql(u8, s.parent, next.parent)) continue;
+        if (s.read_only != next.read_only or !std.mem.eql(u8, s.doc, next.doc) or !std.mem.eql(u8, s.parent, next.parent)) continue;
         next.destroy();
         p.active = i;
         t.shown = p.bumpShown();

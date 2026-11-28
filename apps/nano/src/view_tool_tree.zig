@@ -106,7 +106,7 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
     const live_prog = @import("app_progress.zig").forChat(a, parent).find(p.id);
     const ag_state = if (p.agent) aw.resolveAgentState(if (live_prog) |lp| lp.state else null, p.subagent_status, p.resolved, p.is_error, e.status == .streaming) else .completed;
     const ag_running = p.agent and ag_state == .running;
-    const agent_linked = p.agent and p.subagent_ref.len > 0 and p.subagent_title.len > 0 and parent != null;
+    const agent_linked = (p.agent or p.agent_communication) and p.subagent_ref.len > 0 and p.subagent_title.len > 0 and parent != null;
     const view_linked = p.saved_view != null and parent != null;
     const linked = agent_linked or view_linked;
     const ordinary = p.kind == .tool and !p.agent and !view_linked;

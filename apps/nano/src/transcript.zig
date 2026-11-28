@@ -96,6 +96,8 @@ pub const Part = struct {
     /// of the RPC frame. Ordinary tools never become agents from a stray ref.
     agent: bool = false,
     subagent_ref: []u8 = &.{},
+    agent_communication: bool = false,
+    communication_child_key: []u8 = &.{},
     subagent_title: []u8 = &.{},
     subagent_status: ?@import("agent_link.zig").Status = null,
     subagent_tail: []u8 = &.{},
@@ -141,6 +143,7 @@ pub const Part = struct {
         gpa.free(p.output);
         gpa.free(p.output_ref);
         gpa.free(p.subagent_ref);
+        gpa.free(p.communication_child_key);
         gpa.free(p.subagent_title);
         gpa.free(p.subagent_tail);
         gpa.free(p.stat_paths);
@@ -545,7 +548,13 @@ fn toolCall(gpa: Allocator, p: *Part, call: ?json.Value) !void {
         p.compaction = m;
     }
     p.agent = @import("agent_link.zig").isAgent(o);
-    p.subagent_title = (try @import("agent_link.zig").title(gpa, o)) orelse &.{};
+    if (@import("agent_link.zig").communication(o)) |outgoing| {
+        p.agent_communication = true;
+        if (string(o.get("childKey"))) |key| p.communication_child_key = try gpa.dupe(u8, key);
+        p.subagent_title = try gpa.dupe(u8, if (outgoing) "Agent communication · sent" else "Agent communication · received");
+    } else {
+        p.subagent_title = (try @import("agent_link.zig").title(gpa, o)) orelse &.{};
+    }
     // Keep read paths too: file badges need the identity, not just chip text.
     if (p.tool == .readFile or p.tool == .writeFile or p.tool == .editFile or p.tool == .applyPatch) {
         if (string(o.get("path"))) |f| p.path = try gpa.dupe(u8, f);

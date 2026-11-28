@@ -103,7 +103,10 @@ impl Reducer {
     /// Project both observations into the root transcript's message identity.
     /// The child copy can supply content before the root copy arrives, but
     /// only an explicit cross-reference allows it to stand in for that copy.
-    pub fn communications<'a>(&'a self, root: &str) -> BTreeMap<&'a str, (bool, &'a [Value])> {
+    pub fn communications<'a>(
+        &'a self,
+        root: &str,
+    ) -> BTreeMap<(&'a str, &'a str, bool), &'a [Value]> {
         let mut rows = BTreeMap::new();
         for (owner, session) in &self.sessions {
             if owner != root && session.parent.as_deref() != Some(root) {
@@ -144,9 +147,10 @@ impl Reducer {
                     continue;
                 };
                 if owner == root {
-                    rows.insert(key, (outgoing, content.as_slice()));
+                    rows.insert((key, child, outgoing), content.as_slice());
                 } else {
-                    rows.entry(key).or_insert((outgoing, content.as_slice()));
+                    rows.entry((key, child, outgoing))
+                        .or_insert(content.as_slice());
                 }
             }
         }
