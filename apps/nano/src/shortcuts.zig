@@ -38,12 +38,14 @@ pub const Shortcut = struct {
 
 const jump_description = "Open the session at this place in the sidebar list.";
 
-/// The Appshot capture's, recorded on the Appshots page (Control-Option-Space
-/// on the Mac, `ShortcutId::CaptureAppshot`).
+/// The GPUI app's Appshot capture key (Control-Option-Space on the Mac,
+/// `ShortcutId::CaptureAppshot`). Nano has no capture and shows no row for
+/// it; the file keeps it as saved.
 pub const appshot: Shortcut = .{ .key = "captureAppshot", .group = .sessions, .title = "Capture Appshot", .description = "", .default = "ctrl-alt-space" };
 
-/// In the page's order (`ShortcutId::ALL`, Appshots' left out: it has a
-/// page of its own).
+/// In the page's order (`ShortcutId::ALL`, Appshots' left out). The keys
+/// stay the GPUI app's (`splitTerminal`), so saved bindings still load; the
+/// titles say what the keys do here.
 pub const all = [_]Shortcut{
     .{ .key = "saveFile", .group = .files, .title = "Save file", .description = "Save the active workspace file.", .default = "mod-s" },
     .{ .key = "browserReload", .group = .browser, .title = "Reload browser page", .description = "Reload the focused browser tab.", .default = "mod-shift-r" },
@@ -51,8 +53,8 @@ pub const all = [_]Shortcut{
     .{ .key = "toggleChanges", .group = .panels, .title = "Toggle right sidebar", .description = "Show or hide the right sidebar for the current session.", .default = "mod-r" },
     .{ .key = "toggleFiles", .group = .panels, .title = "Toggle files panel", .description = "Show or hide the files panel for the current session.", .default = "mod-e" },
     .{ .key = "toggleTerminal", .group = .panels, .title = "Toggle terminal", .description = "Show or hide the terminal for the current session.", .default = "mod-j" },
-    .{ .key = "splitTerminal", .group = .panels, .title = "Split terminal right", .description = "Split the focused terminal to the right, like Ghostty ⌘D.", .default = "mod-d" },
-    .{ .key = "splitTerminalDown", .group = .panels, .title = "Split terminal down", .description = "Split the focused terminal downward.", .default = "" },
+    .{ .key = "splitTerminal", .group = .panels, .title = "Split chat right", .description = "Split the chat column to the right, like Ghostty ⌘D, with a new chat in the new pane.", .default = "mod-d" },
+    .{ .key = "splitTerminalDown", .group = .panels, .title = "Split chat down", .description = "Split the chat column downward, with a new chat in the new pane.", .default = "" },
     .{ .key = "newSession", .group = .sessions, .title = "New chat", .description = "Open a new chat tab, preserving the current chat and split layout.", .default = "mod-t" },
     .{ .key = "openModelPicker", .group = .sessions, .title = "Open model picker", .description = "Open the model picker for the current session.", .default = "mod-/" },
     .{ .key = "nextSession", .group = .sessions, .title = "Next tab or session", .description = "Switch to the next tab when two or more are open; otherwise select the next session in the sidebar.", .default = "ctrl-tab" },
@@ -78,11 +80,11 @@ fn jumps() [9]Shortcut {
 }
 
 /// The read-only group under them: the window's own keys
-/// (`fixed_rows`, from the live keymap on macOS).
-pub const Fixed = struct { title: []const u8, keys: []const u8 };
+/// (`fixed_rows`, from the live keymap on macOS). None repeats a rebindable
+/// row: those keys follow the binding, so a fixed copy would go stale.
+pub const Fixed = struct { title: []const u8, keys: []const u8 = "", chord: ?ui.Shortcut = null };
 pub const fixed_label = "Panes, tabs and the composer";
 pub const fixed = [_]Fixed{
-    .{ .title = "Split the chat to the right", .keys = "Cmd+D" },
     .{ .title = "Close the pane (back to one column)", .keys = "Cmd+W" },
     .{ .title = "Next pane", .keys = "Cmd+]" },
     .{ .title = "Previous pane", .keys = "Cmd+[" },
@@ -96,8 +98,6 @@ pub const fixed = [_]Fixed{
     .{ .title = "Grow the pane down", .keys = "Ctrl+Cmd+↓" },
     .{ .title = "Make all panes the same size", .keys = "Ctrl+Cmd+=" },
     .{ .title = "Zoom the pane (and back)", .keys = "Cmd+Shift+Enter" },
-    .{ .title = "New chat tab", .keys = "Cmd+T" },
-    .{ .title = "Reopen closed chat tab", .keys = "Cmd+Shift+T" },
     .{ .title = "Next chat tab", .keys = "Cmd+Shift+]" },
     .{ .title = "Previous chat tab", .keys = "Cmd+Shift+[" },
     .{ .title = "First chat tab (2–8 for the next ones)", .keys = "Ctrl+1" },
@@ -105,7 +105,10 @@ pub const fixed = [_]Fixed{
     .{ .title = "Jump to the message box", .keys = "Cmd+L" },
     .{ .title = "Write the message on a full page (and back)", .keys = "Cmd+Shift+E" },
     .{ .title = "Command palette", .keys = "Cmd+K" },
-    .{ .title = "Toggle Zen / Developer mode", .keys = "Cmd+Shift+M" },
+    .{ .title = "Visual tab overview", .keys = "Cmd+Shift+\\" },
+    .{ .title = "Enter or exit full screen", .keys = "Ctrl+Cmd+F" },
+    .{ .title = "Toggle Zen / Developer mode", .chord = cycle_ui_mode },
+    .{ .title = "Toggle Design Canvas", .chord = toggle_design_canvas },
     .{ .title = "Search sessions", .keys = "Cmd+F" },
     .{ .title = "Settings", .keys = "Cmd+," },
     .{ .title = "Bigger text (zoom in)", .keys = "Cmd+=" },
@@ -134,6 +137,39 @@ pub fn badge(buf: []u8, combo: []const u8) []const u8 {
         w.writeAll(key[1..]) catch {};
     }
     return w.buffered();
+}
+
+/// Platform-aware compact shortcut badge: Mac uses glyphs (`⇧⌘R`), while
+/// Windows and Linux show readable modifier names (`Ctrl+Shift+R`).
+pub fn platformBadgeFor(os: std.Target.Os.Tag, buf: []u8, combo: []const u8) []const u8 {
+    if (os == .macos) return badge(buf, combo);
+    var w: std.Io.Writer = .fixed(buf);
+    const cut = std.mem.lastIndexOfScalar(u8, combo, '-');
+    const key = if (cut) |i| combo[i + 1 ..] else combo;
+    const mods = if (cut) |i| combo[0..i] else "";
+    const order = [_][2][]const u8{ .{ "ctrl", "Ctrl" }, .{ "mod", "Ctrl" }, .{ "alt", "Alt" }, .{ "shift", "Shift" } };
+    var wrote_ctrl = false;
+    for (order) |o| {
+        var it = std.mem.splitScalar(u8, mods, '-');
+        while (it.next()) |part| if (std.mem.eql(u8, part, o[0])) {
+            if (std.mem.eql(u8, o[1], "Ctrl")) {
+                if (wrote_ctrl) break;
+                wrote_ctrl = true;
+            }
+            w.writeAll(o[1]) catch {};
+            w.writeByte('+') catch {};
+            break;
+        };
+    }
+    if (key.len > 0) {
+        w.writeByte(std.ascii.toUpper(key[0])) catch {};
+        w.writeAll(key[1..]) catch {};
+    }
+    return w.buffered();
+}
+
+pub fn platformBadge(buf: []u8, combo: []const u8) []const u8 {
+    return platformBadgeFor(@import("builtin").os.tag, buf, combo);
 }
 
 /// "mod-shift-r" as the page shows it, "Cmd+Shift+R" (`display_combo`):
@@ -254,8 +290,34 @@ test "key-caps as the GPUI app's badges on the Mac (`badge_combos_use_mac_glyphs
     try testing.expectEqualStrings("⌃⌥⌘Space", badge(&buf, "mod-alt-ctrl-space"));
     try testing.expectEqualStrings("⌘,", badge(&buf, "mod-,"));
     try testing.expectEqualStrings("⌘K", badge(&buf, "mod-k"));
+    try testing.expectEqualStrings("⌘J", platformBadgeFor(.macos, &buf, "mod-j"));
+    try testing.expectEqualStrings("Ctrl+J", platformBadgeFor(.linux, &buf, "mod-j"));
+    try testing.expectEqualStrings("Ctrl+Alt+D", chordBadgeFor(.windows, &buf, toggle_design_canvas));
+    try testing.expectEqualStrings("Ctrl+Shift+M", chordBadgeFor(.linux, &buf, cycle_ui_mode));
+    try testing.expectEqualStrings("⇧⌘M", chordBadgeFor(.macos, &buf, cycle_ui_mode));
 }
 
 /// The command palette's key: fixed, as the GPUI app binds it
 /// (`KeyBinding::new(&platform_combo("mod-k"), ToggleCommandPalette)`).
 pub const command_palette: ui.Shortcut = .{ .key = 'k', .cmd = true };
+
+const keymap_partition = @import("ux_rules.zig").KeymapPartition;
+pub const cycle_ui_mode = windowShortcut(keymap_partition.cycle_ui_mode);
+pub const toggle_design_canvas = windowShortcut(keymap_partition.toggle_design_canvas);
+
+fn windowShortcut(chord: keymap_partition.Chord) ui.Shortcut {
+    return .{ .key = chord.code, .cmd = chord.cmd, .ctrl = chord.ctrl, .alt = chord.alt, .shift = chord.shift };
+}
+
+fn chordBadgeFor(os: std.Target.Os.Tag, buf: []u8, chord: ui.Shortcut) []const u8 {
+    var combo_buf: [64]u8 = undefined;
+    return platformBadgeFor(os, buf, fromShortcut(&combo_buf, chord) orelse return "");
+}
+
+pub fn chordBadge(buf: []u8, chord: ui.Shortcut) []const u8 {
+    return chordBadgeFor(@import("builtin").os.tag, buf, chord);
+}
+
+pub fn isWorkspaceModeBinding(combo: []const u8) bool {
+    return matches(combo, cycle_ui_mode) or matches(combo, toggle_design_canvas);
+}

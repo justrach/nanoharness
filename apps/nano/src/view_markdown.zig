@@ -25,6 +25,7 @@ const LinkOwner = struct { app: *@import("app.zig").App, parent: []const u8 };
 var link_owner: ?LinkOwner = null;
 var active_veil: ?*veil_mod.RowVeil = null;
 var active_streaming: bool = false;
+var transcript_commands: bool = false;
 var veil_now_ms: f64 = 0;
 var current_elem_ix: usize = 0;
 var provider_mode: bool = false;
@@ -57,6 +58,21 @@ fn toggleMermaidSource(id: u64) void {
 /// including when a subagent is drawn beside it.
 pub fn withLinks(c: *ui.Context, colors: theme.Colors, src: []const u8, a: *@import("app.zig").App, parent: ?[]const u8) void {
     withLinksVeil(c, colors, src, a, parent, null, false);
+}
+
+/// Only a finished agent reply can offer to run a code fence.
+pub fn withCommandBlocks(
+    c: *ui.Context,
+    colors: theme.Colors,
+    src: []const u8,
+    a: *@import("app.zig").App,
+    parent: ?[]const u8,
+    row_veil: ?*veil_mod.RowVeil,
+) void {
+    const previous = transcript_commands;
+    transcript_commands = true;
+    defer transcript_commands = previous;
+    withLinksVeil(c, colors, src, a, parent, row_veil, false);
 }
 
 /// Draws Markdown `src` with optional streaming fade-in veil and live
@@ -137,6 +153,17 @@ pub fn githubMarkdown(c: *ui.Context, colors: theme.Colors, src: []const u8, a: 
     providerMarkdown(c, colors, src, a);
 }
 
+/// Deterministic hierarchical veil element id so block/table mutations never
+/// shift sibling ids and replay fades on previously finished blocks.
+fn veilElemId(block_ix: usize, kind: u8, row_ix: usize, col_ix: usize) usize {
+    var h = std.hash.Wyhash.init(0x5645_494c_4944);
+    h.update(std.mem.asBytes(&block_ix));
+    h.update(&.{kind});
+    h.update(std.mem.asBytes(&row_ix));
+    h.update(std.mem.asBytes(&col_ix));
+    return @truncate(h.final());
+}
+
 /// Draws the Markdown `src`.
 pub fn markdown(c: *ui.Context, colors: theme.Colors, src: []const u8, feedback: *kit.CopyFeedback) void {
     k = colors;
@@ -154,13 +181,16 @@ pub fn markdown(c: *ui.Context, colors: theme.Colors, src: []const u8, feedback:
             const tight = b == .item and blocks[i - 1] == .item;
             _ = c.leaf(.{ .height = .{ .px = if (tight) 4 else 12 } }, .none, null);
         }
-        current_elem_ix = i * 64;
+        current_elem_ix = veilElemId(i, 0, 0, 0);
         ui.key(c, c.print("md-{d}", .{i}));
-        block(c, b, i == 0, feedback);
+        block(c, b, i == 0, i, feedback);
     }
     if (active_veil) |v| {
         v.finishSeeding();
-        if (v.isFading()) c.frameIn(1.0 / 120.0);
+        if (v.isFading()) {
+            c.animationFrame();
+            c.frameIn(1.0 / 120.0);
+        }
     }
 }
 
@@ -293,7 +323,7 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
             if (activate) {
                 if (link_owner) |owner| {
                     if (local_artifact) {
-                        @import("artifact_links.zig").open(owner.app, owner.parent, link.url);
+                        @import("artifact_links.zig").openReference(owner.app, owner.parent, link.url);
                     } else @import("app_browser.zig").openLink(owner.app, owner.parent, link.url);
                 } else {
                     _ = nanoui.shell.openUrl(link.url);
@@ -327,7 +357,7 @@ fn richWidth(c: *ui.Context, in: md.Inline, style: ui.TextStyle, start: usize, e
     return width;
 }
 
-fn block(c: *ui.Context, b: md.Block, first: bool, feedback: *kit.CopyFeedback) void {
+fn block(c: *ui.Context, b: md.Block, first: bool, block_ix: usize, feedback: *kit.CopyFeedback) void {
     switch (b) {
         .paragraph => |in| rich(c, in, body),
         .heading => |h| {
@@ -358,8 +388,11 @@ fn block(c: *ui.Context, b: md.Block, first: bool, feedback: *kit.CopyFeedback) 
             defer box.end();
             rich(c, in, kit.style(c, 16, 24, .{ .wrap = true }));
         },
-        .code => |code| codeBlock(c, code.lang, code.text, feedback),
-        .table => |t| table(c, t.header, t.rows),
+        .code => |code| {
+            current_elem_ix = veilElemId(block_ix, 1, 0, 0);
+            codeBlock(c, code.lang, code.text, feedback);
+        },
+        .table => |t| table(c, block_ix, t.header, t.rows),
     }
 }
 
@@ -410,10 +443,21 @@ fn codeBlock(c: *ui.Context, lang: []const u8, src: []const u8, feedback: *kit.C
                 c.changed = true;
             }
         }
-        if (show_source) {
-            // The fit toggle (`CodeBlockTooltip`); nano's blocks always scroll.
-            _ = kit.iconButton(c, k, .@"wrap-text", .{ .size = 22, .radius = 6, .icon = 13, .tip = .{ .text = "Fit content" } });
-        }
+        if (transcript_commands) if (link_owner) |owner| {
+            const actions = @import("app_actions.zig");
+            if (actions.commandShell(lang, src)) |shell| {
+                const running = actions.commandRun(owner.app, owner.parent, block_id) != null;
+                if (running or actions.commandCwd(owner.app, owner.parent) != null) {
+                    ui.key(c, "code-terminal");
+                    if (kit.iconButton(c, k, if (running) .terminal else .@"action-play", .{
+                        .size = 22,
+                        .radius = 5,
+                        .icon = 13,
+                        .tip = .{ .text = if (running) "Open command terminal" else "Review command to run" },
+                    })) actions.openCommand(owner.app, owner.parent, block_id, shell, src);
+                }
+            }
+        };
         ui.key(c, "code-copy");
         if (kit.copyButton(c, k, feedback, .{ .size = 22, .radius = 5, .icon = 12 })) c.clipboard.write(c.clipboard.ctx, src);
     }
@@ -450,7 +494,7 @@ fn codeBlock(c: *ui.Context, lang: []const u8, src: []const u8, feedback: *kit.C
     }
 }
 
-fn table(c: *ui.Context, header: []const md.Inline, rows: []const []const md.Inline) void {
+fn table(c: *ui.Context, block_ix: usize, header: []const md.Inline, rows: []const []const md.Inline) void {
     const cols = tableCols(header, rows);
     if (cols == 0) return;
     // GPUI sizes a cell by its content (`table_columns`), not an equal
@@ -461,14 +505,31 @@ fn table(c: *ui.Context, header: []const md.Inline, rows: []const []const md.Inl
     const n = @min(cols, content.len);
     measureTable(c, header, &content, &min_words, n, true);
     for (rows) |r| measureTable(c, r, &content, &min_words, n, false);
-    const box = ui.div(c).column().wFull().p(1).rounded(8).border(k.border);
-    const fallback_room = if (link_owner) |o| @max(220, @min(@import("view_transcript.zig").paneWidth(c, o.app) - 32, @import("view_transcript.zig").column_w) - 2) else 0;
+    const box = ui.div(c).column().wFull().p(1).rounded(8).border(k.border).clip();
+    const fallback_room = if (link_owner) |o| @max(80, @min(@import("view_transcript.zig").paneWidth(c, o.app) - 32, @import("view_transcript.zig").column_w) - 2) else 0;
     const room = if (c.rects.get(c.node(box.index).id)) |r| @max(0, r.w - 2) else fallback_room;
     var widths: [16]f32 = @splat(0);
     columnWidthsWithWords(content[0..n], min_words[0..n], room, widths[0..n]);
+    var total_w: f32 = 0;
+    for (widths[0..n]) |w| total_w += w;
+    const overflows = room >= 1 and total_w > room + 0.5;
     defer box.end();
-    tableRow(c, header, widths[0..n], true, false);
-    for (rows, 0..) |r, i| tableRow(c, r, widths[0..n], false, i % 2 == 1);
+    if (overflows) {
+        // Keep readable columns in a horizontal scroll viewport instead of
+        // crushing narrow split-pane tables into one-character vertical towers.
+        _ = c.open(.{
+            .direction = .column,
+            .width = .fill,
+            .scroll_x = true,
+            .padding = .{ .bottom = 8 },
+        }, "table-scroll");
+        defer c.end();
+        tableRow(c, block_ix, 0, header, widths[0..n], total_w, true, false);
+        for (rows, 0..) |r, i| tableRow(c, block_ix, i + 1, r, widths[0..n], total_w, false, i % 2 == 1);
+    } else {
+        tableRow(c, block_ix, 0, header, widths[0..n], 0, true, false);
+        for (rows, 0..) |r, i| tableRow(c, block_ix, i + 1, r, widths[0..n], 0, false, i % 2 == 1);
+    }
 }
 
 fn tableCols(header: []const md.Inline, rows: []const []const md.Inline) usize {
@@ -531,23 +592,26 @@ fn columnWidthsWithWords(content: []const f32, min_words: []const f32, room: f32
 
     // Per-column natural width, demand weight (capped at `room` because no
     // column in a table of width `room` can render wider than `room` on one
-    // line), and minimum floor (at least 96pt or longest word + 22pt padding,
-    // bounded by the column's own natural width and a fair share of `room`).
+    // line), and unbreakable readable floor (longest word + 22pt cell padding,
+    // or at least 96pt / 136pt for multi-word prose, bounded by the column's
+    // padded single-line natural width). When the sum of readable floors
+    // exceeds `room` (e.g. a narrow split pane), keep those floors so the
+    // table scrolls horizontally instead of crushing text into 1-char stacks.
     var weights: [16]f32 = @splat(0);
     var floors: [16]f32 = @splat(0);
-    const max_floor = room / @as(f32, @floatFromInt(n)) * 0.85;
     var floor_sum: f32 = 0;
     for (content, 0..) |w, i| {
         const nat = @max(w, 48);
+        const nat_padded = @max(w + 22, 48);
         weights[i] = @min(nat, room);
         const word_pad = if (i < min_words.len and min_words[i] > 0) min_words[i] + 22 else 0;
-        const desired_floor = @min(nat, @max(96, @min(word_pad, 158)));
-        floors[i] = @min(desired_floor, max_floor);
+        const prose_floor: f32 = if (w > 160) 136 else 96;
+        floors[i] = @min(nat_padded, @max(prose_floor, @min(word_pad, 158)));
         floor_sum += floors[i];
     }
-    if (floor_sum > room and floor_sum > 0) {
-        const scale = room / floor_sum;
-        for (0..n) |i| floors[i] *= scale;
+    if (floor_sum > room) {
+        for (0..n) |i| out[i] = floors[i];
+        return;
     }
 
     var locked: [16]bool = @splat(false);
@@ -559,9 +623,10 @@ fn columnWidthsWithWords(content: []const f32, min_words: []const f32, room: f32
             weight_sum += weights[i];
         };
         if (weight_sum <= 0) break;
+        const pass_room = remaining_room;
         var any_locked = false;
         for (0..n) |i| if (!locked[i]) {
-            const share = remaining_room * (weights[i] / weight_sum);
+            const share = pass_room * (weights[i] / weight_sum);
             if (share < floors[i]) {
                 out[i] = floors[i];
                 locked[i] = true;
@@ -575,8 +640,8 @@ fn columnWidthsWithWords(content: []const f32, min_words: []const f32, room: f32
     }
 }
 
-fn tableRow(c: *ui.Context, cells: []const md.Inline, widths: []const f32, head: bool, zebra: bool) void {
-    var r = ui.div(c).row().wFull();
+fn tableRow(c: *ui.Context, block_ix: usize, row_ix: usize, cells: []const md.Inline, widths: []const f32, row_w: f32, head: bool, zebra: bool) void {
+    var r = if (row_w > 0) ui.div(c).row().w(row_w) else ui.div(c).row().wFull();
     if (head) r = r.bg(k.code_header) else if (zebra) r = r.bg(k.ink(0.02));
     defer r.end();
     for (widths, 0..) |width, i| {
@@ -588,6 +653,7 @@ fn tableRow(c: *ui.Context, cells: []const md.Inline, widths: []const f32, head:
         st.leading = 1.35;
         if (head) st.weight = .semibold;
         st = kit.style(c, 13, 20, st);
+        current_elem_ix = veilElemId(block_ix, if (head) 2 else 3, row_ix, i);
         rich(c, cell, st);
     }
 }
@@ -673,4 +739,86 @@ test "a label column beside multi-sentence prose columns keeps its word floor in
     try std.testing.expect(widths[1] >= 150);
     try std.testing.expect(widths[2] >= 150);
     try std.testing.expectApproxEqAbs(@as(f32, 460), widths[0] + widths[1] + widths[2], 0.5);
+}
+
+test "narrow pane markdown table preserves readable column widths and scrolls horizontally" {
+    const testing = std.testing;
+    // Rendered UI check: inside a 210pt narrow split pane, the table renders
+    // inside a horizontal scroll viewport (`scroll_x`), keeps prose cells from
+    // exploding into 1-letter vertical towers, and scrolls sideways via hscroll.
+    const Fixture = struct {
+        feedback: kit.CopyFeedback = .{},
+        fn view(f: *@This(), c: *ui.Context) void {
+            const colors = theme.fallback(true);
+            const root = ui.div(c).column().sizeFull().bg(colors.background).p(12).gap(10);
+            defer root.end();
+            markdown(c, colors,
+                \\| PR | Area | Summary | Status |
+                \\| --- | --- | --- | --- |
+                \\| #14 | Schema | (bootstrap) + DB migrations `0041` & `0042` | Ready |
+                \\| #18 | Sync | Snapshot catch-up replay and cursor check | Review |
+                \\
+                \\**Next steps**
+                \\
+                \\1. Land the low-risk schema updates first.
+            , &f.feedback);
+        }
+    };
+    theme.registerFonts();
+    var f: Fixture = .{};
+    var tester: ui.Tester = undefined;
+    try tester.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 210, .height = 460 });
+    defer tester.deinit();
+    tester.settle(3);
+    if (std.c.getenv("NANO_SNAP_DIR")) |dir| {
+        var buf: [1024]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, "{s}/narrow-table.png", .{std.mem.span(dir)})) |path| {
+            tester.screenshot(path) catch {};
+        } else |_| {}
+    }
+
+    // Pure layout contract: a 4-column table in a 180pt narrow split pane must
+    // keep each column wide enough for its words instead of crushing columns
+    // into ~1-character vertical stacks.
+    const content = [_]f32{ 28, 72, 260, 56 };
+    const min_words = [_]f32{ 28, 62, 74, 48 };
+    var widths: [4]f32 = undefined;
+    columnWidthsWithWords(&content, &min_words, 180, &widths);
+    var sum: f32 = 0;
+    for (widths) |w| sum += w;
+    try testing.expect(widths[1] >= 84);
+    try testing.expect(widths[2] >= 96);
+    try testing.expect(widths[3] >= 70);
+    try testing.expect(sum > 180);
+
+    // Find the horizontal scroll viewport for the table and verify prose cell height stays compact.
+    var scroll_node: ?ui.Rect = null;
+    var scroll_id: u64 = 0;
+    var summary_h: f32 = 0;
+    for (tester.ctx.nodes.items) |node| {
+        if (node.style.scroll_x) {
+            scroll_node = node.rect;
+            scroll_id = node.id;
+        }
+        if (node.content == .text and std.mem.indexOf(u8, node.content.text.str, "migrations") != null) {
+            summary_h = node.rect.h;
+        }
+    }
+    try testing.expect(summary_h > 0 and summary_h < 120);
+    const vp = scroll_node orelse return error.MissingTableHorizontalScroll;
+    try testing.expect(vp.w <= 210);
+
+    // Swiping left scrolls the table horizontally to reveal trailing columns.
+    tester.hscroll(vp.x + vp.w / 2, vp.y + vp.h / 2, -160);
+    tester.settle(1);
+    try testing.expect((tester.ctx.scroll_x.get(scroll_id) orelse 0) > 40);
+}
+
+test "streaming veil deterministic block and cell ids prevent replaying finished blocks" {
+    const testing = std.testing;
+    // Block 0 paragraph and table cells keep identical ids as new table rows stream in.
+    try testing.expectEqual(veilElemId(0, 0, 0, 0), veilElemId(0, 0, 0, 0));
+    try testing.expect(veilElemId(0, 0, 0, 0) != veilElemId(1, 0, 0, 0));
+    try testing.expect(veilElemId(1, 2, 0, 0) != veilElemId(1, 3, 1, 0));
+    try testing.expect(veilElemId(1, 3, 1, 0) != veilElemId(1, 3, 1, 1));
 }

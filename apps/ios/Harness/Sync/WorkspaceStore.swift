@@ -756,6 +756,27 @@ final class WorkspaceStore {
                                                                params: action.params, timeoutSeconds: 30)
     }
 
+    func codegraffArtifactFrameURL(deviceId: String, artifactId: String) async throws -> CodegraffArtifactFrame {
+        try await relay(for: deviceId).call(method: "CodegraffArtifactFrameUrl",
+                                            params: ["artifactId": artifactId], timeoutSeconds: 30)
+    }
+
+    func codegraffArtifactSetVisibility(deviceId: String, artifactId: String,
+                                        visibility: String) async throws -> CodegraffArtifactMeta {
+        try await relay(for: deviceId).call(method: "CodegraffArtifactSetVisibility",
+                                            params: ["artifactId": artifactId, "visibility": visibility],
+                                            timeoutSeconds: 30)
+    }
+
+    func codegraffComputer(deviceId: String) async throws -> CodegraffComputerOffer? {
+        do {
+            return try await relay(for: deviceId).call(method: "CodegraffComputer", params: [:],
+                                                       timeoutSeconds: 30)
+        } catch RelayError.rpc(let message) where message.contains("unknown method") {
+            return nil
+        }
+    }
+
     // MARK: Simulators (the computer's iOS Simulators, watched and driven from here)
     // Device-addressed relay calls like terminals: only the account's own
     // devices can open a device's relay room.

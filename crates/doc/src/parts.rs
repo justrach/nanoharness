@@ -218,6 +218,16 @@ pub enum MessagePart {
         title: String,
         script: String,
     },
+    /// Hosted interactive HTML/SVG/Markdown artifact metadata (payload lives in R2).
+    #[serde(rename_all = "camelCase")]
+    Artifact {
+        id: String,
+        artifact_id: String,
+        title: String,
+        format: String,
+        visibility: String,
+        url: String,
+    },
     /// Model thinking. Carries its body in a dedicated doc field (`reasoning`,
     /// never `text`) so pre-reasoning desktop builds — whose unknown-kind
     /// fallback renders `text` as prose — degrade to an invisible empty text
@@ -307,6 +317,7 @@ impl MessagePart {
             MessagePart::Text { id, .. }
             | MessagePart::Image { id, .. }
             | MessagePart::Visual { id, .. }
+            | MessagePart::Artifact { id, .. }
             | MessagePart::Reasoning { id, .. }
             | MessagePart::Tool { id, .. }
             | MessagePart::Delegation { id, .. }
@@ -345,6 +356,21 @@ impl MessagePart {
                 mime_type,
             } => id.len() + path.len() + name.len() + mime_type.len(),
             MessagePart::Visual { id, title, script } => id.len() + title.len() + script.len(),
+            MessagePart::Artifact {
+                id,
+                artifact_id,
+                title,
+                format,
+                visibility,
+                url,
+            } => {
+                id.len()
+                    + artifact_id.len()
+                    + title.len()
+                    + format.len()
+                    + visibility.len()
+                    + url.len()
+            }
             MessagePart::Error { message, .. } => message.len(),
         }
     }
@@ -410,6 +436,39 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 *existing = visual;
             } else {
                 out.push(visual);
+            }
+        }
+        AgentEvent::GeneratedArtifact {
+            id,
+            artifact_id,
+            title,
+            format,
+            visibility,
+            url,
+        } => {
+            if harness_proto::artifact::validate_artifact(
+                artifact_id,
+                title,
+                format,
+                visibility,
+                url,
+            )
+            .is_err()
+            {
+                return;
+            }
+            let artifact = MessagePart::Artifact {
+                id: id.clone(),
+                artifact_id: artifact_id.clone(),
+                title: title.trim().to_owned(),
+                format: format.clone(),
+                visibility: visibility.clone(),
+                url: url.clone(),
+            };
+            if let Some(existing) = out.iter_mut().find(|p| p.id() == id) {
+                *existing = artifact;
+            } else {
+                out.push(artifact);
             }
         }
         AgentEvent::ReasoningDelta { text } => {
@@ -1018,6 +1077,62 @@ mod tests {
                 id: "bad".into(),
                 title: "Overview".into(),
                 script: "x".repeat(64 * 1024 + 1),
+            },
+        );
+        assert_eq!(parts.len(), 3);
+    }
+
+    #[test]
+    fn generated_artifact_fold_is_ordered_validated_and_updatable() {
+        let mut parts = vec![];
+        let art_id = "art-0123456789abcdef01234567";
+        let url = format!("https://codegraff.com/a/{art_id}");
+        fold_event_into_parts(&mut parts, &text_delta("before"));
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::GeneratedArtifact {
+                id: format!("show-artifact:{art_id}"),
+                artifact_id: art_id.into(),
+                title: "Chart v1".into(),
+                format: "html".into(),
+                visibility: "private".into(),
+                url: url.clone(),
+            },
+        );
+        fold_event_into_parts(&mut parts, &text_delta("after"));
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::GeneratedArtifact {
+                id: format!("show-artifact:{art_id}"),
+                artifact_id: art_id.into(),
+                title: "Chart v2".into(),
+                format: "html".into(),
+                visibility: "public".into(),
+                url: url.clone(),
+            },
+        );
+        assert_eq!(parts.len(), 3);
+        assert!(matches!(
+            &parts[1],
+            MessagePart::Artifact { title, visibility, .. } if title == "Chart v2" && visibility == "public"
+        ));
+        let serialized = serde_json::to_value(&parts[1]).unwrap();
+        assert_eq!(serialized["kind"], "artifact");
+        assert_eq!(serialized["artifactId"], art_id);
+        assert_eq!(
+            serde_json::from_value::<MessagePart>(serialized).unwrap(),
+            parts[1]
+        );
+        // Invalid URL with token is ignored
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::GeneratedArtifact {
+                id: "bad".into(),
+                artifact_id: art_id.into(),
+                title: "Bad".into(),
+                format: "html".into(),
+                visibility: "private".into(),
+                url: format!("{url}?t=secret"),
             },
         );
         assert_eq!(parts.len(), 3);

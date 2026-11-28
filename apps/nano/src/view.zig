@@ -55,6 +55,8 @@ const cluster_x: f32 = @import("window_chrome.zig").leading;
 const cluster_w: f32 = 24 * 3 + 8 + 2;
 
 pub fn view(a: *App, c: *ui.Context) void {
+    // Settings › Appearance's Reduce motion before anything reads it.
+    @import("view_settings_appearance.zig").applyReduceMotion(c, a);
     @import("performance.zig").begin(a, c);
     a.markdown_cache.beginFrame();
     @import("frame_profile.zig").beginPass();
@@ -64,6 +66,14 @@ pub fn view(a: *App, c: *ui.Context) void {
     // The themes Settings › Appearance picked, for every palette drawn now.
     theme.light_id = a.settings.themeId(false);
     theme.dark_id = a.settings.themeId(true);
+    if (!a.offscreen) if (a.window) |w| {
+        const native_fs = w.isFullScreen();
+        if (native_fs != a.view.full_screen_native) {
+            a.view.full_screen_native = native_fs;
+            a.applyFullScreenState(native_fs);
+        }
+    };
+    const fs = a.view.full_screen;
     const dark = a.dark orelse nanoui.isDark();
     c.theme = theme.ui(dark);
     // The accent Settings › Appearance chose, in place of the theme's.
@@ -71,11 +81,13 @@ pub fn view(a: *App, c: *ui.Context) void {
     const surfaces = @import("surface_palette.zig");
     const requested = surfaces.requested(a.settings.text("surface"), base.recommended_frosted);
     const k = surfaces.apply(base, @import("app_surface.zig").sync(a, requested, dark));
-    c.theme.background = if (k.frosted) .transparent else k.shell;
+    const canvas_bg: ui.Color = if (fs) ui.Color.black else if (k.frosted) .transparent else k.shell;
+    c.theme.background = canvas_bg;
     c.theme.surface = k.composer;
     // Context.begin seeded an implicit root before the view resolved its
-    // live theme. It must not leave an opaque sheet under a glass window.
-    c.node(0).style.background = c.theme.background;
+    // live theme. It must not leave an opaque sheet under a glass window,
+    // and in minimal fullscreen the outer bezel is always pure #000000 black.
+    c.node(0).style.background = canvas_bg;
     c.setZoom(a.settings.uiFontSize() / 16.0);
     @import("view_transcript.zig").column_w = @import("view_settings_appearance.zig").transcriptWidth(a);
     a.ansi = k.ansi;
@@ -89,7 +101,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     a.view.last_win_w = c.size.w;
     a.view.last_win_h = c.size.h;
     if (!a.offscreen and c.time < a.view.resize_until) c.frameIn(1.0 / 120.0);
-    c.title_bar_height = sidebar.titlebar_h;
+    c.title_bar_height = if (fs) 0 else sidebar.titlebar_h;
     @import("view_kit.zig").beginFrame(c, k);
     // Box edges on the device's pixels, a half toward zero, as GPUI's
     // taffy.rs puts them; text keeps the line heights nano gives it.
@@ -128,8 +140,25 @@ pub fn view(a: *App, c: *ui.Context) void {
     a.reap();
     @import("app_subagents.zig").settleFrame(a);
     @import("app_browser.zig").settleFrame(a);
+    @import("app_browser.zig").syncPreviewConsumers(a);
     @import("view_settings_theme_import.zig").settleFrame(a);
     @import("view_settings_devices_updates.zig").settleFrame(a);
+    @import("view_setup.zig").ensureChecked(a);
+    if (a.view.setup != null and shown == null) {
+        // Dedicated full-window onboarding screen: nothing from the workspace,
+        // sidebar, tab strip, or popovers mounts or receives input underneath.
+        a.view.in_pre_tree = false;
+        c.focus = 0;
+        _ = @import("view_setup.zig").keys(c, a);
+        if (a.view.setup != null) {
+            c.node(0).style.background = base.shell.alpha(1);
+            @import("view_setup.zig").overlay(c, a, base);
+            @import("window_chrome.zig").draw(c, a, base);
+            @import("app_browser.zig").syncNative(a, c);
+            @import("frame_profile.zig").frame(a, c);
+            return;
+        }
+    }
     @import("pane_gesture.zig").observe(a, c);
     settleSelectionPreTree(a, c);
     // Capture once, before drawing the search can blur it on a pointer
@@ -145,6 +174,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     strip.settle(a);
     @import("view_attachment_drop.zig").prepare(a);
     if (!@import("view_image_preview.zig").keys(c, a) and !@import("github_images.zig").keys(c, a)) keys(c, a);
+    @import("view_fullscreen_chrome.zig").updatePeek(c, a);
     c.setZoom(a.settings.uiFontSize() / 16.0);
     if (!a.offscreen and c.time < a.view.resize_until) c.frameIn(1.0 / 120.0);
     a.syncPeers();
@@ -157,8 +187,10 @@ pub fn view(a: *App, c: *ui.Context) void {
     if (!a.view.space_menu) a.view.space_anchor = null;
     a.view.strip.active_folder_anchor = null;
     a.view.strip.active_tab_anchor = null;
+    var strip_layout: strip.rendering.Layout = undefined;
+    var pane_widths: [tabs.max_panes]?f32 = @splat(null);
     {
-        const root = ui.div(c).row().sizeFull().bg(k.shell);
+        const root = ui.div(c).row().sizeFull().bg(if (fs) ui.Color.black else k.shell);
         defer root.end();
         // One retained seam tween, independent of the sidebar's mount state.
         // CSS ease-out (cubic-bezier(0, 0, 0.58, 1)) over 200ms, as GPUI's
@@ -204,56 +236,54 @@ pub fn view(a: *App, c: *ui.Context) void {
             }
             a.view.sidebar_tween = tween;
         }
+        @import("view_fullscreen_chrome.zig").stepLeftPeek(c, a);
         @import("view_drag.zig").update(c, a);
         {
             ui.key(c, "sidebar-slot");
             const slot = ui.div(c).w(a.view.sidebar_width).hFull().clip();
             defer slot.end();
-            if (a.view.sidebar_width > 0) {
+            if (a.view.sidebar_width > 0 and !@import("view_fullscreen_chrome.zig").leftPeekCovers(a)) {
                 // Shrink only the viewport: rows retain their layout and slide
                 // left beneath its clip, rather than squeezing their contents.
                 const content = ui.div(c).absolute().offset(a.view.sidebar_width - side_width, 0).w(side_width).hFull();
                 defer content.end();
                 if (a.view.settings_open) settings_view.nav(c, a, k) else sidebar.sidebar(c, a, k);
-                // Workspace panels own their entire rounded outline; there is
-                // no longer a full-height border at the sidebar's edge.
-                if (a.view.settings_open and !k.is_harp and a.settings.uiMode() != .zen) ui.div(c).absolute().offset(side_width - 1, 0).size(1, c.size.h).bg(k.border).end();
             }
         }
         a.view.seam_inset = 2;
         const zen = a.settings.uiMode() == .zen;
-        const ws_gutter = if (zen) chrome.zen_gutter else chrome.gutter;
+        const ws_gutter = chrome.zen_gutter;
+        const top_inset: f32 = if (fs) chrome.fs_top_inset else chrome.header_height;
         const layout = a.tabs.layout();
         const github_host = strip.hasHost(a) and @import("app_github_repository.zig").surface(a);
         const preferred_host = if (github_host) @max(chrome.right_pane_default, a.settings.rightPaneWidth()) else a.settings.rightPaneWidth();
-        a.view.chrome = if (zen)
-            chrome.zenFrameWithSide(c.size.w, c.size.h, a.view.sidebar_width, side_width, strip.chatCount(a), if (layout) |s| s.axis == .horizontal and !s.zoomed else true, strip.hasHost(a), strip.hasFiles(a), preferred_host)
+        a.view.chrome = chrome.zenFrameWithTop(c.size.w, c.size.h, a.view.sidebar_width, side_width, top_inset, strip.chatCount(a), if (layout) |s| s.axis == .horizontal and !s.zoomed else true, strip.hasHost(a), strip.hasFiles(a), preferred_host);
+        transcript_view.slide_chat_width = if (a.view.sidebar_tween) |tw|
+            (if (strip.layoutExpanded(a) != null) null else chrome.zenFrameWithTop(c.size.w, c.size.h, @max(tw.from, tw.to), side_width, top_inset, strip.chatCount(a), if (layout) |s| s.axis == .horizontal and !s.zoomed else true, strip.hasHost(a), strip.hasFiles(a), preferred_host).chat_width)
         else
-            chrome.frameWithSide(c.size.w, c.size.h, a.view.sidebar_width, side_width, strip.chatCount(a), if (layout) |s| s.axis == .horizontal and !s.zoomed else true, strip.hasHost(a), strip.hasFiles(a), preferred_host);
+            null;
         a.view.chrome.compact_host = github_host and a.view.chrome.host_width < chrome.github_min_width;
+        strip_layout = strip.rendering.layout(c, a);
+        if (!fs and strip_layout.pane_row) {
+            const extra = chrome.tab_height + ws_gutter;
+            a.view.chrome.y += extra;
+            a.view.chrome.height = @max(0, a.view.chrome.height - extra);
+        }
         ui.key(c, "main-column");
         const main = ui.div(c).column().grow().w(0).hFull();
         defer main.end();
         if (a.view.settings_open) {
-            if (zen) {
-                const wrap = ui.div(c).row().pt(chrome.header_height).pl(a.view.chrome.leading).pr(chrome.zen_gutter).pb(chrome.zen_gutter).hFull().wFull();
-                defer wrap.end();
-                ui.key(c, "zen-settings-page-card");
-                const card = panel_chrome.zenBody(c, k).grow().w(0).hFull().clip();
-                defer card.end();
-                settings_view.page(c, a, k);
-            } else if (k.is_harp) {
-                const wrap = ui.div(c).row().pt(sidebar.titlebar_h + 8).pr(8).pb(8).hFull().wFull();
-                defer wrap.end();
-                const card = ui.div(c).column().grow().w(0).hFull().p(1).rounded(10).border(k.border).borderW(1).bg(k.background).clip();
-                defer card.end();
-                settings_view.page(c, a, k);
-            } else {
-                _ = c.leaf(.{ .width = .fill, .height = .{ .px = sidebar.titlebar_h } }, .none, null);
-                settings_view.page(c, a, k);
-            }
+            const wrap = ui.div(c).row().pt(if (fs) chrome.fs_handle_h else top_inset).pl(a.view.chrome.leading).pr(chrome.zen_gutter).pb(chrome.zen_gutter).hFull().wFull();
+            defer wrap.end();
+            const col = ui.div(c).column().grow().w(0).hFull();
+            defer col.end();
+            if (fs) @import("view_fullscreen_chrome.zig").settingsHeader(c, a);
+            ui.key(c, "zen-settings-page-card");
+            const card = panel_chrome.zenBodyOn(c, k, fs).grow().wFull().h(0).clip();
+            defer card.end();
+            settings_view.page(c, a, k);
         } else {
-            const workspace = ui.div(c).row().pt(chrome.header_height).pl(a.view.chrome.leading).pr(ws_gutter).pb(ws_gutter).hFull().wFull();
+            const workspace = ui.div(c).row().pt(if (fs) chrome.fs_handle_h else a.view.chrome.y).pl(a.view.chrome.leading).pr(ws_gutter).pb(ws_gutter).hFull().wFull();
             defer workspace.end();
             const expanded = strip.layoutExpanded(a);
             if (expanded == null or expanded.? == .chat) {
@@ -263,7 +293,7 @@ pub fn view(a: *App, c: *ui.Context) void {
                 const chat = ui.div(c).column().w(a.view.chrome.chat_width + (if (nested_github) a.view.chrome.host_width + ws_gutter else 0)).hFull();
                 defer chat.end();
                 if (a.tabs.layout()) |s| {
-                    if (!s.zoomed and !only and s.panes.items.len > 1) panes(c, a, k, s) else chatPanel(c, a, k);
+                    if (!s.zoomed and !only and s.panes.items.len > 1) panes(c, a, k, s, &pane_widths) else chatPanel(c, a, k);
                 } else chatPanel(c, a, k);
             }
             if (strip.hasHost(a) and !githubChildInSplit(a) and (expanded == null or expanded.? == .host)) {
@@ -274,19 +304,30 @@ pub fn view(a: *App, c: *ui.Context) void {
             if (strip.hasFiles(a) and (expanded == null or expanded.? == .files)) {
                 if (expanded == null) ui.div(c).w(ws_gutter).hFull().end();
                 if (expanded != null) a.view.chrome.files_width = a.view.chrome.width;
-                const files = panel_chrome.bodyFor(c, k, zen).w(a.view.chrome.files_width).hFull().clip();
+                const fcol = ui.div(c).column().w(a.view.chrome.files_width).hFull();
+                defer fcol.end();
+                if (fs) @import("view_fullscreen_chrome.zig").filesHeader(c, a, k, a.view.strip.focused == .files);
+                const files = panel_chrome.bodyForOn(c, k, zen, fs).grow().wFull().h(0).clip();
                 defer files.end();
                 if (c.input.pressed and files.interaction().hovered) a.view.strip.focused = .files;
                 @import("view_files.zig").explorer(c, a, k);
             }
         }
     }
-    strip.draw(c, a, k);
-    titlebar(c, a, k);
-    @import("window_chrome.zig").draw(c, a, k);
+    if (!fs) {
+        strip.draw(c, a, k, strip_layout, &pane_widths);
+        titlebar(c, a, k);
+        @import("window_chrome.zig").draw(c, a, k);
+    } else {
+        const fs_chrome = @import("view_fullscreen_chrome.zig");
+        fs_chrome.drawTopHandle(c, a);
+        fs_chrome.drawLeftHandle(c, a);
+        fs_chrome.drawLeftPeek(c, a, k);
+        fs_chrome.drawTopPeek(c, a, strip_layout, &pane_widths);
+    }
     if (c.input.released) a.view.sidebar_press_focus = false;
     const popup = surfaces.popup(k);
-    trailing(c, a, popup);
+    if (!fs) trailing(c, a, popup);
     @import("view_question.zig").overlay(c, a, k);
     @import("view_diffs.zig").overlays(c, a, popup);
     @import("view_actions.zig").overlays(c, a, popup);
@@ -304,12 +345,13 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("view_updates.zig").overlayCard(c, a, popup);
     @import("view_updates.zig").updatesPopover(c, a, popup);
     // Over everything, as the GPUI app's deferred palette (priority 2).
+    @import("view_tab_cycle.zig").overlay(c, a, popup);
     @import("view_palette.zig").overlay(c, a, popup);
+    @import("view_tab_overview.zig").overlay(c, a, popup);
     @import("view_custom_theme_studio.zig").overlay(c, a, popup);
     @import("view_project_setup.zig").overlay(c, a, popup);
     @import("view_open_chooser.zig").overlay(c, a, popup);
-    // First-run setup, over the whole window.
-    @import("view_setup.zig").overlay(c, a, k);
+    @import("view_image_preview.zig").draw(c, a, k);
     @import("app_browser.zig").syncNative(a, c);
     settleSelectionPostTree(a, c);
     // After the overlays: a click that opens a menu has opened it.
@@ -332,8 +374,33 @@ pub fn view(a: *App, c: *ui.Context) void {
 /// no focus of its own, so it isn't one.
 pub fn menuKeepsKeys(a: *const App) bool {
     const v = &a.view;
-    return v.project_setup.open or v.open_chooser.open or v.strip.menu != null or v.more_menu or v.filter_menu or v.space_menu or v.checkout_menu or v.ref_menu or v.chat_menu.open or v.link_menu.open or
-        v.updates_popover or v.star_menu or v.account_usage.open or v.agent_work.pinned or v.context.pinned or v.menus.ctx_at != null or v.palette.open or v.custom_theme_open or v.search.focus or a.picker != .none;
+    return v.setup != null or v.project_setup.open or v.open_chooser.open or v.strip.menu != null or v.more_menu or v.filter_menu or v.space_menu or v.checkout_menu or v.ref_menu or v.chat_menu.open or v.link_menu.open or
+        v.updates_popover or v.star_menu or v.account_menu or v.theme_menu != null or v.account_usage.open or v.agent_work.pinned or v.context.pinned or v.menus.ctx_at != null or v.palette.open or v.tab_overview.open or v.custom_theme_open or v.theme_import != null or v.dialogs.rename != null or v.dialogs.delete != null or v.search.focus or a.picker != .none or a.actions.menu or a.actions.editor != null or a.actions.command_review != null;
+}
+
+/// Enforces `Nano.OverlayMutex`: clears all Tier-1 popovers before opening a
+/// new popover, palette, or modal sheet so simultaneous menus never stack.
+pub fn closeTransientPopovers(a: *App) void {
+    const v = &a.view;
+    v.account_menu = false;
+    v.updates_popover = false;
+    v.star_menu = false;
+    v.filter_menu = false;
+    v.more_menu = false;
+    v.space_menu = false;
+    v.checkout_menu = false;
+    v.ref_menu = false;
+    v.chat_menu.open = false;
+    v.link_menu.open = false;
+    v.strip.menu = null;
+    v.menus.open = null;
+    v.menus.ctx_at = null;
+    v.account_usage.open = false;
+    v.agent_work.pinned = false;
+    v.context.pinned = false;
+    v.theme_menu = null;
+    a.actions.menu = false;
+    a.picker = .none;
 }
 
 /// A press lands on the window's root unless something nearer takes focus,
@@ -375,16 +442,21 @@ fn seam(c: *ui.Context, a: *App, k: theme.Colors) void {
 /// chat's page.
 fn chatPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     const zen = a.settings.uiMode() == .zen;
-    const panel = panel_chrome.bodyFor(c, k, zen).grow().wFull().h(0);
+    const fs = a.view.full_screen;
+    if (fs) {
+        const pane_ix = if (a.tabs.layout()) |s| s.focus else 0;
+        const pane_w = @max(0, a.view.chrome.chat_width);
+        @import("view_fullscreen_chrome.zig").chatHeader(c, a, k, pane_ix, a.selected, pane_w, true, false);
+    }
+    const panel = panel_chrome.bodyForOn(c, k, zen, fs).grow().wFull().h(0);
     defer panel.end();
     @import("view_attachment_drop.zig").target(c, a, panel.index, if (a.tabs.layout()) |s| s.focus else null);
     @import("view_attachment_drop.zig").shade(c, a, k, panel.index);
     if (c.input.pressed and panel.interaction().hovered) a.view.strip.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
-    if (strip.rendering.selectedBounds(a)) |selected| panel_chrome.join(c, k, a.view.chrome.chat_width, selected.left, selected.right);
     // Decorative shoulders change node count as the sidebar slides; the
     // writing subtree must keep its identity and keyboard focus.
     ui.key(c, "chat-panel-content");
-    const content = ui.div(c).column().grow().wFull().h(0).rounded(if (zen) chrome.zen_radius - 1 else 9).clip();
+    const content = ui.div(c).column().grow().wFull().h(0).rounded(chrome.zen_radius - 1).clip();
     defer content.end();
     focused(c, a, k);
 }
@@ -400,12 +472,11 @@ fn focused(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (a.view.write_open) return @import("view_write.zig").page(c, a, k, transcript_view.paneWidth(c, a));
     // The catch-up, a bot's details or the new-bot form take it the same way.
     if (a.bots.page != .none) return @import("view_bots_page.zig").page(c, a, k, transcript_view.paneWidth(c, a));
-    const parent = c.stack.items[c.stack.items.len - 1];
-    defer @import("view_image_preview.zig").draw(c, a, k, c.rects.get(c.node(parent).id));
     @import("view_backdrop.zig").draw(c, a, k);
     if (a.selected == null) {
         @import("view_newchat.zig").canvas(c, a, k);
     } else {
+        @import("view_chat_header.zig").draw(c, a, k, a.selected.?, transcript_view.paneWidth(c, a), true);
         if (a.settings.hierarchyProfile().shows_action_toolbar) @import("view_actions.zig").toolbar(c, a, k);
         @import("view_bots.zig").strip(c, a, k, @min(transcript_view.paneWidth(c, a), transcript_view.column_w));
         transcript_view.transcript(c, a, k);
@@ -421,18 +492,23 @@ fn githubChildInSplit(a: *const App) bool {
 
 fn hostPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     const zen = a.settings.uiMode() == .zen;
+    const fs = a.view.full_screen;
+    const hcol = ui.div(c).column().w(a.view.chrome.host_width).hFull();
+    defer hcol.end();
+    if (fs) @import("view_fullscreen_chrome.zig").hostHeader(c, a, k, a.view.strip.focused == .host);
     ui.key(c, "workspace-host-body");
-    const host = panel_chrome.bodyFor(c, k, zen).w(a.view.chrome.host_width).hFull();
+    const host = panel_chrome.bodyForOn(c, k, zen, fs).grow().wFull().h(0);
     defer host.end();
-    if (c.input.pressed and host.interaction().hovered) a.view.strip.focused = .host;
-    if (!zen and @import("app_github_repository.zig").surface(a)) {
+    const host_hit = host.interaction();
+    if (c.input.pressed and host_hit.hovered) a.view.strip.focused = .host;
+    if (!a.view.full_screen and !zen and @import("app_github_repository.zig").surface(a)) {
         if (a.view.strip.host_tab_rect) |tab| if (c.rects.get(c.node(host.index).id)) |body| {
             panel_chrome.join(c, k, a.view.chrome.host_width, @max(0, tab.x - body.x), @min(a.view.chrome.host_width, tab.x + tab.w - body.x));
         };
     }
     // Clip content, not the cap/shoulders extending above the body.
     ui.key(c, "workspace-host-content");
-    const content = ui.div(c).column().wFull().hFull().rounded(if (zen) chrome.zen_radius - 1 else 9).clip();
+    const content = ui.div(c).column().wFull().hFull().rounded(chrome.zen_radius - 1).clip();
     defer content.end();
     @import("view_host.zig").host(c, a, k);
 }
@@ -440,12 +516,12 @@ fn hostPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
 /// A split's panes along its axis, each its share of the column; the
 /// focused one is the tab's chat, the others its neighbors, read only
 /// (`render_chat_split`, shell/chat_split.rs).
-fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split) void {
+fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split, widths: *[tabs.max_panes]?f32) void {
     const across = s.axis == .horizontal;
     var box = ui.div(c).grow().wFull().h(0);
     box = if (across) box.row() else box.column();
     defer box.end();
-    const total: f32 = if (across) a.view.chrome.chat_width else a.view.chrome.height;
+    const total: f32 = if (across) a.view.chrome.chat_width else (a.view.chrome.height + (if (a.view.full_screen) chrome.fs_pane_header_h else 0));
     var focus: ?usize = null;
     const press = a.view.pane_press;
     if (c.input.pressed or c.input.released) a.view.pane_press = null;
@@ -478,13 +554,14 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split) void {
     }
 
     const zen = a.settings.uiMode() == .zen;
-    const ws_gutter = if (zen) chrome.zen_gutter else chrome.gutter;
+    const ws_gutter = chrome.zen_gutter;
     const child_parent = if (githubChildInSplit(a)) @import("app_github_repository.zig").parentPane(a) else null;
     for (s.panes.items, s.shares.items, 0..) |chat, share, ix| {
         ui.key(c, c.print("pane-{d}", .{ix}));
         if (ix > 0) divider(c, a, k, ix, across, total, ws_gutter);
         const target = chrome.paneSpanIn(total, share, s.panes.items.len, across, ws_gutter);
         const size = if (reveal) |r| revealSpan(total, across, r, ix, target, reveal_t) else target;
+        if (across) widths[ix] = size;
         const owns_child = child_parent != null and child_parent.? == ix;
         const extra = if (owns_child) a.view.chrome.host_width + ws_gutter else 0;
         var group = ui.div(c).row();
@@ -495,7 +572,23 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split) void {
             // In a vertical split only the parent's row shares its width.
             if (!across and child_parent != null and !owns_child) a.view.chrome.chat_width += a.view.chrome.host_width + ws_gutter;
             defer a.view.chrome.chat_width = saved_width;
-            const pane = panel_chrome.bodyFor(c, k, zen).clip().w(if (across) size else a.view.chrome.chat_width).hFull();
+            const slot_w = if (across) size else a.view.chrome.chat_width;
+            const slot_box = if (across)
+                ui.div(c).column().w(slot_w).hFull()
+            else
+                ui.div(c).column().h(size).w(slot_w);
+            defer slot_box.end();
+            if (a.view.full_screen) {
+                const pane_chat = if (ix == s.focus) a.selected else chat;
+                @import("view_fullscreen_chrome.zig").chatHeader(c, a, k, ix, pane_chat, slot_w, ix == s.focus, true);
+            }
+            const bpct = @import("ux_rules.zig").FocusAndClose.splitPaneBorderPct(@intCast(s.panes.items.len), ix == s.focus);
+            var pane = panel_chrome.bodyForOn(c, k, zen, a.view.full_screen).clip().grow().wFull().h(0);
+            if (bpct == 100) {
+                pane = pane.border(k.accent.alpha(0.45));
+            } else if (bpct > 0) {
+                pane = pane.border(if (a.view.full_screen) ui.Color.white.alpha(0.12) else k.border.alpha(0.55));
+            }
             defer pane.end();
             @import("view_attachment_drop.zig").target(c, a, pane.index, ix);
             @import("view_attachment_drop.zig").shade(c, a, k, pane.index);
@@ -509,7 +602,7 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split) void {
                 if (c.input.released and it.hovered and c.window_focused) if (press) |p| {
                     if (p.tab == @import("pane_gesture.zig").context(a, c) and p.pane == ix) focus = ix;
                 };
-                const neighbor_w = @max(0, (if (across) size else a.view.chrome.chat_width) - a.view.seam_inset);
+                const neighbor_w = @max(0, slot_w - a.view.seam_inset);
                 if (neighbor(c, a, k, ix, chat, neighbor_w)) return;
             }
         }
@@ -541,36 +634,75 @@ pub fn revealSpan(total: f32, across: bool, r: @import("app.zig").SplitReveal, i
 /// the room differently, double-click to make them even
 /// (`render_split_divider`).
 fn divider(c: *ui.Context, a: *App, k: theme.Colors, ix: usize, across: bool, total: f32, across_gap: f32) void {
-    const dragging = if (a.pane_drag) |d| d.divider == ix else false;
-    const gap = if (across) across_gap else chrome.tab_top;
-    var line = ui.div(c);
-    if (dragging) line = line.bg(k.accent.alpha(0.2));
-    line = if (across) line.w(gap).hFull() else line.h(gap).wFull();
-    defer line.end();
-    var grip = ui.div(c).absolute();
-    grip = if (across) grip.offset((gap - 9) / 2, 0).w(9).hFull() else grip.offset(0, (gap - 9) / 2).h(9).wFull();
-    defer grip.end();
-    const it = grip.interaction();
-    if (it.hovered or it.pressed) c.cursor = if (across) .resize_left_right else .resize_up_down;
-    const at = if (across) c.input.mouse.x else c.input.mouse.y;
-    if (it.double_clicked) {
-        a.pane_drag = null;
-        a.tabs.equalize();
-        a.rememberTabs();
-        return;
-    }
-    if (it.pressed) {
-        if (a.pane_drag == null) {
-            var d: tabs.Drag = .{ .divider = ix, .origin = at, .start = @splat(0) };
-            const sh = a.tabs.layout().?.shares.items;
-            @memcpy(d.start[0..sh.len], sh);
-            a.pane_drag = d;
+    var dragging_now = false;
+    {
+        const dragging = if (a.pane_drag) |d| d.divider == ix else false;
+        const gap = if (across) across_gap else chrome.tab_top;
+        var line = ui.div(c).center();
+        if (dragging) line = line.bg(k.accent.alpha(0.2));
+        line = if (across) line.w(gap).hFull() else line.h(gap).wFull();
+        defer line.end();
+        var show_pill = dragging;
+        {
+            var grip = ui.div(c).absolute();
+            grip = if (across) grip.offset((gap - 9) / 2, 0).w(9).hFull() else grip.offset(0, (gap - 9) / 2).h(9).wFull();
+            defer grip.end();
+            const it = grip.interaction();
+            if (it.hovered or it.pressed) c.cursor = if (across) .resize_left_right else .resize_up_down;
+            if (it.hovered) show_pill = true;
+            const at = if (across) c.input.mouse.x else c.input.mouse.y;
+            if (it.double_clicked) {
+                a.pane_drag = null;
+                a.tabs.equalize();
+                a.rememberTabs();
+                return;
+            }
+            if (it.pressed) {
+                if (a.pane_drag == null) {
+                    var d: tabs.Drag = .{ .divider = ix, .origin = at, .start = @splat(0) };
+                    const sh = a.tabs.layout().?.shares.items;
+                    @memcpy(d.start[0..sh.len], sh);
+                    a.pane_drag = d;
+                }
+                if (a.pane_drag) |d| if (d.divider == ix) {
+                    a.tabs.dragDivider(d, (at - d.origin) / @max(total, 1));
+                    c.frameIn(0);
+                };
+                dragging_now = true;
+            } else if (dragging) {
+                a.tabs.snapDivider(ix);
+                a.pane_drag = null;
+                a.rememberTabs();
+            }
         }
-        if (a.pane_drag) |d| if (d.divider == ix) a.tabs.dragDivider(d, (at - d.origin) / @max(total, 1));
-    } else if (dragging) {
-        a.pane_drag = null;
-        a.rememberTabs();
+        if (show_pill) {
+            const pill_c = if (dragging_now or dragging) k.accent.alpha(0.9) else if (a.view.full_screen) ui.Color.white.alpha(0.38) else k.muted.alpha(0.42);
+            ui.div(c).size(if (across) @as(f32, 3) else 32, if (across) @as(f32, 32) else 3).rounded(1.5).bg(pill_c).end();
+        }
     }
+    if (dragging_now) if (a.tabs.layout()) |s| if (ix > 0 and ix < s.shares.items.len) {
+        const sh = s.shares.items;
+        const gap = if (across) across_gap else chrome.tab_top;
+        var span_before: f32 = 0;
+        for (0..ix) |p_i| {
+            span_before += chrome.paneSpanIn(total, sh[p_i], sh.len, across, gap);
+            if (p_i > 0) span_before += gap;
+        }
+        const center_x = if (across) a.view.chrome.x + span_before + gap / 2 else a.view.chrome.x + a.view.chrome.chat_width / 2;
+        const center_y = if (across) a.view.chrome.y + a.view.chrome.height / 2 else a.view.chrome.y + span_before + gap / 2;
+        const left_pct: u32 = if (sh.len == 2) @intFromFloat(@round(sh[0] * 100.0)) else @intFromFloat(@round(sh[ix - 1] * 100.0));
+        const right_pct: u32 = if (sh.len == 2) 100 -| left_pct else @intFromFloat(@round(sh[ix] * 100.0));
+        const label = c.print("{d}% \u{00b7} {d}%", .{ left_pct, right_pct });
+        const st: ui.TextStyle = .{ .size = 11, .line_height = 14, .weight = theme.ui_medium_weight, .color = if (a.view.full_screen) ui.Color.white.alpha(0.92) else k.text };
+        const pill_w = @max(62, @ceil(c.text.width(label, st)) + 16);
+        const px_x = std.math.clamp(center_x - pill_w / 2, 8, @max(8, c.size.w - pill_w - 8));
+        const px_y = std.math.clamp(center_y - 11, 8, @max(8, c.size.h - 30));
+        const pill_bg: ui.Color = if (k.dark or a.view.full_screen) .{ .r = 0.11, .g = 0.11, .b = 0.12, .a = 0.94 } else k.composer.alpha(0.96);
+        ui.key(c, c.print("split-ratio-pill-{d}", .{ix}));
+        const pill = ui.div(c).fixed().offset(px_x, px_y).h(22).w(pill_w).center().rounded(11).bg(pill_bg).border(k.border).borderW(1).layer(5);
+        defer pill.end();
+        ui.text(c, label, st);
+    };
 }
 
 /// A pane other than the focused one (`render_peer_chat_pane`): its title
@@ -578,9 +710,11 @@ fn divider(c: *ui.Context, a: *App, k: theme.Colors, ix: usize, across: bool, to
 /// where a click starts a chat. True when the ✕ closed it.
 fn neighbor(c: *ui.Context, a: *App, k: theme.Colors, ix: usize, chat_id: ?[]const u8, w: f32) bool {
     _ = ix;
-    // The strip is this panel's only header, even when unfocused.
     if (chat_id) |id| {
-        if (a.peer(id)) |p| _ = transcript_view.entries(c, a, k, &p.transcript, w, p.watch != null, 8);
+        const header_view = @import("view_chat_header.zig");
+        header_view.draw(c, a, k, id, w, false);
+        const peer_top: f32 = if (header_view.shownInMode(a)) 16 else 8;
+        if (a.peer(id)) |p| _ = transcript_view.entries(c, a, k, &p.transcript, w, p.watch != null, peer_top);
         return false;
     }
     const body = ui.div(c).column().grow().wFull();
@@ -600,6 +734,13 @@ fn neighbor(c: *ui.Context, a: *App, k: theme.Colors, ix: usize, chat_id: ?[]con
 /// (protocol/keymap-macos.json, the GPUI app's `shell::` bindings).
 fn keys(c: *ui.Context, a: *App) void {
     const S = ui.Shortcut;
+    if (a.actions.command_review != null) {
+        if (c.shortcut(.{ .key = S.escape }) or c.input.key == .escape) {
+            @import("app_actions.zig").dismissCommand(a);
+            c.input.key = null;
+        }
+        return;
+    }
     // A shortcut being rebound takes the keys first.
     const rebinding = @import("view_settings_shortcuts.zig");
     if (rebinding.recording(a)) return rebinding.capture(c, a);
@@ -608,22 +749,30 @@ fn keys(c: *ui.Context, a: *App) void {
     if (@import("view_setup.zig").keys(c, a)) return;
     if (@import("view_project_setup.zig").keys(c, a)) return;
     if (@import("view_open_chooser.zig").keys(c, a)) return;
-    // ⌘K, the command palette (fixed, as the GPUI app binds it); open, it
-    // takes ↑↓, Return and Escape before anything else.
+    // ⌘K command palette & ⇧⌘\ visual tab overview (fixed, as the GPUI/browse
+    // bindings); open, they take navigation, split, close and Escape before anything else.
     const palette = @import("view_palette.zig");
+    const tab_overview = @import("view_tab_overview.zig");
     if (c.shortcut(@import("shortcuts.zig").command_palette)) palette.toggle(a, .preserve_tabs);
+    if (c.shortcut(S.native(.{ .cmd = true, .shift = true, .key = '\\' }))) tab_overview.toggle(a);
     const chat_menu = @import("view_chat_menu.zig");
     if (chat_menu.anyDialog(a)) {
         if (c.shortcut(.{ .key = S.escape })) chat_menu.dismiss(a);
         return;
     }
     const palette_had_keys = a.view.palette.open;
+    const overview_had_keys = a.view.tab_overview.open;
     const picker_had_keys = a.picker != .none;
     palette.keys(c, a);
+    tab_overview.keys(c, a);
     if (a.picker != .none) @import("view_picker.zig").keys(c, a);
     // Modal searches own the event even when it is not one of their editing
     // keys. Never navigate or open a second picker underneath them.
-    if (palette_had_keys or a.view.palette.open or picker_had_keys or a.picker != .none) return;
+    if (palette_had_keys or a.view.palette.open or overview_had_keys or a.view.tab_overview.open or picker_had_keys or a.picker != .none) return;
+    if (@import("view_tab_cycle.zig").isOpen(a, c.time) and c.shortcut(.{ .key = S.escape })) {
+        @import("view_tab_cycle.zig").hide(a);
+        return;
+    }
     // A dialog has the keys; else an open header menu takes Escape, the
     // arrows and Return.
     const header_menus = @import("view_sidebar_menus.zig");
@@ -640,6 +789,11 @@ fn keys(c: *ui.Context, a: *App) void {
         }
         if (a.view.theme_menu != null and c.shortcut(.{ .key = S.escape })) {
             a.view.theme_menu = null;
+            a.redraw();
+            return;
+        }
+        if (c.shortcut(.{ .key = 'f', .cmd = true })) {
+            a.view.settings_search_focus = true;
             a.redraw();
             return;
         }
@@ -720,6 +874,13 @@ fn keys(c: *ui.Context, a: *App) void {
         c.changed = false;
         toggleSidebar(c, a, false);
     }
+    const is_macos_native = @import("builtin").os.tag == .macos and a.window != null and !a.offscreen;
+    if ((!is_macos_native and c.shortcut(.{ .key = 'f', .cmd = true, .ctrl = true })) or
+        (@import("builtin").os.tag != .macos and c.shortcut(.{ .key = S.f(11) })))
+    {
+        a.toggleFullScreen();
+        return;
+    }
     if (c.shortcut(.{ .key = '=', .cmd = true }) or
         c.shortcut(.{ .key = '=', .cmd = true, .shift = true }) or
         c.shortcut(.{ .key = '+', .cmd = true }) or
@@ -739,7 +900,7 @@ fn keys(c: *ui.Context, a: *App) void {
     }
     if (c.shortcut(.{ .key = ',', .cmd = true })) settings_view.open(a);
     if (boundShortcut(c, a, "newProject")) {
-        @import("app_open_chooser.zig").open(a, .new_project);
+        a.addFolder();
         return;
     }
     if (!a.view.settings_open and boundShortcut(c, a, "openProjectPicker")) {
@@ -770,14 +931,18 @@ fn keys(c: *ui.Context, a: *App) void {
         if (!a.view.search.open) search.toggle(a) else a.view.search.focus = true;
     }
     if (a.selected != null and boundShortcut(c, a, "toggleFiles")) @import("app_files.zig").toggle(a);
-    if (a.selected != null and (boundShortcut(c, a, "toggleChanges") or boundShortcut(c, a, "toggleTerminal"))) @import("app_panels.zig").toggleHost(a);
+    if (a.selected != null and boundShortcut(c, a, "toggleChanges")) @import("app_panels.zig").toggleHost(a);
+    // ⌘J is the title bar's terminal & action-runs button, not a second ⌘R.
+    if (boundShortcut(c, a, "toggleTerminal")) @import("app_actions.zig").toggleDock(a);
     if (boundShortcut(c, a, "newSession") or c.shortcut(.{ .key = 'n', .cmd = true })) a.newTab();
     if (boundShortcut(c, a, "archiveSession")) {
         if (a.selected) |sel| a.setArchived(sel, true);
     }
     if (c.shortcut(.{ .key = 'j', .cmd = true, .shift = true })) strip.nextAttention(a);
-    if (c.shortcut(.{ .key = 'm', .cmd = true, .shift = true })) {
+    if (c.shortcut(@import("shortcuts.zig").cycle_ui_mode)) {
+        const was_design = a.settings.uiMode() == .design;
         a.settings.toggleUiMode();
+        if (was_design and a.settings.uiMode() != .design) @import("app_panels.zig").closeDesignCanvas(a);
         a.redraw();
     }
     for (0..@min(strip.count(a), 6)) |ix| {
@@ -813,9 +978,28 @@ fn keys(c: *ui.Context, a: *App) void {
             a.rememberTabs();
         }
     }
+    if (c.shortcut(@import("shortcuts.zig").toggle_design_canvas)) {
+        if (a.settings.uiMode() == .design) {
+            a.settings.applyUiMode(.zen);
+            @import("app_panels.zig").closeDesignCanvas(a);
+        } else {
+            a.settings.applyUiMode(.design);
+            @import("app_panels.zig").openDesignCanvas(a);
+        }
+        a.redraw();
+        return;
+    }
     // A session menu or its dialog, over everything, takes Escape first.
     // An unobscured question owns Escape (Back); the no-menu fallback
     // must not consume it before the question's surface can see it.
+    if (a.view.full_screen and a.view.fs_top_peek and !menuKeepsKeys(a) and c.shortcut(.{ .key = S.escape })) {
+        a.view.fs_top_peek = false;
+        return a.redraw();
+    }
+    if (a.view.full_screen and a.view.fs_left_peek and !menuKeepsKeys(a) and c.shortcut(.{ .key = S.escape })) {
+        @import("view_fullscreen_chrome.zig").dismissLeftPeek(a);
+        return a.redraw();
+    }
     if (a.view.link_menu.open and c.shortcut(.{ .key = S.escape })) {
         a.view.link_menu.open = false;
     } else if (@import("view_chat_menu.zig").anyOpen(a) and c.shortcut(.{ .key = S.escape })) {
@@ -824,17 +1008,40 @@ fn keys(c: *ui.Context, a: *App) void {
         // The global fallback must not swallow Write's Save/back gesture.
         @import("view_write.zig").close(a);
     } else if ((a.wizard == null or menuKeepsKeys(a) or a.view.account_menu) and c.shortcut(.{ .key = S.escape }) and a.queue_edit == null) {
-        a.picker = .none;
-        a.view.filter_menu = false;
-        a.view.more_menu = false;
-        if (a.view.custom_theme_open) @import("view_custom_theme_studio.zig").close(a);
-        a.view.account_menu = false;
-        a.view.account_usage.open = false;
-        a.view.account_usage.card = null;
-        if (a.view.context.pinned) {
-            a.view.context.open = false;
-            a.view.context.pinned = false;
-            a.view.context.card = null;
+        const esc_rules = @import("ux_rules.zig").EscapeTermination;
+        const esc_state: esc_rules.EscState = .{
+            .setup_open = a.view.setup != null,
+            .project_setup_open = a.view.project_setup.open,
+            .open_chooser_open = a.view.open_chooser.open,
+            .palette_open = a.view.palette.open,
+            .picker_open = a.picker != .none,
+            .settings_recording = a.view.recording != null,
+            .close_choice_open = a.view.close_choice,
+            .dialog_open = a.view.custom_theme_open or a.view.theme_import != null or a.view.dialogs.rename != null or a.view.dialogs.delete != null or a.actions.editor != null or a.actions.command_review != null,
+            .popup_menu_open = menuKeepsKeys(a),
+            .write_open = a.view.write_open,
+            .queue_edit_open = a.queue_edit != null,
+            .settings_open = a.view.settings_open,
+            .agent_busy = a.settings.get(.escape_stops_active_agent) and a.selected != null and @import("workspace.zig").statusOf(a.sessions.items, a.selected.?) == .working,
+        };
+        switch (esc_rules.escAction(esc_state)) {
+            .dismiss_popup_menu => closeTransientPopovers(a),
+            .dismiss_dialog => {
+                if (a.view.custom_theme_open) @import("view_custom_theme_studio.zig").close(a) else if (a.view.theme_import != null) _ = @import("view_settings_theme_import.zig").escape(c, a) else if (a.view.dialogs.rename != null or a.view.dialogs.delete != null) @import("view_chat_menu.zig").dismiss(a) else if (a.actions.editor != null) @import("app_actions.zig").closeEditor(a) else if (a.actions.command_review != null) @import("app_actions.zig").dismissCommand(a);
+            },
+            .close_settings => {
+                a.view.settings_open = false;
+                a.view.focus_composer = true;
+            },
+            .interrupt_agent => a.interrupt(),
+            else => {
+                closeTransientPopovers(a);
+                if (a.view.context.pinned) {
+                    a.view.context.open = false;
+                    a.view.context.pinned = false;
+                    a.view.context.card = null;
+                }
+            },
         }
     }
 }
@@ -851,12 +1058,14 @@ fn sessionNavigationKeys(c: *ui.Context, a: *App) bool {
             const count = group.count();
             if (count > 1) {
                 a.showPaneTab(if (next) (group.active + 1) % count else (group.active + count - 1) % count);
+                @import("view_tab_cycle.zig").show(a, c.time, true);
                 return true;
             }
         }
         const n = a.tabs.items.items.len;
         if (n >= 2) {
             a.showTab(if (next) (a.tabs.active + 1) % n else (a.tabs.active + n - 1) % n);
+            @import("view_tab_cycle.zig").show(a, c.time, false);
         } else {
             const visible = sidebar.visibleSessionIds(c, a);
             if (visible.len > 0) {
@@ -884,6 +1093,7 @@ fn sessionNavigationKeys(c: *ui.Context, a: *App) bool {
 /// Mouse and keyboard share search cleanup and return hidden controls' focus
 /// to the composer. Motion is owned entirely by nanoui on the next layout.
 fn toggleSidebar(c: *ui.Context, a: *App, pointer: bool) void {
+    @import("view_fullscreen_chrome.zig").togglingSidebar(a);
     a.view.sidebar_open = !a.view.sidebar_open;
     if (!a.view.sidebar_open) {
         // A pointer press on the toggle may already have blurred the search
@@ -994,83 +1204,154 @@ fn closeOnlyPressed(c: *ui.Context, a: *App) bool {
 }
 
 fn titlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
-    // In Zen Settings the navigation column sits flush under traffic lights and
-    // is never collapsible, so avoid floating an orphaned sidebar toggle above it.
-    if (a.view.settings_open and a.settings.uiMode() == .zen) return;
-    // With no sidebar in view, a running cloud sandbox (billed until turned
-    // off) still shows under the sidebar toggle. The GPUI app hides its
-    // settings sidebar with the sidebar; this one keeps it, with the strip.
-    if (!a.view.sidebar_open and !a.view.settings_open) @import("view_sandbox_strip.zig").chip(c, a, k);
+    // In Settings the navigation column sits in a non-collapsible card under
+    // traffic lights, so avoid floating an orphaned sidebar toggle above it.
+    if (a.view.settings_open or strip.rendering.usesWindowedChatCaption(a)) return;
     const bar = ui.div(c).fixed().offset(cluster_x, 4 + (34 - 24) / 2).row().itemsCenter().layer(3);
     defer bar.end();
-    ui.key(c, "workspace-sidebar-toggle");
-    if (kit.iconButton(c, k, .@"sidebar-minimalistic-left", .{ .tip = .{ .text = "Toggle sidebar" } })) toggleSidebar(c, a, true);
+    sidebarToggle(c, a, k);
     // The history control arrives when the seam finishes collapsing rather
     // than on the ⌘B press, so it never pops over the still-sliding sidebar.
-    if (a.view.sidebar_width <= 1 or (a.view.settings_open and a.settings.uiMode() != .zen)) {
-        ui.div(c).w(4).end();
-        ui.key(c, "titlebar-chat-history");
-        const history = ui.div(c).row().size(24, 24).center().rounded(6).hover(k.hover).control();
-        icons.icon(c, .@"clock-circle", 16, k.muted, 0);
-        if (history.clicked()) strip.open(a, .history, strip.active(a), c.rects.get(c.node(history.index).id));
-        history.end();
-        ui.div(c).w(4).end();
-        const dev = a.settings.uiMode() == .developer;
-        ui.key(c, "titlebar-ui-mode-pill");
-        if (kit.iconButton(c, k, if (dev) .terminal else .@"magic-stick-3", .{
-            .on = dev,
-            .tip = .{ .text = "Toggle Zen / Developer mode (⇧⌘M)" },
-        })) {
-            a.settings.toggleUiMode();
-            a.redraw();
-        }
-    }
+    if (a.view.sidebar_width <= 1) historyAndMode(c, a, k, true);
     @import("view_updates.zig").titlebarControl(c, a, k);
 }
 
-/// The title bar's right end, over the panels: the files panel and the
-/// surface pane's toggles (`shell/tabs.rs`); a new chat has none.
+fn sidebarToggle(c: *ui.Context, a: *App, k: theme.Colors) void {
+    ui.key(c, "workspace-sidebar-toggle");
+    if (kit.iconButton(c, k, .@"sidebar-minimalistic-left", .{
+        .size = 24,
+        .tip = .{ .text = "Toggle sidebar" },
+    })) toggleSidebar(c, a, true);
+}
+
+fn historyAndMode(c: *ui.Context, a: *App, k: theme.Colors, left_cluster: bool) void {
+    if (left_cluster) ui.div(c).w(4).end();
+    // The open tabs' list (`strip.open(.history)`), not the palette's
+    // Chat history: its own name and glyph, not the history clock.
+    ui.key(c, "titlebar-open-tabs");
+    const tabs_label = "Open tabs";
+    const history = @import("view_tooltip.zig").on(ui.div(c).row().size(24, 24).center().rounded(6).hover(k.hover).control(), k, .{ .text = tabs_label });
+    const open_tabs = @import("control_behavior.zig").activate(c, history, k, tabs_label, true, false);
+    icons.icon(c, .list, 16, k.muted, 0);
+    if (open_tabs) strip.open(a, .history, strip.active(a), c.rects.get(c.node(history.index).id));
+    history.end();
+    if (left_cluster) ui.div(c).w(4).end();
+    const mode = a.settings.uiMode();
+    const dev = mode == .developer;
+    const shortcuts = @import("shortcuts.zig");
+    var shortcut_buf: [64]u8 = undefined;
+    ui.key(c, "titlebar-ui-mode-pill");
+    if (kit.iconButton(c, k, if (dev) .terminal else .@"magic-stick-3", .{
+        .size = 24,
+        .on = dev,
+        .tip = .{ .text = c.print("{s} ({s})", .{ modePillTip(mode), shortcuts.chordBadge(&shortcut_buf, shortcuts.cycle_ui_mode) }) },
+    })) {
+        const was_design = a.settings.uiMode() == .design;
+        a.settings.toggleUiMode();
+        if (was_design and a.settings.uiMode() != .design) @import("app_panels.zig").closeDesignCanvas(a);
+        a.redraw();
+    }
+}
+
+/// What the mode pill's click (and ⇧⌘M) does from `mode`: Zen and
+/// Developer swap, and Design returns to Zen (`UiMode.flip`).
+pub fn modePillTip(mode: @import("motion_rules.zig").UiMode) []const u8 {
+    return switch (mode.flip()) {
+        .zen => "Switch to Zen mode",
+        .developer => "Switch to Developer mode",
+        .design => "Switch to Design mode",
+    };
+}
+
+/// The Design canvas button says what a click does now.
+pub fn designCanvasTip(open: bool) []const u8 {
+    return if (open) "Close Design Canvas" else "Open Design Canvas";
+}
+
+/// The reserved right end of the title bar: live utilities and mode toggles (`Nano.UiMode3`).
 fn trailing(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const zen = a.settings.uiMode() == .zen;
-    if (!a.view.settings_open or zen) {
-        const vu = @import("view_updates.zig");
-        const uw = vu.topbarUpdatesWidth(a);
-        if (uw == 0) {
-            a.view.updates_anchor = null;
-            a.view.updates_popover = false;
-        }
-        const show_panel_toggle = zen and !a.view.settings_open;
-        if (uw == 0 and !show_panel_toggle) return;
-        const w = uw + (if (uw > 0 and show_panel_toggle) @as(f32, 6) else 0) + (if (show_panel_toggle) @as(f32, 28) else 0);
-        const bar = ui.div(c).fixed().offset(c.size.w - @import("window_chrome.zig").trailing - 10 - w, 4 + (34 - 28) / 2).row().itemsCenter().gap(6).layer(3);
-        defer bar.end();
-        if (uw > 0) vu.topbarUpdatesButton(c, a, k);
-        if (show_panel_toggle) {
-            ui.key(c, "topbar-right-panel-toggle");
-            if (kit.iconButton(c, k, .@"sidebar-minimalistic", .{
-                .size = 28,
-                .on = strip.hasHost(a),
-                .tip = .{ .text = "Toggle side panel" },
-            })) @import("app_panels.zig").toggleHost(a);
-        }
-        return;
+    const vu = @import("view_updates.zig");
+    const ux_m = @import("ux_rules.zig").UiMode3;
+    const mode: ux_m.UiMode = switch (a.settings.uiMode()) {
+        .zen => .zen,
+        .developer => .developer,
+        .design => .design,
+    };
+    const policy = ux_m.profileOf(mode);
+    const tm = vu.trailingMetrics(a);
+    const eff_cnt = ux_m.effectiveTrailingCount(mode, false, tm.avail, tm.last_slot);
+    const uw = vu.topbarUpdatesWidth(a);
+    if (uw == 0) {
+        a.view.updates_anchor = null;
+        a.view.updates_popover = false;
     }
-    if (a.selected == null) return;
-    const va = @import("view_actions.zig");
-    const actions_w = va.controlWidth(c, a);
-    // The actions control, the row's 8-point gap, then the two toggles 4
-    // apart (`PANEL_TOGGLE_GAP`), 6 from the edge
-    // (`TITLEBAR_ACTION_EDGE_INSET`).
-    const w: f32 = 28 * 2 + 4 + (if (actions_w > 0) actions_w + 8 else 0);
-    const bar = ui.div(c).fixed().offset(c.size.w - @import("window_chrome.zig").trailing - 6 - w, 4 + (34 - 28) / 2).row().itemsCenter().layer(3);
+    const w = strip.rendering.utilityWidth(a);
+    if (w == 0) return;
+    const bar = ui.div(c).fixed().offset(c.size.w - @import("window_chrome.zig").trailing - 10 - w, 4 + (34 - 28) / 2).row().itemsCenter().gap(6).layer(3);
     defer bar.end();
-    if (actions_w > 0) {
-        va.control(c, a, k);
-        _ = c.leaf(.{ .width = .{ .px = 8 } }, .none, null);
+    const sandbox = @import("view_sandbox_strip.zig");
+    if (sandbox.toolbarVisible(a)) sandbox.toolbar(c, a, k);
+    if (uw > 0) vu.topbarUpdatesButton(c, a, k);
+    const sc = @import("shortcuts.zig");
+
+    if (!a.view.settings_open) {
+        var tip_buf: [32]u8 = undefined;
+        if (policy.shows_dev_trailing_toggles and eff_cnt >= 3) {
+            ui.key(c, "topbar-actions-dock-toggle");
+            const act_k = sc.platformBadge(&tip_buf, a.settings.keymap.get("toggleTerminal") orelse "mod-j");
+            const app_actions = @import("app_actions.zig");
+            // Nothing to show: disabled, saying why, rather than lit over nothing.
+            const runs = app_actions.hasVisibleRun(&a.actions, a.selected);
+            if (kit.iconButton(c, k, .terminal, .{
+                .size = 28,
+                .on = runs and a.actions.dock_open,
+                .disabled = !runs,
+                .label = "Toggle terminal & action runs",
+                .tip = .{ .text = if (runs) c.print("Toggle terminal & action runs ({s})", .{act_k}) else app_actions.no_runs_tip },
+            })) app_actions.toggleDock(a);
+            ui.key(c, "topbar-files-toggle");
+            var files_buf: [32]u8 = undefined;
+            const files_k = sc.platformBadge(&files_buf, a.settings.keymap.get("toggleFiles") orelse "mod-e");
+            if (kit.iconButton(c, k, .folder, .{
+                .size = 28,
+                .on = a.panels.files_open,
+                .tip = .{ .text = c.print("Toggle files panel ({s})", .{files_k}) },
+            })) @import("app_panels.zig").toggleFiles(a);
+        } else if (policy.shows_design_canvas_toggle and eff_cnt >= 2) {
+            ui.key(c, "topbar-design-canvas-toggle");
+            const canvas_on = strip.hasHost(a) and if (a.panels.activeTab()) |t| t.kind == .design_canvas else false;
+            // ⌘⌥D leaves Design mode altogether, so it is not this button's key.
+            if (kit.iconButton(c, k, .@"palette-search", .{
+                .size = 28,
+                .on = canvas_on,
+                .tip = .{ .text = designCanvasTip(canvas_on) },
+            })) {
+                if (canvas_on) {
+                    @import("app_panels.zig").closeDesignCanvas(a);
+                } else {
+                    @import("app_panels.zig").openDesignCanvas(a);
+                }
+            }
+        }
     }
-    if (kit.iconButton(c, k, .@"file-tree", .{ .size = 28, .on = a.panels.files_open })) @import("app_files.zig").toggle(a);
-    _ = c.leaf(.{ .width = .{ .px = 4 } }, .none, null);
-    if (kit.iconButton(c, k, .@"sidebar-minimalistic", .{ .size = 28 })) @import("app_panels.zig").toggleHost(a);
+
+    if (strip.rendering.showSidePanelToggle(a)) {
+        ui.key(c, "topbar-right-panel-toggle");
+        var pan_buf: [32]u8 = undefined;
+        const pan_k = sc.platformBadge(&pan_buf, a.settings.keymap.get("toggleChanges") orelse "mod-r");
+        if (kit.iconButton(c, k, .@"sidebar-minimalistic", .{
+            .size = 28,
+            .on = strip.hasHost(a),
+            .label = "Toggle side panel",
+            .tip = .{ .text = c.print("Toggle side panel ({s})", .{pan_k}) },
+        })) @import("app_panels.zig").toggleHost(a);
+    }
+    if (strip.rendering.usesWindowedChatCaption(a)) {
+        const controls = ui.div(c).row().h(28).itemsCenter().gap(6);
+        if (a.view.sidebar_width <= 1) historyAndMode(c, a, k, false);
+        sidebarToggle(c, a, k);
+        controls.end();
+    }
 }
 
 /// The chat's identity in the title bar's row: its agent's mark, its title,
@@ -1503,6 +1784,12 @@ fn hitLeafIndex(c: *ui.Context, ix: u32, r: ui.Rect, visible: ui.Rect, pointer: 
         .text => |t| t,
         else => return 0,
     };
+    if (tx.positioned_lines.len > 0) {
+        for (tx.positioned_lines) |line| {
+            if (p.y < r.y + line.y + line.height) return line.byteAt(p.x - r.x);
+        }
+        return tx.positioned_lines[tx.positioned_lines.len - 1].end;
+    }
     const lh = c.text.lineHeight(tx.style);
     const lines = if (tx.lines.len > 0)
         tx.lines

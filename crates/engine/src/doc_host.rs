@@ -16,9 +16,9 @@
 //! another device POSTs a durable nudge to that device's room (§7 cold-chat delivery);
 //! the host's relay receives it and warm-opens the doc, which drains the queue.
 
-mod prompt_restore;
 #[cfg(test)]
 mod peer_dispatch_tests;
+mod prompt_restore;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -35,8 +35,8 @@ use tokio_util::task::TaskTracker;
 use harness_doc::{
     COMMAND_DEFAULT_TTL_MS, CommandBasedOn, CommandDisposition, DocError, EvaluationContext,
     MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, QueuedMessage, SessionCommandEntry,
-    SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, evaluate_command,
-    join_continuation_entries_shared,
+    SessionCommandKind, SessionCommandPayload, SessionCommandStatus, SessionDoc,
+    SessionMessageEntry, evaluate_command, join_continuation_entries_shared,
 };
 use harness_proto::{
     ConversationSourceContext, HarnessId, TurnOrigin, UserInputAnswer, UserInputQuestion,
@@ -71,6 +71,11 @@ pub const QUEUE_EDIT_LEASE_MS: i64 = 60_000;
 /// ~11ms of a warm doc, so the cap trades no perceptible open latency.
 const WARM_DOC_CAP: usize = 12;
 
+/// A stored transcript at or above this snapshot size benefits from sending
+/// changed newest entries first before reading the full history (`WatchDocMessages`
+/// with `known`).
+const LONG_TRANSCRIPT_BYTES: usize = 1 << 20;
+
 /// Resident-memory estimate per compressed snapshot byte. Loro snapshots are
 /// columnar+compressed; the in-memory doc plus mirror runs well above the blob
 /// size. A rough multiplier is enough here — the budget is a safety ceiling,
@@ -87,6 +92,12 @@ const SYNC_QUANTUM_MS: i64 = 30_000;
 const ACTIVE_SYNC_CAP: usize = 28;
 const SYNC_ADMISSION_BATCH: usize = 4;
 const SYNC_CATCH_UP_QUANTUM_MS: i64 = 300_000;
+/// A remote chat reopened while its sync client is already running asks the
+/// room for missed updates at most this often.
+const REOPEN_REFRESH_SPACING_MS: i64 = 15_000;
+/// If a reopen catch-up ask does not complete within this deadline, redial the
+/// room socket so a silent/half-open link recovers without waiting for a write.
+const REOPEN_REFRESH_DEADLINE_MS: i64 = 20_000;
 /// A peer nudges as it pushes the row it announces, so the wake's catch-up
 /// can finish before that row lands; the client then went idle and the
 /// command waited for someone to open the chat (#412). A woken client stays
@@ -650,8 +661,31 @@ pub struct ChatDocHandle {
     publication_failed: AtomicBool,
     /// Local-update feed into the chat2 client (drop = unsubscribe).
     chat2_local_sub: Mutex<Option<loro::Subscription>>,
+    /// Tracks reopens while this handle's sync client is already connected.
+    reopen: Mutex<ReopenRefresh>,
+    /// Whether this admission's client has logged its initial catch-up.
+    sync_caught_up_logged: AtomicBool,
     /// Doc subscription (drop = unsubscribe) — bumps the change watch on every commit.
     _sub: loro::Subscription,
+}
+
+/// Reopen catch-up state for a connected remote chat. A client that was already
+/// admitted is otherwise never asked to re-verify against the room until this
+/// device writes; reopening or focusing the chat schedules a bounded catch-up
+/// ask (and redials if that ask stalls past [`REOPEN_REFRESH_DEADLINE_MS`]).
+#[derive(Default)]
+struct ReopenRefresh {
+    /// Epoch ms when an open/focus requested a check (`0` = none pending).
+    opened: i64,
+    /// Epoch ms of the last catch-up ask (throttled by [`REOPEN_REFRESH_SPACING_MS`]).
+    asked_at: i64,
+    pending: Option<PendingRefresh>,
+}
+
+#[derive(Clone, Copy)]
+struct PendingRefresh {
+    catch_up: u64,
+    since: i64,
 }
 
 /// A running agent explicitly owns a writer lease until its final cleanup.
@@ -900,7 +934,7 @@ impl ChatDocHandle {
         Ok(noted)
     }
 
-    fn publish_messages(&self) {
+    pub(crate) fn publish_messages(&self) {
         let _import = lock(&self.transcript_import);
         self.publish_messages_locked();
     }
@@ -954,6 +988,16 @@ impl ChatDocHandle {
         } else {
             self.publish_messages_locked();
         }
+    }
+
+    /// Whether this chat's stored snapshot is large enough that cold opens
+    /// holding rows should receive changed newest entries before a full read.
+    pub(crate) fn transcript_is_long(&self) -> bool {
+        let bytes = self
+            .snapshot_bytes
+            .load(Ordering::Relaxed)
+            .max(self.persistence.as_ref().map_or(0, |p| p.snapshot_bytes()));
+        bytes >= LONG_TRANSCRIPT_BYTES
     }
 
     /// Rough resident cost for the LRU budget.
@@ -1076,7 +1120,10 @@ impl DocHost {
     /// see — so watch session status instead and re-drain every warm chat.
     /// `drain_queue` is a cheap no-op for empty queues and busy agents, which
     /// is why this can afford to be indiscriminate.
-    fn spawn_queue_flush_watcher(&self, mut statuses: watch::Receiver<Vec<harness_proto::Session>>) {
+    fn spawn_queue_flush_watcher(
+        &self,
+        mut statuses: watch::Receiver<Vec<harness_proto::Session>>,
+    ) {
         let host = self.clone();
         self.spawn_worker(async move {
             while statuses.changed().await.is_ok() {
@@ -1351,10 +1398,22 @@ impl DocHost {
         &self.inner.config.device_id
     }
 
+    /// A device row's name, for texts a person reads; `None` when unnamed.
+    pub(crate) fn device_name(&self, device_id: &str) -> Option<String> {
+        self.workspace()?
+            .read_devices()
+            .ok()?
+            .into_iter()
+            .find(|device| device.id == device_id)
+            .map(|device| device.name.trim().to_string())
+            .filter(|name| !name.is_empty())
+    }
+
     /// Open (or return) the chat's doc handle: load the local snapshot (or init fresh),
     /// start the change-driven task, and request budgeted sync when configured.
     pub fn open(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
         let handle = self.open_local(chat_id)?;
+        Self::note_reopen(&handle);
         self.activate_sync(&handle);
         Ok(handle)
     }
@@ -1365,8 +1424,77 @@ impl DocHost {
         let handle = self.open_local(chat_id)?;
         let focus = self.inner.focus_clock.fetch_add(1, Ordering::AcqRel) + 1;
         handle.last_focus.fetch_max(focus, Ordering::AcqRel);
+        Self::note_reopen(&handle);
         self.activate_sync(&handle);
         Ok(())
+    }
+
+    fn note_reopen(handle: &ChatDocHandle) {
+        lock(&handle.reopen).opened = now_ms();
+    }
+
+    /// Serve [`ReopenRefresh`] for a connected remote-hosted chat: ask the room
+    /// for any missed updates (throttled to [`REOPEN_REFRESH_SPACING_MS`]), and
+    /// redial the socket if the catch-up stalls past [`REOPEN_REFRESH_DEADLINE_MS`].
+    /// Returns `true` while a reopen refresh is still in flight.
+    fn serve_reopen(&self, handle: &ChatDocHandle) -> bool {
+        let (opened, pending) = {
+            let reopen = lock(&handle.reopen);
+            (reopen.opened, reopen.pending.is_some())
+        };
+        if opened == 0 && !pending {
+            return false;
+        }
+        if !pending && self.is_host(&handle.chat_id) {
+            lock(&handle.reopen).opened = 0;
+            return false;
+        }
+        let client = lock(&handle.chat2);
+        let mut reopen = lock(&handle.reopen);
+        let opened = std::mem::take(&mut reopen.opened);
+        let Some(client) = client.as_ref() else {
+            reopen.pending = None;
+            return false;
+        };
+        let now = now_ms();
+        if opened != 0
+            && reopen.pending.is_none()
+            && now - reopen.asked_at >= REOPEN_REFRESH_SPACING_MS
+        {
+            reopen.asked_at = now;
+            let catch_up = client.request_catch_up();
+            reopen.pending = Some(PendingRefresh {
+                catch_up,
+                since: now,
+            });
+            tracing::info!(
+                chat = %handle.chat_id,
+                "chat2 reopened while connected; asking room for missed updates"
+            );
+        }
+        let Some(pending) = reopen.pending else {
+            return false;
+        };
+        if client.catch_up_completed(pending.catch_up) {
+            reopen.pending = None;
+            tracing::info!(
+                chat = %handle.chat_id,
+                elapsed_ms = now - pending.since,
+                "chat2 reopen catch-up complete"
+            );
+            return false;
+        }
+        if now - pending.since < REOPEN_REFRESH_DEADLINE_MS {
+            return true;
+        }
+        reopen.pending = None;
+        tracing::info!(
+            chat = %handle.chat_id,
+            elapsed_ms = now - pending.since,
+            "chat2 reopen catch-up timed out; redialing"
+        );
+        client.redial();
+        false
     }
 
     /// Materialize one authoritative local document without acquiring a network
@@ -1632,6 +1760,8 @@ impl DocHost {
             chat2_pending_local: Mutex::new(Vec::new()),
             publication_failed: AtomicBool::new(false),
             chat2_local_sub: Mutex::new(None),
+            reopen: Mutex::new(ReopenRefresh::default()),
+            sync_caught_up_logged: AtomicBool::new(false),
             _sub: sub,
         });
         // Snapshot recovery may restore several independently edited rows.
@@ -1975,6 +2105,7 @@ impl DocHost {
                     // reclaim a slot. Only resident, non-closing clients
                     // acknowledge focus here.
                     handle.sync_focus_served.fetch_max(handle.last_focus.load(Ordering::Acquire), Ordering::AcqRel);
+                    let reopen_pending = host.serve_reopen(handle);
                     let mut captured = handle.sync_wake_version.load(Ordering::Acquire);
                     let pending_wake = host
                         .inner
@@ -2004,12 +2135,20 @@ impl DocHost {
                                 .complete_sync_job(&handle.chat_id, "wake", captured);
                     }
                     let caught_up = lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up());
+                    if caught_up && !handle.sync_caught_up_logged.swap(true, Ordering::AcqRel) {
+                        tracing::info!(
+                            chat = %handle.chat_id,
+                            elapsed_ms = now_ms() - handle.sync_last_started.load(Ordering::Acquire),
+                            "chat2 client caught up"
+                        );
+                    }
                     // A quiet document can still be receiving its checkpoint
                     // or commands. Incomplete catch-up only yields via rotate's
                     // explicit service deadline, never the short reuse grace.
                     let lingering = !slots_needed
                         && now_ms() < handle.sync_linger_until.load(Ordering::Acquire);
                     let idle = caught_up
+                        && !reopen_pending
                         && !lingering
                         && !handle.sync_protected()
                         && (now_ms() - handle.last_access.load(Ordering::Relaxed) >= SYNC_IDLE_MS
@@ -2167,6 +2306,11 @@ impl DocHost {
                     handle.sync_last_started.store(now_ms(), Ordering::Release);
                     handle.sync_wake_version.store(wake_version.unwrap_or(0), Ordering::Release);
                     handle.sync_wake_ticket.store(0, Ordering::Release);
+                    handle.sync_caught_up_logged.store(false, Ordering::Release);
+                    *lock(&handle.reopen) = ReopenRefresh {
+                        asked_at: now_ms(),
+                        ..Default::default()
+                    };
                     handle.sync_linger_until.store(
                         if wake_version.is_some() { now_ms() + WAKE_LINGER_MS } else { 0 },
                         Ordering::Release,
@@ -2898,7 +3042,8 @@ impl DocHost {
         let doc = handle.doc.clone();
         let body = tokio::task::spawn_blocking(move || {
             let tail =
-                harness_doc::materialize_tail(&doc, now_ms(), harness_doc::TAIL_MESSAGE_COUNT).ok()?;
+                harness_doc::materialize_tail(&doc, now_ms(), harness_doc::TAIL_MESSAGE_COUNT)
+                    .ok()?;
             serde_json::to_vec(&tail).ok()
         })
         .await
@@ -3226,7 +3371,11 @@ impl DocHost {
         let url = format!("{}/{path}", edge.url.trim_end_matches('/'));
         let request = match method {
             "GET" => self.inner.http.get(&url),
-            "POST" => self.inner.http.post(&url).json(&body.unwrap_or_else(|| serde_json::json!({}))),
+            "POST" => self
+                .inner
+                .http
+                .post(&url)
+                .json(&body.unwrap_or_else(|| serde_json::json!({}))),
             other => return Err(format!("unsupported method {other}")),
         };
         let res = request
@@ -3251,12 +3400,20 @@ impl DocHost {
     /// was offline drains when it reconnects. Returns how many were queued.
     pub async fn drain_room_wakes(&self) -> Result<usize, String> {
         let reply = self
-            .room_request("GET", "rooms/wakes", &[("limit".into(), "100".into())], None)
+            .room_request(
+                "GET",
+                "rooms/wakes",
+                &[("limit".into(), "100".into())],
+                None,
+            )
             .await?;
         if reply["status"].as_u64() != Some(200) {
             return Err(format!("rooms/wakes answered {}", reply["status"]));
         }
-        let wakes = reply["body"]["wakes"].as_array().cloned().unwrap_or_default();
+        let wakes = reply["body"]["wakes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         let workspace = self.workspace();
         let mut acked = Vec::new();
         let mut dropped = Vec::new();
@@ -3267,7 +3424,9 @@ impl DocHost {
             if wake["toDevice"].as_str() != Some(self.device_id()) {
                 continue;
             }
-            let Some(id) = wake["id"].as_u64() else { continue };
+            let Some(id) = wake["id"].as_u64() else {
+                continue;
+            };
             let chat_id = wake["toRef"].as_str().unwrap_or_default();
             let row = (!chat_id.is_empty())
                 .then(|| workspace.and_then(|w| w.chat(chat_id).ok().flatten()))
@@ -3288,6 +3447,7 @@ impl DocHost {
                     from_display: wake["fromDisplay"].as_str().map(str::to_owned),
                     from_github: wake["fromGithub"].as_str().map(str::to_owned),
                     from_fingerprint: wake["fromFingerprint"].as_str().map(str::to_owned),
+                    hop: wake["hop"].as_u64().unwrap_or(0) as u32,
                 };
                 let text = harness_proto::room_delivery::format(
                     &origin,
@@ -3317,7 +3477,8 @@ impl DocHost {
         for (ids, dropped) in [(acked, false), (dropped, true)] {
             if !ids.is_empty() {
                 let body = serde_json::json!({ "ids": ids, "dropped": dropped });
-                self.room_request("POST", "rooms/wakes/ack", &[], Some(body)).await?;
+                self.room_request("POST", "rooms/wakes/ack", &[], Some(body))
+                    .await?;
             }
         }
         Ok(queued)
@@ -4798,7 +4959,7 @@ impl DocHost {
             .client(target)
             .await
             .map_err(|e| format!("peer link: {e}"))?;
-        let params = serde_json::json!({ "chatId": chat_id, "entry": entry });
+        let params = relay_command_params(chat_id, entry, self.device_id());
         let call = client.call(harness_rpc::methods::RELAY_COMMAND, params);
         match tokio::time::timeout(RELAY_CALL_TIMEOUT, call).await {
             Err(_) => {
@@ -4974,6 +5135,18 @@ impl DocHost {
         let sessions = self
             .sessions()
             .ok_or_else(|| EngineError::Other("executor unavailable".into()))?;
+        if self.park_unapproved_remote(&sessions, &handle, &entry) {
+            tracing::info!(chat = %chat_id, device = %entry.issued_by, caller = "unapproved",
+                reason = "needs_approval", "relayed command refused");
+            let text = harness_rpc::relay_refusal_text(
+                harness_rpc::RelayAdmit::NeedsApproval,
+                true,
+                self.device_name(self.device_id()).as_deref(),
+                self.device_name(&entry.issued_by).as_deref(),
+            )
+            .unwrap_or_default();
+            return Err(EngineError::Other(text));
+        }
         let commands = handle.doc.read_commands()?;
         let messages = handle.doc.read_entries().unwrap_or_default();
         let current_turn_id = messages.last().map(|m| m.id.clone());
@@ -5060,9 +5233,12 @@ impl DocHost {
             let mut seq = 0u64;
             loop {
                 let end = (start + TRANSFER_CHUNK_B64).min(b64.len());
-                let params = serde_json::json!({
-                    "uploadId": transfer.upload_id, "seq": seq, "data": &b64[start..end],
-                });
+                let params = upload_chunk_params(
+                    &transfer.upload_id,
+                    seq,
+                    &b64[start..end],
+                    self.device_id(),
+                );
                 let call = client.call(harness_rpc::methods::UPLOAD_CHUNK, params);
                 match tokio::time::timeout(TRANSFER_CHUNK_TIMEOUT, call).await {
                     Err(_) => {
@@ -5088,9 +5264,8 @@ impl DocHost {
                     break;
                 }
             }
-            let params = serde_json::json!({
-                "uploadId": transfer.upload_id, "fileName": transfer.file_name,
-            });
+            let params =
+                upload_commit_params(&transfer.upload_id, &transfer.file_name, self.device_id());
             let call = client.call(harness_rpc::methods::UPLOAD_COMMIT, params);
             match tokio::time::timeout(TRANSFER_COMMIT_TIMEOUT, call).await {
                 Err(_) => {
@@ -5258,6 +5433,75 @@ impl DocHost {
         request.harness.unwrap_or_else(|| self.harness_for(chat_id))
     }
 
+    fn command_kind_name(kind: SessionCommandKind) -> &'static str {
+        match kind {
+            SessionCommandKind::Run => "run",
+            SessionCommandKind::Steer => "steer",
+            SessionCommandKind::Interrupt => "interrupt",
+            SessionCommandKind::RespondInput => "respondInput",
+            SessionCommandKind::DismissInput => "dismissInput",
+        }
+    }
+
+    /// Park a remote Run/Steer until remote control is on or the user
+    /// approves. Returns true when the caller must skip execute. Admitted
+    /// remote human commands keep their `TurnOrigin` so phone/second-device
+    /// composers can steer live turns, while `McpScopedRpc`/bots/room wakes
+    /// stamp `TurnOrigin::Peer` and host autonomy applies to all runs.
+    fn park_unapproved_remote(
+        &self,
+        sessions: &SessionsEngine,
+        handle: &ChatDocHandle,
+        entry: &SessionCommandEntry,
+    ) -> bool {
+        let registry = sessions.registry();
+        let admit = harness_rpc::admit_remote_command(
+            self.device_id(),
+            &entry.issued_by,
+            Self::command_kind_name(entry.kind()),
+            registry.remote_control(),
+            registry.command_approved(&entry.id),
+            registry.remote_device_approved(&entry.issued_by),
+        );
+        if admit != harness_rpc::RemoteCommandAdmit::NeedsApproval {
+            return false;
+        }
+        let summary = match &entry.payload {
+            SessionCommandPayload::Run { request, .. } => {
+                let t = request.prompt.trim();
+                if t.is_empty() {
+                    "Run a command from another device".into()
+                } else {
+                    format!(
+                        "Run from {}: {}",
+                        entry.issued_by,
+                        t.chars().take(80).collect::<String>()
+                    )
+                }
+            }
+            SessionCommandPayload::Steer { prompt, .. } => {
+                format!(
+                    "Follow-up from {}: {}",
+                    entry.issued_by,
+                    prompt.chars().take(80).collect::<String>()
+                )
+            }
+            _ => format!("Remote action from {}", entry.issued_by),
+        };
+        registry.park_remote_approval(harness_rpc::RemoteApproval {
+            id: crate::new_id(),
+            kind: "command".into(),
+            device_id: entry.issued_by.clone(),
+            chat_id: Some(handle.chat_id().to_string()),
+            command_id: Some(entry.id.clone()),
+            method: None,
+            summary,
+            allow_once: true,
+            request_digest: None,
+        });
+        true
+    }
+
     /// Drain pending commands (host-only): evaluate → mark processed BEFORE execute →
     /// execute → write the outcome as the sole outcome writer.
     pub async fn drain_commands(&self, handle: &Arc<ChatDocHandle>) {
@@ -5312,6 +5556,10 @@ impl DocHost {
             else {
                 return;
             };
+            if self.park_unapproved_remote(&sessions, handle, &entry) {
+                skipped.insert(entry.id.clone());
+                continue;
+            }
             let messages = handle.doc.read_entries().unwrap_or_default();
             let current_turn_id = messages.last().map(|m| m.id.clone());
             let turn_is_past = |turn_id: &str| messages.iter().any(|m| m.id == turn_id);
@@ -5607,10 +5855,7 @@ impl DocHost {
                                     .map(|tree| tree.name)
                                     .or_else(|| spec.agent_name.clone())
                                     .unwrap_or_else(|| {
-                                        harness_proto::graff_worktree::name_for_task(
-                                            chat_id,
-                                            &request.prompt,
-                                        )
+                                        harness_proto::graff_worktree::default_name(chat_id)
                                     }),
                             ),
                             ..spec.clone()
@@ -5750,7 +5995,14 @@ impl DocHost {
             SessionCommandPayload::RespondInput {
                 request_id,
                 answers,
+                from_agent,
             } if request_id.starts_with(branch_drift::REQUEST_PREFIX) => {
+                if *from_agent {
+                    return Ok((
+                        SessionCommandStatus::Rejected,
+                        Some("this prompt requires human approval in the Harness UI".into()),
+                    ));
+                }
                 self.answer_branch_drift(sessions, handle, request_id, Some(answers.as_slice()))
                     .await
             }
@@ -5782,9 +6034,15 @@ impl DocHost {
             SessionCommandPayload::RespondInput {
                 request_id,
                 answers,
+                from_agent,
             } => {
-                if sessions.respond_input(chat_id, request_id, answers.clone())? {
-                    return Ok((SessionCommandStatus::Applied, None));
+                match sessions.respond_input(chat_id, request_id, answers.clone(), *from_agent) {
+                    Ok(true) => return Ok((SessionCommandStatus::Applied, None)),
+                    Ok(false) => {}
+                    Err(err) if *from_agent => {
+                        return Ok((SessionCommandStatus::Rejected, Some(err.to_string())));
+                    }
+                    Err(err) => return Err(err),
                 }
                 // No live resolver. Only a request id the doc shows as an
                 // OPEN question on a SETTLED entry gets the orphan fallback:
@@ -5815,6 +6073,16 @@ impl DocHost {
                         Some("no pending input request".into()),
                     ));
                 };
+                if *from_agent
+                    && questions
+                        .iter()
+                        .any(harness_proto::is_human_approval_question)
+                {
+                    return Ok((
+                        SessionCommandStatus::Rejected,
+                        Some("this prompt requires human approval in the Harness UI".into()),
+                    ));
+                }
                 // The run died under the question (engine restart, crash).
                 // The question is still open in the doc and the command is
                 // durable, so honor it anyway — stamp the part resolved and
@@ -5832,7 +6100,11 @@ impl DocHost {
                     ));
                 };
                 request.prompt = respond_input_prompt(&questions, answers);
-                request.turn_origin = TurnOrigin::Human;
+                request.turn_origin = if *from_agent {
+                    TurnOrigin::Peer
+                } else {
+                    TurnOrigin::Human
+                };
                 request.resume = None; // dispatch re-derives the harness session
                 request.attachments = Vec::new();
                 if let Err(err) = handle.doc.resolve_input(request_id) {
@@ -6372,6 +6644,49 @@ fn encode_part_segment(part_id: &str) -> String {
     out
 }
 
+/// Pure parameter builder for `RelayCommand`, stamping `relayDeviceId` so the
+/// host relay attributes first-action approval consistently.
+fn relay_command_params(
+    chat_id: &str,
+    entry: &SessionCommandEntry,
+    relay_device_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "chatId": chat_id,
+        "entry": entry,
+        "relayDeviceId": relay_device_id,
+    })
+}
+
+/// Pure parameter builder for `UploadChunk`, stamping `relayDeviceId`.
+fn upload_chunk_params(
+    upload_id: &str,
+    seq: u64,
+    data: &str,
+    relay_device_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "uploadId": upload_id,
+        "seq": seq,
+        "data": data,
+        "relayDeviceId": relay_device_id,
+    })
+}
+
+/// Pure parameter builder for `UploadCommit`, stamping `relayDeviceId` so
+/// approved peer devices are not misattributed as `"unknown"` and parked.
+fn upload_commit_params(
+    upload_id: &str,
+    file_name: &str,
+    relay_device_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "uploadId": upload_id,
+        "fileName": file_name,
+        "relayDeviceId": relay_device_id,
+    })
+}
+
 #[path = "doc_host_branch_drift.rs"]
 mod branch_drift;
 #[path = "doc_host_checkout_isolation.rs"]
@@ -6456,12 +6771,16 @@ mod transfer_progress_tests {
         };
         assert_eq!(to_vec(&rx.borrow().entries), full(&handle));
 
-        let mut writer = harness_doc::SegmentWriter::begin(&handle.doc, "reply", "device", 99).unwrap();
+        let mut writer =
+            harness_doc::SegmentWriter::begin(&handle.doc, "reply", "device", 99).unwrap();
         let mut text = String::new();
         for token in 0..50 {
             text.push_str(&format!("token{token} "));
             writer
-                .sync(&[harness_doc::MessagePart::Text { id: "t".into(), text: text.clone() }])
+                .sync(&[harness_doc::MessagePart::Text {
+                    id: "t".into(),
+                    text: text.clone(),
+                }])
                 .unwrap();
             handle.doc.doc().commit();
             handle.publish_messages_if_watched();
@@ -6506,7 +6825,10 @@ mod transfer_progress_tests {
         // Unwatched changes drop the cache; reattaching rebuilds correctly.
         drop(rx);
         writer
-            .sync(&[harness_doc::MessagePart::Text { id: "t".into(), text: format!("{text} done") }])
+            .sync(&[harness_doc::MessagePart::Text {
+                id: "t".into(),
+                text: format!("{text} done"),
+            }])
             .unwrap();
         handle.doc.doc().commit();
         handle.publish_messages_if_watched();
@@ -7248,5 +7570,25 @@ mod pending_prompt_tests {
         let json = serde_json::to_value(&prompts[1]).unwrap();
         assert_eq!(json["messageId"], "m-image");
         assert_eq!(json["waitingForAttachments"], true);
+    }
+
+    #[test]
+    fn relay_and_upload_params_stamp_relay_device_id() {
+        let entry = run("r1", "hi", Vec::new(), SessionCommandStatus::Pending);
+        let relay = relay_command_params("c1", &entry, "dev-sender");
+        assert_eq!(relay["chatId"], "c1");
+        assert_eq!(relay["relayDeviceId"], "dev-sender");
+        assert_eq!(relay["entry"]["id"], "r1");
+
+        let chunk = upload_chunk_params("u1", 2, "YWI=", "dev-sender");
+        assert_eq!(chunk["uploadId"], "u1");
+        assert_eq!(chunk["seq"], 2);
+        assert_eq!(chunk["data"], "YWI=");
+        assert_eq!(chunk["relayDeviceId"], "dev-sender");
+
+        let commit = upload_commit_params("u1", "shot.png", "dev-sender");
+        assert_eq!(commit["uploadId"], "u1");
+        assert_eq!(commit["fileName"], "shot.png");
+        assert_eq!(commit["relayDeviceId"], "dev-sender");
     }
 }

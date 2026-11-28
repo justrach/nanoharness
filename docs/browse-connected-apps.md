@@ -2,9 +2,11 @@
 
 Agents Harness runs can use [browse](https://github.com/justrach/browse) with
 the user's own sign-ins, through browse's Connected apps (protocol
-`v1-p256-sig`, browse `docs/connected-apps.md`, justrach/browse#4). The code
-is `crates/engine/src/browse_link/`; the Settings card is
-`crates/ui/src/settings/browse_link.rs` (Settings › Accounts › browse).
+`v1-p256-sig`, browse `docs/connected-apps.md`, justrach/browse#4). The engine
+side is `crates/engine/src/browse_link/`; the Settings card is
+`apps/nano/src/view_settings_accounts_browse.zig` (Settings › Accounts ›
+browse), and `apps/nano/src/browse_connect.zig` is the app's own Connected
+apps client.
 
 ## How it works
 
@@ -30,8 +32,7 @@ is `crates/engine/src/browse_link/`; the Settings card is
   for a run. The card is only on macOS, and only for this device.
 - **Relay tokens** are 256 random bits per run, compared in constant time,
   and never logged (`McpServer`'s `Debug` hides header values).
-- **Without browse** running and paired, runs get no browse server and use
-  Harness's own browser pane as before.
+- **Without browse** running and paired, runs get no browse server.
 
 ## Testing
 
@@ -41,8 +42,9 @@ nonce the way browse does. The fake answers anything else that connects to
 its port (a dev-server scanner's `HEAD /`, say) as browse would, instead of
 failing the test.
 
-Screenshots from synthetic data:
-`cargo run -p harness-ui --features appshots-fixture --example browse-link-fixture -- <dir> [light]`.
+The app side, from `apps/nano`:
+`zig build test -Dtest-filter="browse"` (the card's Disconnect and status-retry tests run on
+macOS only).
 
 Against a real browse, in a test world so the user's profile is untouched:
 

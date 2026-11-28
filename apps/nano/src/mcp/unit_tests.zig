@@ -277,14 +277,14 @@ const mock_claude =
 ;
 
 /// An in-process engine with made-up spaces and chats, and the tools over it.
-const WorldFixture = struct {
+pub const WorldFixture = struct {
     arena: std.heap.ArenaAllocator,
     world: World = undefined,
     peer: FakePeer = undefined,
     bots: FakeBots = undefined,
     t: tools.Tools = undefined,
 
-    fn create(origin: tools.Origin) !*WorldFixture {
+    pub fn create(origin: tools.Origin) !*WorldFixture {
         const gpa = testing.allocator;
         const f = try gpa.create(WorldFixture);
         f.* = .{ .arena = std.heap.ArenaAllocator.init(gpa) };
@@ -305,12 +305,12 @@ const WorldFixture = struct {
         return f;
     }
 
-    fn destroy(f: *WorldFixture) void {
+    pub fn destroy(f: *WorldFixture) void {
         f.arena.deinit();
         testing.allocator.destroy(f);
     }
 
-    fn call(f: *WorldFixture, name: []const u8, args: []const u8) !tools.Outcome {
+    pub fn call(f: *WorldFixture, name: []const u8, args: []const u8) !tools.Outcome {
         const a = f.arena.allocator();
         return f.t.call(a, name, try json.parseFromSliceLeaky(Value, a, args, .{}));
     }
@@ -326,7 +326,7 @@ const WorldFixture = struct {
     }
 };
 
-fn ok(o: tools.Outcome) !Value {
+pub fn ok(o: tools.Outcome) !Value {
     return switch (o) {
         .ok => |v| v,
         .err => |m| {
@@ -336,7 +336,7 @@ fn ok(o: tools.Outcome) !Value {
     };
 }
 
-fn expectErr(o: tools.Outcome, want: []const u8) !void {
+pub fn expectErr(o: tools.Outcome, want: []const u8) !void {
     switch (o) {
         .ok => return error.TestExpectedError,
         .err => |m| try testing.expectEqualStrings(want, m),
@@ -374,7 +374,7 @@ test "mcp catalog: tools/list serves protocol/mcp-tools.json exactly: names, ord
     defer f.destroy();
     const a = f.arena.allocator();
     const shared = try sharedCatalog(a);
-    try testing.expectEqual(@as(usize, 31), shared.len);
+    try testing.expectEqual(@as(usize, 33), shared.len);
     for (shared) |t| {
         const has_ann = u.get(t, "annotations") != null;
         // Exactly these keys, so nothing else could be served.
@@ -402,7 +402,7 @@ test "mcp catalog: tools/list serves protocol/mcp-tools.json exactly: names, ord
     var k: usize = 0;
     for (shared) |want| {
         const name = u.str(want, "name").?;
-        if (std.mem.eql(u8, name, "show_image") or std.mem.eql(u8, name, "show_visual")) continue;
+        if (std.mem.eql(u8, name, "show_image") or std.mem.eql(u8, name, "show_visual") or std.mem.eql(u8, name, "create_artifact") or std.mem.eql(u8, name, "update_artifact")) continue;
         try testing.expectEqualStrings(try u.stringify(a, want), try u.stringify(a, plain[k]));
         k += 1;
     }
@@ -415,11 +415,11 @@ test "mcp catalog: the shared catalog is the Rust server's tool list" {
     const a = arena.allocator();
     const all = try json.parseFromSliceLeaky(Value, a, tools.catalog_json, .{});
     const want = [_][]const u8{
-        "whoami",      "list_devices", "list_projects", "list_harnesses", "list_models",    "list_chats",    "get_chat",
-        "create_chat", "read_chat",    "send_message",  "wait_for_turn",  "interrupt_chat", "dismiss_input", "respond_to_input",
-        "rename_chat", "archive_chat", "show_visual",   "show_image",     "list_rooms",     "create_room",   "join_room",
-        "leave_room",  "post_room",    "release_claim", "read_room",      "room_inbox",     "archive_room",  "destroy_room",
-        "list_bots",   "run_bot",      "run_due_bots",
+        "whoami",       "list_devices", "list_projects", "list_harnesses", "list_models",     "list_chats",      "get_chat",
+        "create_chat",  "read_chat",    "send_message",  "wait_for_turn",  "interrupt_chat",  "dismiss_input",   "respond_to_input",
+        "rename_chat",  "archive_chat", "show_visual",   "show_image",     "create_artifact", "update_artifact", "list_rooms",
+        "create_room",  "join_room",    "leave_room",    "post_room",      "release_claim",   "read_room",       "room_inbox",
+        "archive_room", "destroy_room", "list_bots",     "run_bot",        "run_due_bots",
     };
     try testing.expectEqual(want.len, all.array.items.len);
     for (all.array.items, want) |t, name| {
@@ -457,12 +457,12 @@ test "mcp protocol: initialize, ping, list, and protocol errors match the Rust s
     const unknown = try mcp.handleRequest(&f.t, a, u.i(6), "tools/call", try json.parseFromSliceLeaky(Value, a, "{\"name\":\"render_visual\"}", .{}));
     try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":6,\"error\":{\"code\":-32602,\"message\":\"unknown tool: render_visual\"}}", unknown);
 
-    // Without an origin chat, show_image/show_visual are hidden.
+    // Without an origin chat, show_image/show_visual/create_artifact/update_artifact are hidden.
     const listed = try json.parseFromSliceLeaky(Value, a, try mcp.handleRequest(&f.t, a, u.i(7), "tools/list", .null), .{});
     try testing.expectEqual(@as(usize, 29), u.array(u.get(listed, "result").?, "tools").?.len);
     f.t.origin = .{ .chat_id = "chat-beta-2" };
     const listed2 = try json.parseFromSliceLeaky(Value, a, try mcp.handleRequest(&f.t, a, u.i(8), "tools/list", .null), .{});
-    try testing.expectEqual(@as(usize, 31), u.array(u.get(listed2, "result").?, "tools").?.len);
+    try testing.expectEqual(@as(usize, 33), u.array(u.get(listed2, "result").?, "tools").?.len);
 
     // A tool error is a result with isError, never a protocol error.
     const failed = try json.parseFromSliceLeaky(Value, a, try mcp.handleRequest(&f.t, a, u.i(9), "tools/call", try json.parseFromSliceLeaky(Value, a, "{\"name\":\"get_chat\",\"arguments\":{\"chat\":\"nope\"}}", .{})), .{});
@@ -729,6 +729,7 @@ test "mcp respond_to_input: the current pending question is found in the transcr
     try testing.expectEqualStrings("chat-alpha-1", u.str(sent, "chatId").?);
     try testing.expectEqualStrings("respondInput", sval(sent, &.{ "command", "kind" }).?);
     try testing.expectEqualStrings("req-7", sval(sent, &.{ "command", "requestId" }).?);
+    try testing.expect(u.boolean(u.get(sent, "command").?, "fromAgent").?);
     const ans = u.array(u.get(sent, "command").?, "answers").?;
     try testing.expectEqualStrings("q1", u.str(ans[0], "questionId").?);
     try testing.expectEqualStrings("Yes", u.array(ans[0], "labels").?[0].string);
@@ -741,6 +742,34 @@ test "mcp respond_to_input: the current pending question is found in the transcr
         \\   {"kind":"input","id":"i2","requestId":"req-7","questions":[{"id":"q1","prompt":"Push to main?"}],"resolved":true}]}]
     ;
     try expectErr(try w.call("respond_to_input", "{\"chat\":\"Alpha\",\"answers\":[{\"question_id\":\"q1\",\"labels\":[\"Yes\"]}]}"), "chat chat-alp has no pending question");
+}
+
+test "mcp respond_to_input refuses tool-approval prompts and peer relayDepth reads room hops" {
+    const w = try WorldFixture.create(.{});
+    defer w.destroy();
+    w.world.doc_reset =
+        \\[{"id":"u1","role":"user","createdAt":1,"deviceId":"dev-local","parts":[{"kind":"text","id":"t","text":"run it"}]},
+        \\ {"id":"a1","role":"assistant","createdAt":2,"deviceId":"dev-local","status":"streaming","parts":[
+        \\   {"kind":"input","id":"i2","requestId":"req-perm","questions":[{"id":"q1","header":"Approve tool","prompt":"Run shell command?","requiresHumanUi":true}],"resolved":false}]}]
+    ;
+    try expectErr(try w.call("respond_to_input", "{\"chat\":\"Alpha\",\"answers\":[{\"question_id\":\"q1\",\"labels\":[\"Yes\"]}]}"), "this prompt requires human approval in the Harness UI");
+    try testing.expect(w.lastWrite("QueueCommand") == null);
+
+    const room_msg =
+        \\<!--harness-room {"room_id":"r1","room_name":"build","seq":7,"from_member":"codex","member_kind":"graff","from_user":false,"external":false,"hop":4} -->
+        \\[room message from codex · room build #7 · agent, advisory]: @alpha ping
+    ;
+    try testing.expectEqual(@as(u32, 4), peer.relayDepth(room_msg));
+
+    const w_room = try WorldFixture.create(.{ .chat_id = "chat-alpha-1" });
+    defer w_room.destroy();
+    w_room.world.doc_reset =
+        \\[{"id":"u1","role":"user","createdAt":1,"deviceId":"dev-local","parts":[{"kind":"text","id":"t","text":"[Message from Harness chat Beta. Sender chat: chat-beta-1. Relay depth: 2/4. Agent coordination, not a human request. Reply with Harness `send_message` only for an actionable question, blocker, or final requested result; otherwise do not reply. Do not send acknowledgements or progress updates.]\n\ncheck"}]}]
+    ;
+    const posted = try ok(try w_room.call("post_room", "{\"room\":\"build\",\"text\":\"@beta update\"}"));
+    _ = posted;
+    const post_req = w_room.lastWrite("RoomRequest").?;
+    try testing.expectEqual(@as(i64, 2), u.int(u.get(post_req, "body").?, "parentHop").?);
 }
 
 test "mcp list_chats and create_chat ignore blank optional string filters" {
@@ -763,6 +792,12 @@ test "mcp show_image and show_visual: scripted engine surfaces errors and valida
     try testing.expect(tools.validateVisual(try repeat(w.arena.allocator(), "界", 200), try repeat(w.arena.allocator(), "é", 32768)) == null);
     try testing.expect(tools.validateVisual(try repeat(w.arena.allocator(), "界", 201), "x") != null);
     try testing.expect(tools.validateVisual("title", try repeat(w.arena.allocator(), "é", 32769)) != null);
+
+    // create_artifact & update_artifact validate inputs locally and forward the RPC shape.
+    try expectErr(try w.call("create_artifact", "{\"title\":\"  \",\"format\":\"html\",\"content\":\"<h1>x</h1>\"}"), "artifact title must be nonblank and at most 200 characters");
+    try expectErr(try w.call("create_artifact", "{\"title\":\"Chart\",\"format\":\"pdf\",\"content\":\"x\"}"), "artifact format must be html, svg, or markdown");
+    try expectErr(try w.call("update_artifact", "{\"artifactId\":\"bad\"}"), "artifactId must be art- followed by 24 lowercase hex characters");
+    try expectErr(try w.call("update_artifact", "{\"artifactId\":\"art-0123456789abcdef01234567\"}"), "update_artifact needs at least one of title, format, content, or visibility");
 }
 
 // ---- rooms -------------------------------------------------------------------------------

@@ -105,3 +105,30 @@ fn full_id_tails_remain_distinct_after_task_and_path_truncation() {
     }
     assert_eq!(names.len(), tails.len());
 }
+
+#[test]
+fn prompt_changes_never_alter_or_appear_in_generated_worktree_branch() {
+    let prompt_a = "The blue button still does nothing after I click it twice.";
+    let prompt_b = "Unrelated synthetic prompt with confidential customer token.";
+    let name_a = name_for_task("chat-graff-tree", prompt_a);
+    let name_b = name_for_task("chat-graff-tree", prompt_b);
+
+    assert_eq!(
+        name_a, name_b,
+        "generated worktree name must depend only on chat id, got {name_a:?} vs {name_b:?}"
+    );
+    let branch = GraffWorktree {
+        root: "/synthetic/repo".into(),
+        name: name_a.clone(),
+        path: GraffWorktree::path_in("/synthetic/repo", &name_a),
+    }
+    .branch();
+    assert_git_branch(&branch);
+    for leaked in ["blue", "button", "click", "unrelated", "confidential"] {
+        assert!(
+            !branch.contains(leaked),
+            "generated branch {branch:?} leaked prompt word {leaked:?}"
+        );
+    }
+    assert_eq!(branch, "worktree-1a7188e911beeb31");
+}

@@ -19,7 +19,7 @@ pub const width: f32 = 520;
 const band_h: f32 = 38;
 
 pub fn host(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const bg = if (a.settings.uiMode() == .zen) @import("view_panel_chrome.zig").zenPageBg(k) else k.background;
+    const bg = @import("view_panel_chrome.zig").zenPageBg(k);
     const col = ui.div(c).column().wFull().hFull().bg(bg).clip();
     defer col.end();
     const t = a.panels.activeTab() orelse return picker(c, a, k);
@@ -35,6 +35,7 @@ pub fn host(c: *ui.Context, a: *App, k: theme.Colors) void {
         .github => @import("view_git.zig").github(c, a, k),
         .file => file(c, a, k, t.path),
         .browser => if (t.browser) |b| @import("view_browser.zig").draw(c, a, k, b),
+        .design_canvas => @import("view_design_canvas.zig").draw(c, a, k),
         .tool_access => @import("view_tool_access.zig").draw(c, a, k),
         .subagent => if (t.agent) |s| subagentSurface(c, a, k, s),
     }
@@ -46,7 +47,8 @@ fn subagentSurface(c: *ui.Context, a: *App, k: theme.Colors, s: *@import("app_su
 
     // Resolve live state and model from the parent transcript + WatchToolProgress.
     var model: []const u8 = "";
-    var sub_state: aw.AgentState = if (!s.frozen and !s.transcript.complete) .running else .completed;
+    // Without its chip in a loaded parent, a settled child's outcome is unknown.
+    var sub_state: aw.AgentState = if (!s.frozen and !s.transcript.complete) .running else .ended;
     const session = @import("workspace.zig").sessionOf(a.sessions.items, s.parent);
     const parent_working = if (session) |row| row.status == .working else false;
     const selected_parent = if (a.selected) |id| std.mem.eql(u8, id, s.parent) else false;
@@ -86,18 +88,19 @@ fn subagentSurface(c: *ui.Context, a: *App, k: theme.Colors, s: *@import("app_su
             const pill_bg = switch (sub_state) {
                 .running => k.accent.alpha(0.14),
                 .failed => k.danger.alpha(0.14),
-                .completed, .cancelled => k.ink(0.06),
+                .completed, .cancelled, .ended => k.ink(0.06),
             };
             const pill_fg = switch (sub_state) {
                 .running => k.accent,
                 .failed => k.danger,
-                .completed, .cancelled => k.muted,
+                .completed, .cancelled, .ended => k.muted,
             };
             const pill_label = switch (sub_state) {
                 .running => "Running",
                 .completed => "Done",
                 .failed => "Failed",
                 .cancelled => "Stopped",
+                .ended => "Ended",
             };
             const pill = ui.div(c).row().h(22).px(8).gap(5).itemsCenter().rounded(11).bg(pill_bg);
             if (sub_state == .running) vaw.paintSpinner(c, 10, 1.35, k.accent, k.accent.alpha(0.22));
@@ -111,6 +114,14 @@ fn subagentSurface(c: *ui.Context, a: *App, k: theme.Colors, s: *@import("app_su
         }
     }
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
+
+    // The feed's error, in the transcript's error style, while it retries.
+    if (s.error_text) |message| {
+        ui.key(c, "subagent-feed-error");
+        const pad = ui.div(c).column().wFull().px(14).pt(12);
+        defer pad.end();
+        @import("view_transcript.zig").noticeChip(c, &a.view.copy_feedback, k, "Couldn't load this subagent's transcript", message).end();
+    }
 
     // 2. Scrollable subagent transcript.
     _ = @import("view_transcript.zig").entries(
@@ -231,13 +242,15 @@ fn band(c: *ui.Context, a: *App, k: theme.Colors) void {
 fn picker(c: *ui.Context, a: *App, k: theme.Colors) void {
     const area = ui.div(c).column().wFull().grow().center().gap(8);
     defer area.end();
+    const row_w = @min(@as(f32, 280), @max(0, a.view.chrome.host_width - 24));
+    const label_w = @max(0, row_w - 28 - 15 - 10);
     for ([_]struct { title: []const u8, glyph: icons.Name, kind: panels.TabKind }{
         .{ .title = "Browser", .glyph = .globe, .kind = .browser },
         .{ .title = "Diffs", .glyph = .list, .kind = .diffs },
         .{ .title = "Git history", .glyph = .@"git-branch", .kind = .git },
         .{ .title = "GitHub", .glyph = .@"pull-request", .kind = .github },
     }) |item| {
-        const row = ui.div(c).row().w(280).h(44).px(14).gap(10).itemsCenter().rounded(10).border(k.border).borderW(1).bg(k.ink(0.02)).hover(k.ink(0.05));
+        const row = ui.div(c).row().w(row_w).h(44).px(14).gap(10).itemsCenter().rounded(10).border(k.border).borderW(1).bg(k.ink(0.02)).hover(k.ink(0.05)).clip();
         defer row.end();
         if (row.clicked()) {
             switch (item.kind) {
@@ -248,7 +261,7 @@ fn picker(c: *ui.Context, a: *App, k: theme.Colors) void {
             }
         }
         icons.icon(c, item.glyph, 15, k.muted, 0);
-        ui.text(c, item.title, .{ .size = 13, .weight = .medium, .color = k.text });
+        kit.ellipsisText(c, item.title, .{ .size = 13, .weight = .medium, .color = k.text }, label_w);
     }
 }
 
@@ -280,7 +293,7 @@ fn file(c: *ui.Context, a: *App, k: theme.Colors, path: []const u8) void {
                     }
                 }
             }
-            if (fileButton(c, k, if (e.pending != null) "Saving…" else "Save file", e.editable and e.dirty() and e.pending == null and !e.conflict)) _ = e.save();
+            if (fileButton(c, k, if (e.pending != null) "Saving…" else "Save file", e.editable and !e.composing and e.dirty() and e.pending == null and !e.conflict)) _ = e.save();
             if (fileButton(c, k, "Reload file", e.pending == null and !e.loading)) @import("app_file_editor.zig").requestReload(a, e);
         }
     }
@@ -303,39 +316,54 @@ fn file(c: *ui.Context, a: *App, k: theme.Colors, path: []const u8) void {
                     c.focus = e.field;
                 }
             }
-            const lines: u16 = @intFromFloat(std.math.clamp((a.view.chrome.height - 100) / 19, 4, 200));
-            const result = ui.textField(c, &e.buffer, .{ .placeholder = "Edit file…", .width = .fill, .bare = true, .mono = true, .size = 12.5, .line_height = 19, .multiline = true, .max_lines = lines });
-            e.focused = result.focused;
-            if (result.focused and c.shortcut(.{ .key = 'a', .cmd = true })) {
-                if (c.edits.getPtr(e.field)) |edit| {
-                    edit.anchor = 0;
-                    edit.caret = e.buffer.text().len;
-                    c.selection.clear();
-                    c.changed = true;
-                }
+            if (c.focus == e.field and c.shortcut(.{ .key = 'a', .cmd = true })) {
+                e.buffer.want_selection = .{ 0, std.math.maxInt(usize) };
+                c.selection.clear();
+                c.changed = true;
             }
-            if (result.changed) e.changed();
-            if (result.submitted) {
-                _ = e.buffer.insert(result.caret, "\n");
-                e.buffer.want_caret = result.caret + 1;
+            const lines: u16 = @intFromFloat(std.math.clamp((a.view.chrome.height - 100) / 19, 4, 200));
+            const result = ui.textField(c, &e.buffer, .{
+                .placeholder = "Edit file…",
+                .width = .fill,
+                .bare = true,
+                .mono = true,
+                .size = 12.5,
+                .line_height = 19,
+                .multiline = true,
+                .word_wrap = a.settings.get(.files_word_wrap),
+                .reversible_preedit = true,
+                .max_lines = lines,
+            });
+            e.focused = result.focused;
+            const inserted_break = result.submitted and !result.composing and e.buffer.insert(result.caret, "\n") == 1;
+            if (inserted_break) e.buffer.want_caret = result.caret + 1;
+            if (result.changed or inserted_break) {
+                // A native event can confirm one edit and start a new mark.
+                // Arm for the confirmed edit; tick still pauses while marked.
+                e.composing = false;
                 e.changed();
+            }
+            e.composing = result.composing;
+            if (!e.composing and e.pending == null and a.panels.file_close.intent == null) {
+                if (e.autosave_at) |deadline| c.frameIn(@floatCast(@max(0, deadline - c.time)));
             }
             return;
         }
-        ui.scroll(c, .{ .grow = 1, .width = .fill, .padding = .{ .left = 16, .right = 16, .top = 12, .bottom = 24 } });
-        defer ui.end(c);
-        if (std.mem.endsWith(u8, path, ".md") or std.mem.endsWith(u8, path, ".markdown"))
-            return @import("view_markdown.zig").withLinks(c, k, e.buffer.text(), a, e.target.chatId);
-        return code(c, k, e.buffer.text(), langOf(path));
+        return previewFile(c, a, k, path, e.buffer.text(), e.target.chatId);
     }
     const f = a.panels.file;
     if (f.loading) return centered(c, k, "Loading…");
     const text = f.text orelse return centered(c, k, f.reason orelse "This file can't be shown.");
-    ui.scroll(c, .{ .grow = 1, .width = .fill, .padding = .{ .left = 16, .right = 16, .top = 12, .bottom = 24 } });
+    previewFile(c, a, k, path, text, a.selected);
+}
+
+fn previewFile(c: *ui.Context, a: *App, k: theme.Colors, path: []const u8, text: []const u8, owner: ?[]const u8) void {
+    const markdown = std.mem.endsWith(u8, path, ".md") or std.mem.endsWith(u8, path, ".markdown");
+    const wrap = a.settings.get(.files_word_wrap);
+    ui.scroll(c, .{ .grow = 1, .width = .fill, .scroll_x = !markdown and !wrap, .padding = .{ .left = 16, .right = 16, .top = 12, .bottom = 24 } });
     defer ui.end(c);
-    if (std.mem.endsWith(u8, path, ".md") or std.mem.endsWith(u8, path, ".markdown"))
-        return @import("view_markdown.zig").withLinks(c, k, text, a, a.selected);
-    code(c, k, text, langOf(path));
+    if (markdown) return @import("view_markdown.zig").withLinks(c, k, text, a, owner);
+    code(c, k, text, langOf(path), wrap);
 }
 
 fn fileButton(c: *ui.Context, k: theme.Colors, label: []const u8, enabled: bool) bool {
@@ -348,9 +376,10 @@ fn fileButton(c: *ui.Context, k: theme.Colors, label: []const u8, enabled: bool)
 }
 
 /// Code with its line numbers, coloured as the language reads.
-pub fn code(c: *ui.Context, k: theme.Colors, text: []const u8, lang: []const u8) void {
+fn code(c: *ui.Context, k: theme.Colors, text: []const u8, lang: []const u8, wrap: bool) void {
     const pal = k.syntax;
-    const st = kit.style(c, 12.5, 19, .{ .mono = true, .color = k.text });
+    var st = kit.style(c, 12.5, 19, .{ .mono = true, .color = k.text });
+    st.wrap = wrap;
     const num = kit.style(c, 11, 19, .{ .mono = true, .color = k.faint });
     var in_block: highlight.State = .{};
     var n: usize = 0;
@@ -358,7 +387,8 @@ pub fn code(c: *ui.Context, k: theme.Colors, text: []const u8, lang: []const u8)
     while (it.next()) |l| {
         n += 1;
         if (n > 4000) break;
-        const r = ui.div(c).row().gap(12);
+        var r = ui.div(c).row().gap(12);
+        if (wrap) r = r.wFull();
         defer r.end();
         {
             const g = ui.div(c).row().w(36).justifyEnd();

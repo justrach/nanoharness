@@ -15,7 +15,7 @@ final class HarnessCatalogTests: XCTestCase {
         XCTAssertEqual(sol?.options.first?.choices.last?.label, "Ultra Fast")
 
         let astra62 = models.first { $0.id == "gpt-6.2-astra" }
-        XCTAssertEqual(astra62?.options.first?.choices.map(\.id), ["default", "fast", "ultrafast"])
+        XCTAssertEqual(astra62?.options.first?.choices.map(\.id), ["default", "fast"])
         let astra6 = models.first { $0.id == "gpt-6-astra" }
         XCTAssertEqual(astra6?.options.first?.choices.map(\.id), ["default", "fast"])
     }

@@ -1,5 +1,6 @@
 //! What a box draws inside it: text, an icon, a picture, a texture, a
 //! canvas, or a hole that a native view shows through.
+const std = @import("std");
 const types = @import("types.zig");
 const text = @import("text.zig");
 
@@ -57,5 +58,25 @@ pub const Content = union(enum) {
         /// Colored byte ranges, sorted; the rest is drawn in `color`.
         spans: []const types.Span = &.{},
         cut_lay: ?text.Layout = null,
+        /// A selection-only text node whose visible content is drawn by
+        /// other nodes. All lines share `str` and this node's selection ID.
+        positioned_lines: []const PositionedLine = &.{},
+    };
+
+    pub const PositionedLine = struct {
+        start: usize,
+        end: usize,
+        y: f32,
+        height: f32,
+        /// Glyph indices are relative to `start` as for ordinary text lines.
+        layout: text.Layout,
+
+        pub fn xAt(line: PositionedLine, byte: usize) f32 {
+            return @import("selection.zig").xAt(line.layout, std.math.clamp(byte, line.start, line.end) - line.start);
+        }
+
+        pub fn byteAt(line: PositionedLine, x: f32) usize {
+            return line.start + @import("selection.zig").indexAt(line.layout, x, line.end - line.start);
+        }
     };
 };

@@ -293,7 +293,7 @@ fn destroyRoom(c: *Ctx, args: Value) !Value {
 
 /// `room_delivery::format` for an agent post from this server (never a
 /// person's, never external): the tag line, then the framed message.
-pub fn deliveryText(a: Allocator, room_id: []const u8, room_name: []const u8, seq: i64, from_member: []const u8, body: []const u8) ![]const u8 {
+pub fn deliveryText(a: Allocator, room_id: []const u8, room_name: []const u8, seq: i64, from_member: []const u8, hop: u32, body: []const u8) ![]const u8 {
     var tag = u.obj(a);
     try tag.put("room_id", u.s(room_id));
     try tag.put("room_name", u.s(room_name));
@@ -303,6 +303,7 @@ pub fn deliveryText(a: Allocator, room_id: []const u8, room_name: []const u8, se
     try tag.put("from_user", u.b(false));
     try tag.put("framed", u.b(true));
     try tag.put("external", u.b(false));
+    try tag.put("hop", u.i(hop));
     const raw = try u.stringify(a, tag.value());
     // Keep the comment closable whatever the names contain.
     const safe = try std.mem.replaceOwned(u8, a, raw, "-->", "--\\u003e");
@@ -327,6 +328,14 @@ fn postRoom(c: *Ctx, args: Value) !Value {
     const m = try me(c);
     const name = try myNameIn(c, room.id, m);
     const text = argStr(args, "text").?;
+    // Carry the origin chat's current hop count across room posts so agents
+    // cannot reset loop accounting by switching between rooms and send_message.
+    var inbound: u32 = 0;
+    if (c.t.origin.chat_id) |origin_id| {
+        const rendered = try @import("transcript.zig").render(a, try c.transcriptOf(origin_id), .{});
+        const ledger = c.t.relay.inbound(a, origin_id, rendered, c.t.nowMs());
+        inbound = @max(peer.inboundDepth(rendered), ledger);
+    }
     // Agents never post as a person. The client id makes one retry safe: a
     // post that landed but whose answer was lost comes back as the original.
     var client_id_buf: [32]u8 = undefined;
@@ -348,6 +357,7 @@ fn postRoom(c: *Ctx, args: Value) !Value {
     try post.put("claimKey", u.field(args, "claim_key"));
     try post.put("clientId", u.s(try a.dupe(u8, client_id_buf[0..n])));
     try post.put("fromUser", u.b(false));
+    if (inbound > 0) try post.put("parentHop", u.i(inbound));
     const path = try std.fmt.allocPrint(a, "room/{s}/post", .{room.id});
     const posted = c.roomRequest("POST", path, &.{}, post.value()) catch |err| switch (err) {
         // A transport failure (not the room's own refusal) retries once.
@@ -359,13 +369,14 @@ fn postRoom(c: *Ctx, args: Value) !Value {
     };
     const message = u.field(posted, "message");
     const seq: i64 = @max(0, u.int(message, "seq") orelse 0);
+    const hop: u32 = @intCast(@max(0, u.int(message, "hop") orelse 1));
     var woken = u.arr(a);
     for (u.array(posted, "deliver") orelse u.none) |target| {
         // graff and external members pull with read_room / room_inbox.
         if (!std.mem.eql(u8, u.str(target, "memberKind") orelse "", "harness_chat")) continue;
         const chat_id = u.str(target, "memberRef") orelse continue;
         if (std.mem.eql(u8, chat_id, m.chat_id)) continue;
-        const delivery = try deliveryText(a, room.id, room.name, seq, name, text);
+        const delivery = try deliveryText(a, room.id, room.name, seq, name, hop, text);
         var w = u.obj(a);
         try w.put("member", u.field(target, "member"));
         var probe: Ctx = .{ .t = c.t, .a = a };
@@ -520,7 +531,7 @@ test "mcp rooms: a delivery opens with a tag the peer rules recognise" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const text = try deliveryText(a, "room_0123456789abcdef01234567", "build -->", 7, "alpha", "hello");
+    const text = try deliveryText(a, "room_0123456789abcdef01234567", "build -->", 7, "alpha", 1, "hello");
     try testing.expect(peer.isRoomDelivery(a, text));
     try testing.expect(!peer.isHumanPrompt(a, text));
     try testing.expect(std.mem.indexOf(u8, text, "build --\\u003e") != null);

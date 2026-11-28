@@ -30,7 +30,7 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     else
         @min(anchor.y + anchor.h + 4, @max(8, c.size.h - est_h));
     {
-        const scrim_top = @import("motion_rules.zig").scrimTop(false, @import("panel_chrome.zig").header_height);
+        const scrim_top = @import("motion_rules.zig").scrimTop(false, a.view.chrome.y);
         const scrim = ui.div(c).fixed().offset(0, scrim_top).size(c.size.w, @max(0, c.size.h - scrim_top)).layer(4);
         defer scrim.end();
         if (scrim.clicked()) {
@@ -88,6 +88,46 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     switch (target) {
         .chat => |pane| {
+            if (a.settings.hierarchyProfile().shows_git_checkout_chrome) {
+                const pane_chat_id = strip.chatId(a, pane);
+                const pane_chat = if (pane_chat_id) |cid| a.findChat(cid) else null;
+                const branch = if (pane_chat) |ch| ch.branch else null;
+                const matches_diff = if (pane_chat_id) |cid|
+                    (if (a.panels.chat) |pc| std.mem.eql(u8, pc, cid) else false)
+                else
+                    false;
+                const diff_ptr = if (matches_diff) a.panels.diff else null;
+                const diff_files: usize = if (diff_ptr) |d| d.files.len else 0;
+                if (branch != null or diff_files > 0) {
+                    const hdr = ui.div(c).row().wFull().px(8).py(5).gap(6).itemsCenter().clip();
+                    if (branch) |br| {
+                        icons.icon(c, .@"git-branch", 12, k.muted, 0);
+                        kit.ellipsisText(c, br, .{ .size = 11.5, .weight = .medium, .color = k.text }, 118);
+                    }
+                    if (diff_files > 0) {
+                        const d = diff_ptr.?;
+                        ui.spacer(c);
+                        ui.key(c, "panel-menu-diff-badge");
+                        const badge = ui.div(c).row().h(20).px(6).center().rounded(5).bg(k.accent.alpha(0.14)).hover(k.accent.alpha(0.22)).control();
+                        ui.text(c, c.print("{d}f +{d}/-{d}", .{ diff_files, d.additions, d.deletions }), .{ .size = 10.5, .weight = .medium, .color = k.accent });
+                        if (badge.clicked()) {
+                            const panels_mod = @import("app_panels.zig");
+                            var found_diff = false;
+                            for (a.panels.tabs.items, 0..) |tb, tix| if (tb.kind == .diffs) {
+                                a.panels.host_open = true;
+                                panels_mod.showTab(a, tix);
+                                found_diff = true;
+                                break;
+                            };
+                            if (!found_diff) panels_mod.addDiffsTab(a);
+                            a.view.strip.menu = null;
+                        }
+                        badge.end();
+                    }
+                    hdr.end();
+                    separator(c, k);
+                }
+            }
             if (a.tabs.layout()) |s| {
                 if (pane >= s.panes.items.len) {
                     a.view.strip.menu = null;
@@ -114,7 +154,12 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
             for (a.panels.tabs.items, 0..) |tab, ix| {
                 if (tab.agent) |agent| if (!agent.belongsTo(a.selected)) continue;
                 if (tab.browser) |browser| if (!browser.belongsTo(a.selected)) continue;
-                if (row(c, a, k, if (tab.kind == .browser) .globe else .document, strip.hostTitle(a, tab), ix == a.panels.active)) strip.queue(a, .{ .host_tab = ix });
+                const g_icon: icons.Name = switch (tab.kind) {
+                    .browser => .globe,
+                    .design_canvas => .@"palette-search",
+                    else => .document,
+                };
+                if (row(c, a, k, g_icon, strip.hostTitle(a, tab), ix == a.panels.active)) strip.queue(a, .{ .host_tab = ix });
             }
             if (a.panels.active < a.panels.tabs.items.len) {
                 if (row(c, a, k, .close, "Close tab", false)) strip.queue(a, .{ .close_host_tab = a.panels.active });
@@ -129,14 +174,17 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (row(c, a, k, .@"alt-arrow-down", "Split down", false)) strip.queue(a, .{ .split_down = target });
         if (a.tabs.layout()) |s| {
             const vertical = s.axis == .vertical;
-            if (target.chat > 0) if (row(c, a, k, if (vertical) .@"alt-arrow-down" else .@"alt-arrow-left", if (vertical) "Move panel up" else "Move panel left", false)) strip.queue(a, .{ .move_left = target });
-            if (target.chat + 1 < s.panes.items.len) if (row(c, a, k, if (vertical) .@"alt-arrow-down" else .@"alt-arrow-right", if (vertical) "Move panel down" else "Move panel right", false)) strip.queue(a, .{ .move_right = target });
+            if (target.chat > 0) if (row(c, a, k, if (vertical) .@"alt-arrow-up" else .@"alt-arrow-left", if (vertical) "Move pane up" else "Move pane left", false)) strip.queue(a, .{ .move_left = target });
+            if (target.chat + 1 < s.panes.items.len) if (row(c, a, k, if (vertical) .@"alt-arrow-down" else .@"alt-arrow-right", if (vertical) "Move pane down" else "Move pane right", false)) strip.queue(a, .{ .move_right = target });
         }
     }
     if (strip.count(a) > 1) {
         separator(c, k);
-        if (row(c, a, k, .@"split-columns", if (a.view.strip.expanded != null) "Restore panels" else "Expand panel", false)) strip.queue(a, .{ .zoom = target });
-        if (row(c, a, k, .close, "Close panel", false)) strip.queue(a, .{ .close = target });
+        // A chat column is a pane (Settings' "Zoom the pane"); the side and
+        // files panels keep "panel".
+        const pane = target == .chat;
+        if (row(c, a, k, .@"split-columns", if (a.view.strip.expanded != null) "Restore panes" else if (pane) "Zoom pane" else "Zoom panel", false)) strip.queue(a, .{ .zoom = target });
+        if (row(c, a, k, .close, if (pane) "Close pane" else "Close panel", false)) strip.queue(a, .{ .close = target });
     }
 }
 
@@ -179,9 +227,12 @@ fn separator(c: *ui.Context, k: theme.Colors) void {
     ui.div(c).wFull().h(1).bg(k.border).end();
 }
 
-fn folderMenu(c: *ui.Context, a: *App, k: theme.Colors, anchor: ui.Rect) void {
+fn folderMenu(c: *ui.Context, a: *App, k: theme.Colors, opened_at: ui.Rect) void {
     const search = @import("strip_folder_search.zig");
     const state = &a.view.strip;
+    // Only the focused draft draws a footer chip. Follow it while the window
+    // resizes, as the tab strip's chip does.
+    const anchor = if (state.footer_folder and strip.same(state.target, strip.pickerPanel(a))) a.view.space_anchor orelse opened_at else opened_at;
     const target = state.target;
     var cursor_node: ?u32 = null;
     const device = strip.device(a, target);
@@ -197,7 +248,7 @@ fn folderMenu(c: *ui.Context, a: *App, k: theme.Colors, anchor: ui.Rect) void {
     const x = rules.snapToWindow(anchor.x, width, c.size.w, 8);
     const y = rules.snapToWindow(if (footer and !flip) anchor.y - height - 4 else anchor.y + anchor.h + (if (footer) @as(f32, 4) else 0), height, c.size.h, 8);
     {
-        const scrim_top = @import("motion_rules.zig").scrimTop(footer, @import("panel_chrome.zig").header_height);
+        const scrim_top = @import("motion_rules.zig").scrimTop(footer, a.view.chrome.y);
         const scrim = ui.div(c).fixed().offset(0, scrim_top).size(c.size.w, @max(0, c.size.h - scrim_top)).layer(4);
         defer scrim.end();
         const scrim_hit = scrim.interaction();

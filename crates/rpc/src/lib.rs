@@ -24,16 +24,28 @@ pub use git_actions::*;
 pub mod github_repository;
 pub use github_repository::*;
 pub mod device_room;
+mod remote_control;
 mod server;
 mod ws;
 
-pub use client::{RpcClient, RpcSubscription, connect_ws};
+pub use client::{RpcClient, RpcSubscription, connect_ws, connect_ws_with_bearer};
 pub use device_room::{
     DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
     NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
     decode_device_frame, device_room_ws_url, encode_device_frame,
 };
-pub use server::{serve_connection, serve_ws_listener};
+pub use harness_sync::device_crypto::{
+    DeviceEnvelope, DeviceKeypair, E2EE_FLAG, EnvelopeError, MAGIC_E2EE, MAGIC_SIGNED, ReplayCache,
+    WorkspaceKey, open_bytes, seal_bytes, unwrap_workspace_key, verify_envelope,
+    wrap_workspace_key,
+};
+pub use remote_control::{
+    RELAY_ALLOW_ONCE_TTL, RELAY_DEVICE_FALLBACK, RELAY_HOST_FALLBACK, RELAY_LOCAL_ONLY, RelayAdmit,
+    RelayOnceGrant, RemoteApproval, RemoteCommandAdmit, UNKNOWN_CALLER, admit_relay_action,
+    admit_relay_caller, admit_relay_rpc, admit_remote_command, relay_allow_once_method,
+    relay_caller_identified, relay_first_action_method, relay_refusal_reason, relay_refusal_text,
+};
+pub use server::{IpcAuth, serve_connection, serve_ws_listener, serve_ws_listener_authenticated};
 
 /// RPC method names — single source of truth for both ends.
 /// Full surface: docs/research/feature-inventory.md §2.
@@ -70,6 +82,21 @@ pub mod methods {
     /// full-access fallback existing installs keep.
     pub const GET_AUTONOMY: &str = "GetAutonomy";
     pub const SET_AUTONOMY: &str = "SetAutonomy";
+    /// Whether this computer serves ControlRpc over its device-room host
+    /// relay. Off until the user enables it in Settings → Devices. Replies
+    /// `{ enabled }`. `SetRemoteControl` is local IPC only.
+    pub const GET_REMOTE_CONTROL: &str = "GetRemoteControl";
+    pub const SET_REMOTE_CONTROL: &str = "SetRemoteControl";
+    /// Parked remote actions waiting for a person on this computer.
+    pub const GET_REMOTE_APPROVALS: &str = "GetRemoteApprovals";
+    pub const WATCH_REMOTE_APPROVALS: &str = "WatchRemoteApprovals";
+    pub const APPROVE_REMOTE_ACTION: &str = "ApproveRemoteAction";
+    pub const DENY_REMOTE_ACTION: &str = "DenyRemoteAction";
+    /// This device's Ed25519 / X25519 public keys (no secrets).
+    pub const GET_DEVICE_IDENTITY: &str = "GetDeviceIdentity";
+    /// Seal chat2 rows and ControlRpc payloads with the workspace key.
+    pub const GET_E2EE: &str = "GetE2ee";
+    pub const SET_E2EE: &str = "SetE2ee";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
     pub const LIST_COMMANDS: &str = "ListCommands";
@@ -120,6 +147,22 @@ pub mod methods {
     /// Publish bounded inline native visual data into a local live run.
     /// Local-owner only, never forwarded. `{ chatId, id, title, script }`.
     pub const SHOW_VISUAL: &str = "ShowVisual";
+    /// Create a hosted artifact (`POST /v1/artifacts`) and attach it to a local live run.
+    /// Local-only: `{ chatId, id, title, format, content, visibility? }`.
+    pub const CREATE_ARTIFACT: &str = "CreateArtifact";
+    /// Update a hosted artifact (`PATCH /v1/artifacts/:id`) and emit the updated part.
+    /// Local-only: `{ chatId, artifactId, title?, format?, content?, visibility? }`.
+    pub const UPDATE_ARTIFACT: &str = "UpdateArtifact";
+    /// Mint a short-lived signed frame URL (`POST /v1/artifacts/:id/frame-url`).
+    pub const CODEGRAFF_ARTIFACT_FRAME_URL: &str = "CodegraffArtifactFrameUrl";
+    /// Change an artifact's sharing visibility (`PATCH /v1/artifacts/:id`).
+    pub const CODEGRAFF_ARTIFACT_SET_VISIBILITY: &str = "CodegraffArtifactSetVisibility";
+    /// Cloud computer availability + owned status (`GET /api/computer/offer`).
+    pub const CODEGRAFF_COMPUTER: &str = "CodegraffComputer";
+    /// Reserve a Cloud Computer slot and open Stripe Checkout (`POST /api/computer/checkout`).
+    pub const CODEGRAFF_COMPUTER_CHECKOUT: &str = "CodegraffComputerCheckout";
+    /// Trigger provisioning/attach after checkout (`POST /api/computer/start`).
+    pub const CODEGRAFF_COMPUTER_START: &str = "CodegraffComputerStart";
     /// Steer this row into the live turn without interrupting it.
     /// `{ chatId, id }` → `{ sent }`.
     pub const STEER_QUEUED_MESSAGE_NOW: &str = "SteerQueuedMessageNow";
@@ -173,6 +216,8 @@ pub mod methods {
     pub const CODEGRAFF_AUTH_STATUS: &str = "CodegraffAuthStatus";
     pub const CODEGRAFF_USAGE: &str = "CodegraffUsage";
     pub const CODEGRAFF_SIGN_OUT: &str = "CodegraffSignOut";
+    /// `{}` → aggregate local token usage by runtime/model for the current month.
+    pub const LOCAL_TOKEN_USAGE: &str = "LocalTokenUsage";
     /// `{cwd?, limit?}` → conversations from Claude Code, Codex and graff found on this
     /// device that Harness doesn't have yet, newest first.
     pub const EXTERNAL_HISTORY_LIST: &str = "ExternalHistoryList";
@@ -262,6 +307,8 @@ pub mod methods {
     pub const RUN_PROJECT_ACTION: &str = "RunProjectAction";
     // Terminals (ControlRpc, relay-forwardable; SubscribeTerminal streams).
     pub const OPEN_TERMINAL: &str = "OpenTerminal";
+    /// Local desktop IPC only; regular and relay RPC do not expose this method.
+    pub const OPEN_LOCAL_COMMAND_TERMINAL: &str = "OpenLocalCommandTerminal";
     pub const SUBSCRIBE_TERMINAL: &str = "SubscribeTerminal";
     pub const WRITE_TERMINAL: &str = "WriteTerminal";
     pub const RESIZE_TERMINAL: &str = "ResizeTerminal";
@@ -833,5 +880,77 @@ mod tests {
         // The next unary call still works — the dead stream didn't wedge the connection.
         let echoed = client.call("Echo", serde_json::json!(2)).await.unwrap();
         assert_eq!(echoed, serde_json::json!(2));
+    }
+
+    #[tokio::test]
+    async fn authenticated_ipc_routes_admin_and_mcp_tiers_and_rejects_unauth() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        struct ScopedEcho(&'static str);
+        #[async_trait]
+        impl RpcService for ScopedEcho {
+            async fn handle(
+                &self,
+                method: &str,
+                _params: serde_json::Value,
+            ) -> Result<RpcReply, RpcError> {
+                if self.0 == "mcp" && method == "AdminOnly" {
+                    return Err(RpcError::UnknownMethod(method.to_owned()));
+                }
+                RpcReply::value(&serde_json::json!({ "tier": self.0, "method": method }))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(serve_ws_listener_authenticated(
+            listener,
+            IpcAuth {
+                admin_token: "admin-tok".into(),
+                admin_service: Arc::new(ScopedEcho("admin")),
+                mcp_token: "mcp-tok".into(),
+                mcp_service: Arc::new(ScopedEcho("mcp")),
+            },
+        ));
+
+        // Missing or wrong bearer is rejected during WebSocket handshake.
+        assert!(connect_ws(&format!("ws://127.0.0.1:{port}")).await.is_err());
+        assert!(
+            connect_ws_with_bearer(&format!("ws://127.0.0.1:{port}"), Some("wrong-tok"))
+                .await
+                .is_err()
+        );
+
+        // Even with a valid bearer, a browser-supplied Origin header is refused.
+        let mut req = format!("ws://127.0.0.1:{port}")
+            .into_client_request()
+            .unwrap();
+        req.headers_mut()
+            .insert("origin", "https://evil.example".parse().unwrap());
+        req.headers_mut()
+            .insert("authorization", "Bearer admin-tok".parse().unwrap());
+        assert!(tokio_tungstenite::connect_async(req).await.is_err());
+
+        // MCP bearer gets MCP service (denied AdminOnly, allowed Read).
+        let mcp = connect_ws_with_bearer(&format!("ws://127.0.0.1:{port}"), Some("mcp-tok"))
+            .await
+            .unwrap();
+        assert_eq!(
+            mcp.call("Read", serde_json::json!({})).await.unwrap(),
+            serde_json::json!({ "tier": "mcp", "method": "Read" })
+        );
+        assert!(mcp.call("AdminOnly", serde_json::json!({})).await.is_err());
+
+        // Admin bearer reaches Admin service.
+        let admin = connect_ws_with_bearer(&format!("ws://127.0.0.1:{port}"), Some("admin-tok"))
+            .await
+            .unwrap();
+        assert_eq!(
+            admin
+                .call("AdminOnly", serde_json::json!({}))
+                .await
+                .unwrap(),
+            serde_json::json!({ "tier": "admin", "method": "AdminOnly" })
+        );
     }
 }

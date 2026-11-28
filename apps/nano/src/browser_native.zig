@@ -20,6 +20,7 @@ pub const Native = struct {
     delegate: objc.Object,
     events: Events,
     saved_view: ?saved.View = null,
+    ephemeral: bool = false,
     loading: bool = false,
     visible: bool = false,
     attached: bool = false,
@@ -44,6 +45,10 @@ pub const Native = struct {
     }
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, home: []const u8, events: Events) !*Native {
+        return createWithOptions(gpa, io, home, events, false);
+    }
+
+    pub fn createWithOptions(gpa: std.mem.Allocator, io: std.Io, home: []const u8, events: Events, ephemeral: bool) !*Native {
         const pool = objc.Pool.push();
         defer pool.pop();
         const self = try gpa.create(Native);
@@ -64,11 +69,11 @@ pub const Native = struct {
         const delegate = objc.msg(objc.Object, cls, "new", .{});
         const config = objc.new("WKWebViewConfiguration");
         defer objc.release(config);
-        // Tests never consult or change a person's website data.
-        if (builtin.is_test) objc.msg(void, config, "setWebsiteDataStore:", .{objc.msg(objc.Object, objc.class("WKWebsiteDataStore"), "nonPersistentDataStore", .{})});
-        objc.msg(void, config, "setURLSchemeHandler:forURLScheme:", .{ delegate, objc.nsString("graff-view") });
+        // Sandboxed artifacts and tests never consult or mutate persistent website data.
+        if (ephemeral or builtin.is_test) objc.msg(void, config, "setWebsiteDataStore:", .{objc.msg(objc.Object, objc.class("WKWebsiteDataStore"), "nonPersistentDataStore", .{})});
+        if (!ephemeral) objc.msg(void, config, "setURLSchemeHandler:forURLScheme:", .{ delegate, objc.nsString("graff-view") });
         const view = objc.msg(objc.Object, objc.alloc("WKWebView"), "initWithFrame:configuration:", .{ objc.CGRect{}, config });
-        self.* = .{ .gpa = gpa, .io = io, .home = owned_home, .view = view, .delegate = delegate, .events = events };
+        self.* = .{ .gpa = gpa, .io = io, .home = owned_home, .view = view, .delegate = delegate, .events = events, .ephemeral = ephemeral };
         objc.setZig(delegate, self);
         objc.msg(void, view, "setNavigationDelegate:", .{delegate});
         objc.msg(void, view, "setUIDelegate:", .{delegate});
@@ -92,11 +97,13 @@ pub const Native = struct {
 
     pub fn navigate(s: *Native, address: []const u8) void {
         const generated = saved.fromUrl(address);
-        if (generated == null and !web.allowedNavigation(address)) return;
+        const sandboxed = s.ephemeral and @import("artifact_url.zig").isSandboxFrameUrl(address);
+        if (s.ephemeral and !sandboxed) return;
+        if (!s.ephemeral and generated == null and !web.allowedNavigation(address)) return;
         const pool = objc.Pool.push();
         defer pool.pop();
         s.saved_view = generated;
-        objc.msg(void, s.view, "setAllowsBackForwardNavigationGestures:", .{if (generated == null) objc.YES else objc.NO});
+        objc.msg(void, s.view, "setAllowsBackForwardNavigationGestures:", .{if (generated == null and !s.ephemeral) objc.YES else objc.NO});
         s.allow_blank = false;
         s.error_len = 0;
         const target_url = objc.msg(?objc.Object, objc.class("NSURL"), "URLWithString:", .{objc.nsString(address)}) orelse return;
@@ -186,7 +193,12 @@ fn decide(delegate: objc.Object, _: objc.SEL, _: objc.Object, action: objc.Objec
     const address = objc.fromNSString(objc.msg(?objc.Object, url, "absoluteString", .{}));
     const frame = objc.msg(?objc.Object, action, "targetFrame", .{});
     const main = if (frame) |f| objc.msg(objc.BOOL, f, "isMainFrame", .{}) else true;
-    const allowed = if (s.saved_view) |view| saved.allowedNavigation(view, address, main) else web.allowedNavigation(address) or (s.allow_blank and std.mem.eql(u8, address, "about:blank"));
+    const allowed = if (s.ephemeral)
+        (if (main) @import("artifact_url.zig").isSandboxFrameUrl(address) else std.mem.startsWith(u8, address, "https://") or std.mem.eql(u8, address, "about:blank"))
+    else if (s.saved_view) |view|
+        saved.allowedNavigation(view, address, main)
+    else
+        web.allowedNavigation(address) or (s.allow_blank and std.mem.eql(u8, address, "about:blank"));
     if (allowed and frame == null) {
         _ = objc.msg(?objc.Object, s.view, "loadRequest:", .{request});
         handler.invoke(handler, 0);
@@ -195,7 +207,7 @@ fn decide(delegate: objc.Object, _: objc.SEL, _: objc.Object, action: objc.Objec
 
 fn createPopup(delegate: objc.Object, _: objc.SEL, _: objc.Object, _: objc.Object, action: objc.Object, _: objc.Object) callconv(.c) ?objc.Object {
     const s = objc.getZig(Native, delegate) orelse return null;
-    if (s.saved_view != null) return null;
+    if (s.saved_view != null or s.ephemeral) return null;
     const request = objc.msg(objc.Object, action, "request", .{});
     const url = objc.msg(?objc.Object, request, "URL", .{}) orelse return null;
     const address = objc.fromNSString(objc.msg(?objc.Object, url, "absoluteString", .{}));

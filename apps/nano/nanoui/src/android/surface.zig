@@ -79,6 +79,7 @@ pub const Surface = struct {
         };
         if (!window.app.headless and !window.app.flags.hidden) self.text.enablePersistence(window.app.options.name);
         self.ctx = .init(gpa, &self.text);
+        self.ctx.system_reduce_motion = window.app.reduced_motion;
         self.ctx.reduced_motion = window.app.reduced_motion;
         self.updateGeometry();
         return self;

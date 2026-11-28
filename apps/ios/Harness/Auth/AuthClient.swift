@@ -23,6 +23,31 @@ struct AuthTokens: Codable, Equatable {
     var refreshToken: String
 }
 
+struct GraffGatewayKeyResponse: Decodable, Equatable {
+    var apiKey: String
+    var email: String
+
+    var isUsable: Bool {
+        !email.isEmpty && apiKey.range(of: #"^cg_sk_[A-Za-z0-9]{16,128}$"#,
+                                       options: .regularExpression) != nil
+    }
+}
+
+struct AuthExchangeResponse: Decodable {
+    var user: AuthUser
+    var accessToken: String
+    var refreshToken: String
+    /// Older edges and an unavailable key issuer omit this without breaking sign-in.
+    var graffKey: GraffGatewayKeyResponse?
+}
+
+struct GraffGatewayCredential: Codable, Equatable {
+    var apiKey: String
+    var email: String
+    var userId: String
+    var edgeURL: String
+}
+
 enum AuthError: LocalizedError {
     case http(Int, String)
     case invalidResponse
@@ -37,19 +62,31 @@ enum AuthError: LocalizedError {
 
 struct AuthClient {
     var baseURL: URL
+    var session: URLSession = .shared
 
     func exchange(code: String, codeVerifier: String, redirectURI: String,
-                  nonce: String) async throws -> (AuthUser, AuthTokens) {
-        struct Response: Codable {
-            var user: AuthUser
-            var accessToken: String
-            var refreshToken: String
-        }
-        let r: Response = try await post("auth/exchange", body: [
+                  nonce: String, requestGraffKey: Bool = false) async throws -> (AuthUser, AuthTokens, GraffGatewayKeyResponse?) {
+        var body: [String: Any] = [
             "code": code, "codeVerifier": codeVerifier,
             "redirectUri": redirectURI, "nonce": nonce,
-        ])
-        return (r.user, AuthTokens(accessToken: r.accessToken, refreshToken: r.refreshToken))
+        ]
+        if requestGraffKey {
+            body["graffKey"] = true
+            body["deviceLabel"] = "Harness iPhone"
+        }
+        let r: AuthExchangeResponse = try await post("auth/exchange", body: body)
+        let key = r.graffKey?.isUsable == true ? r.graffKey : nil
+        return (r.user, AuthTokens(accessToken: r.accessToken, refreshToken: r.refreshToken), key)
+    }
+
+    /// Best-effort revocation for the phone-owned gateway key. Sync tokens remain separate.
+    func revokeGraffKey(_ apiKey: String) async {
+        guard baseURL.scheme == "https" else { return }
+        var request = URLRequest(url: URL(string: "https://gateway.codegraff.com/v1/keys/revoke")!)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 5
+        _ = try? await session.data(for: request)
     }
 
     func refresh(refreshToken: String, organizationId: String? = nil) async throws -> AuthTokens {
@@ -62,7 +99,7 @@ struct AuthClient {
         struct Response: Codable { var orgs: [AuthOrg] }
         var request = URLRequest(url: baseURL.appending(path: "auth/orgs"))
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         try Self.check(data: data, response: response)
         return try JSONDecoder().decode(Response.self, from: data).orgs
     }
@@ -75,17 +112,17 @@ struct AuthClient {
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(["refreshToken": refreshToken, "confirm": "delete"])
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw AuthError.invalidResponse }
         return AccountDeletion(status: http.statusCode, data: data)
     }
 
-    private func post<T: Decodable>(_ path: String, body: [String: String]) async throws -> T {
+    private func post<T: Decodable>(_ path: String, body: [String: Any]) async throws -> T {
         var request = URLRequest(url: baseURL.appending(path: path))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(body)
-        let (data, response) = try await URLSession.shared.data(for: request)
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await session.data(for: request)
         try Self.check(data: data, response: response)
         return try JSONDecoder().decode(T.self, from: data)
     }
@@ -102,6 +139,25 @@ struct AuthClient {
 
 enum Keychain {
     private static let service = "harness.codegraff.ios"
+    private static let graffGatewayKey = "graffGatewayCredential.v1"
+
+    static func saveGraffGatewayCredential(_ credential: GraffGatewayCredential) {
+        guard let data = try? JSONEncoder().encode(credential),
+              let value = String(data: data, encoding: .utf8) else { return }
+        save(value, key: graffGatewayKey)
+    }
+
+    static func graffGatewayCredential(userId: String, edgeURL: URL) -> GraffGatewayCredential? {
+        guard case .found(let value) = read(key: graffGatewayKey),
+              let data = value.data(using: .utf8),
+              let credential = try? JSONDecoder().decode(GraffGatewayCredential.self, from: data),
+              credential.userId == userId, credential.edgeURL == edgeURL.absoluteString else { return nil }
+        return credential
+    }
+
+    static func deleteGraffGatewayCredential() {
+        delete(key: graffGatewayKey)
+    }
 
     /// What a read found. `unavailable` is not `missing`: before the first unlock after a restart (iOS may
     /// launch the app in the background then), or for an item still under an older accessibility class

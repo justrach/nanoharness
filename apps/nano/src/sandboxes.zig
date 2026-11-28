@@ -177,7 +177,7 @@ pub fn selectedSize(sizes: []const Size, picked: ?[]const u8) ?Size {
     return if (sizes.len > 0) sizes[0] else null;
 }
 
-fn live(s: Sandbox) bool {
+pub fn live(s: Sandbox) bool {
     return eq(s.state, "running") or eq(s.state, "starting");
 }
 

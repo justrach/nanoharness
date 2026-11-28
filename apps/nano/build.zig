@@ -35,6 +35,26 @@ pub fn build(b: *std.Build) void {
     math.addArgs(&.{ "--target", rust_target });
     math.addFileInput(b.path("native_math/Cargo.lock"));
     math.addFileInput(b.path("native_math/src/lib.rs"));
+    const math_vendor = "native_math/vendor/latex-rust";
+    math.addFileInput(b.path(math_vendor ++ "/Cargo.toml"));
+    for ([_][]const u8{ "/src", "/data", "/fonts" }) |subdir| {
+        const path = b.fmt("{s}{s}", .{ math_vendor, subdir });
+        const io = b.graph.io;
+        const dir = b.root.root_dir.handle.openDir(io, path, .{ .iterate = true }) catch @panic("missing native math vendor source");
+        defer dir.close(io);
+        var walker = dir.walk(b.allocator) catch @panic("OOM");
+        defer walker.deinit();
+        var inputs: std.ArrayList([]const u8) = .empty;
+        while (walker.next(io) catch @panic("cannot enumerate native math inputs")) |entry| {
+            if (entry.kind == .file) inputs.append(b.allocator, b.fmt("{s}/{s}", .{ path, entry.path })) catch @panic("OOM");
+        }
+        std.mem.sortUnstable([]const u8, inputs.items, {}, struct {
+            fn lessThan(_: void, a: []const u8, z: []const u8) bool {
+                return std.mem.lessThan(u8, a, z);
+            }
+        }.lessThan);
+        for (inputs.items) |input| math.addFileInput(b.path(input));
+    }
     const math_target = math.addPrefixedOutputDirectoryArg("--target-dir=", "native-math");
     const math_library = math_target.path(b, b.fmt("{s}/release/{s}", .{ rust_target, if (target.result.os.tag == .windows and target.result.abi == .msvc) "harness_native_math.lib" else "libharness_native_math.a" }));
     var linked_math = math_library;
@@ -238,6 +258,10 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addOptions("parity_options", opts);
     const test_step = b.step("test", "Run harness-nano tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+    // Everything `test` runs besides the Zig test binary, so CI can run that
+    // binary itself (`test-build`, then zig-out/bin/test) and log each test's
+    // name as it starts. Add new non-Zig checks here and to `test`.
+    const support_step = b.step("test-support", "Run the checks `test` runs besides the Zig test binary");
     if (b.graph.host.result.os.tag == .windows and target.result.os.tag == .windows and target.result.abi == .msvc) {
         // Exercise the actual Windows PowerShell 5.1 -> cmd -> MSVC boundary
         // for every Zig 0.17 mode, not a mocked shell on a different OS.
@@ -248,6 +272,7 @@ pub fn build(b: *std.Build) void {
         luau_build_test.addArg("-OutputDirectory");
         _ = luau_build_test.addOutputDirectoryArg("luau-build-test");
         test_step.dependOn(&luau_build_test.step);
+        support_step.dependOn(&luau_build_test.step);
         b.step("test-luau-windows", "Test the Windows Luau build helper with the installed MSVC toolset").dependOn(&luau_build_test.step);
     }
     // Pure AST/box geometry, safety and native-ABI regressions from the
@@ -258,6 +283,7 @@ pub fn build(b: *std.Build) void {
     math_tests.addArg("--target-dir");
     math_tests.addDirectoryArg(math_target);
     test_step.dependOn(&math_tests.step);
+    support_step.dependOn(&math_tests.step);
     b.step("test-build", "Build tests for a separate Windows or native runner").dependOn(&b.addInstallArtifact(tests, .{}).step);
 
     // `zig build snap -- scene.json out-dir`: the window drawn offscreen

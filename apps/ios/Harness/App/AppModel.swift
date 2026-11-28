@@ -80,6 +80,9 @@ final class AppModel {
     @ObservationIgnored private var usageClock: UInt64 = 0
     @ObservationIgnored private var memoryWarningObserver: NSObjectProtocol?
     private var config: AppConfig?
+    @ObservationIgnored private var authGeneration: UInt64 = 0
+    @ObservationIgnored private var pendingGraffGatewayKey: (userId: String, edgeURL: String, key: GraffGatewayKeyResponse)?
+    @ObservationIgnored private let phoneCloud = PhoneCloudSandboxCoordinator()
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
     @ObservationIgnored private var lastPathKey: String?
 
@@ -127,6 +130,7 @@ final class AppModel {
     var launchSheet: String?
     /// Screenshot rig: auto-send a canned prompt from the new-session canvas.
     var launchAutosend = false
+    var launchAutosendPrompt: String?
     /// Screenshot rig: the session composer takes keyboard focus after ~1.5s,
     /// to drive the keyboard-up transcript states headless.
     var launchFocusComposer = false
@@ -239,6 +243,9 @@ final class AppModel {
                 launchSheet = args[ix + 1]
             }
             launchAutosend = args.contains("-autosend")
+            if let ix = args.firstIndex(of: "-autosendtext"), ix + 1 < args.count {
+                launchAutosendPrompt = args[ix + 1]
+            }
             launchFocusComposer = args.contains("-focuscomposer")
             // Rig: open with an EMPTY transcript that lands in bulk 2.5s
             // later — the live checkpoint-backfill shape (loader → reveal).
@@ -326,6 +333,26 @@ final class AppModel {
     var signInBusy = false
     var signInError: String?
 
+    var hasPhoneGatewayKey: Bool {
+        if demo != nil { return true }
+        guard authModeRaw == AppConfig.Mode.codegraff.rawValue,
+              let edgeURL = URL(string: edgeURLString) else { return false }
+        return Keychain.graffGatewayCredential(userId: storedUserId, edgeURL: edgeURL) != nil
+    }
+
+    private var phoneGatewayCredential: GraffGatewayCredential? {
+        guard demo == nil, authModeRaw == AppConfig.Mode.codegraff.rawValue,
+              let edgeURL = URL(string: edgeURLString) else { return nil }
+        return Keychain.graffGatewayCredential(userId: storedUserId, edgeURL: edgeURL)
+    }
+
+    private func invalidatePhoneGatewayKeyIfRejected(_ error: Error) {
+        guard let gatewayError = error as? CloudGatewayError,
+              case .http(let status, _) = gatewayError,
+              status == 401 || status == 403 else { return }
+        Keychain.deleteGraffGatewayCredential()
+    }
+
     /// CodeGraff browser sign-in → Harness callback → edge exchange with PKCE.
     func startSignIn() {
         let pending = PendingSignIn.start()
@@ -393,20 +420,32 @@ final class AppModel {
     /// connects straight away when exactly one org exists).
     func signIn(edgeURL: URL, code: String, codeVerifier: String,
                 redirectURI: String, nonce: String) async throws {
+        authGeneration &+= 1
+        var generation = authGeneration
         let client = AuthClient(baseURL: edgeURL)
-        let (user, tokens) = try await client.exchange(code: code,
-                                                       codeVerifier: codeVerifier,
-                                                       redirectURI: redirectURI,
-                                                       nonce: nonce)
+        let (user, tokens, graffKey) = try await client.exchange(code: code,
+                                                                 codeVerifier: codeVerifier,
+                                                                 redirectURI: redirectURI,
+                                                                 nonce: nonce,
+                                                                 requestGraffKey: true)
+        guard authGeneration == generation else { return }
+        // A different account must never inherit this phone's cached data or sandbox key.
+        if !storedUserId.isEmpty,
+           (storedUserId != user.id || edgeURLString != edgeURL.absoluteString) {
+            signOut()
+            authGeneration &+= 1
+            generation = authGeneration
+        }
+        pendingGraffGatewayKey = graffKey.map { (user.id, edgeURL.absoluteString, $0) }
         edgeURLString = edgeURL.absoluteString
         authModeRaw = AppConfig.Mode.codegraff.rawValue
-        // A different account signing in over an expired session must not inherit its data.
-        if sessionExpired, !storedUserId.isEmpty, storedUserId != user.id { signOut() }
         storedUserId = user.id
         let orgs = try await client.orgs(accessToken: tokens.accessToken)
+        guard authGeneration == generation else { return }
         if let only = orgs.first, orgs.count == 1 {
             try await selectOrg(only, tokens: tokens)
         } else if orgs.isEmpty {
+            pendingGraffGatewayKey = nil
             throw AuthError.http(403, "No organizations for this account")
         } else {
             phase = .pickingOrg(tokens, orgs)
@@ -414,16 +453,28 @@ final class AppModel {
     }
 
     func selectOrg(_ org: AuthOrg, tokens: AuthTokens) async throws {
+        let generation = authGeneration
         guard let url = URL(string: edgeURLString) else { return }
         // Re-scope the access token to the org (adds the org_id claim).
         let client = AuthClient(baseURL: url)
         let scoped = try await client.refresh(refreshToken: tokens.refreshToken,
                                               organizationId: org.organizationId)
+        guard authGeneration == generation else { return }
         Keychain.saveTokens(scoped)
+        if let pending = pendingGraffGatewayKey, pending.userId == storedUserId,
+           pending.edgeURL == url.absoluteString {
+            let previous = Keychain.graffGatewayCredential(userId: pending.userId, edgeURL: url)
+            Keychain.saveGraffGatewayCredential(GraffGatewayCredential(
+                apiKey: pending.key.apiKey, email: pending.key.email,
+                userId: pending.userId, edgeURL: pending.edgeURL))
+            if let previous, previous.apiKey != pending.key.apiKey {
+                Task { await client.revokeGraffKey(previous.apiKey) }
+            }
+        }
+        pendingGraffGatewayKey = nil
         storedOrgId = org.organizationId
-        if sessionExpired, let config, config.orgId == org.organizationId {
-            // Same account signing back in: hand the live connection its new credential and keep every
-            // open session, draft and cached doc.
+        if let config, config.userId == storedUserId, config.orgId == org.organizationId {
+            // Same-account sign-in repairs the phone key without clearing its open sessions, drafts or docs.
             config.updateTokens(scoped)
             sessionExpired = false
             foregrounded()
@@ -436,6 +487,11 @@ final class AppModel {
 
     /// Dev-mode edge (AUTH_MODE=dev): bearer = "userId@orgId".
     func signInDev(edgeURL: URL, userId: String, orgId: String) {
+        if let previousURL = URL(string: edgeURLString),
+           let credential = Keychain.graffGatewayCredential(userId: storedUserId, edgeURL: previousURL) {
+            Task { await AuthClient(baseURL: previousURL).revokeGraffKey(credential.apiKey) }
+        }
+        Keychain.deleteGraffGatewayCredential()
         edgeURLString = edgeURL.absoluteString
         authModeRaw = AppConfig.Mode.dev.rawValue
         storedUserId = userId
@@ -463,6 +519,13 @@ final class AppModel {
     }
 
     func signOut() {
+        authGeneration &+= 1
+        pendingGraffGatewayKey = nil
+        if let edgeURL = URL(string: edgeURLString),
+           let credential = Keychain.graffGatewayCredential(userId: storedUserId, edgeURL: edgeURL) {
+            Task { await AuthClient(baseURL: edgeURL).revokeGraffKey(credential.apiKey) }
+        }
+        Keychain.deleteGraffGatewayCredential()
         PushNotifications.shared.signingOut(config: demo == nil ? config : nil)
         workspace?.stop()
         workspace = nil
@@ -762,7 +825,8 @@ final class AppModel {
             try? await Task.sleep(for: .seconds(ProcessInfo.processInfo.arguments.contains("-slow-catalog") ? 15 : 0.1))
             let args = ProcessInfo.processInfo.arguments
             // `-demo-graff`: the demo device also runs graff (chat mode's agent).
-            let graff = args.contains("-demo-graff") ? [HarnessInfo(id: ChatMode.harness, label: "Graff")] : []
+            let graff = args.contains("-demo-graff") || demo?.isPhoneCloudDevice(deviceId) == true
+                ? [HarnessInfo(id: ChatMode.harness, label: "Graff")] : []
             return DeviceCatalog(items: args.contains("-no-agents") ? [] : HarnessCatalog.harnesses + graff, isLive: true)
         }
         if let live = await workspace?.listHarnesses(deviceId: deviceId) {
@@ -995,24 +1059,122 @@ final class AppModel {
     /// Demo mode serves a made-up account.
     func cloudSandboxes(deviceId: String) async throws -> CodegraffSandboxes? {
         if let demo { return demo.cloud.sandboxes }
+        if deviceId == self.deviceId {
+            guard let credential = phoneGatewayCredential else { return nil }
+            do { return try await phoneCloud.list(credential) }
+            catch { invalidatePhoneGatewayKeyIfRejected(error); throw error }
+        }
         guard let workspace else { throw RelayError.notConnected }
         return try await workspace.codegraffSandboxes(deviceId: deviceId)
     }
 
-    func createCloudSandbox(deviceId: String, size: String?) async throws {
+    func cloudComputer(deviceId: String) async throws -> CodegraffComputerOffer? {
+        if demo != nil { return nil }
+        if deviceId == self.deviceId {
+            guard let credential = phoneGatewayCredential else { return nil }
+            do { return try await phoneCloud.computerOffer(credential) }
+            catch { invalidatePhoneGatewayKeyIfRejected(error); throw error }
+        }
+        guard let workspace else { throw RelayError.notConnected }
+        return try await workspace.codegraffComputer(deviceId: deviceId)
+    }
+
+    func artifactFrameURL(artifactId: String, hostDeviceId: String?) async throws -> CodegraffArtifactFrame {
+        if let credential = phoneGatewayCredential {
+            do { return try await phoneCloud.artifactFrameURL(credential, id: artifactId) }
+            catch { invalidatePhoneGatewayKeyIfRejected(error); throw error }
+        }
+        guard let workspace, let target = artifactHostDeviceId(preferred: hostDeviceId) else {
+            throw RelayError.notConnected
+        }
+        return try await workspace.codegraffArtifactFrameURL(deviceId: target, artifactId: artifactId)
+    }
+
+    func setArtifactVisibility(artifactId: String, visibility: String,
+                               hostDeviceId: String?) async throws -> CodegraffArtifactMeta {
+        if let credential = phoneGatewayCredential {
+            do {
+                return try await phoneCloud.setArtifactVisibility(credential, id: artifactId, visibility: visibility)
+            } catch {
+                invalidatePhoneGatewayKeyIfRejected(error)
+                throw error
+            }
+        }
+        guard let workspace, let target = artifactHostDeviceId(preferred: hostDeviceId) else {
+            throw RelayError.notConnected
+        }
+        return try await workspace.codegraffArtifactSetVisibility(deviceId: target, artifactId: artifactId,
+                                                                 visibility: visibility)
+    }
+
+    private func artifactHostDeviceId(preferred: String?) -> String? {
+        if let preferred, !preferred.isEmpty, preferred != self.deviceId, deviceOnline(preferred) {
+            return preferred
+        }
+        if let online = devices.first(where: { $0.canHostSessions && deviceOnline($0.id) }) {
+            return online.id
+        }
+        return preferred
+    }
+
+    @discardableResult
+    func createCloudSandbox(deviceId: String, size: String?) async throws -> String? {
         if let demo {
-            try? await Task.sleep(nanoseconds: 1_200_000_000)  // a create takes a while
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            if ProcessInfo.processInfo.arguments.contains("-demo-phone-cloud") {
+                return demo.startPhoneCloudSandbox(size: size)
+            }
             demo.cloud.create(size: size)
-            return
+            return nil
+        }
+        if deviceId == self.deviceId {
+            guard let credential = phoneGatewayCredential else { throw CloudGatewayError.unavailable("Sign out and back in to enable cloud sandboxes on this phone.") }
+            do { return try await phoneCloud.provision(credential, size: size).id }
+            catch { invalidatePhoneGatewayKeyIfRejected(error); throw error }
         }
         guard let workspace else { throw RelayError.notConnected }
         try await workspace.createCodegraffSandbox(deviceId: deviceId, size: size)
+        return nil
+    }
+
+    func startPhoneCloudSandbox(size: String?) async throws -> String {
+        if let demo {
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            return demo.startPhoneCloudSandbox(size: size)
+        }
+        guard let credential = phoneGatewayCredential else {
+            throw CloudGatewayError.unavailable("Sign out and back in to enable cloud sandboxes on this phone.")
+        }
+        do { return try await phoneCloud.provision(credential, size: size).id }
+        catch { invalidatePhoneGatewayKeyIfRejected(error); throw error }
+    }
+
+    func phoneCloudChatReadiness(sandboxId: String) async -> PhoneCloudReadiness {
+        guard let host = PhoneCloudReadinessRules.host(sandboxId: sandboxId, devices: devices,
+                                                       online: { deviceOnline($0) }) else {
+            return .waitingForDevice
+        }
+        let harnesses = await listHarnesses(deviceId: host.id)
+        guard harnesses.isLive, harnesses.items.contains(where: { $0.id == ChatMode.harness }) else {
+            return .waitingForAgent
+        }
+        let models = await listModels(deviceId: host.id, harness: ChatMode.harness)
+        guard PhoneCloudReadinessRules.canStartChat(harnesses: harnesses, models: models) else {
+            return .waitingForModel
+        }
+        return .ready(host.id)
     }
 
     func cloudSandboxAction(deviceId: String, id: String, action: CloudSandboxAction) async throws {
         if let demo {
             try? await Task.sleep(nanoseconds: 400_000_000)
             demo.cloud.act(id: id, action: action)
+            return
+        }
+        if deviceId == self.deviceId {
+            guard let credential = phoneGatewayCredential else { throw CloudGatewayError.unavailable("Sign out and back in to enable cloud sandboxes on this phone.") }
+            do { try await phoneCloud.act(credential, id: id, action: action) }
+            catch { invalidatePhoneGatewayKeyIfRejected(error); throw error }
             return
         }
         guard let workspace else { throw RelayError.notConnected }

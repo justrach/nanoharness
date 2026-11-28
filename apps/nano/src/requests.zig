@@ -17,6 +17,11 @@ pub fn none(method: []const u8) Request(Empty) {
     return .{ .method = method, .params = rpc.empty };
 }
 
+/// Aggregate this device's locally recorded token usage; it accepts no paths or targets.
+pub fn localTokenUsage() Request(Empty) {
+    return none("LocalTokenUsage");
+}
+
 // ── bots ─────────────────────────────────────────────────────────────
 
 /// One change to the user's bots (`BotAction`). Which fields count depends
@@ -287,8 +292,15 @@ pub fn discard(chat_id: []const u8, checkout_id: []const u8, checksum: []const u
     return .{ .method = "DiscardWorkingTree", .params = .{ .chatId = chat_id, .checkoutId = checkout_id, .expectedChecksum = checksum, .targetDeviceId = host } };
 }
 
-pub fn listDirectory(chat_id: []const u8, dir: []const u8, include_ignored: bool, host: ?[]const u8) Request(struct { chatId: []const u8, directory: []const u8, includeIgnored: bool, targetDeviceId: ?[]const u8 }) {
-    return .{ .method = "ListWorkspaceDirectory", .params = .{ .chatId = chat_id, .directory = dir, .includeIgnored = include_ignored, .targetDeviceId = host } };
+const DirectoryListing = struct { chatId: []const u8, directory: []const u8, includeIgnored: bool, cursor: ?[]const u8, targetDeviceId: ?[]const u8 };
+
+pub fn listDirectory(chat_id: []const u8, dir: []const u8, include_ignored: bool, host: ?[]const u8) Request(DirectoryListing) {
+    return listDirectoryPage(chat_id, dir, include_ignored, null, host);
+}
+
+/// The engine's `nextCursor` is an opaque string, scoped to the directory and visibility mode.
+pub fn listDirectoryPage(chat_id: []const u8, dir: []const u8, include_ignored: bool, cursor: ?[]const u8, host: ?[]const u8) Request(DirectoryListing) {
+    return .{ .method = "ListWorkspaceDirectory", .params = .{ .chatId = chat_id, .directory = dir, .includeIgnored = include_ignored, .cursor = cursor, .targetDeviceId = host } };
 }
 
 pub fn searchFiles(chat_id: []const u8, query: []const u8, include_ignored: bool, host: ?[]const u8) Request(struct { chatId: []const u8, query: []const u8, includeIgnored: bool, limit: u16, targetDeviceId: ?[]const u8 }) {
@@ -348,6 +360,16 @@ pub fn deleteAction(space_id: []const u8, action_id: []const u8, host: ?[]const 
 
 pub fn runAction(space_id: []const u8, chat_id: []const u8, action_id: []const u8, host: ?[]const u8) Request(struct { spaceId: []const u8, chatId: []const u8, actionId: []const u8, cols: u16, rows: u16, targetDeviceId: ?[]const u8 }) {
     return .{ .method = "RunProjectAction", .params = .{ .spaceId = space_id, .chatId = chat_id, .actionId = action_id, .cols = 80, .rows = 24, .targetDeviceId = host } };
+}
+
+pub const TerminalCommand = struct { shell: []const u8, source: []const u8 };
+
+pub fn openCommandTerminal(chat: []const u8, cwd: []const u8, command: TerminalCommand) Request(struct { chatId: []const u8, cwd: []const u8, command: TerminalCommand, cols: u16, rows: u16 }) {
+    return .{ .method = "OpenLocalCommandTerminal", .params = .{ .chatId = chat, .cwd = cwd, .command = command, .cols = 80, .rows = 24 } };
+}
+
+pub fn writeTerminal(terminal_id: []const u8, data: []const u8) Request(struct { terminalId: []const u8, data: []const u8 }) {
+    return .{ .method = "WriteTerminal", .params = .{ .terminalId = terminal_id, .data = data } };
 }
 
 pub fn subscribeTerminal(terminal_id: []const u8, host: ?[]const u8) Request(struct { terminalId: []const u8, targetDeviceId: ?[]const u8 }) {

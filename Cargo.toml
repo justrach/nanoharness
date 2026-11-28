@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.216"
+version = "0.2.245"
 edition = "2024"
 license-file = "LICENSE"
 publish = false
@@ -68,6 +68,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+rand_core = { version = "0.6", features = ["getrandom"] }
 zip = { version = "9.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 notify = "7"
 portable-pty = "0.8"
@@ -86,19 +91,19 @@ lto = "thin"
 strip = "symbols"
 
 [profile.dist]
-# What ships (scripts/package-macos.sh, package-linux.sh, package-arch.sh,
-# package-windows.ps1): fat LTO in one codegen unit merges the generic code
-# thin LTO leaves duplicated. The macOS app binary measured 101.9 MB with
-# `release`, 84.5 MB with this, for a link of about 8 minutes on an M-series
-# Mac. Kept out of `release` so CI's release-mode tests stay fast.
+# Speed-oriented fat-LTO distribution profile. The shipped Rust engine uses
+# `headless` below, while the macOS app binary measured 101.9 MB with `release`,
+# 84.5 MB with this, for a link of about 8 minutes on an M-series Mac. Kept out
+# of `release` so CI's release-mode tests stay fast.
 inherits = "release"
 lto = "fat"
 codegen-units = 1
 
 [profile.headless]
-# Size-optimized headless daemon build (`cargo build --profile headless -p harness-engine --bin harness-engine`).
+# Size-optimized Rust engine profile used by shipped desktop packages
+# (`cargo build --profile headless -p harness-engine --bin harness-engine`).
 inherits = "dist"
-opt-level = "s"
+opt-level = "z"
 
 [profile.dev]
 # Optimize external dependencies in dev builds while keeping workspace crates fast to compile.

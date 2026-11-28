@@ -191,6 +191,7 @@ fn answer(core: &EngineCore, request_id: &str, label: &str) -> String {
                     question_id: "branch".into(),
                     labels: vec![label.into()],
                 }],
+                from_agent: false,
             },
         )
         .expect("queue answer")
@@ -286,6 +287,7 @@ fn seed_saved_question(core: &EngineCore, branch: &str) -> String {
                     multi_select: false,
                     prefill: None,
                     multiline: false,
+                    requires_human_ui: false,
                 }],
                 resolved: false,
             }],

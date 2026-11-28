@@ -322,7 +322,7 @@ test "artifact links failed reads release active transfer for explicit retries" 
         try testing.expectEqual(count, try requestCount(&a));
         try testing.expect(a.artifacts.active == null);
         try testing.expect(a.artifacts.request == null);
-        try containsNotice(&a, "host could not read");
+        try containsNotice(&a, "Couldn't read “promo.mp4” on its host");
     }
     try testing.expectEqual(@as(usize, 0), Recorder.calls);
 }

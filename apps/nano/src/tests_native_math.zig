@@ -141,6 +141,28 @@ fn geometry(source: []const u8, shot: ?[]const u8) !ui.Rect {
     return error.NativeEquationMissing;
 }
 
+test "native math UI renders all supported LaTeX regression rows in a table" {
+    theme.registerFonts();
+    var f = Fixture{ .source =
+        \\| Case | Formula |
+        \\|---|---|
+        \\| Boxed integral | \(\displaystyle\iint_T \boxed{u}\,g(u,v)\,du\,dv\) |
+        \\| Binary spacing | $a\,+b$ |
+        \\| Nested style | $\frac{\displaystyle\frac{u}{v}}{w}$ |
+        \\| Operator placement | $\int\limits_{u}^{v}$ and $\sum\nolimits_{i}^{n}$ |
+    };
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 760, .height = 425 });
+    defer t.deinit();
+    t.settle(3);
+    if (std.c.getenv("NANO_MATH_COVERAGE_SNAP")) |path| try t.screenshot(std.mem.span(path));
+    var equations: usize = 0;
+    for (t.ctx.nodes.items) |node| {
+        if (node.content == .image) equations += 1;
+    }
+    try testing.expectEqual(@as(usize, 5), equations);
+}
+
 test "native math UI paragraph links beside equations still activate their destination" {
     theme.registerFonts();
     var a: @import("app.zig").App = .init(testing.allocator, testing.io, 1);
@@ -349,4 +371,348 @@ test "sibling display equations have distinct selection ids and copy independent
     const p1 = std.mem.indexOf(u8, t.ctx.selection.text.items, "\\sum") orelse return error.MissingSecondEquation;
     const p2 = std.mem.indexOf(u8, t.ctx.selection.text.items, "m c^2") orelse return error.MissingThirdEquation;
     try testing.expect(p0 < p1 and p1 < p2);
+}
+
+test "native math UI inline \\displaystyle renders at display sizing and copies original source (#91)" {
+    theme.registerFonts();
+    const source = "Value: $\\displaystyle \\frac{p+q}{r}$";
+    var a: @import("app.zig").App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.openChat("math", null);
+    a.settings.set(.transcript_compact_mode, false);
+    const data = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"m","role":"assistant","status":"complete","parts":[{"kind":"text","id":"p","text":"Value: $\\displaystyle \\frac{p+q}{r}$"}]}]}
+    , .{});
+    defer data.deinit();
+    try a.transcript.apply(data.value);
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1100, .height = 700 });
+    defer t.deinit();
+    t.settle(3);
+    if (std.c.getenv("NANO_MATH_STYLE_SNAP")) |raw| {
+        try t.screenshot(std.mem.span(raw));
+    }
+
+    const math = @import("native_math.zig");
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const styled_eq = math.layout(arena.allocator(), "\\displaystyle \\frac{p+q}{r}", false, 15, .black) orelse return error.MissingStyledEquation;
+    const display_eq = math.layout(arena.allocator(), "\\frac{p+q}{r}", true, 15, .black) orelse return error.MissingDisplayEquation;
+    try testing.expectApproxEqAbs(display_eq.height, styled_eq.height, 0.01);
+
+    const styled = try geometry("Value: $\\displaystyle \\frac{p+q}{r}$", null);
+    const plain = try geometry("Value: $\\frac{p+q}{r}$", null);
+    try testing.expect(styled.h > plain.h * 1.15);
+    try testing.expectApproxEqAbs(styled_eq.height, styled.h, 0.25);
+
+    var copy_id: u64 = 0;
+    for (t.ctx.nodes.items) |node| {
+        if (node.content == .text and std.mem.eql(u8, node.content.text.str, source)) {
+            copy_id = node.id;
+            break;
+        }
+    }
+    try testing.expect(copy_id != 0);
+    t.ctx.selection.anchor = .{ .id = copy_id, .at = 0 };
+    t.ctx.selection.focus = .{ .id = copy_id, .at = source.len };
+    t.ctx.selection.moved = true;
+    t.frame();
+    try testing.expectEqualStrings(source, t.ctx.selection.text.items);
+}
+
+test "native math parses multiple display equations on one source line (#154)" {
+    theme.registerFonts();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    for ([_][]const u8{
+        "\\[a^2\\] and \\[b^2\\]",
+        "$$a^2$$ and $$b^2$$",
+        "Example: \\[a^2\\] and \\[b^2\\]",
+        "Example: $$a^2$$ and $$b^2$$",
+    }) |src| {
+        const blocks = md.parse(a, src, pal);
+        try testing.expectEqual(@as(usize, 1), blocks.len);
+        try testing.expect(blocks[0] == .paragraph);
+        const p = blocks[0].paragraph;
+        try testing.expectEqual(@as(usize, 2), p.maths.len);
+        try testing.expectEqualStrings("a^2", p.maths[0].source);
+        try testing.expect(p.maths[0].display);
+        try testing.expectEqualStrings("b^2", p.maths[1].source);
+        try testing.expect(p.maths[1].display);
+        try testing.expect(std.mem.indexOf(u8, p.text, " and ") != null);
+    }
+
+    for ([_][]const u8{ "$$a^2$$", "\\[a^2\\]" }) |single| {
+        const blocks = md.parse(a, single, pal);
+        try testing.expectEqual(@as(usize, 1), blocks.len);
+        try testing.expect(blocks[0] == .math);
+        try testing.expectEqualStrings("a^2", blocks[0].math.maths[0].source);
+        try testing.expect(blocks[0].math.maths[0].display);
+    }
+
+    const multiline = "\\[\n\\begin{matrix}a&b\\\\c&d\\end{matrix}\n\\]";
+    const mblocks = md.parse(a, multiline, pal);
+    try testing.expectEqual(@as(usize, 1), mblocks.len);
+    try testing.expect(mblocks[0] == .math);
+    try testing.expect(mblocks[0].math.maths[0].display);
+
+    for ([_][]const u8{ "\\[a^2\\] and \\[b^2\\]", "$$a^2$$ and $$b^2$$" }) |src| {
+        var f = Fixture{ .source = src };
+        var t: ui.Tester = undefined;
+        try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 620, .height = 240 });
+        defer t.deinit();
+        t.settle(3);
+        var images: usize = 0;
+        for (t.ctx.nodes.items) |node| {
+            if (node.content == .image) images += 1;
+        }
+        try testing.expectEqual(@as(usize, 2), images);
+    }
+}
+
+test "native math recovers at later complete equation after unmatched opener (#153)" {
+    theme.registerFonts();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    for ([_][]const u8{
+        "Unfinished \\(draft; then $x^2$.",
+        "Unfinished $$draft; then $x^2$.",
+        "Unfinished \\[draft; then $x^2$.",
+        "Unfinished $draft_1; then \\(x^2\\).",
+    }) |src| {
+        const p = md.parse(a, src, pal)[0].paragraph;
+        try testing.expectEqual(@as(usize, 1), p.maths.len);
+        try testing.expectEqualStrings("x^2", p.maths[0].source);
+        try testing.expectEqualStrings(src, p.text);
+    }
+
+    for ([_][]const u8{
+        "Unfinished \\(draft; then $x^2$ and **bold**.",
+        "Unfinished $$draft; then **bold** and $x^2$.",
+    }) |src| {
+        const p = md.parse(a, src, pal)[0].paragraph;
+        try testing.expectEqual(@as(usize, 1), p.maths.len);
+        try testing.expectEqualStrings("x^2", p.maths[0].source);
+        var saw_bold = false;
+        for (p.spans) |sp| {
+            if (sp.weight == .semibold and std.mem.eql(u8, p.text[sp.start..sp.end], "bold")) {
+                saw_bold = true;
+                break;
+            }
+        }
+        try testing.expect(saw_bold);
+    }
+
+    for ([_][]const u8{
+        "\\(x_i",
+        "$$x_{a}_b",
+        "$x_{a}_b",
+        "Unfinished \\(draft",
+        "Unfinished \\(draft; then `$x^2$`.",
+    }) |incomplete| {
+        const p = md.parse(a, incomplete, pal)[0].paragraph;
+        try testing.expectEqual(@as(usize, 0), p.maths.len);
+        if (std.mem.indexOfScalar(u8, incomplete, '`') == null) {
+            try testing.expectEqualStrings(incomplete, p.text);
+        }
+    }
+
+    var f = Fixture{ .source = "Unfinished \\(draft" };
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 620, .height = 240 });
+    defer t.deinit();
+    t.settle(3);
+    var before_images: usize = 0;
+    for (t.ctx.nodes.items) |node| {
+        if (node.content == .image) before_images += 1;
+    }
+    try testing.expectEqual(@as(usize, 0), before_images);
+    try testing.expect(t.hasText("Unfinished \\(draft"));
+
+    f.source = "Unfinished \\(draft; then $x^2$.";
+    t.settle(3);
+    var after_images: usize = 0;
+    for (t.ctx.nodes.items) |node| {
+        if (node.content == .image) after_images += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), after_images);
+}
+
+test "native math prevents dollar price from stealing later inline equation opener (#155)" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    for ([_][]const u8{
+        "Pay $9, then ($x^2$).",
+        "Pay $9.99, then ($x^2$).",
+        "Pay $1,200, then [$x^2$].",
+        "Pay $9, then \"$x^2$\".",
+        "Pay $9 (not $10) for ($x^2$).",
+    }) |src| {
+        const p = md.parse(a, src, pal)[0].paragraph;
+        try testing.expectEqual(@as(usize, 1), p.maths.len);
+        try testing.expectEqualStrings("x^2", p.maths[0].source);
+        try testing.expectEqualStrings(src, p.text);
+    }
+
+    const streaming = md.parse(a, "Pay $9, then ($x^2", pal)[0].paragraph;
+    try testing.expectEqual(@as(usize, 0), streaming.maths.len);
+
+    const code_price = md.parse(a, "`$9, then ($x^2$)`", pal)[0].paragraph;
+    try testing.expectEqual(@as(usize, 0), code_price.maths.len);
+
+    for ([_]struct { src: []const u8, eq: []const u8 }{
+        .{ .src = "$5$", .eq = "5" },
+        .{ .src = "$1, 2$", .eq = "1, 2" },
+        .{ .src = "$2x + 3$", .eq = "2x + 3" },
+        .{ .src = "$12.50 - 3$", .eq = "12.50 - 3" },
+    }) |case| {
+        const p = md.parse(a, case.src, pal)[0].paragraph;
+        try testing.expectEqual(@as(usize, 1), p.maths.len);
+        try testing.expectEqualStrings(case.eq, p.maths[0].source);
+    }
+
+    const numeric_then_math = md.parse(a, "$1 + 2$, then ($x^2$)", pal)[0].paragraph;
+    try testing.expectEqual(@as(usize, 2), numeric_then_math.maths.len);
+    try testing.expectEqualStrings("1 + 2", numeric_then_math.maths[0].source);
+    try testing.expectEqualStrings("x^2", numeric_then_math.maths[1].source);
+}
+
+test "native math UI delimiter regressions render cleanly (#153 #154 #155)" {
+    theme.registerFonts();
+    var f = Fixture{ .source =
+        \\**#153 Unmatched opener:** Unfinished \(draft; then $x^2$.
+        \\
+        \\Unfinished $$draft; then $x^2$.
+        \\
+        \\**#154 Same-line display:**
+        \\
+        \\\[a^2\] and \[b^2\]
+        \\
+        \\$$a^2$$ and $$b^2$$
+        \\
+        \\**#155 Currency before equation:** Pay $9, then ($x^2$).
+    };
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 560, .height = 410 });
+    defer t.deinit();
+    t.settle(3);
+    if (std.c.getenv("NANO_MATH_DELIM_SNAP")) |raw| {
+        try t.screenshot(std.mem.span(raw));
+    }
+
+    var equations: usize = 0;
+    var saw_price = false;
+    var saw_raw_eq = false;
+    for (t.ctx.nodes.items) |node| {
+        if (node.content == .image) equations += 1;
+        if (node.content == .text and node.content.text.color.a != 0) {
+            if (std.mem.indexOf(u8, node.content.text.str, "$9") != null) saw_price = true;
+            if (std.mem.indexOf(u8, node.content.text.str, "x^2$") != null) saw_raw_eq = true;
+        }
+    }
+    try testing.expectEqual(@as(usize, 7), equations);
+    try testing.expect(saw_price);
+    try testing.expect(!saw_raw_eq);
+}
+
+const ams_forms =
+    \\$\operatorname*{argmax}_{x} f(x)$
+    \\
+    \\$\operatorname{argmax}_{x} f(x)$
+    \\
+    \\$\left\langle a\middle\vert b\right\rangle$
+    \\
+    \\$\begin{gathered}a=b\\c=d\end{gathered}$
+;
+
+fn expectLiteral(source: []const u8) !void {
+    theme.registerFonts();
+    var f = Fixture{ .source = source };
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 620, .height = 240 });
+    defer t.deinit();
+    t.settle(3);
+    for (t.ctx.nodes.items) |node| if (node.content == .image) return error.UnexpectedEquation;
+    try testing.expect(t.hasText(source));
+}
+
+test "native math UI AMS forms all typeset without literal source (#156)" {
+    theme.registerFonts();
+    var f = Fixture{ .source = ams_forms };
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 400, .height = 240 });
+    defer t.deinit();
+    t.settle(3);
+    if (std.c.getenv("NANO_SNAP_DIR")) |dir| {
+        var buf: [2048]u8 = undefined;
+        try t.screenshot(try std.fmt.bufPrint(&buf, "{s}/math-ams-forms.png", .{std.mem.span(dir)}));
+    }
+    var equations: usize = 0;
+    for (t.ctx.nodes.items) |node| {
+        if (node.content == .image) equations += 1;
+        if (node.content != .text or node.content.text.color.a == 0) continue;
+        try testing.expect(std.mem.indexOfScalar(u8, node.content.text.str, '\\') == null);
+    }
+    try testing.expectEqual(@as(usize, 4), equations);
+}
+
+test "native math UI starred operators place display limits below the name (#156)" {
+    const starred = try geometry("$$\\operatorname*{argmax}_{x}$$", null);
+    const plain = try geometry("$$\\operatorname{argmax}_{x}$$", null);
+    try testing.expect(starred.h > plain.h * 1.2);
+    try testing.expect(starred.w < plain.w);
+    const inline_starred = try geometry("$\\operatorname*{argmax}_{x} f(x)$", null);
+    const inline_plain = try geometry("$\\operatorname{argmax}_{x} f(x)$", null);
+    try testing.expectApproxEqAbs(inline_plain.w, inline_starred.w, 0.01);
+    try testing.expectApproxEqAbs(inline_plain.h, inline_starred.h, 0.01);
+    _ = try geometry("$$\\operatorname*{arg\\,max}_{x} f(x)$$", null);
+    for ([_][]const u8{ "$\\operatorname*x$", "$\\operatorname*{}$", "$\\operatorname*{\\unsupported}$" }) |source| try expectLiteral(source);
+}
+
+test "native math UI starred operators in one paragraph are not emphasis (#156)" {
+    theme.registerFonts();
+    var f = Fixture{ .source = "Let $\\operatorname*{argmax}_{x} f$ and $\\operatorname*{argmin}_{y} g$ differ" };
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 620, .height = 240 });
+    defer t.deinit();
+    t.settle(3);
+    var equations: usize = 0;
+    for (t.ctx.nodes.items) |node| {
+        if (node.content == .image) equations += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), equations);
+}
+
+test "native math UI middle delimiters stretch with their enclosing pair (#156)" {
+    const named = try geometry("$\\left\\langle a\\middle\\vert b\\right\\rangle$", null);
+    const bar = try geometry("$\\left\\langle a\\middle| b\\right\\rangle$", null);
+    try testing.expectApproxEqAbs(named.w, bar.w, 0.01);
+    try testing.expectApproxEqAbs(named.h, bar.h, 0.01);
+    const joined = try geometry("$\\left\\langle ab\\right\\rangle$", null);
+    try testing.expect(bar.w > joined.w);
+    try testing.expectApproxEqAbs(joined.h, bar.h, 0.01);
+    const tall = try geometry("$$\\left\\langle\\frac{a}{b}\\middle| c\\right\\rangle$$", null);
+    const tall_joined = try geometry("$$\\left\\langle\\frac{a}{b} c\\right\\rangle$$", null);
+    try testing.expectApproxEqAbs(tall_joined.h, tall.h, 0.01);
+    for ([_][]const u8{ "$a\\middle|b$", "$\\left(a\\middle|b$", "$\\left({a\\middle|b}\\right)$" }) |source| try expectLiteral(source);
+}
+
+test "native math UI gathered rows stack and center (#156)" {
+    const one = try geometry("$a=b$", null);
+    const two = try geometry("$\\begin{gathered}a=b\\\\c=d\\end{gathered}$", null);
+    const aligned = try geometry("$\\begin{aligned}a=b\\\\c=d\\end{aligned}$", null);
+    try testing.expect(two.h > one.h * 1.5);
+    try testing.expectApproxEqAbs(aligned.h, two.h, 0.01);
+    // Row order doesn't change the width of a centered column.
+    const first = try geometry("$$\\begin{gathered}a=b+c\\\\d\\end{gathered}$$", null);
+    const last = try geometry("$$\\begin{gathered}d\\\\a=b+c\\end{gathered}$$", null);
+    try testing.expectApproxEqAbs(first.w, last.w, 0.01);
+    for ([_][]const u8{ "$\\begin{gathered}a&b\\end{gathered}$", "$\\begin{gathered}a\\\\[4pt]b\\end{gathered}$", "$\\begin{gathered}a=b$" }) |source| try expectLiteral(source);
 }

@@ -50,7 +50,7 @@ test "titlebar clearance keeps collapsed history and mode controls beside the se
         try h.init(dark);
         defer h.deinit();
         try h.snap(if (dark) "dark" else "light");
-        const history = try h.button("clock-circle");
+        const history = try h.button("list");
         const mode = try h.button("magic-stick-3");
         const hn = h.t.ctx.nodes.items[history];
         const mn = h.t.ctx.nodes.items[mode];
@@ -67,7 +67,7 @@ test "titlebar clearance keeps collapsed history and mode controls beside the se
         h.t.click(d.x + d.w / 2, d.y + d.h / 2);
         try testing.expectEqual(@import("motion_rules.zig").UiMode.zen, h.a.settings.uiMode());
         h.t.settle(0.2);
-        const hr = h.t.ctx.nodes.items[try h.button("clock-circle")].rect;
+        const hr = h.t.ctx.nodes.items[try h.button("list")].rect;
         h.t.click(hr.x + hr.w / 2, hr.y + hr.h / 2);
         try testing.expect(h.a.view.strip.menu == .history);
     }
@@ -81,7 +81,7 @@ test "titlebar clearance native traffic lights share the custom control center" 
     var lifecycle: @import("window_lifecycle.zig").Lifecycle = .{ .state = &h.a };
     const options = lifecycle.windowOptions();
     const lights = options.traffic_lights orelse return error.NativeLightsNotAligned;
-    const history = h.t.ctx.nodes.items[try h.button("clock-circle")].rect;
+    const history = h.t.ctx.nodes.items[try h.button("list")].rect;
     const mode = h.t.ctx.nodes.items[try h.button("magic-stick-3")].rect;
     try testing.expectApproxEqAbs(history.y + history.h / 2, lights.y, 0.01);
     try testing.expectApproxEqAbs(mode.y + mode.h / 2, lights.y, 0.01);

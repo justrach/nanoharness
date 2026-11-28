@@ -36,6 +36,7 @@ pub const Edit = struct {
     base_hash: []u8,
     renew_at: f64,
     saving: bool = false,
+    last_finish: ?Finish = null,
     finish_call: ?u64 = null,
     renew_call: ?u64 = null,
 
@@ -204,17 +205,8 @@ pub fn steerUnavailable(live: bool, has_text: bool, has_attachments: bool, queue
     return null;
 }
 
-/// What a send during a run does (`main_action`): a steer only when it can
-/// be one, else the queue.
-pub fn followUpAction(behavior: FollowUp, unavailable: ?[]const u8) FollowUp {
-    return if (behavior == .steer and unavailable == null) .steer else .queue;
-}
-
-test "follow-ups steer only when they can, as follow_up.rs decides" {
+test "follow-ups check opposite behavior and steer blockers" {
     const t = std.testing;
-    try t.expectEqual(FollowUp.queue, followUpAction(.queue, null));
-    try t.expectEqual(FollowUp.steer, followUpAction(.steer, null));
-    try t.expectEqual(FollowUp.queue, followUpAction(.steer, "x"));
     try t.expectEqual(FollowUp.steer, opposite(.queue));
     try t.expectEqualStrings("Steer only supports text; remove attachments or screenshots", steerUnavailable(true, true, true, true, true).?);
     try t.expectEqualStrings("Update Harness on this device and the chat host to use this action", steerUnavailable(true, true, false, false, true).?);
@@ -506,18 +498,37 @@ pub fn finishEdit(a: *App, action: Finish) void {
     const text = attached orelse body;
     const act: Finish = if (action == .commit and text.len == 0) .discard else action;
     e.saving = true;
+    e.last_finish = act;
     e.finish_call = 0; // synchronous not-connected callback
     const id = a.send_(requests.finishEdit(chat, e.row, e.lease, @tagName(act), if (act == .commit) text else null, if (act == .commit) e.base_hash else null, host(a)), .of(App, a, onFinished));
     if (a.queue_edit) |*live| live.finish_call = id;
+}
+
+fn releaseEditState(a: *App, restore_draft: bool) void {
+    const edit = a.queue_edit orelse return;
+    if (restore_draft) @import("app_attachments.zig").clear(a);
+    if (edit.renew_call) |call| a.engine.cancel(call);
+    if (a.queue_edit) |*e| e.deinit(a.gpa);
+    a.queue_edit = null;
+    if (restore_draft) {
+        a.composer.set(a.draft_stash.items);
+    }
+    a.draft_stash.clearRetainingCapacity();
+    a.redraw();
 }
 
 fn onFinished(a: *App, id: u64, r: rpc.Reply) void {
     const edit = if (a.queue_edit) |*e| e else return;
     if (edit.finish_call != id) return;
     edit.finish_call = null;
+    const was_cancel = edit.last_finish == .cancel;
     const outcome: []const u8 = switch (r) {
         .ok => |v| if (v == .object) (str(v.object, "outcome") orelse "") else "",
         .err => {
+            if (was_cancel) {
+                releaseEditState(a, true);
+                return a.setNotice("Couldn't reach the chat host; closed local edit mode");
+            }
             if (a.queue_edit) |*e| e.saving = false;
             return a.setNotice("Couldn't reach the chat host; your edit is still in the editor");
         },
@@ -526,21 +537,20 @@ fn onFinished(a: *App, id: u64, r: rpc.Reply) void {
     const done = std.mem.eql(u8, outcome, "committed") or std.mem.eql(u8, outcome, "cancelled") or
         std.mem.eql(u8, outcome, "discarded") or std.mem.eql(u8, outcome, "released");
     if (!done) {
-        if (a.queue_edit) |*e| e.saving = false;
-        return a.setNotice(if (std.mem.eql(u8, outcome, "conflict"))
+        const notice = if (std.mem.eql(u8, outcome, "conflict"))
             "This message changed on another device; your edit was kept locally"
         else if (std.mem.eql(u8, outcome, "missing"))
             "The queued message was removed; your edit was kept locally"
+        else if (std.mem.eql(u8, outcome, "expired"))
+            "The edit lease expired; your edit was kept locally"
         else
-            "The edit lease changed; your text is still in the editor");
+            "The edit lease changed; your text is still in the editor";
+        // Release local edit state so terminal server states (`missing`/`conflict`/`expired`)
+        // or user Cancel never lock the queue editor, while preserving edited text on non-cancel errors.
+        releaseEditState(a, was_cancel);
+        return a.setNotice(notice);
     }
-    @import("app_attachments.zig").clear(a);
-    if (edit.renew_call) |call| a.engine.cancel(call);
-    if (a.queue_edit) |*e| e.deinit(a.gpa);
-    a.queue_edit = null;
-    a.composer.set(a.draft_stash.items);
-    a.draft_stash.clearRetainingCapacity();
-    a.redraw();
+    releaseEditState(a, true);
 }
 
 /// Renews the edit's lease when it is due; from `tick`. When next due.

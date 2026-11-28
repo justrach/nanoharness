@@ -87,6 +87,81 @@ test "completion slash menu inactive rows retain the theme surface in both schem
     try testing.expect(valid);
 }
 
+test "completion paints only explicitly accepted command chips across undo and redo" {
+    const completion = @import("composer_completion.zig");
+    for ([_]bool{ false, true }) |dark| {
+        var h: Harness = undefined;
+        try h.initTheme(dark);
+        defer h.deinit();
+        h.t.resize(490, 540);
+        h.draft("Synthetic prompt\n/goal", "Synthetic prompt\n/goal".len);
+        const plain = try completion.prompt(&h.a);
+        if (plain) |value| testing.allocator.free(value);
+        try testing.expect(plain == null);
+        try expectCommandChip(&h, dark, false);
+        try testing.expect(h.t.hasText("Synthetic goal command"));
+        _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
+        h.draw();
+        try testing.expect(std.mem.startsWith(u8, h.a.composer.text(), "Synthetic prompt\n/goal"));
+        const invocation = (try completion.prompt(&h.a)) orelse return error.MissingSelectedCommand;
+        defer testing.allocator.free(invocation);
+        try testing.expect(std.mem.indexOf(u8, invocation, "harness-invoke:") != null);
+        if (std.c.getenv("NANO_COMPLETION_CHIP_SNAP_DIR")) |path| {
+            var buf: [1024]u8 = undefined;
+            try h.t.screenshot(try std.fmt.bufPrint(&buf, "{s}/accepted-{s}.png", .{ std.mem.span(path), if (dark) "dark" else "light" }));
+        }
+        try expectCommandChip(&h, dark, true);
+
+        _ = h.t.shortcut(.{ .key = 'z', .cmd = true });
+        h.draw();
+        try expectCommandChip(&h, dark, false);
+        _ = h.t.shortcut(.{ .key = 'z', .cmd = true, .shift = true });
+        h.draw();
+        try expectCommandChip(&h, dark, true);
+
+        const command_start = "Synthetic prompt\n".len;
+        const command_end = h.a.composer.text().len;
+        h.t.textOps(&.{
+            .{ .select = .{ .anchor = command_start, .caret = command_end } },
+            .{ .insert = "/goal " },
+        });
+        h.draw();
+        const pasted = try completion.prompt(&h.a);
+        if (pasted) |value| testing.allocator.free(value);
+        try testing.expect(pasted == null);
+        try expectCommandChip(&h, dark, false);
+    }
+}
+
+fn expectCommandChip(h: *Harness, dark: bool, expected: bool) !void {
+    const field = h.t.ctx.rects.get(h.a.view.composer_id) orelse return error.MissingComposerField;
+    const accent_wash = @import("theme.zig").colors(dark).accent_wash;
+    var chips: usize = 0;
+    var chip: ?ui.Rect = null;
+    for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (node.style.radius != 6 or !std.meta.eql(node.style.background, accent_wash)) continue;
+        if (r.x < field.x or r.x + r.w > field.x + field.w or r.y < field.y or r.y + r.h > field.y + field.h) continue;
+        chips += 1;
+        chip = r;
+    }
+    try testing.expectEqual(@as(usize, @intFromBool(expected)), chips);
+    if (chip) |r| {
+        try testing.expect(r.y >= field.y + 20);
+        for (h.t.ctx.nodes.items) |node| {
+            if (node.content != .text or !std.mem.eql(u8, node.content.text.str, "/goal")) continue;
+            if (node.rect.y < field.y or node.rect.y >= field.y + field.h) continue;
+            const width = h.t.ctx.text.width("/goal", node.content.text.style);
+            // The wash must surround the label, especially at a line start.
+            try testing.expect(node.rect.x - r.x >= 5.5);
+            try testing.expect(r.x + r.w - (node.rect.x + width) >= 5.5);
+            try testing.expect(r.h >= 21 and r.h <= 22.75);
+            return;
+        }
+        return error.MissingCommandLabel;
+    }
+}
+
 test "completion restores original issue575 Tab path without deleting adjacent prompt" {
     var h: Harness = undefined;
     try h.init();
@@ -267,6 +342,202 @@ test "completion new canvas tab parking and first run retain accepted identity b
     try testing.expectEqualStrings("", h.a.composer.text());
 }
 
+/// Moves the live caret without rewriting the draft, as arrow keys or a click do.
+fn moveCaret(h: *Harness, caret: usize) void {
+    h.t.textOps(&.{.{ .select = .{ .anchor = caret, .caret = caret } }});
+    h.draw();
+}
+
+/// Leaves the accepted token, returns to its end and accepts it again.
+fn acceptAgain(h: *Harness, caret: usize) void {
+    moveCaret(h, h.a.composer.text().len);
+    moveCaret(h, caret);
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
+    h.draw();
+}
+
+/// The count comes before `prompt`, so a duplicate fails here, not in a slice.
+fn expectOnePrompt(h: *Harness, start: usize, end: usize, expected: []const u8) !void {
+    const refs = h.a.completion.selected.items;
+    try testing.expectEqual(@as(usize, 1), refs.len);
+    try testing.expectEqual(start, refs[0].start);
+    try testing.expectEqual(end, refs[0].end);
+    const encoded = (try @import("composer_completion.zig").prompt(&h.a)) orelse return error.MissingSelectedCommand;
+    defer testing.allocator.free(encoded);
+    try testing.expectEqualStrings(expected, encoded);
+}
+
+fn goalPrompt(suffix: []const u8) ![]u8 {
+    const link = try @import("composer_completion.zig").canonical(testing.allocator, .{ .name = "goal", .description = "" });
+    defer testing.allocator.free(link);
+    return std.fmt.allocPrint(testing.allocator, "{s}{s}", .{ link, suffix });
+}
+
+test "completion issue178 repeated accept keeps one reference and sends one command" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.draft("/goal write tests", 5);
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
+    h.draw();
+    acceptAgain(&h, 5);
+    try testing.expectEqualStrings("/goal write tests", h.a.composer.text());
+    const expected = try goalPrompt(" write tests");
+    defer testing.allocator.free(expected);
+    if (std.c.getenv("NANO_SNAP_DIR")) |dir| {
+        var buf: [1024]u8 = undefined;
+        try h.t.screenshot(try std.fmt.bufPrint(&buf, "{s}/issue178-accepted.png", .{std.mem.span(dir)}));
+    }
+    try expectOnePrompt(&h, 0, 5, expected);
+    h.a.send();
+    const wire = (try lastPrompt(&h)) orelse return error.NoQueueCommand;
+    defer testing.allocator.free(wire);
+    try testing.expectEqualStrings(expected, wire);
+}
+
+test "completion issue178 repeated accept that only restores the trailing space keeps one reference" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.draft("/goal", 5);
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
+    h.draw();
+    try testing.expectEqualStrings("/goal ", h.a.composer.text());
+    // Deleting the space leaves the accepted name and its reference in place.
+    h.t.textOps(&.{.{ .command = .delete_backward }});
+    h.draw();
+    try testing.expectEqualStrings("/goal", h.a.composer.text());
+    try testing.expectEqual(@as(usize, 1), h.a.completion.selected.items.len);
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
+    h.draw();
+    try testing.expectEqualStrings("/goal ", h.a.composer.text());
+    const expected = try goalPrompt(" ");
+    defer testing.allocator.free(expected);
+    try expectOnePrompt(&h, 0, 5, expected);
+}
+
+test "completion issue178 newest accept replaces the link and leaves other references alone" {
+    const completion = @import("composer_completion.zig");
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const text = "$review notes then /goal write tests";
+    const goal_start = std.mem.indexOf(u8, text, "/goal").?;
+    h.draft(text, goal_start + 5);
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
+    h.draw();
+    moveCaret(&h, 7);
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
+    h.draw();
+    try testing.expectEqual(@as(usize, 2), h.a.completion.selected.items.len);
+    // The same visible name now resolves to a different synthetic skill.
+    try replies(&h,
+        \\{"ListCommands":[{"name":"goal","description":"Synthetic goal command"}],"ListSkills":[{"name":"review","path":"/synthetic/skills/review-next.md","description":"Synthetic review skill","enabled":true}],"QueueCommand":{"commandId":"synthetic-command"},"FocusChat":{},"Mutate":{}}
+    );
+    h.draw();
+    acceptAgain(&h, 7);
+    try testing.expectEqualStrings(text, h.a.composer.text());
+    const refs = h.a.completion.selected.items;
+    try testing.expectEqual(@as(usize, 2), refs.len);
+    try testing.expectEqual(@as(usize, 0), refs[0].start);
+    try testing.expectEqual(goal_start, refs[1].start);
+    const review = try completion.canonical(testing.allocator, .{ .name = "review", .description = "", .path = "/synthetic/skills/review-next.md" });
+    defer testing.allocator.free(review);
+    const goal = try goalPrompt(" write tests");
+    defer testing.allocator.free(goal);
+    const expected = try std.fmt.allocPrint(testing.allocator, "{s} notes then {s}", .{ review, goal });
+    defer testing.allocator.free(expected);
+    const encoded = (try completion.prompt(&h.a)) orelse return error.MissingSelectedCommand;
+    defer testing.allocator.free(encoded);
+    try testing.expectEqualStrings(expected, encoded);
+}
+
+test "completion issue178 repeated accept after undo, redo, parking or paste keeps one reference" {
+    const expected = try goalPrompt(" prompt remains");
+    defer testing.allocator.free(expected);
+    for ([_]enum { redo, parked, pasted }{ .redo, .parked, .pasted }) |writer| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        h.draft("/goalprompt remains", 5);
+        _ = h.t.shortcut(.{ .key = ui.Shortcut.tab });
+        h.draw();
+        const text = "/goal prompt remains";
+        try testing.expectEqualStrings(text, h.a.composer.text());
+        switch (writer) {
+            .redo => {
+                _ = h.t.shortcut(.{ .key = 'z', .cmd = true });
+                h.draw();
+                try testing.expectEqual(@as(usize, 0), h.a.completion.selected.items.len);
+                _ = h.t.shortcut(.{ .key = 'z', .cmd = true, .shift = true });
+                h.draw();
+                try testing.expectEqual(@as(usize, 1), h.a.completion.selected.items.len);
+            },
+            .parked => {
+                h.a.select("other-synthetic-chat", null);
+                h.draw();
+                h.a.select("completion-chat", null);
+                h.a.view.focus_composer = true;
+                h.draw();
+                try testing.expectEqual(@as(usize, 1), h.a.completion.selected.items.len);
+            },
+            .pasted => {
+                h.t.textOps(&.{ .{ .select = .{ .anchor = 0, .caret = text.len } }, .{ .insert = text } });
+                h.draw();
+                try testing.expectEqual(@as(usize, 0), h.a.completion.selected.items.len);
+                acceptAgain(&h, 5);
+                try testing.expectEqual(@as(usize, 1), h.a.completion.selected.items.len);
+            },
+        }
+        acceptAgain(&h, 5);
+        try testing.expectEqualStrings(text, h.a.composer.text());
+        try expectOnePrompt(&h, 0, 5, expected);
+        if (writer != .redo) continue;
+        // The repeated accept changed no text, so undo still steps over the
+        // one completion edit and redo brings back exactly one reference.
+        _ = h.t.shortcut(.{ .key = 'z', .cmd = true });
+        h.draw();
+        try testing.expectEqualStrings("/goalprompt remains", h.a.composer.text());
+        try testing.expectEqual(@as(usize, 0), h.a.completion.selected.items.len);
+        _ = h.t.shortcut(.{ .key = 'z', .cmd = true, .shift = true });
+        h.draw();
+        try testing.expectEqualStrings(text, h.a.composer.text());
+        try expectOnePrompt(&h, 0, 5, expected);
+    }
+}
+
+test "completion issue178 invalid references fail the send and keep the draft" {
+    const completion = @import("composer_completion.zig");
+    const Span = struct { start: usize, end: usize };
+    const text = "/goal write tests";
+    // The inverted span comes first: unlike the rest it does not slice out of
+    // order, so an unchecked serializer fails the assertion instead of aborting.
+    const cases = [_][]const Span{
+        &.{.{ .start = 5, .end = 0 }},
+        &.{ .{ .start = 0, .end = 5 }, .{ .start = 0, .end = 5 } },
+        &.{ .{ .start = 0, .end = 5 }, .{ .start = 3, .end = 8 } },
+        &.{ .{ .start = 6, .end = 11 }, .{ .start = 0, .end = 5 } },
+        &.{.{ .start = 0, .end = text.len + 1 }},
+    };
+    for (cases) |spans| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        h.draft(text, 5);
+        for (spans) |span| {
+            const display = try testing.allocator.dupe(u8, "/goal");
+            const link = try testing.allocator.dupe(u8, "[/goal](harness-invoke:00)");
+            try h.a.completion.selected.append(testing.allocator, .{ .start = span.start, .end = span.end, .display = display, .link = link });
+        }
+        try testing.expectError(error.InvalidReferences, completion.prompt(&h.a));
+        h.a.send();
+        try testing.expectEqualStrings(text, h.a.composer.text());
+        try testing.expectEqual(spans.len, h.a.completion.selected.items.len);
+        try testing.expectEqualStrings("Could not prepare selected command or skill. Your draft is preserved.", h.a.noticeText() orelse return error.MissingNotice);
+        try testing.expect(try lastPrompt(&h) == null);
+    }
+}
+
 fn replies(h: *Harness, text: []const u8) !void {
     if (h.a.engine.scene) |*old| old.deinit();
     h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator, text, .{});
@@ -388,4 +659,173 @@ test "completion catalog requests use existing scoped camelCase RPC and exclude 
         if (std.mem.eql(u8, method, "ListCommands")) commands = true else skills = true;
     }
     try testing.expect(commands and skills);
+}
+
+/// A catalog with a provider `/compact`, and a provider `resume` that must not
+/// take the workspace's own `/resume`.
+const bare_scene =
+    \\{"ListCommands":[{"name":"goal","description":"Synthetic goal"},{"name":"compact","description":"Compact the synthetic context"},{"name":"resume","description":"Synthetic provider resume"}],"ListSkills":[],"QueueCommand":{"commandId":"synthetic-command"},"FocusChat":{},"Mutate":{}}
+;
+
+/// The scene's catalog answers once pumped: the first pump delivers both
+/// catalog replies, the second whatever they set off.
+fn answer(h: *Harness) void {
+    _ = h.a.engine.pump();
+    _ = h.a.engine.pump();
+}
+
+fn expectNothingSent(h: *Harness) !void {
+    if (try lastPrompt(h)) |wire| {
+        defer testing.allocator.free(wire);
+        std.debug.print("\nunexpected prompt on the wire: {s}\n", .{wire});
+        return error.UnexpectedPrompt;
+    }
+}
+
+fn expectCommandOnWire(h: *Harness, name: []const u8) !void {
+    const wire = (try lastPrompt(h)) orelse return error.NoQueueCommand;
+    defer testing.allocator.free(wire);
+    const expected = try @import("composer_completion.zig").canonical(testing.allocator, .{ .name = name, .description = "" });
+    defer testing.allocator.free(expected);
+    try testing.expectEqualStrings(expected, std.mem.trim(u8, wire, " "));
+}
+
+fn expectTextOnWire(h: *Harness, text: []const u8) !void {
+    const wire = (try lastPrompt(h)) orelse return error.NoQueueCommand;
+    defer testing.allocator.free(wire);
+    try testing.expectEqualStrings(text, wire);
+}
+
+test "completion bare command sent while its catalog loads waits, then goes out as the command" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    // Requested, not yet answered: Return before the menu has its rows.
+    try replies(&h, bare_scene);
+    h.a.composer.set("/compact");
+    h.a.send();
+    try expectNothingSent(&h);
+    try testing.expectEqualStrings("/compact", h.a.composer.text());
+    answer(&h);
+    try expectCommandOnWire(&h, "compact");
+    try testing.expectEqualStrings("", h.a.composer.text());
+}
+
+test "completion bare command sent without the menu goes out as the command" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try replies(&h, bare_scene);
+    // Loaded catalog, sent with Cmd+Return or the Send button rather than
+    // the menu's Return.
+    h.draft("/compact", 8);
+    h.a.send();
+    try expectCommandOnWire(&h, "compact");
+}
+
+test "completion bare text that is no command still goes out as text" {
+    {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        try replies(&h, bare_scene);
+        h.draft("/shrug", 6);
+        h.a.send();
+        try expectTextOnWire(&h, "/shrug");
+    }
+    {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        try replies(&h, bare_scene);
+        h.a.composer.set("/shrug");
+        h.a.send();
+        try expectNothingSent(&h);
+        answer(&h);
+        try expectTextOnWire(&h, "/shrug");
+    }
+}
+
+test "completion bare command with arguments stays literal unless accepted" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try replies(&h, bare_scene);
+    const text = "/goal explain a synthetic parser";
+    h.draft(text, text.len);
+    h.a.send();
+    try expectTextOnWire(&h, text);
+}
+
+test "completion bare command says it is waiting while the catalog loads" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try replies(&h, bare_scene);
+    h.a.composer.set("/compact");
+    h.a.send();
+    try expectNothingSent(&h);
+    // A held send is visible: the draft stays, and nothing else says why.
+    const notice = h.a.noticeText() orelse return error.MissingNotice;
+    try testing.expect(std.mem.indexOf(u8, notice, "/compact") != null);
+    answer(&h);
+    try expectCommandOnWire(&h, "compact");
+    try testing.expect(h.a.noticeText() == null);
+
+    // Withdrawn by an edit: the wait is over, so is the notice.
+    var g: Harness = undefined;
+    try g.init();
+    defer g.deinit();
+    try replies(&g, bare_scene);
+    g.a.composer.set("/compact");
+    g.a.send();
+    try testing.expect(g.a.noticeText() != null);
+    g.a.composer.set("/compact now");
+    answer(&g);
+    try expectNothingSent(&g);
+    try testing.expect(g.a.noticeText() == null);
+}
+
+test "completion bare command held while loading is withdrawn when the draft changes" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try replies(&h, bare_scene);
+    h.a.composer.set("/compact");
+    h.a.send();
+    h.a.composer.set("/compact now");
+    answer(&h);
+    try expectNothingSent(&h);
+    try testing.expectEqualStrings("/compact now", h.a.composer.text());
+}
+
+test "completion bare command is not sent when discovery failed, and sending again sends it as text" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try replies(&h,
+        \\{"ListCommands":{"$err":"synthetic unavailable"},"ListSkills":[],"QueueCommand":{"commandId":"synthetic-command"},"FocusChat":{},"Mutate":{}}
+    );
+    h.draw();
+    try testing.expect(h.a.completion.failed);
+    h.a.composer.set("/compact");
+    h.a.send();
+    try expectNothingSent(&h);
+    try testing.expectEqualStrings("/compact", h.a.composer.text());
+    const notice = h.a.noticeText() orelse return error.MissingNotice;
+    try testing.expect(std.mem.indexOf(u8, notice, "Send again") != null);
+    h.a.send();
+    try expectTextOnWire(&h, "/compact");
+}
+
+test "completion bare workspace commands stay the workspace's" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try replies(&h, bare_scene);
+    h.draft("/resume", 7);
+    h.a.send();
+    try expectNothingSent(&h);
+    try testing.expect(h.a.view.palette.open);
+    try testing.expectEqualStrings("", h.a.composer.text());
 }

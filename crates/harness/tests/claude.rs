@@ -127,6 +127,7 @@ async fn build_wait_environment_is_scoped_to_the_launched_run() {
     let origin = || harness_adapters::RunOrigin {
         chat_id: "synthetic-chat".into(),
         build_wait_dir: Some("/synthetic/current-run".into()),
+        ..Default::default()
     };
     for (origin, expected, title) in [
         (Some(origin()), "build-wait:/synthetic/current-run", false),

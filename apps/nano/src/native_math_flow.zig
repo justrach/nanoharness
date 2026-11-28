@@ -1,7 +1,7 @@
 //! Native equation/prose flow. Ordinary paragraphs stay on richText's fast
 //! path. Math paragraphs are wrapped at word boundaries with a shared baseline.
-//! A single transparent, geometrically mapped source run per line supplies
-//! native selection/Copy; visible fragments are controls, not duplicate text.
+//! One selection-only text node maps the whole source to positioned lines.
+//! Visible fragments are controls, not duplicate selectable text.
 const std = @import("std");
 const ui = @import("nanoui").ui;
 const md = @import("markdown.zig");
@@ -162,31 +162,19 @@ pub fn draw(c: *ui.Context, in: md.Inline, style: ui.TextStyle, color: ui.Color,
         i = end;
     }
     if (line.end > line.from) lines.append(c.alloc(), line) catch return;
-    for (lines.items, 0..) |ln, li| {
-        ui.key(c, c.print("equation-line-{d}", .{li}));
-        const row = ui.div(c).wFull().h(ln.ascent + ln.depth);
-        defer row.end();
-        var x: f32 = if (ln.centered) @max(0, (room - ln.width) / 2) else 0;
-        const start_x = x;
-        for (fs.items[ln.from..ln.end]) |f| {
-            if (f.hard_break) continue;
-            const box = ui.div(c).absolute().offset(x, ln.ascent - f.ascent).size(f.width, f.ascent + f.depth).control();
-            if (f.equation) |eq| {
-                if (!ui.svg(c, .{ .key = eq.svg, .bytes = eq.svg, .width = eq.width, .height = eq.height })) rich(c, slice(c, in, f.start, f.end), st);
-            } else rich(c, slice(c, in, f.start, f.end), st);
-            box.end();
-            x += f.width;
-        }
-        // A continuous source run prevents Copy from inserting a newline
-        // between every word or replacing equations by their visual glyphs.
+    var positioned: std.ArrayList(ui.PositionedTextLine) = .empty;
+    var y: f32 = 0;
+    for (lines.items) |ln| {
         const first = fs.items[ln.from].start;
         var last = fs.items[ln.end - 1].end;
-        if (last > first and in.text[last - 1] == '\n') last -= 1;
+        const height = ln.ascent + ln.depth;
+        defer y += height;
+        if (fs.items[ln.end - 1].hard_break) last -= 1;
         if (last <= first) continue;
         const source = in.text[first..last];
         const raw = c.text.layout(source, st);
         const glyphs = c.alloc().dupe(@TypeOf(raw.glyphs[0]), raw.glyphs) catch return;
-        var fx = start_x;
+        var fx = lineStart(ln, room);
         var gi: usize = 0;
         for (fs.items[ln.from..ln.end]) |f| {
             if (f.hard_break) continue;
@@ -199,14 +187,34 @@ pub fn draw(c: *ui.Context, in: md.Inline, style: ui.TextStyle, color: ui.Color,
             }
             fx += f.width;
         }
-        var invisible = st;
-        invisible.color = ui.Color.transparent;
-        invisible.line_height = ln.ascent + ln.depth;
-        _ = c.leaf(.{ .width = .fill, .height = .{ .px = ln.ascent + ln.depth }, .selectable = true }, .{ .text = .{
-            .str = source,
-            .style = invisible,
+        positioned.append(c.alloc(), .{ .start = first, .end = last, .y = y, .height = height, .layout = .{ .glyphs = glyphs, .width = fx } }) catch return;
+    }
+    if (positioned.items.len > 0) {
+        ui.key(c, "equation-source");
+        _ = c.leaf(.{ .absolute = true, .width = .fill, .height = .fill, .selectable = true }, .{ .text = .{
+            .str = in.text,
+            .style = st,
             .color = .transparent,
-            .cut_lay = .{ .glyphs = glyphs, .width = fx },
+            .positioned_lines = positioned.items,
         } }, null);
     }
+    for (lines.items, 0..) |ln, li| {
+        ui.key(c, c.print("equation-line-{d}", .{li}));
+        const row = ui.div(c).wFull().h(ln.ascent + ln.depth);
+        defer row.end();
+        var x = lineStart(ln, room);
+        for (fs.items[ln.from..ln.end]) |f| {
+            if (f.hard_break) continue;
+            const box = ui.div(c).absolute().offset(x, ln.ascent - f.ascent).size(f.width, f.ascent + f.depth).control();
+            if (f.equation) |eq| {
+                if (!ui.svg(c, .{ .key = eq.svg, .bytes = eq.svg, .width = eq.width, .height = eq.height })) rich(c, slice(c, in, f.start, f.end), st);
+            } else rich(c, slice(c, in, f.start, f.end), st);
+            box.end();
+            x += f.width;
+        }
+    }
+}
+
+fn lineStart(line: Line, room: f32) f32 {
+    return if (line.centered) @max(0, (room - line.width) / 2) else 0;
 }

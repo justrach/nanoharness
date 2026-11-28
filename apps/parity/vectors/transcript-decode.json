@@ -199,6 +199,24 @@
               "reasoning": "weighing the plan"
             },
             {
+              "id": "art1",
+              "kind": "artifact",
+              "artifactId": "art-0123456789abcdef01234567",
+              "title": "System Diagram",
+              "format": "html",
+              "visibility": "private",
+              "url": "https://codegraff.com/a/art-0123456789abcdef01234567"
+            },
+            {
+              "id": "art-bad",
+              "kind": "artifact",
+              "artifactId": "art-0123456789abcdef01234567",
+              "title": "Signed should drop",
+              "format": "html",
+              "visibility": "private",
+              "url": "https://codegraff.com/a/art-0123456789abcdef01234567?t=secret"
+            },
+            {
               "kind": "text",
               "text": "no id"
             }
@@ -220,7 +238,8 @@
             "input q3 request=q3 questions=1 resolved=true",
             "error e signed out reauth=codex",
             "error e2 boom reauth=-",
-            "reasoning r weighing the plan"
+            "reasoning r weighing the plan",
+            "artifact art1 art-0123456789abcdef01234567 html private System Diagram"
           ]
         }
       ],

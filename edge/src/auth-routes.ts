@@ -17,6 +17,9 @@ import type { Env } from "./env";
 import { CodegraffAuthFailed, exchange, refresh, sandboxExchange } from "./codegraff";
 import { deleteAccount } from "./account-delete";
 import { ensureHarnessMemberProfile } from "./member-profile";
+import { readJsonCapped } from "./body";
+
+export const MAX_AUTH_BODY_BYTES = 64 * 1024;
 
 const json = (value: unknown, status = 200): Response =>
   new Response(JSON.stringify(value), {
@@ -36,12 +39,15 @@ export const refreshFailed = (e: unknown): Response =>
     ? json({ error: e.message }, 401)
     : json({ error: "refresh is temporarily unavailable", retryable: true }, 503);
 
-const bodyJson = async <T>(request: Request): Promise<T | undefined> => {
-  try {
-    return (await request.json()) as T;
-  } catch {
-    return undefined;
+const bodyJson = async <T>(
+  request: Request
+): Promise<{ ok: true; value: T | undefined } | { ok: false; response: Response }> => {
+  const parsed = await readJsonCapped(request, MAX_AUTH_BODY_BYTES);
+  if (!parsed.ok) {
+    if (parsed.status === 413) return { ok: false, response: json({ error: "too_large" }, 413) };
+    return { ok: true, value: undefined };
   }
+  return { ok: true, value: parsed.value as T };
 };
 
 /** Handle an /auth/* route; undefined means "not an auth route". */
@@ -56,7 +62,7 @@ export const handleAuthRoute = async (
 
   if (parts[1] === "exchange" && parts.length === 2 && request.method === "POST") {
     if (!configured) return notConfigured();
-    const body = await bodyJson<{
+    const parsed = await bodyJson<{
       code?: string;
       codeVerifier?: string;
       redirectUri?: string;
@@ -64,6 +70,8 @@ export const handleAuthRoute = async (
       graffKey?: boolean;
       deviceLabel?: string;
     }>(request);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.value;
     if (typeof body?.code !== "string" || typeof body.codeVerifier !== "string" ||
         typeof body.redirectUri !== "string" || typeof body.nonce !== "string") {
       return json({ error: "code, codeVerifier, redirectUri, and nonce are required" }, 400);
@@ -81,7 +89,9 @@ export const handleAuthRoute = async (
 
   if (parts[1] === "refresh" && parts.length === 2 && request.method === "POST") {
     if (!configured) return notConfigured();
-    const body = await bodyJson<{ refreshToken?: string; organizationId?: string }>(request);
+    const parsed = await bodyJson<{ refreshToken?: string; organizationId?: string }>(request);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.value;
     if (typeof body?.refreshToken !== "string") return json({ error: "missing refreshToken" }, 400);
     if (body.organizationId !== undefined && typeof body.organizationId !== "string") {
       return json({ error: "missing refreshToken" }, 400);
@@ -114,7 +124,9 @@ export const handleAuthRoute = async (
 
   if (parts[1] === "sandbox" && parts.length === 2 && request.method === "POST") {
     if (!env.HARNESS_AUTH_SIGNING_KEY) return notConfigured();
-    const body = await bodyJson<{ token?: string }>(request);
+    const parsed = await bodyJson<{ token?: string }>(request);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.value;
     if (typeof body?.token !== "string") return json({ error: "token is required" }, 400);
     try {
       return json(await sandboxExchange(env, body.token));

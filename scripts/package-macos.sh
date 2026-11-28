@@ -44,8 +44,8 @@ if [[ -n "${HARNESS_BINARY:-}" ]]; then
   [[ -x "$HARNESS_BINARY" ]] || { echo "HARNESS_BINARY is not executable" >&2; exit 1; }
   ENGINE_BINARY="${HARNESS_ENGINE_BINARY:-$(dirname "$HARNESS_BINARY")/harness-engine}"
 else
-  # PROFILE=release for a quicker local package; `dist` is what ships.
-  PROFILE="${PROFILE:-dist}"
+  # PROFILE=release for a quicker local package; `headless` is the smaller shipped engine.
+  PROFILE="${PROFILE:-headless}"
   cargo build --profile "$PROFILE" -p harness-engine --bin harness-engine
   TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
   ENGINE_BINARY="$TARGET_DIR/$PROFILE/harness-engine"

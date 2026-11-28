@@ -201,14 +201,15 @@ func effectiveStatus(_ row: SessionRow?, now: Int64) -> SessionStatus? {
     }
 }
 
-/// entities.rs:147 — live Working/AwaitingInput win; Errored only if unseen;
-/// else unseen ⇒ Completed; else Idle.
+/// Show completion attention for an unseen reply with a settled session row.
+/// Missing or stale status provides no completion evidence.
 func chatIndicator(chat: Chat, live: SessionStatus?) -> ChatIndicator {
     switch live {
     case .working: return .working
     case .awaitingInput: return .awaitingInput
     case .errored: return chat.unseen ? .errored : .idle
-    default: return chat.unseen ? .completed : .idle
+    case .idle: return chat.unseen ? .completed : .idle
+    case nil: return .idle
     }
 }
 
@@ -375,6 +376,7 @@ enum AgentReauthProvider: String, Hashable, Sendable {
 enum MessagePart: Hashable, Identifiable {
     case image(id: String, reference: GeneratedImageReference)
     case visual(id: String, title: String, script: String)
+    case artifact(id: String, artifactId: String, title: String, format: String, visibility: String, url: String)
     case text(id: String, text: String)
     /// Model thinking (doc kind "reasoning", body in its `reasoning` field).
     case reasoning(id: String, text: String)
@@ -384,7 +386,8 @@ enum MessagePart: Hashable, Identifiable {
 
     var id: String {
         switch self {
-        case .text(let id, _), .reasoning(let id, _), .image(let id, _), .visual(let id, _, _), .tool(let id, _, _, _), .input(let id, _, _, _), .error(let id, _, _):
+        case .text(let id, _), .reasoning(let id, _), .image(let id, _), .visual(let id, _, _),
+             .artifact(let id, _, _, _, _, _), .tool(let id, _, _, _), .input(let id, _, _, _), .error(let id, _, _):
             return id
         }
     }

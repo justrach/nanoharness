@@ -24,12 +24,12 @@ use tokio_tungstenite::tungstenite::handshake::server::{
     Request as WsRequest, Response as WsResponse,
 };
 
+use harness_adapters::{Harness, HarnessError, RunControls};
 use harness_doc::SessionCommandPayload;
 use harness_engine::{
     BranchHeadContext, ChangeRequestError, CheckoutChangeRequestLookup, CheckoutChangeRequests,
     CheckoutSourceContext, EngineCore, HarnessRegistry,
 };
-use harness_adapters::{Harness, HarnessError, RunControls};
 use harness_proto::{
     AgentEvent, ChangeRequestState, ChangeRequestSummary, DoneStatus, HarnessId, Model,
     ReasoningLevel, RunRequest, SandboxLevel, SteeringMode,
@@ -191,7 +191,12 @@ fn registry() -> Arc<HarnessRegistry> {
 fn assemble(dir: &std::path::Path, device_id: &str) -> EngineCore {
     std::fs::create_dir_all(dir).expect("create data dir");
     std::fs::write(dir.join("device-id"), device_id).expect("write device id");
-    EngineCore::assemble(dir, registry(), HarnessId::Mock, None).expect("engine assembles")
+    let core =
+        EngineCore::assemble(dir, registry(), HarnessId::Mock, None).expect("engine assembles");
+    // These tests exercise the opted-in host relay. Default-off is pinned in
+    // `remote_control.rs` / `admit_relay_rpc`.
+    core.registry.set_remote_control(true);
+    core
 }
 
 async fn git(cwd: &std::path::Path, args: &[&str]) {
@@ -683,6 +688,7 @@ async fn target_device_id_routes_over_the_relay() {
 
     // Engine B hosts its device room on the fake relay.
     let core_b = assemble(&dirs.path().join("b"), "device-b");
+    core_b.registry.approve_remote_device("device-a");
     let _host = core_b.start_host_relay(&relay_url);
 
     // Engine A dials peers through the same relay.
@@ -1205,6 +1211,7 @@ async fn terminal_stream_proxies_over_the_relay() {
         .workspace
         .create_chat("chat-term", Some("space-term"), None, None, None)
         .expect("chat row on B");
+    core_b.registry.approve_remote_device("device-a");
     let _host = core_b.start_host_relay(&relay_url);
 
     let core_a = assemble(&dirs.path().join("a"), "device-a");
@@ -1317,6 +1324,7 @@ async fn workspace_file_surface_proxies_over_the_relay() {
         .workspace
         .create_chat("chat-files", Some("space-files"), None, None, None)
         .expect("chat on B");
+    core_b.registry.approve_remote_device("device-a");
     let _host = core_b.start_host_relay(&relay_url);
 
     let core_a = assemble(&dirs.path().join("a-files"), "device-a");
@@ -1636,6 +1644,7 @@ async fn queue_watch_and_single_consumption_route_to_the_remote_chat_host() {
             true,
         )
         .expect("seed held queue row");
+    core_b.registry.approve_remote_device("device-a");
     let _host = core_b.start_host_relay(&relay_url);
 
     let core_a = assemble(&dirs.path().join("a"), "device-a");
@@ -1859,4 +1868,74 @@ async fn keep_awake_offline_target_never_falls_back_to_local_preferences() {
     }
     assert!(!core.registry.keep_awake());
     core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_relay_rejects_non_forwardable() {
+    let (relay_url, relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let core_b = assemble(&dirs.path().join("b"), "device-b");
+    let _host = core_b.start_host_relay(&relay_url);
+
+    let mut link_config = LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    link_config.probe_timeout = Duration::from_secs(5);
+    let links = LinkCache::new(link_config);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let link_client = loop {
+        match links.client("device-b").await {
+            Ok(client) => break client,
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "relay never came up: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    };
+
+    for method in [
+        methods::LOCAL_DEVICE,
+        methods::AUTH_STATUS,
+        methods::STOP_ENGINE,
+    ] {
+        let err = link_client
+            .call(method, serde_json::json!({}))
+            .await
+            .expect_err(&format!("{method} must be refused over remote DeviceRelay"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not forwardable") || msg.contains("unknown method"),
+            "unexpected error for {method}: {msg}"
+        );
+    }
+
+    for probe in [methods::ENGINE_INFO, methods::ENGINE_READY] {
+        link_client
+            .call(probe, serde_json::json!({}))
+            .await
+            .expect(&format!("{probe} probe must be allowed over DeviceRelay"));
+    }
+
+    let mutate_err = link_client
+        .call(
+            methods::MUTATE,
+            serde_json::json!({ "op": "renameDevice", "deviceId": "device-b", "name": "Hijacked" }),
+        )
+        .await
+        .expect_err("Mutate must be refused over remote DeviceRelay");
+    assert!(
+        mutate_err.to_string().contains("not forwardable"),
+        "unexpected error for Mutate: {mutate_err}"
+    );
+
+    let harnesses = link_client
+        .call(methods::LIST_HARNESSES, serde_json::json!({}))
+        .await
+        .expect("forwardable method must still work");
+    assert!(harnesses.is_array());
+
+    core_b.shutdown().await;
+    relay.abort();
 }

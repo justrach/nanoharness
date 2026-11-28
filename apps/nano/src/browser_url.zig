@@ -4,7 +4,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 pub const Error = error{ EmptyAddress, InvalidAddress, UnsupportedScheme, Credentials };
-const Parts = struct { scheme: []const u8, authority: []const u8, host: []const u8, tail: []const u8 };
+const Parts = struct { scheme: []const u8, authority: []const u8, host: []const u8, port: ?[]const u8 = null, tail: []const u8 };
 
 fn parts(text: []const u8, explicit: bool) Error!Parts {
     if (text.len == 0) return error.EmptyAddress;
@@ -50,7 +50,7 @@ fn parts(text: []const u8, explicit: bool) Error!Parts {
         for (p) |ch| if (!std.ascii.isDigit(ch)) return error.InvalidAddress;
         _ = std.fmt.parseInt(u16, p, 10) catch return error.InvalidAddress;
     }
-    return .{ .scheme = scheme, .authority = authority, .host = host, .tail = rest[end..] };
+    return .{ .scheme = scheme, .authority = authority, .host = host, .port = port, .tail = rest[end..] };
 }
 
 fn loopback(host: []const u8) bool {
@@ -76,6 +76,18 @@ pub fn normalize(gpa: Allocator, input: []const u8) (Error || Allocator.Error)![
     // The authority has no credentials; its case is not significant.
     for (result[scheme.len + 3 ..][0..p.authority.len]) |*ch| ch.* = std.ascii.toLower(ch.*);
     return result;
+}
+
+/// The local TCP port an explicit http(s) address reaches when its host is
+/// this machine: loopback, `*.localhost`, or the unspecified address that a
+/// browser connects to locally. 80 and 443 by scheme. Anything else,
+/// credentials or port 0 included, is null.
+pub fn loopbackPort(address: []const u8) ?u16 {
+    const p = parts(address, true) catch return null;
+    const unspecified = std.mem.eql(u8, p.host, "0.0.0.0") or std.mem.eql(u8, p.host, "::");
+    if (!loopback(p.host) and !unspecified) return null;
+    const port: u16 = if (p.port) |text| std.fmt.parseInt(u16, text, 10) catch return null else if (std.mem.eql(u8, p.scheme, "https")) 443 else 80;
+    return if (port == 0) null else port;
 }
 
 /// Redirects and clicked links must already be explicit web addresses.

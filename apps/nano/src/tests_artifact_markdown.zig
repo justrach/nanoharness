@@ -20,7 +20,13 @@ fn calls(h: *Harness) !usize {
 }
 
 test "artifact markdown bold and list links activate the owning host reader" {
-    for ([_][]const u8{ "artifacts/promo.mp4", "/synthetic/fieldnotes/artifacts/promo.mp4", "file:///synthetic/fieldnotes/artifacts/promo.mp4" }) |destination| {
+    const cases = [_][2][]const u8{
+        .{ "artifacts/promo.mp4", "artifacts/promo.mp4" },
+        .{ "/synthetic/fieldnotes/artifacts/promo.mp4", "/synthetic/fieldnotes/artifacts/promo.mp4" },
+        .{ "file:///synthetic/fieldnotes/artifacts/promo.mp4", "/synthetic/fieldnotes/artifacts/promo.mp4" },
+    };
+    for (cases) |case| {
+        const destination = case[0];
         var h: Harness = undefined;
         try h.init(false);
         defer h.deinit();
@@ -51,8 +57,10 @@ test "artifact markdown bold and list links activate the owning host reader" {
         h.t.settle(0.1);
         try t.expect(h.t.hasText("Open file"));
         try t.expect(!h.t.hasText("Open in browser"));
-        try h.t.clickText("Copy link");
-        try t.expectEqualStrings(destination, h.t.clipboard.items);
+        // A file reference copies its plain path (#200), not the link.
+        try t.expect(!h.t.hasText("Copy link"));
+        try h.t.clickText("Copy file path");
+        try t.expectEqualStrings(case[1], h.t.clipboard.items);
         try t.expectEqual(@as(usize, 1), try calls(&h));
         h.t.ctx.focus = for (h.t.ctx.a11y_items.items) |item| {
             if (item.role == .link and std.mem.eql(u8, item.label, "Watch video")) break item.id;

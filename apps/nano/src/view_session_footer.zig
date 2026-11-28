@@ -21,6 +21,8 @@ const App = @import("app.zig").App;
 /// under the pill.
 pub const height: f32 = 24;
 pub const gap: f32 = 8;
+const jump_size: f32 = 20;
+const jump_label = "Scroll to bottom";
 
 /// `FOOTER_LABEL_MIN_WIDTH`: two 8-point insets, a 12-point glyph and the
 /// 6-point gap; only the words give way.
@@ -55,28 +57,107 @@ pub fn checkoutOf(chat: workspace.Chat, space: workspace.Space) Checkout {
     return if (std.mem.eql(u8, cwd, space.path)) .local else .worktree;
 }
 
-/// The footer's row, `w` wide: `px(10)`, the model chip, the open chat's
-/// workspace labels when its project has git, and at the right end the
-/// context ring (`composer-footer`).
+/// The footer's row, `w` wide: `px(10)` (or `px(2)` when narrow), the model
+/// chip, the open chat's workspace labels when its project has git, and at the
+/// right end the context ring (`composer-footer`).
 pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
-    const row = ui.div(c).row().w(w).h(height).px(10).gap(4).itemsCenter().clip();
+    const composer_view = @import("view_composer.zig");
+    const acct_view = @import("view_account_usage.zig");
+    const ctx_view = @import("view_context.zig");
+    const narrow = w < 180;
+    const pad_x: f32 = if (narrow) 2 else 10;
+    const item_gap: f32 = if (narrow) 2 else 4;
+    const has_ctx = ctx_view.hasWindow(a);
+    const compact_ctx = has_ctx and w < 220;
+    const has_follow = composer_view.followUpShown(a);
+    const follow_glyph_only = w < 240;
+    const show_follow = has_follow and w >= 120;
+    const has_jump_slot = w >= 96;
+    const show_jump = jumpShown(a) and has_jump_slot;
+    const show_acct = acct_view.hasRing(a) and w >= 200;
+    const show_agent_work = w >= 200;
+
+    const ctx_w: f32 = if (!has_ctx) 0 else if (compact_ctx) 24 else 60;
+    const follow_w: f32 = if (!show_follow) 0 else if (follow_glyph_only) 20 else 68;
+    const acct_w: f32 = if (show_acct) 64 else 0;
+    const follow_space: f32 = if (show_follow) follow_w + item_gap else 0;
+    const trailing_total: f32 = ctx_w + acct_w + (if (show_acct and has_ctx) item_gap else 0);
+    const mid_gap: f32 = if (trailing_total > 0) item_gap else 0;
+    const leading_budget = w - pad_x * 2 - follow_space - trailing_total - mid_gap;
+    const jump_style = kit.style(c, 12, 16, .{ .weight = .medium, .color = k.text });
+    const labeled_jump_w = @ceil(c.text.width(jump_label, jump_style)) + 13 + 4 + 12;
+    // Reserve the slot even at the end of the chat. Giving its space back to
+    // the animated model chip makes the neighboring follow-up action move
+    // under the pointer when the jump hides.
+    const jump_w: f32 = if (leading_budget >= labeled_jump_w + item_gap + 88) labeled_jump_w else jump_size;
+    const jump_space: f32 = if (has_jump_slot) jump_w + item_gap else 0;
+    const visible_jump_space: f32 = if (show_jump) jump_w + item_gap else 0;
+    const chip_budget: f32 = @max(28, @min(248, leading_budget - jump_space));
+
+    const row = ui.div(c).row().w(w).h(height).px(pad_x).itemsCenter().clip();
     defer row.end();
-    const model_w = @import("view_composer.zig").chip(c, a, k);
-    @import("view_composer.zig").followUpChip(c, a, k, false);
+    var model_w: f32 = 0;
     {
-        const rings_w: f32 = if (@import("view_account_usage.zig").hasRing(a)) 128 else 64;
+        const leading = ui.div(c).row().hFull().gap(item_gap).itemsCenter();
+        defer leading.end();
+        model_w = composer_view.chipWithMax(c, a, k, chip_budget);
+        if (show_follow) composer_view.followUpChip(c, a, k, follow_glyph_only);
+    }
+    {
+        const agent_w: f32 = if (show_agent_work) (if (a.view.agent_work.anchor) |ar| ar.w + 6 else 26) else 0;
+        const rings_w: f32 = (if (show_acct) @as(f32, 128) else if (has_ctx) ctx_w else 0) + agent_w;
         const slot = ui.div(c).row().grow().w(0).hFull().itemsCenter().clip();
         defer slot.end();
-        const slot_w = if (c.rects.get(c.node(slot.index).id)) |sr| sr.w else @max(0, w - 20 - model_w - rings_w);
-        session(c, a, k, slot_w);
+        if (w >= 220) {
+            const slot_w = if (c.rects.get(c.node(slot.index).id)) |sr| sr.w else @max(0, w - pad_x * 2 - model_w - follow_space - visible_jump_space - rings_w);
+            session(c, a, k, slot_w);
+        }
     }
-    @import("view_account_usage.zig").indicator(c, a, k);
-    @import("view_agent_work.zig").indicator(c, a, k);
-    @import("view_context.zig").indicator(c, a, k);
+    // Mount the jump target only while `show_jump` is active so hidden jump
+    // capacity never pushes trailing PR badges left (`tests_ui_change_requests`).
+    if (show_jump or show_acct or show_agent_work or has_ctx) {
+        const trailing = ui.div(c).row().hFull().gap(item_gap).itemsCenter();
+        defer trailing.end();
+        if (show_jump) jumpButton(c, a, k, jump_w, jump_style);
+        if (show_acct) acct_view.indicator(c, a, k);
+        if (show_agent_work) @import("view_agent_work.zig").indicator(c, a, k);
+        if (has_ctx) ctx_view.indicatorCompact(c, a, k, compact_ctx);
+    }
+}
+
+/// Keep the jump available when reading older messages without overlaying them.
+fn jumpShown(a: *App) bool {
+    // Only ignore normal end-of-scroll rounding and bounce, not a whole
+    // screenful of history in a short pane.
+    const threshold: f32 = if (a.view.jump_shown) 4 else 16;
+    a.view.jump_shown = a.view.jump_box != 0 and a.view.jump_distance > threshold;
+    return a.view.jump_shown;
+}
+
+fn jumpButton(c: *ui.Context, a: *App, k: theme.Colors, w: f32, style: ui.TextStyle) void {
+    ui.key(c, "jump-to-bottom");
+    const labeled = w > jump_size;
+    var chip = ui.div(c).row().size(w, jump_size).center().gap(4).rounded(6).bg(k.ink(0.08)).hover(k.hover).control();
+    if (!labeled) chip = @import("view_tooltip.zig").on(chip, k, .{ .text = jump_label });
+    chip = kit.pressFeedback(chip);
+    defer chip.end();
+    const clicked = @import("control_behavior.zig").activate(c, chip, k, jump_label, true, false);
+    icons.icon(c, .@"alt-arrow-down", 13, k.text, 0);
+    if (labeled) ui.text(c, jump_label, style);
+    if (!clicked) return;
+    const box = a.view.jump_box;
+    c.scroll.put(c.gpa, box, std.math.floatMax(f32)) catch {};
+    c.scroll_follow.put(c.gpa, box, true) catch {};
+    a.view.jump_shown = false;
+    a.view.jump_distance = 0;
+    c.changed = true;
 }
 
 fn session(c: *ui.Context, a: *App, k: theme.Colors, slot_w: f32) void {
-    if (!a.settings.hierarchyProfile().shows_git_checkout_chrome) return;
+    if (!a.settings.hierarchyProfile().shows_git_checkout_chrome) {
+        zenSessionLocation(c, a, k, slot_w);
+        return;
+    }
     const id = a.selected orelse return;
     const chat = a.findChat(id) orelse return;
     const space = a.findSpace(chat.space_id) orelse return;
@@ -97,6 +178,45 @@ fn session(c: *ui.Context, a: *App, k: theme.Colors, slot_w: f32) void {
     const pr = @import("app_change_requests.zig").forChat(a, chat) orelse return;
     prs.mergeControls(c, a, k, chat, pr[0]);
     prs.badge(c, k, pr[0], pr[1], .composer, true);
+}
+
+fn zenSessionLocation(c: *ui.Context, a: *App, k: theme.Colors, slot_w: f32) void {
+    if (slot_w < 56) return;
+    const id = a.selected orelse return;
+    const chat = a.findChat(id) orelse return;
+    const space = a.findSpace(chat.space_id);
+    const header = @import("view_chat_header.zig");
+
+    var proj_icon: icons.Name = .folder;
+    var proj_name: ?[]const u8 = null;
+    if (space) |sp| {
+        if (sp.git and checkoutOf(chat, sp) != .local) proj_icon = .@"folder-with-files";
+        proj_name = sp.name;
+    } else if (chat.cwd) |cwd| {
+        if (cwd.len > 0) proj_name = header.pathBasename(cwd);
+    }
+
+    const branch: ?[]const u8 = if (space) |sp| (if (sp.git) (chat.row_branch orelse chat.branch) else null) else null;
+    if (proj_name == null and branch == null) return;
+
+    const show_branch = branch != null and slot_w >= 170;
+    const usable = @max(0, slot_w - 20);
+    const proj_cap: f32 = if (show_branch) @min(132, usable * 0.48) else @min(160, usable);
+    const branch_cap: f32 = if (show_branch) @min(132, @max(0, usable - proj_cap - 38)) else 0;
+
+    const row = ui.div(c).row().grow().w(0).hFull().px(10).gap(4).itemsCenter().clip();
+    defer row.end();
+    if (proj_name) |pn| label(c, k, proj_icon, pn, slot_w >= 72, proj_cap);
+    if (show_branch) if (branch) |br| {
+        label(c, k, .@"git-branch", br, branch_cap >= 24, branch_cap);
+    };
+    const spring = ui.div(c).grow().w(0);
+    spring.end();
+    if (space != null and space.?.git and slot_w >= 260) {
+        if (@import("app_change_requests.zig").forChat(a, chat)) |pr| {
+            prs.badge(c, k, pr[0], pr[1], .composer, true);
+        }
+    }
 }
 
 /// `footer_label`: a 12-point glyph and words (or 28px icon-only when tight), quiet, 20 tall.

@@ -87,7 +87,7 @@ test "sidebar disclosure arrows stay aligned through hover collapse and Cmd+B" {
     const pinned = try disclosureArrow(&h.t, "Pinned");
     const project = try disclosureArrow(&h.t, "synthetic-notes");
     const archived = try disclosureArrow(&h.t, "Archived");
-    try testing.expectApproxEqAbs(sidebar.widthOf(&h.a) - 28, project.x, 0.01);
+    try testing.expectApproxEqAbs(sidebar.widthOf(&h.a) - 31, project.x, 0.01);
     try testing.expectApproxEqAbs(pinned.x, project.x, 0.01);
     try testing.expectApproxEqAbs(pinned.x, archived.x, 0.01);
 
@@ -181,13 +181,16 @@ test "desktop parity composer alignment matches the reference and compact width 
     try h.init(true);
     defer h.deinit();
     h.a.dictation.probed.store(1, .release);
-    // The shell keeps 234 points outside this pane (sidebar + panel chrome).
-    h.t.resize(606, 440);
+    // The shell keeps 235 points outside this pane (sidebar + inset panel chrome).
+    h.t.resize(607, 440);
     h.t.settle(1);
     const pill = h.a.view.composer_anchor orelse return error.NoComposer;
-    const field = h.t.ctx.rects.get(h.a.view.composer_id) orelse return error.NoComposerField;
+    const field = for (h.t.ctx.nodes.items) |node| {
+        if (node.id == h.a.view.composer_id) break node.rect.inset(node.style.padding);
+    } else return error.NoComposerField;
     try testing.expectApproxEqAbs(@as(f32, 340), pill.w, 0.01);
     try testing.expectApproxEqAbs(@as(f32, 49), pill.h, 0.01);
+    // Measure the writing area, not the outer hitbox that includes the chip gutters.
     try testing.expectApproxEqAbs(@as(f32, 75), field.x - pill.x, 0.01);
     try testing.expectApproxEqAbs(@as(f32, 212), field.w, 0.01);
     var controls: [3]ui.Rect = undefined;
@@ -212,7 +215,9 @@ test "desktop parity composer alignment matches the reference and compact width 
     try testing.expectApproxEqAbs(@as(f32, 10), model.x - pill.x, 0.01);
     try testing.expectApproxEqAbs(pill.y + pill.h + 8, model.y, 0.01);
     try testing.expectApproxEqAbs(model.y + 12, mode.y + mode.h / 2, 0.01);
-    try testing.expectApproxEqAbs(model.y + 12, project.y + project.h / 2, 0.01);
+    // Too narrow for its words, the project chip is drawn once, centred in
+    // the targets' own row under the first (24 + 2 gap + 22 / 2).
+    try testing.expectApproxEqAbs(model.y + 37, project.y + project.h / 2, 0.01);
     const last = textNode(&h.t, "Tour this project") orelse return error.NoStarter;
     const chip = h.t.ctx.node(h.t.ctx.node(last).parent).rect;
     try testing.expectApproxEqAbs(@as(f32, 24), pill.y - chip.y - chip.h, 0.01);
@@ -220,17 +225,17 @@ test "desktop parity composer alignment matches the reference and compact width 
 
     // GPUI's compact_capacity is the measured field less eight points.
     // Six fewer pane points cross its 200-point compact minimum even empty.
-    h.t.resize(600, 440);
+    h.t.resize(601, 440);
     h.t.settle(1);
     try testing.expect(h.a.view.composer_expanded);
     try testing.expect(h.a.view.composer_anchor.?.h >= composer.expanded_min);
 }
 
-test "desktop parity sidebar history has a six point trailing gap and a 350ms tooltip" {
+test "desktop parity sidebar history is the footer's last control and has a 350ms tooltip" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
-    var controls: [2]ui.Rect = undefined;
+    var controls: [1]ui.Rect = undefined;
     var count: usize = 0;
     for (h.t.ctx.nodes.items) |node| {
         const r = node.rect;
@@ -240,8 +245,8 @@ test "desktop parity sidebar history has a six point trailing gap and a 350ms to
             count += 1;
         }
     }
-    try testing.expectEqual(@as(usize, 2), count);
-    try testing.expectApproxEqAbs(@as(f32, 6), controls[1].x - controls[0].x - controls[0].w, 0.01);
+    // The title row's "New session" is the only "+"; none repeats it here.
+    try testing.expectEqual(@as(usize, 1), count);
     h.t.moveTo(controls[0].x + 13, controls[0].y + 13);
     h.t.advance(0.3);
     try testing.expect(h.t.tooltipText() == null);
@@ -607,19 +612,19 @@ test "retention 794 New workspace remains distinct from the pane New tab action"
     try testing.expectEqual(workspaces, h.a.tabs.items.items.len);
     @import("app_open_chooser.zig").close(&h.a);
     h.t.settle(1);
+    // The sidebar title row's "+" ("New session") makes a workspace; the
+    // footer no longer repeats it.
     var create: ?ui.Rect = null;
-    for (h.t.ctx.nodes.items) |node| {
-        const r = node.rect;
-        if (r.w == 26 and r.h == 26 and r.y >= 736 and r.x < sidebar.widthOf(&h.a)) {
-            if (create == null or r.x > create.?.x) create = r;
-        }
+    for (h.t.ctx.a11y_items.items) |item| {
+        const r = h.t.ctx.nodes.items[item.node_index].rect;
+        if (std.mem.eql(u8, item.label, "New session") and r.x < sidebar.widthOf(&h.a)) create = r;
     }
     const button = create orelse return error.NoWorkspaceCreate;
-    h.t.moveTo(button.x + 13, button.y + 13);
+    h.t.moveTo(button.x + button.w / 2, button.y + button.h / 2);
     h.t.advance(0.4);
-    try testing.expectEqualStrings("New workspace", h.t.tooltipText() orelse return error.NoWorkspaceTooltip);
+    try testing.expectEqualStrings("New session", h.t.tooltipText() orelse return error.NoWorkspaceTooltip);
     h.snap("retention-794-new-workspace-label");
-    h.t.click(button.x + 13, button.y + 13);
+    h.t.click(button.x + button.w / 2, button.y + button.h / 2);
     h.t.settle(1);
     try testing.expectEqual(workspaces + 1, h.a.tabs.items.items.len);
     try testing.expectEqual(old_panes, h.a.tabs.splits.items[0].?.panes.items.len);
@@ -718,6 +723,22 @@ fn gitDraft(h: *Harness) !void {
     h.t.frame();
 }
 
+/// The draft's target chips moved to their own row under the footer's
+/// first when they had no room for their words.
+fn targetRowControls(h: *Harness, out: []ui.Rect) ![]ui.Rect {
+    const model = h.a.view.chip_anchor orelse return error.NoModelChip;
+    const pill = h.a.view.composer_anchor orelse return error.NoComposer;
+    var n: usize = 0;
+    for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (r.h != 20 or r.w <= 0 or r.x < pill.x or r.y < model.y + 24 or r.y + r.h > model.y + 50) continue;
+        if (n >= out.len) return error.ExtraFooterControl;
+        out[n] = r;
+        n += 1;
+    }
+    return out[0..n];
+}
+
 /// The footer's controls after the model chip: every 20-point box in its
 /// 24-point row.
 fn footerControls(h: *Harness, out: []ui.Rect) ![]ui.Rect {
@@ -756,9 +777,13 @@ test "draft footer controls end inside the composer in split panes" {
         if (window_w == 1200) h.snap("draft-footer-split-pane");
         const pill = h.a.view.composer_anchor orelse return error.NoComposer;
         const controls = try footerControls(&h, &buf);
-        // Mode, computer, project, checkout and ref: none left out, none
-        // past the row's 10-point inset, each whole or its 28-point glyph.
-        try testing.expectEqual(@as(usize, 5), controls.len);
+        var row2_buf: [4]ui.Rect = undefined;
+        const targets = try targetRowControls(&h, &row2_buf);
+        // Mode, computer, project, checkout and ref, across the two rows:
+        // none left out or drawn twice, none past the row's 10-point inset,
+        // each whole or its 28-point glyph.
+        try testing.expectEqual(@as(usize, 5), controls.len + targets.len);
+        for (targets) |r| try testing.expect(r.x + r.w <= pill.x + pill.w - 10 + 0.01);
         for (controls, 0..) |r, i| {
             try testing.expect(r.x + r.w <= pill.x + pill.w - 10 + 0.01);
             try testing.expect(r.w >= 28);
@@ -1121,6 +1146,222 @@ test "unified updates Skip persists per version token and reappears only when a 
     try testing.expect(h.a.view.updates_anchor != null);
 }
 
+test "topbar updates pill disappears automatically once agent or engine updates finish" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    const devs = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"synthetic-device","name":"Synthetic Mac Studio","online":true}]
+    , .{});
+    defer devs.deinit();
+    try h.a.devices.replace(devs.value);
+    if (h.a.device_id) |old| h.a.gpa.free(old);
+    h.a.device_id = try h.a.gpa.dupe(u8, "synthetic-device");
+
+    const updates = @import("agent_updates.zig");
+    const vu = @import("view_updates.zig");
+
+    // 1. Available agent update renders the topbar updates pill.
+    try updates.setTestStatuses(&h.a, "synthetic-device", true,
+        \\[{"harness":"claude-code","installedVersion":"2.1.319","latestVersion":"2.1.322","phase":"available","canApply":true}]
+    );
+    h.t.settle(1);
+    h.t.frame();
+    try testing.expectEqual(@as(usize, 1), vu.topbarUpdatesCount(&h.a));
+    try testing.expect(h.a.view.updates_anchor != null);
+
+    // 2. Once the agent finishes updating (`phase: "updated"`), the topbar pill goes away automatically.
+    try updates.setTestStatuses(&h.a, "synthetic-device", true,
+        \\[{"harness":"claude-code","installedVersion":"2.1.322","latestVersion":"2.1.322","phase":"updated","canApply":false}]
+    );
+    h.t.settle(1);
+    h.t.frame();
+    h.snap("completed-update-pill");
+    try testing.expectEqual(@as(usize, 0), vu.topbarUpdatesCount(&h.a));
+    try testing.expectEqual(@as(f32, 0), vu.topbarUpdatesWidth(&h.a));
+    try testing.expect(h.a.view.updates_anchor == null);
+    try testing.expect(!h.a.view.updates_popover);
+
+    // 3. A completed Codegraff engine update (`graff_kind == .updated`) also stays out of the topbar pill,
+    //    while a staged desktop app update awaiting Restart (matching installed version) still stays actionable.
+    const to = "0.302.99.0";
+    @memcpy(h.a.updates.graff_to[0..to.len], to);
+    h.a.updates.graff_to_len = to.len;
+    h.a.updates.graff_kind = .updated;
+    h.t.settle(1);
+    try testing.expectEqual(@as(usize, 0), vu.topbarUpdatesCount(&h.a));
+
+    const app_ver = "99.0.0";
+    @memcpy(h.a.release.latest[0..app_ver.len], app_ver);
+    h.a.release.latest_len = app_ver.len;
+    h.a.updates.setAppInstalled(app_ver);
+    h.t.settle(1);
+    h.t.frame();
+    try testing.expectEqual(@as(usize, 1), vu.topbarUpdatesCount(&h.a));
+    try testing.expect(h.a.view.updates_anchor != null);
+}
+
+test "failed Codex Xcode license update shows diagnostic, Copy command, and local-only Open Terminal (#125)" {
+    const updates = @import("agent_updates.zig");
+    const vu = @import("view_updates.zig");
+
+    // 1. Local Mac: surfaces Xcode license explanation, Copy command, Open Terminal, and Retry.
+    {
+        var h: Harness = undefined;
+        try h.init(false);
+        defer h.deinit();
+        h.a.settings.applyUiMode(.zen);
+        const devs = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\[{"id":"synthetic-device","name":"Synthetic MacBook","online":true}]
+        , .{});
+        defer devs.deinit();
+        try h.a.devices.replace(devs.value);
+        if (h.a.device_id) |old| h.a.gpa.free(old);
+        h.a.device_id = try h.a.gpa.dupe(u8, "synthetic-device");
+
+        try updates.setTestStatuses(&h.a, "synthetic-device", true,
+            \\[{"harness":"codex","installedVersion":"0.171.0","latestVersion":"0.172.0","phase":"failed","canApply":true,"error":{"kind":"install","message":"Error: Agreeing to the Xcode/iOS license requires admin privileges, please run \"sudo xcodebuild -license\" and then retry this command."}}]
+        );
+        h.t.settle(1);
+        h.t.frame();
+        const btn = h.a.view.updates_anchor orelse return error.MissingTopbarUpdatesButton;
+        h.t.click(btn.x + btn.w / 2, btn.y + btn.h / 2);
+        h.t.settle(0.4);
+        h.t.frame();
+        try testing.expect(h.a.view.updates_popover);
+        try testing.expect(h.t.hasText("Homebrew can\u{2019}t update Codex until you accept the Xcode license."));
+        try testing.expect(h.t.hasText("Copy command"));
+        try testing.expect(h.t.hasText("Open Terminal"));
+        try testing.expect(h.t.hasText("Retry"));
+        try testing.expect(h.t.hasText("Skip"));
+
+        try h.t.clickText("Copy command");
+        h.t.settle(0.2);
+        try testing.expectEqualStrings(vu.xcode_license_cmd, h.t.clipboard.items);
+
+        try h.t.clickText("Open Terminal");
+        h.t.settle(0.2);
+        try testing.expectEqual(@as(u32, 1), h.a.updates.test_opened_terminal_count);
+        try testing.expect(h.a.agent_updates.last_action == null);
+
+        try h.t.clickText("Retry");
+        h.t.settle(0.2);
+        const retry = h.a.agent_updates.last_action orelse return error.MissingRetryAction;
+        try testing.expectEqualStrings("ApplyHarnessUpdate", retry.method);
+        try testing.expectEqualStrings("codex", retry.harness);
+    }
+
+    // 2. Remote Mac: shows remote device recovery instruction and omits Open Terminal.
+    {
+        var h: Harness = undefined;
+        try h.init(false);
+        defer h.deinit();
+        h.a.settings.applyUiMode(.zen);
+        const devs = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\[{"id":"synthetic-device","name":"Local MacBook","online":true},{"id":"remote-mac","name":"Build Mini","online":true}]
+        , .{});
+        defer devs.deinit();
+        try h.a.devices.replace(devs.value);
+        if (h.a.device_id) |old| h.a.gpa.free(old);
+        h.a.device_id = try h.a.gpa.dupe(u8, "synthetic-device");
+
+        try updates.setTestStatuses(&h.a, "remote-mac", true,
+            \\[{"harness":"codex","installedVersion":"0.171.0","latestVersion":"0.172.0","phase":"failed","canApply":true,"error":{"kind":"install","message":"Error: please run sudo xcodebuild -license"}}]
+        );
+        h.t.settle(1);
+        h.t.frame();
+        const btn = h.a.view.updates_anchor orelse return error.MissingTopbarUpdatesButton;
+        h.t.click(btn.x + btn.w / 2, btn.y + btn.h / 2);
+        h.t.settle(0.4);
+        h.t.frame();
+        try testing.expect(h.t.hasText("Homebrew can\u{2019}t update Codex until you accept the Xcode license."));
+        try testing.expect(h.t.hasText("Run sudo xcodebuild -license on Build Mini, review and accept the license, then retry."));
+        try testing.expect(h.t.hasText("Copy command"));
+        try testing.expect(!h.t.hasText("Open Terminal"));
+        try testing.expect(h.t.hasText("Retry"));
+    }
+
+    // 3. Generic unrecognized failure: shows wrapped diagnostic alongside Retry and Skip.
+    {
+        var h: Harness = undefined;
+        try h.init(false);
+        defer h.deinit();
+        h.a.settings.applyUiMode(.zen);
+        const devs = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\[{"id":"synthetic-device","name":"Local MacBook","online":true}]
+        , .{});
+        defer devs.deinit();
+        try h.a.devices.replace(devs.value);
+        if (h.a.device_id) |old| h.a.gpa.free(old);
+        h.a.device_id = try h.a.gpa.dupe(u8, "synthetic-device");
+
+        try updates.setTestStatuses(&h.a, "synthetic-device", true,
+            \\[{"harness":"codex","installedVersion":"0.171.0","latestVersion":"0.172.0","phase":"failed","canApply":true,"error":{"kind":"install","message":"Error: SHA256 checksum mismatch for codex bottle"}}]
+        );
+        h.t.settle(1);
+        h.t.frame();
+        const btn = h.a.view.updates_anchor orelse return error.MissingTopbarUpdatesButton;
+        h.t.click(btn.x + btn.w / 2, btn.y + btn.h / 2);
+        h.t.settle(0.4);
+        h.t.frame();
+        try testing.expect(h.t.hasText("Error: SHA256 checksum mismatch for codex bottle"));
+        try testing.expect(!h.t.hasText("Open Terminal"));
+        try testing.expect(!h.t.hasText("Copy command"));
+        try testing.expect(h.t.hasText("Retry"));
+        try testing.expect(h.t.hasText("Skip"));
+    }
+}
+
+test "an update failure that only mentions Xcode and a LICENSE file keeps its own diagnostic (#125)" {
+    const updates = @import("agent_updates.zig");
+    const vu = @import("view_updates.zig");
+    const unrelated = "npm error EACCES: permission denied, unlink '/opt/demo/node_modules/xcode/LICENSE'";
+
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    const devs = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"synthetic-device","name":"Local MacBook","online":true}]
+    , .{});
+    defer devs.deinit();
+    try h.a.devices.replace(devs.value);
+    if (h.a.device_id) |old| h.a.gpa.free(old);
+    h.a.device_id = try h.a.gpa.dupe(u8, "synthetic-device");
+
+    try updates.setTestStatuses(&h.a, "synthetic-device", true,
+        \\[{"harness":"codex","installedVersion":"0.171.0","latestVersion":"0.172.0","phase":"failed","canApply":true,"error":{"kind":"install","message":"npm error EACCES: permission denied, unlink '/opt/demo/node_modules/xcode/LICENSE'"}}]
+    );
+    h.t.settle(1);
+    h.t.frame();
+    const btn = h.a.view.updates_anchor orelse return error.MissingTopbarUpdatesButton;
+    h.t.click(btn.x + btn.w / 2, btn.y + btn.h / 2);
+    h.t.settle(0.4);
+    h.t.frame();
+    if (std.c.getenv("NANO_SNAP_DIR")) |dir| {
+        var buf: [1024]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, "{s}/update-failure-unrelated.png", .{std.mem.span(dir)});
+        h.t.screenshot(path) catch {};
+    }
+    try testing.expect(h.t.hasText(unrelated));
+    try testing.expect(!h.t.hasText("Copy command"));
+    try testing.expect(!h.t.hasText("Open Terminal"));
+    try testing.expect(h.t.hasText("Retry"));
+    try testing.expect(h.t.hasText("Skip"));
+
+    try testing.expect(!vu.isXcodeLicenseBlocker(null));
+    try testing.expect(!vu.isXcodeLicenseBlocker(unrelated));
+    try testing.expect(!vu.isXcodeLicenseBlocker("license changed\nnpm error gyp: No Xcode or CLT version detected!"));
+    for ([_][]const u8{
+        "Error: You have not agreed to the Xcode license. Run `sudo xcodebuild -license` and retry.",
+        "You have not agreed to the Xcode license agreements.",
+        "Agreeing to the Xcode/iOS license requires admin privileges",
+        "The Xcode license has not been accepted",
+        "  sudo xcodebuild -license accept",
+    }) |msg| try testing.expect(vu.isXcodeLicenseBlocker(msg));
+}
+
 test "sidebar star banner, right-click menu, bottom account row, and compact model account popover" {
     var h: Harness = undefined;
     try h.init(true);
@@ -1201,7 +1442,8 @@ test "sidebar star banner, right-click menu, bottom account row, and compact mod
     try testing.expect(settings_left_card and settings_right_card);
     try testing.expect(!duplicate_back_row);
     try testing.expect(!topbar_nav_control);
-    try testing.expect(esc_badge_count >= 2);
+    // One way out of Settings, Back to chats with its esc hint; no second Close pill.
+    try testing.expectEqual(@as(usize, 1), esc_badge_count);
 
     // Pressing Escape exits Zen Settings cleanly; reopening and clicking "Back to chats" also exits.
     _ = h.t.shortcut(.{ .key = @import("nanoui").ui.Shortcut.escape });
@@ -1327,7 +1569,7 @@ test "desktop 3-pane horizontal split contains tool rows, question chips, and se
         \\  {"id":"t1","kind":"tool","resolved":true,"call":{"kind":"shell","command":"git status --short"}},
         \\  {"id":"t2","kind":"tool","resolved":true,"call":{"kind":"editFile","path":"apps/nano/src/view_question.zig"}},
         \\  {"id":"m1","kind":"text","text":"Checking where `main`, the branches and the worktrees stand before changing anything."},
-        \\  {"id":"q1","kind":"input","resolved":true,"questions":[{"id":"q-main","header":"Cleanup","question":"This worktree is now on `main`, level with `origin/main` (b3727a7), which cleanup mode should run?","options":["Prune clean throwaway worktrees","Keep all worktrees"]}]}
+        \\  {"id":"q1","kind":"input","resolved":false,"questions":[{"id":"q-main","header":"Cleanup","question":"This worktree is now on `main`, level with `origin/main` (b3727a7), which cleanup mode should run?","options":["Prune clean throwaway worktrees","Keep all worktrees"]}]}
         \\]}]}
     , .{});
     defer doc_b.deinit();
@@ -1336,19 +1578,25 @@ test "desktop 3-pane horizontal split contains tool rows, question chips, and se
     h.t.frame();
     h.snap("desktop-3pane-split-fixed");
 
-    // Verify no text node inside the center pane overflows into the right pane.
+    // The transcript chip stays in the center pane; the active question in
+    // this narrow split gets a separate window-bounded answer card.
     const q_label = h.t.findText("Question") orelse return error.MissingQuestionChip;
     const layout_s = h.a.tabs.layout() orelse return error.MissingSplitLayout;
     try testing.expectEqual(@as(usize, 3), layout_s.panes.items.len);
     const pane_each = h.a.view.chrome.chat_width / 3;
     const center_right = sidebar.widthOf(&h.a) + h.a.view.chrome.leading + pane_each * 2;
     try testing.expect(q_label.x + q_label.w < center_right);
+    try testing.expect(@import("view_question.zig").expanded(&h.t.ctx, &h.a));
+    try testing.expect(h.t.hasText("Cancel question"));
+    var question_text_found = false;
     for (h.t.ctx.nodes.items) |node| switch (node.content) {
         .text => |tx| if (std.mem.startsWith(u8, tx.str, "This worktree is now")) {
-            try testing.expect(node.rect.x + node.rect.w <= center_right + 1);
+            question_text_found = true;
+            try testing.expect(node.rect.x >= 0 and node.rect.x + node.rect.w <= h.t.ctx.size.w + 1);
         },
         else => {},
     };
+    try testing.expect(question_text_found);
 }
 
 test "session footer renders account usage ring alongside context ring, opens account switcher popover, and optimistically switches accounts" {
@@ -1443,7 +1691,8 @@ test "session footer renders account usage ring alongside context ring, opens ac
     try testing.expect(h.t.hasText("Context"));
 }
 
-test "zen topbar session pill left edge aligns flush with the right rounded-12 card in both chat and settings" {
+test "zen topbar right-aligns a lone chat caption while two tabs and settings stay flush with the right rounded-12 card" {
+    const rendering = @import("view_tab_strip.zig").rendering;
     const Find = struct {
         fn rightCard(ctx: *ui.Context, side_w: f32) ?ui.Rect {
             for (ctx.nodes.items) |n| {
@@ -1453,7 +1702,8 @@ test "zen topbar session pill left edge aligns flush with the right rounded-12 c
             }
             return null;
         }
-        fn activePill(ctx: *ui.Context) ?ui.Rect {
+        /// The first title-bar pill in node order: the lone chat caption, or the strip's leftmost tab.
+        fn firstPill(ctx: *ui.Context) ?ui.Rect {
             for (ctx.nodes.items) |n| {
                 if (n.rect.y < 38 and @abs(n.rect.h - 28) < 0.5 and n.style.radius == 7 and n.style.control) {
                     return n.rect;
@@ -1461,52 +1711,103 @@ test "zen topbar session pill left edge aligns flush with the right rounded-12 c
             }
             return null;
         }
+        /// Where #225 ends a lone windowed Zen caption: beside the device picker and the
+        /// trailing controls (the anchor of `tests_ui_tab_strip.zig`'s single-chat test).
+        fn captionEnd(a: *const App, ctx: *ui.Context) f32 {
+            const utilities = @import("view_tab_strip.zig").rendering.utilityWidth(a);
+            return ctx.size.w - @import("window_chrome.zig").trailing - utilities - 10 - @import("panel_chrome.zig").device_room - 12;
+        }
     };
 
     var h: Harness = undefined;
     try h.init(false);
     defer h.deinit();
+    // Two synthetic devices show the device picker the caption ends beside, and a
+    // second conversation in the same project lets the strip hold two tabs later.
+    const devices = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"synthetic-device","name":"Synthetic studio"},{"id":"synthetic-remote","name":"Synthetic build box"}]
+    , .{});
+    defer devices.deinit();
+    try h.a.devices.replace(devices.value);
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"synthetic-chat","deviceId":"synthetic-device","title":"Synthetic navigation conversation","spaceId":"synthetic-project","archived":false},
+        \\ {"id":"synthetic-second","deviceId":"synthetic-device","title":"Synthetic follow-up conversation","spaceId":"synthetic-project","archived":false}]
+    , .{});
+    defer chats.deinit();
+    try h.a.chats.replace(chats.value);
     h.a.settings.applyUiMode(.zen);
     h.a.openChatInTab("synthetic-chat");
     h.t.settle(1);
 
-    // Default sidebarWidth (224): pill left edge is flush with right card (sidebar_width + 3 = 227) and clears [⋯].
+    // Default sidebarWidth (224), one chat: the lone windowed caption ends beside the
+    // device picker and trailing controls (#225) and still clears [⋯] and the traffic lights.
+    try testing.expect(rendering.usesWindowedChatCaption(&h.a));
+    {
+        const pill = Find.firstPill(&h.t.ctx) orelse return error.MissingActivePill;
+        const more = h.a.view.more_anchor orelse return error.MissingMoreAnchor;
+        try testing.expectApproxEqAbs(Find.captionEnd(&h.a, &h.t.ctx), pill.x + pill.w, 1);
+        try testing.expect(more.x + more.w + 12 <= pill.x);
+        try testing.expect(pill.x >= @import("window_chrome.zig").leading);
+    }
+
+    // Wider sidebar (300), one chat: the right card follows (303) but the caption keeps its right-hand anchor.
+    h.a.settings.setNumber("sidebarWidth", 300);
+    h.t.settle(0.5);
+    try testing.expect(rendering.usesWindowedChatCaption(&h.a));
     {
         const card = Find.rightCard(&h.t.ctx, h.a.view.sidebar_width) orelse return error.MissingRightCard;
-        const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
+        const pill = Find.firstPill(&h.t.ctx) orelse return error.MissingActivePill;
         const more = h.a.view.more_anchor orelse return error.MissingMoreAnchor;
-        try testing.expectApproxEqAbs(card.x, pill.x, 0.5);
+        try testing.expectApproxEqAbs(@as(f32, 303), card.x, 0.5);
+        try testing.expectApproxEqAbs(Find.captionEnd(&h.a, &h.t.ctx), pill.x + pill.w, 1);
         try testing.expect(more.x + more.w + 12 <= pill.x);
     }
 
-    // Wider sidebar (300): pill follows right card edge (303) instead of pinning near left sidebar controls.
-    h.a.settings.setNumber("sidebarWidth", 300);
-    h.t.settle(0.5);
+    // Settings open: no lone caption; the pill is flush with the Zen Settings right rounded-12 card.
+    try h.t.clickText("Sign in");
+    h.t.settle(0.4);
+    try testing.expect(h.a.view.settings_open);
+    try testing.expect(!rendering.usesWindowedChatCaption(&h.a));
     {
         const card = Find.rightCard(&h.t.ctx, h.a.view.sidebar_width) orelse return error.MissingRightCard;
-        const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
+        const pill = Find.firstPill(&h.t.ctx) orelse return error.MissingActivePill;
         try testing.expectApproxEqAbs(@as(f32, 303), card.x, 0.5);
         try testing.expectApproxEqAbs(card.x, pill.x, 0.5);
     }
 
-    // Settings open: pill stays flush with the Zen Settings right rounded-12 card.
-    try h.t.clickText("Sign in");
+    // Back in chats with a second tab: no lone caption; the strip's first tab is flush with the right card (303).
+    try h.t.clickText("Back to chats");
     h.t.settle(0.4);
-    try testing.expect(h.a.view.settings_open);
+    h.a.openChatInTab("synthetic-second");
+    h.t.settle(1);
+    try testing.expectEqual(@as(usize, 2), rendering.singleSpec(&h.a).n);
+    try testing.expect(!rendering.usesWindowedChatCaption(&h.a));
     {
         const card = Find.rightCard(&h.t.ctx, h.a.view.sidebar_width) orelse return error.MissingRightCard;
-        const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
+        const pill = Find.firstPill(&h.t.ctx) orelse return error.MissingActivePill;
+        try testing.expectApproxEqAbs(@as(f32, 303), card.x, 0.5);
         try testing.expectApproxEqAbs(card.x, pill.x, 0.5);
     }
 
-    // Return to chats and collapse sidebar: pill clears traffic lights, toggle, history, and mode controls.
-    try h.t.clickText("Back to chats");
-    h.t.settle(0.4);
+    // Two tabs at the default sidebarWidth (224): the first tab follows the card back to 227 and clears [⋯].
+    h.a.settings.setNumber("sidebarWidth", 224);
+    h.t.settle(0.5);
+    {
+        const card = Find.rightCard(&h.t.ctx, h.a.view.sidebar_width) orelse return error.MissingRightCard;
+        const pill = Find.firstPill(&h.t.ctx) orelse return error.MissingActivePill;
+        const more = h.a.view.more_anchor orelse return error.MissingMoreAnchor;
+        try testing.expectApproxEqAbs(@as(f32, 227), card.x, 0.5);
+        try testing.expectApproxEqAbs(card.x, pill.x, 0.5);
+        try testing.expect(more.x + more.w + 12 <= pill.x);
+    }
+
+    // Two tabs, sidebar collapsed: the strip starts after the traffic lights, toggle, history, and mode controls.
     _ = h.t.shortcut(.{ .key = 'b', .cmd = true });
     h.t.settle(0.5);
     try testing.expect(h.a.view.sidebar_width < 0.5);
+    try testing.expect(!rendering.usesWindowedChatCaption(&h.a));
     {
-        const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
+        const pill = Find.firstPill(&h.t.ctx) orelse return error.MissingActivePill;
         const min_x = @import("window_chrome.zig").leading + 24 + 56 + 14;
         try testing.expect(pill.x >= min_x - 0.5);
     }

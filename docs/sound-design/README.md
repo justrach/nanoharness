@@ -1,23 +1,26 @@
 # Rounded notification sounds
 
-This contribution selects a compact four-cue product signature. It replaces the
-existing completion and agent-question sounds, adds one shared attention cue for
-run failures and durable connection outages, and preserves the Appshot capture cue
-from the separate Appshots contribution.
+The desktop app plays a compact set of rounded cues (`apps/nano/src/sound.zig`,
+which embeds the copies in `apps/nano/src/sounds/`; the same files are in
+`apps/nano/assets/sounds/`):
 
-- [`done.wav`](../../crates/ui/assets/sounds/done.wav): completion, settling
+- [`done.wav`](../../apps/nano/assets/sounds/done.wav): completion, settling
   rounded pair.
-- [`request.wav`](../../crates/ui/assets/sounds/request.wav): agent question,
+- [`request.wav`](../../apps/nano/assets/sounds/request.wav): agent question,
   rising rounded pair.
-- [`attention.wav`](../../crates/ui/assets/sounds/attention.wav): failure or
+- [`attention.wav`](../../apps/nano/assets/sounds/attention.wav): failure or
   durable disconnection, restrained downward rounded pair.
-- [`generate-notification-sounds.py`](../../scripts/generate-notification-sounds.py):
-  reproduces the completion and question assets;
-  `--variants-dir <directory>` also exports the two click-only alternatives.
+- [`attach.wav`](../../apps/nano/assets/sounds/attach.wav): a file or image
+  landing in the composer.
+- [`appshot.wav`](../../apps/nano/assets/sounds/appshot.wav): the Appshot cue.
 
-Settings → Notifications has a master session-sounds switch and independent
-choices for completion, input required, and errors/disconnections. Appshot capture
-keeps its independent **Capture sound** setting on the Appshots page.
+The WAVs are checked in; no generator script is in the repository.
+
+Settings → Notifications has a master **Session sounds** switch and independent
+choices for **Task completed**, **Input required** and **Errors and
+disconnections**. **Attaching files** has its own switch, outside Session
+sounds. Appshots keep their independent **Capture sound** setting on the
+Appshots page.
 
 ## Additional auditions
 
@@ -29,7 +32,5 @@ references without triggers.
 Earlier click-only alternatives: [completion](auditions/done-minimal.wav) and
 [agent question](auditions/request-minimal.wav).
 
-Run `python3 scripts/generate-sound-auditions.py --install-attention` to regenerate
-the ten numbered WAVs, their manifest, and the selected attention asset. All
-synthesis uses Python's standard library and original rounded pressure pulses,
-with no external samples.
+All ten were synthesized from original rounded pressure pulses, with no
+external samples.

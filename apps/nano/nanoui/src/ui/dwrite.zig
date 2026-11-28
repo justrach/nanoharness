@@ -37,6 +37,16 @@ const GlyphRun = extern struct {
     bidi_level: u32 = 0,
 };
 const Key = struct { face: usize, simulations: u32 };
+const AdvanceKey = struct { face: usize, simulations: u32, size_bits: u32, scale_bits: u32, glyph: u16 };
+const GlyphMetrics = extern struct {
+    left_side_bearing: i32,
+    advance_width: u32,
+    right_side_bearing: i32,
+    top_side_bearing: i32,
+    advance_height: u32,
+    bottom_side_bearing: i32,
+    vertical_origin_y: i32,
+};
 pub const Bitmap = struct { bytes: []const u8, rgb: []const u8, w: u32, h: u32, stride: u32, x: f32, y: f32 };
 
 /// A non-null owner makes DirectWrite borrow the database's bytes instead of
@@ -77,11 +87,16 @@ pub const Cache = struct {
     loader: ?*Com = null,
     params: ?*Com = null,
     blending: blending.Params = .{},
+    classic_blending: ?blending.Params = null,
+    classic_grayscale_blending: ?blending.Params = null,
+    classic_clear_level: f32 = 1,
     cleartype: bool = false,
     aliased: bool = false,
     bgr: bool = false,
     clear_level: f32 = 1,
     fonts: std.AutoHashMapUnmanaged(Key, *Com) = .empty,
+    /// GDI-measured advances in device pixels (`gridAdvance`).
+    grid_advances: std.AutoHashMapUnmanaged(AdvanceKey, f32) = .empty,
     bytes: std.ArrayList(u8) = .empty,
     rgb: std.ArrayList(u8) = .empty,
     scratch: std.ArrayList(u8) = .empty,
@@ -102,6 +117,7 @@ pub const Cache = struct {
             if (self.factory) |factory| factory.release();
         }
         self.fonts.deinit(gpa);
+        self.grid_advances.deinit(gpa);
         self.bytes.deinit(gpa);
         self.rgb.deinit(gpa);
         self.scratch.deinit(gpa);
@@ -150,10 +166,37 @@ pub const Cache = struct {
         self.loader = l;
     }
 
+    /// The advance of `glyph`, in whole device pixels, as GDI measures it
+    /// when its run font is drawn in a GDI mode (GDI Classic, GDI Natural or
+    /// aliased); null in a Natural mode. A GDI mode grid-fits each glyph's
+    /// stems and width and draws it at a whole pixel, so the pen has to move
+    /// by these widths: moved by design advances instead, letters drift up to
+    /// half a pixel apart ("ju mps", "m atters").
+    pub fn gridAdvance(self: *Cache, gpa: std.mem.Allocator, rf: anytype, glyph: u16, scale: f32) !?f32 {
+        if (!enabled) return null;
+        const key: AdvanceKey = .{ .face = @intFromPtr(rf.font), .simulations = simulationsOf(rf), .size_bits = @bitCast(rf.size), .scale_bits = @bitCast(scale), .glyph = glyph };
+        if (self.grid_advances.get(key)) |px| return px;
+        const f = try self.face(gpa, rf);
+        const m = self.mode(f, rf.size, scale);
+        if (m.rendering > 3) return null;
+        var metrics: GlyphMetrics = undefined;
+        const indices = [1]u16{glyph};
+        // IDWriteFontFace::GetGdiCompatibleGlyphMetrics: design units that
+        // come to whole pixels at this size; GDI Natural (3) asks for its own.
+        if (f.method(17, *const fn (*Com, f32, f32, ?*const anyopaque, i32, [*]const u16, u32, *GlyphMetrics, i32) callconv(.winapi) i32)(f, rf.size, scale, null, @intFromBool(m.rendering == 3), &indices, 1, &metrics, 0) < 0) return error.DirectWriteGlyphMetrics;
+        const px = @round(@as(f32, @floatFromInt(metrics.advance_width)) * rf.size * scale / rf.font.units_per_em);
+        try self.grid_advances.put(gpa, key, px);
+        return px;
+    }
+
+    fn simulationsOf(rf: anytype) u32 {
+        return @as(u32, if (rf.embolden > 0) 1 else 0) | @as(u32, if (rf.skew != 0) 2 else 0);
+    }
+
     fn face(self: *Cache, gpa: std.mem.Allocator, rf: anytype) !*Com {
         const key: Key = .{
             .face = @intFromPtr(rf.font),
-            .simulations = @as(u32, if (rf.embolden > 0) 1 else 0) | @as(u32, if (rf.skew != 0) 2 else 0),
+            .simulations = simulationsOf(rf),
         };
         if (self.fonts.get(key)) |f| return f;
         try self.initialize();
@@ -220,6 +263,15 @@ pub const Cache = struct {
         };
     }
 
+    /// Analysis-specific parameters differ from system defaults in Classic.
+    fn analysisBlend(self: *Cache, analysis: *Com) !struct { params: blending.Params, clear_level: f32 } {
+        var gamma: f32 = 0;
+        var contrast: f32 = 0;
+        var level: f32 = 0;
+        if (analysis.method(5, *const fn (*Com, *Com, *f32, *f32, *f32) callconv(.winapi) i32)(analysis, self.params.?, &gamma, &contrast, &level) < 0) return error.DirectWriteBlendParams;
+        return .{ .params = .{ .gamma = blending.gammaRatios(gamma), .contrast = contrast, .grayscale_contrast = contrast }, .clear_level = std.math.clamp(level, 0, 1) };
+    }
+
     fn analyze(self: *Cache, run: *const GlyphRun, phase: f32, rendering: u32, grid: u32, clear: bool) !struct { analysis: *Com, bounds: Rect } {
         const factory = self.factory.?;
         var analysis: ?*Com = null;
@@ -240,6 +292,15 @@ pub const Cache = struct {
         defer gray.analysis.release();
         const clear = if (self.cleartype) try self.analyze(&run, phase, m.rendering, m.grid, true) else null;
         defer if (clear) |c| c.analysis.release();
+        if (m.rendering == 2) {
+            if (self.classic_grayscale_blending == null)
+                self.classic_grayscale_blending = (try self.analysisBlend(gray.analysis)).params;
+            if (clear) |c| if (self.classic_blending == null) {
+                const p = try self.analysisBlend(c.analysis);
+                self.classic_blending = p.params;
+                self.classic_clear_level = p.clear_level;
+            };
+        }
         const gb = gray.bounds;
         const cb = if (clear) |c| c.bounds else gb;
         const bounds: Rect = .{ .left = @min(gb.left, cb.left), .top = @min(gb.top, cb.top), .right = @max(gb.right, cb.right), .bottom = @max(gb.bottom, cb.bottom) };
@@ -251,6 +312,7 @@ pub const Cache = struct {
         if (gray.analysis.method(4, *const fn (*Com, u32, *const Rect, [*]u8, u32) callconv(.winapi) i32)(gray.analysis, 0, &bounds, self.bytes.items.ptr, len) < 0) return error.DirectWriteTexture;
         try self.rgb.resize(gpa, len * 4);
         @memset(self.rgb.items, 0);
+        const clear_level = if (m.rendering == 2) self.classic_clear_level else self.clear_level;
         if (clear) |c| {
             try self.scratch.resize(gpa, len * 3);
             if (c.analysis.method(4, *const fn (*Com, u32, *const Rect, [*]u8, u32) callconv(.winapi) i32)(c.analysis, 1, &bounds, self.scratch.items.ptr, len * 3) < 0) return error.DirectWriteTexture;
@@ -259,12 +321,12 @@ pub const Cache = struct {
                 const mean = (@as(f32, @floatFromInt(v[0])) + @as(f32, @floatFromInt(v[1])) + @as(f32, @floatFromInt(v[2]))) / 3;
                 for (0..3) |ch| {
                     const value: f32 = @floatFromInt(v[if (self.bgr) 2 - ch else ch]);
-                    self.rgb.items[i * 4 + ch] = @intFromFloat(@round(mean + (value - mean) * self.clear_level));
+                    self.rgb.items[i * 4 + ch] = @intFromFloat(@round(mean + (value - mean) * clear_level));
                 }
-                self.rgb.items[i * 4 + 3] = 255;
+                self.rgb.items[i * 4 + 3] = if (m.rendering == 2) 254 else 255;
             }
         } else {
-            for (0..len) |i| self.rgb.items[i * 4 + 3] = 128;
+            for (0..len) |i| self.rgb.items[i * 4 + 3] = if (m.rendering == 2) 127 else 128;
         }
         return .{ .bytes = self.bytes.items, .rgb = self.rgb.items, .w = w, .h = h, .stride = w, .x = @floatFromInt(bounds.left), .y = @floatFromInt(-bounds.top) };
     }

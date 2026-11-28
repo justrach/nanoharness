@@ -48,6 +48,9 @@ pub const State = struct {
 pub const Item = struct {
     app: *App,
     owner: []u8,
+    /// A blank composer has no chat ID. Retain its pane identity rather
+    /// than treating all unsent new-chat drafts as the same owner.
+    draft_pane: ?u64 = null,
     name: []u8,
     bytes: []u8,
     target: ?[]u8,
@@ -70,7 +73,7 @@ pub const Item = struct {
     }
 
     pub fn active(item: *const Item, a: *const App) bool {
-        return !item.removed and std.mem.eql(u8, item.owner, owner(a));
+        return !item.removed and std.mem.eql(u8, item.owner, owner(a)) and item.draft_pane == draftPane(a);
     }
 
     pub fn remove(item: *Item) void {
@@ -160,6 +163,13 @@ fn owner(a: *const App) []const u8 {
     return if (a.queue_edit) |e| e.row else a.selected orelse "";
 }
 
+fn draftPane(a: *const App) ?u64 {
+    if (a.selected != null or a.queue_edit != null) return null;
+    if (a.tabs.layout()) |s| return s.identities[s.focus];
+    if (a.tabs.active >= a.tabs.identities.items.len) return null;
+    return a.tabs.identities.items[a.tabs.active].pane;
+}
+
 fn host(a: *const App) ?[]const u8 {
     if (a.selected) |id| if (a.findChat(id)) |chat| if (chat.device_id) |device| {
         if (a.device_id) |mine| if (std.mem.eql(u8, mine, device)) return null;
@@ -210,7 +220,7 @@ pub fn stage(a: *App, name: []const u8, bytes: []const u8) !void {
     errdefer a.gpa.free(data);
     const target = if (host(a)) |h| try a.gpa.dupe(u8, h) else null;
     errdefer if (target) |h| a.gpa.free(h);
-    item.* = .{ .app = a, .owner = key, .name = label, .bytes = data, .target = target, .id = undefined };
+    item.* = .{ .app = a, .owner = key, .draft_pane = draftPane(a), .name = label, .bytes = data, .target = target, .id = undefined };
     _ = @import("ids.zig").uuid(a.io, &item.id);
     try a.attachments.items.append(a.gpa, item);
     item.start();
@@ -371,7 +381,7 @@ fn restoredItem(a: *App, path: []const u8) !*Item {
     const target = if (host(a)) |h| try a.gpa.dupe(u8, h) else null;
     errdefer if (target) |h| a.gpa.free(h);
     const ref = try a.gpa.dupe(u8, path);
-    item.* = .{ .app = a, .owner = key, .name = label, .bytes = data, .target = target, .id = undefined, .path = ref, .status = .ready };
+    item.* = .{ .app = a, .owner = key, .draft_pane = draftPane(a), .name = label, .bytes = data, .target = target, .id = undefined, .path = ref, .status = .ready };
     _ = @import("ids.zig").uuid(a.io, &item.id);
     return item;
 }

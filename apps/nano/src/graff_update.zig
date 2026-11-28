@@ -14,9 +14,19 @@ const user_agent = "harness-graff-updater";
 
 /// Periodic background check interval (10 minutes), matching GPUI's cadence.
 pub const check_interval_ms: i64 = 10 * 60 * 1000;
-/// Short backoff after a single transient network failure before returning to
+/// Fast backoff after a first transient failure before escalating to 2 minutes.
+pub const fast_retry_delay_ms: i64 = 30 * 1000;
+/// Short backoff after a repeated transient failure before returning to
 /// the 10-minute schedule.
 pub const retry_delay_ms: i64 = 2 * 60 * 1000;
+
+/// Pure backoff policy for Codegraff update failures: keep auto-updates retrying
+/// silently on transient errors, and only fall back to the manual `Available`
+/// prompt on repeated failures or explicit user/disabled-auto-update checks.
+pub fn failureNoticeKind(auto_update: bool, manual: bool, prior_failures: u8) view_updates.GraffKind {
+    if (!auto_update or manual or prior_failures >= 2) return .available;
+    return .none;
+}
 
 /// UI-thread wall-clock schedule, surviving macOS sleep and clock adjustments.
 pub const Schedule = struct {
@@ -38,7 +48,14 @@ pub const Schedule = struct {
     pub fn complete(s: *Schedule, now_ms: i64, ok: bool) void {
         s.in_flight = false;
         s.failures = if (ok) 0 else @min(s.failures +| 1, 3);
-        const delay: i64 = if (!ok and s.failures == 1) retry_delay_ms else check_interval_ms;
+        const delay: i64 = if (ok)
+            check_interval_ms
+        else if (s.failures == 1)
+            fast_retry_delay_ms
+        else if (s.failures == 2)
+            retry_delay_ms
+        else
+            check_interval_ms;
         s.due_ms = now_ms +| delay;
     }
 
@@ -97,6 +114,7 @@ fn check(a: *App, manual: bool, force_install: bool) bool {
         if (env.get("GRAFF_EXECUTABLE")) |v| if (v.len > 0) return false;
     }
     const home = if (a.env) |env| env.get("HOME") orelse return false else return false;
+    const prior_failures = a.updates.graff_schedule.failures;
     if (!a.updates.graff_schedule.begin(a.nowMs(), manual)) return false;
 
     const auto_update = force_install or (if (a.env) |env| !off(env.get("HARNESS_GRAFF_AUTO_UPDATE")) else true);
@@ -114,6 +132,8 @@ fn check(a: *App, manual: bool, force_install: bool) bool {
         },
         .dismissed = if (dismissed) |d| (a.gpa.dupe(u8, d) catch null) else null,
         .auto_update = auto_update,
+        .manual = force_install,
+        .prior_failures = prior_failures,
     };
     const t = std.Thread.spawn(.{}, workerMain, .{job}) catch {
         job.deinit(a.gpa);
@@ -129,6 +149,8 @@ const Job = struct {
     home: []u8,
     dismissed: ?[]u8,
     auto_update: bool,
+    manual: bool,
+    prior_failures: u8,
 
     fn deinit(self: *Job, gpa: std.mem.Allocator) void {
         gpa.free(self.home);
@@ -161,7 +183,9 @@ fn applyOnMain(ctx: ?*anyopaque) callconv(.c) void {
     defer msg.deinit();
     const a = msg.app;
     if (msg.publish) {
-        if (msg.to) |to| {
+        if (msg.kind == .none) {
+            a.updates.clearGraff();
+        } else if (msg.to) |to| {
             a.updates.publishGraff(msg.kind, msg.from, to, msg.version_out);
         }
     }
@@ -237,9 +261,19 @@ fn workerMain(job: *Job) void {
                 postUi(a, true, true, true, .updated, current, bare_tag, new_out);
                 return;
             }
-            // Swap failed: surface Available so the user can retry instead of
-            // leaving an eternal "Updating…" pill.
-            postUi(a, true, false, true, .available, current, bare_tag, null);
+            // Retry transient auto-update failures quietly before surfacing a
+            // manual Update card so brief glitches do not drop auto-update UX.
+            const next_kind = failureNoticeKind(job.auto_update, job.manual, job.prior_failures);
+            postUi(
+                a,
+                true,
+                false,
+                true,
+                next_kind,
+                if (next_kind == .available) current else null,
+                if (next_kind == .available) bare_tag else null,
+                null,
+            );
             return;
         }
     }
@@ -310,6 +344,98 @@ fn sha256FileHex(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ?[64]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
+pub fn extractAndSwapArchive(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    asset: []const u8,
+    tar_path: []const u8,
+    sums_bytes: ?[]const u8,
+    stage_dir: []const u8,
+    managed_path: []const u8,
+) bool {
+    const sums = sums_bytes orelse {
+        std.log.warn("harness-nano: graff {s} SHA256SUMS missing; refusing unverified update", .{asset});
+        return false;
+    };
+    const actual = sha256FileHex(gpa, io, tar_path) orelse {
+        std.log.warn("harness-nano: graff update checksum read failed for {s}", .{tar_path});
+        return false;
+    };
+    if (!verifySha256Sums(sums, asset, &actual)) {
+        std.log.warn("harness-nano: graff {s} SHA256SUMS verification failed", .{asset});
+        return false;
+    }
+
+    std.Io.Dir.cwd().deleteTree(io, stage_dir) catch {};
+    std.Io.Dir.cwd().createDirPath(io, stage_dir) catch |err| {
+        std.log.warn("harness-nano: graff update stage mkdir failed ({s}): {t}", .{ stage_dir, err });
+        return false;
+    };
+    defer std.Io.Dir.cwd().deleteTree(io, stage_dir) catch {};
+
+    var child = std.process.spawn(io, .{
+        .argv = &.{ "/usr/bin/tar", "-xzf", tar_path, "-C", stage_dir },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch |err| {
+        std.log.warn("harness-nano: graff update tar spawn failed: {t}", .{err});
+        return false;
+    };
+    const term = child.wait(io) catch |err| {
+        std.log.warn("harness-nano: graff update tar wait failed: {t}", .{err});
+        return false;
+    };
+    if (term != .exited or term.exited != 0) {
+        std.log.warn("harness-nano: graff update tar failed for {s}", .{asset});
+        return false;
+    }
+
+    const extracted = findGraffForAsset(gpa, io, stage_dir, asset) orelse {
+        std.log.warn("harness-nano: graff binary missing from {s}", .{asset});
+        return false;
+    };
+    defer gpa.free(extracted);
+
+    // Ensure executable permissions before probing and atomic swap.
+    var chmod_child = std.process.spawn(io, .{
+        .argv = &.{ "/bin/chmod", "755", extracted },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch |err| {
+        std.log.warn("harness-nano: graff update chmod spawn failed: {t}", .{err});
+        return false;
+    };
+    const chmod_term = chmod_child.wait(io) catch |err| {
+        std.log.warn("harness-nano: graff update chmod wait failed: {t}", .{err});
+        return false;
+    };
+    if (chmod_term != .exited or chmod_term.exited != 0) {
+        std.log.warn("harness-nano: graff update chmod failed for {s}", .{extracted});
+        return false;
+    }
+
+    const probed = versionOutput(gpa, io, extracted) orelse {
+        std.log.warn("harness-nano: unpacked graff --version failed ({s})", .{extracted});
+        return false;
+    };
+    defer gpa.free(probed);
+    const ver = dotted(gpa, probed) orelse {
+        std.log.warn("harness-nano: unpacked graff reported invalid version", .{});
+        return false;
+    };
+    gpa.free(ver);
+
+    // Atomic rename directly over managed path (no delete-before-rename window;
+    // any running `graff acp` keeps its unlinked inode).
+    std.Io.Dir.cwd().rename(extracted, std.Io.Dir.cwd(), managed_path, io) catch |err| {
+        std.log.warn("harness-nano: graff atomic swap into {s} failed: {t}", .{ managed_path, err });
+        return false;
+    };
+    return true;
+}
+
 fn downloadAndSwap(gpa: std.mem.Allocator, io: std.Io, home: []const u8, managed: []const u8, tag: []const u8) bool {
     const asset = macosAssetName(builtin.cpu.arch) orelse return false;
     const bin_dir = std.fmt.allocPrint(gpa, "{s}/.harness/bin", .{home}) catch return false;
@@ -329,62 +455,53 @@ fn downloadAndSwap(gpa: std.mem.Allocator, io: std.Io, home: []const u8, managed
     defer gpa.free(sums_path);
     defer std.Io.Dir.cwd().deleteFile(io, sums_path) catch {};
 
-    if (!curlDownload(io, url, tar)) return false;
-    if (curlDownload(io, sums_url, sums_path)) {
-        const sums_bytes = std.Io.Dir.cwd().readFileAlloc(io, sums_path, gpa, .limited(256 * 1024)) catch return false;
-        defer gpa.free(sums_bytes);
-        const actual = sha256FileHex(gpa, io, tar) orelse return false;
-        if (!verifySha256Sums(sums_bytes, asset, &actual)) {
-            std.log.warn("harness-nano: graff {s} SHA256SUMS verification failed", .{tag});
-            return false;
-        }
+    if (!curlDownload(io, url, tar)) {
+        std.log.warn("harness-nano: graff {s} download failed", .{tag});
+        return false;
     }
+    if (!curlDownload(io, sums_url, sums_path)) {
+        std.log.warn("harness-nano: graff {s} SHA256SUMS unavailable; refusing unverified update", .{tag});
+        return false;
+    }
+    const sums_bytes = std.Io.Dir.cwd().readFileAlloc(io, sums_path, gpa, .limited(256 * 1024)) catch return false;
+    defer gpa.free(sums_bytes);
 
     const stage = std.fmt.allocPrint(gpa, "{s}/.graff-update-stage", .{bin_dir}) catch return false;
     defer gpa.free(stage);
-    std.Io.Dir.cwd().deleteTree(io, stage) catch {};
-    std.Io.Dir.cwd().createDirPath(io, stage) catch return false;
-    defer std.Io.Dir.cwd().deleteTree(io, stage) catch {};
+    return extractAndSwapArchive(gpa, io, asset, tar, sums_bytes, stage, managed);
+}
 
-    var child = std.process.spawn(io, .{
-        .argv = &.{ "tar", "-xzf", tar, "-C", stage },
-        .stdin = .ignore,
-        .stdout = .ignore,
-        .stderr = .ignore,
-    }) catch return false;
-    const term = child.wait(io) catch return false;
-    if (term != .exited or term.exited != 0) return false;
-
-    const extracted = findGraff(gpa, io, stage) orelse return false;
-    defer gpa.free(extracted);
-
-    // Ensure executable permissions before atomic swap.
-    var chmod_child = std.process.spawn(io, .{
-        .argv = &.{ "chmod", "755", extracted },
-        .stdin = .ignore,
-        .stdout = .ignore,
-        .stderr = .ignore,
-    }) catch return false;
-    const chmod_term = chmod_child.wait(io) catch return false;
-    if (chmod_term != .exited or chmod_term.exited != 0) return false;
-
-    // Atomic rename directly over managed path (no delete-before-rename window;
-    // any running `graff acp` keeps its unlinked inode).
-    std.Io.Dir.cwd().rename(extracted, std.Io.Dir.cwd(), managed, io) catch return false;
-    return true;
+fn findGraffForAsset(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, asset: []const u8) ?[]u8 {
+    const stem = if (std.mem.endsWith(u8, asset, ".tar.gz"))
+        asset[0 .. asset.len - ".tar.gz".len]
+    else
+        asset;
+    if (std.fmt.allocPrint(gpa, "{s}/{s}/graff", .{ dir, stem })) |nested| {
+        if (std.Io.Dir.cwd().access(io, nested, .{})) |_| return nested else |_| gpa.free(nested);
+    } else |_| {}
+    if (std.fmt.allocPrint(gpa, "{s}/graff", .{dir})) |flat| {
+        if (std.Io.Dir.cwd().access(io, flat, .{})) |_| return flat else |_| gpa.free(flat);
+    } else |_| {}
+    return findGraff(gpa, io, dir);
 }
 
 fn findGraff(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ?[]u8 {
     const list = std.fmt.allocPrint(gpa, "{s}/.list", .{dir}) catch return null;
     defer gpa.free(list);
     const file = std.Io.Dir.cwd().createFile(io, list, .{}) catch return null;
+    defer std.Io.Dir.cwd().deleteFile(io, list) catch {};
+    var file_open = true;
+    defer if (file_open) file.close(io);
     var child = std.process.spawn(io, .{
-        .argv = &.{ "find", dir, "-type", "f", "-name", "graff" },
+        .argv = &.{ "/usr/bin/find", dir, "-type", "f", "-name", "graff" },
         .stdin = .ignore,
         .stdout = .{ .file = file },
         .stderr = .ignore,
     }) catch return null;
-    _ = child.wait(io) catch return null;
+    file.close(io);
+    file_open = false;
+    const term = child.wait(io) catch return null;
+    if (term != .exited or term.exited != 0) return null;
     const out_bytes = std.Io.Dir.cwd().readFileAlloc(io, list, gpa, .limited(4096)) catch return null;
     defer gpa.free(out_bytes);
     const line_end = std.mem.indexOfScalar(u8, out_bytes, '\n') orelse out_bytes.len;
@@ -398,6 +515,11 @@ fn curlDownload(io: std.Io, url: []const u8, dest_path: []const u8) bool {
         .argv = &.{
             "/usr/bin/curl",
             "-fsSL",
+            "--retry",
+            "2",
+            "--retry-delay",
+            "2",
+            "--retry-connrefused",
             "--max-time",
             "120",
             "-A",
@@ -415,20 +537,17 @@ fn curlDownload(io: std.Io, url: []const u8, dest_path: []const u8) bool {
 }
 
 fn runCapture(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8, max_bytes: usize) ?[]u8 {
-    var tmp_buf: [128]u8 = undefined;
-    const seed = std.Io.Clock.real.now(io).nanoseconds;
-    const out_path = std.fmt.bufPrint(&tmp_buf, "/tmp/harness-graff-upd-{d}.tmp", .{seed}) catch return null;
-    const file = std.Io.Dir.cwd().createFile(io, out_path, .{}) catch return null;
-    defer std.Io.Dir.cwd().deleteFile(io, out_path) catch {};
-    var child = std.process.spawn(io, .{
+    const res = std.process.run(gpa, io, .{
         .argv = argv,
-        .stdin = .ignore,
-        .stdout = .{ .file = file },
-        .stderr = .ignore,
+        .stdout_limit = .limited(max_bytes),
+        .stderr_limit = .limited(4096),
     }) catch return null;
-    const term = child.wait(io) catch return null;
-    if (term != .exited or term.exited != 0) return null;
-    return std.Io.Dir.cwd().readFileAlloc(io, out_path, gpa, .limited(max_bytes)) catch null;
+    defer gpa.free(res.stderr);
+    if (res.term != .exited or res.term.exited != 0) {
+        gpa.free(res.stdout);
+        return null;
+    }
+    return res.stdout;
 }
 
 fn latestTag(gpa: std.mem.Allocator, io: std.Io) ?[]u8 {
@@ -514,7 +633,7 @@ test "a release is newer only past the installed dotted version" {
     try std.testing.expectEqualStrings("0.0.302.24", got);
 }
 
-test "graff auto-update schedule polls every 10 minutes and retries once after failure" {
+test "graff auto-update schedule polls every 10 minutes and steps backoff 30s -> 2m -> 10m" {
     const testing = std.testing;
     var s: Schedule = .{};
     const t0: i64 = 1_700_000_000_000;
@@ -527,17 +646,149 @@ test "graff auto-update schedule polls every 10 minutes and retries once after f
     try testing.expect(!s.due(t0 + 500 + check_interval_ms - 1));
     try testing.expect(s.due(t0 + 500 + check_interval_ms));
 
-    // Transient failure retries after 2 minutes, then returns to 10 minutes.
-    try testing.expect(s.begin(t0 + 500 + check_interval_ms, false));
+    // Failure 1 -> 30s quick retry; failure 2 -> 2m; failure 3 -> 10m; recovery resets to 0.
     const t1 = t0 + 1000 + check_interval_ms;
+    try testing.expect(s.begin(t0 + 500 + check_interval_ms, false));
     s.complete(t1, false);
-    try testing.expect(!s.due(t1 + retry_delay_ms - 1));
-    try testing.expect(s.due(t1 + retry_delay_ms));
+    try testing.expectEqual(@as(u8, 1), s.failures);
+    try testing.expect(!s.due(t1 + fast_retry_delay_ms - 1));
+    try testing.expect(s.due(t1 + fast_retry_delay_ms));
 
-    try testing.expect(s.begin(t1 + retry_delay_ms, false));
-    s.complete(t1 + retry_delay_ms + 500, false);
-    try testing.expect(!s.due(t1 + retry_delay_ms + 500 + check_interval_ms - 1));
-    try testing.expect(s.due(t1 + retry_delay_ms + 500 + check_interval_ms));
+    const t2 = t1 + fast_retry_delay_ms + 250;
+    try testing.expect(s.begin(t1 + fast_retry_delay_ms, false));
+    s.complete(t2, false);
+    try testing.expectEqual(@as(u8, 2), s.failures);
+    try testing.expect(!s.due(t2 + retry_delay_ms - 1));
+    try testing.expect(s.due(t2 + retry_delay_ms));
+
+    const t3 = t2 + retry_delay_ms + 250;
+    try testing.expect(s.begin(t2 + retry_delay_ms, false));
+    s.complete(t3, false);
+    try testing.expectEqual(@as(u8, 3), s.failures);
+    try testing.expect(!s.due(t3 + check_interval_ms - 1));
+    try testing.expect(s.due(t3 + check_interval_ms));
+
+    try testing.expect(s.begin(t3 + check_interval_ms, false));
+    s.complete(t3 + check_interval_ms + 100, true);
+    try testing.expectEqual(@as(u8, 0), s.failures);
+}
+
+test "graff auto-update retries silently before falling back to manual Available notice" {
+    const testing = std.testing;
+    const ui = nanoui.ui;
+    @import("theme.zig").registerFonts();
+
+    try testing.expectEqual(view_updates.GraffKind.none, failureNoticeKind(true, false, 0));
+    try testing.expectEqual(view_updates.GraffKind.none, failureNoticeKind(true, false, 1));
+    try testing.expectEqual(view_updates.GraffKind.available, failureNoticeKind(true, false, 2));
+    try testing.expectEqual(view_updates.GraffKind.available, failureNoticeKind(true, true, 0));
+    try testing.expectEqual(view_updates.GraffKind.available, failureNoticeKind(false, false, 0));
+
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.dark = false;
+    a.settings.setText("uiMode", "classic");
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1120, .height = 760, .dark = false });
+    defer t.deinit();
+
+    // Old behavior showed an intrusive manual "Update available" prompt on the first failure.
+    a.updates.publishGraff(.available, "0.302.74.80", "0.302.74.81", null);
+    t.settle(1);
+    try testing.expect(t.containsText("Codegraff engine update available"));
+    try testing.expect(t.containsText("Update"));
+    if (std.c.getenv("NANO_GRAFF_AUTO_SNAP_DIR")) |dir| {
+        var buf: [1024]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, "{s}/before-graff-manual.png", .{std.mem.span(dir)})) |p| t.screenshot(p) catch {} else |_| {}
+    }
+
+    // Transient auto-update failure now clears silently so background retry completes without prompting.
+    a.updates.publishGraff(.updating, "0.302.74.80", "0.302.74.81", null);
+    t.settle(1);
+    a.updates.clearGraff();
+    t.settle(1);
+    try testing.expect(!t.containsText("Codegraff engine update available"));
+    try testing.expect(!a.updates.graff_card_open);
+
+    const version_out =
+        \\graff 0.302.74.81
+        \\
+        \\What's new
+        \\──────────
+        \\0.302.74.81
+        \\  • Retry transient background downloads quietly before falling back to manual Update.
+    ;
+    a.updates.publishGraff(.updated, "0.302.74.80", "0.302.74.81", version_out);
+    t.settle(1);
+    try testing.expect(t.containsText("Codegraff engine updated"));
+    if (std.c.getenv("NANO_GRAFF_AUTO_SNAP_DIR")) |dir| {
+        var buf: [1024]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, "{s}/after-graff-updated.png", .{std.mem.span(dir)})) |p| t.screenshot(p) catch {} else |_| {}
+    }
+}
+
+test "graff extractAndSwapArchive verifies checksum, unpacks, validates --version, and swaps atomically" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    const io = testing.io;
+    const gpa = testing.allocator;
+
+    const root = "/tmp/harness-graff-swap-test";
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, root ++ "/pkg/graff-aarch64-macos");
+
+    const managed = root ++ "/graff";
+    const new_bin = root ++ "/pkg/graff-aarch64-macos/graff";
+    const tar_path = root ++ "/graff-aarch64-macos.tar.gz";
+    const stage_dir = root ++ "/stage";
+
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = managed,
+        .data = "#!/bin/sh\necho 'graff 0.302.74.80'\n",
+    });
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = new_bin,
+        .data = "#!/bin/sh\necho 'graff 0.302.74.81'\n",
+    });
+    var chmod_child = try std.process.spawn(io, .{
+        .argv = &.{ "/bin/chmod", "755", managed, new_bin },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    _ = try chmod_child.wait(io);
+
+    var tar_child = try std.process.spawn(io, .{
+        .argv = &.{ "/usr/bin/tar", "-czf", tar_path, "-C", root ++ "/pkg", "graff-aarch64-macos" },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    const tar_term = try tar_child.wait(io);
+    try testing.expect(tar_term == .exited and tar_term.exited == 0);
+
+    // Missing SHA256SUMS must fail closed and leave the existing binary untouched.
+    try testing.expect(!extractAndSwapArchive(gpa, io, "graff-aarch64-macos.tar.gz", tar_path, null, stage_dir, managed));
+    const missing_out = versionOutput(gpa, io, managed) orelse return error.MissingOldVersion;
+    defer gpa.free(missing_out);
+    try testing.expect(std.mem.indexOf(u8, missing_out, "0.302.74.80") != null);
+
+    // Mismatched SHA256SUMS must leave existing managed binary untouched.
+    const bad_sums = "0000000000000000000000000000000000000000000000000000000000000000  graff-aarch64-macos.tar.gz\n";
+    try testing.expect(!extractAndSwapArchive(gpa, io, "graff-aarch64-macos.tar.gz", tar_path, bad_sums, stage_dir, managed));
+    const before_out = versionOutput(gpa, io, managed) orelse return error.MissingOldVersion;
+    defer gpa.free(before_out);
+    try testing.expect(std.mem.indexOf(u8, before_out, "0.302.74.80") != null);
+
+    // Matching SHA256SUMS swaps in the verified binary atomically.
+    const actual_hex = sha256FileHex(gpa, io, tar_path) orelse return error.MissingSha;
+    const good_sums = try std.fmt.allocPrint(gpa, "{s}  graff-aarch64-macos.tar.gz\n", .{&actual_hex});
+    defer gpa.free(good_sums);
+    try testing.expect(extractAndSwapArchive(gpa, io, "graff-aarch64-macos.tar.gz", tar_path, good_sums, stage_dir, managed));
+    const after_out = versionOutput(gpa, io, managed) orelse return error.MissingNewVersion;
+    defer gpa.free(after_out);
+    try testing.expect(std.mem.indexOf(u8, after_out, "0.302.74.81") != null);
 }
 
 test "graff latest tag parser handles redirect URLs, pretty JSON, and SHA256SUMS" {

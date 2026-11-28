@@ -377,12 +377,12 @@ test "deep shortcuts destination sheet harmless title clicks stay inside the mod
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
-    @import("app_open_chooser.zig").open(&h.a, .new_project);
+    @import("app_open_chooser.zig").open(&h.a, .new_tab);
     h.t.settle(1);
-    try h.t.clickText("Pick a computer and the folder to work in.");
+    try h.t.clickText("The new session starts where you choose.");
     h.t.settle(0.1);
     try testing.expect(h.a.view.open_chooser.open);
-    try testing.expectEqual(@import("app_open_chooser.zig").Intent.new_project, h.a.view.open_chooser.intent);
+    try testing.expectEqual(@import("app_open_chooser.zig").Intent.new_tab, h.a.view.open_chooser.intent);
     // Outside remains a real dismissal, not a blanket no-op workaround.
     h.t.click(20, 300);
     h.t.settle(0.1);
@@ -658,8 +658,9 @@ test "retention custom new chat and project chords dispatch their saved bindings
             try testing.expectEqual(before + 1, h.a.tabs.items.items.len);
             try testing.expect(h.a.tabs.find("a") != null);
         } else if (std.mem.eql(u8, key, "newProject")) {
-            try testing.expect(h.a.view.open_chooser.open);
-            try testing.expectEqual(@import("app_open_chooser.zig").Intent.new_project, h.a.view.open_chooser.intent);
+            // The New project form, not the new-tab destination sheet.
+            try testing.expect(h.a.view.project_setup.open);
+            try testing.expect(!h.a.view.open_chooser.open);
         } else if (std.mem.eql(u8, key, "openProjectPicker")) {
             try testing.expectEqual(@import("view_tab_strip.zig").Menu.folder, h.a.view.strip.menu.?);
         } else try testing.expect(h.a.picker == .model);
@@ -672,11 +673,20 @@ test "retention custom panel chords reach their actual panel actions (#793)" {
         try h.init(true);
         defer h.deinit();
         try rebind(&h, key);
+        const terminal = std.mem.eql(u8, key, "toggleTerminal");
+        // The dock opens over a run, as its title-bar button does.
+        if (terminal) try h.a.actions.runs.append(testing.allocator, .{
+            .name = try testing.allocator.dupe(u8, "Synthetic build"),
+            .log = .{ .gpa = testing.allocator, .palette = h.a.ansi },
+        });
         h.press(custom);
         if (std.mem.eql(u8, key, "toggleFiles")) {
             try testing.expect(h.a.panels.files_open);
-        } else if (std.mem.eql(u8, key, "toggleChanges") or std.mem.eql(u8, key, "toggleTerminal")) {
+        } else if (std.mem.eql(u8, key, "toggleChanges")) {
             try testing.expect(h.a.panels.host_open);
+        } else if (terminal) {
+            try testing.expect(h.a.actions.dock_open);
+            try testing.expect(!h.a.panels.host_open);
         } else {
             // Keyboard splits inherit the source destination without a picker,
             // including when dispatched through a saved custom binding.

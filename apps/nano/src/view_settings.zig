@@ -1,5 +1,5 @@
 //! The Settings page, as the GPUI app's: its sidebar (shell.rs
-//! `render_settings_nav`: search, the sections under their groups, Back)
+//! `render_settings_nav`: Back, search, the sections under their groups)
 //! in place of the sessions list, and each section's page built from the
 //! same kit (settings/widgets.rs). ⌘, opens it, at the section last shown.
 const std = @import("std");
@@ -66,64 +66,45 @@ pub fn space(c: *ui.Context, h: f32) void {
     _ = c.leaf(.{ .width = .{ .px = 1 }, .height = .{ .px = h } }, .none, null);
 }
 
-/// In the sidebar's place: "Settings", the search, the sections under their
-/// groups, and Back at the foot.
+/// In the sidebar's place: Back, the search, and the sections under their
+/// groups. The top Back is Settings' one close control in every mode and
+/// width (Settings always shows this sidebar); Escape closes it too.
 pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const zen = a.settings.uiMode() == .zen;
-    if (zen) {
-        const chrome = @import("panel_chrome.zig");
-        const panel_chrome = @import("view_panel_chrome.zig");
-        const side = ui.div(c).column().w(sidebar.widthOf(a)).hFull()
-            .pt(chrome.header_height).pl(chrome.zen_gutter).pr(chrome.zen_gutter / 2.0).pb(chrome.zen_gutter);
-        defer side.end();
-        ui.key(c, "zen-settings-nav-card");
-        const nav_card = panel_chrome.zenSidebar(c, k).wFull().grow().h(0).pt(4).clip();
-        defer nav_card.end();
-        navBody(c, a, k, true);
-        return;
-    }
-    const side = ui.div(c).column().w(sidebar.widthOf(a)).hFull().bg(k.sidebar).pt(sidebar.titlebar_h);
+    const chrome = @import("panel_chrome.zig");
+    const panel_chrome = @import("view_panel_chrome.zig");
+    const top_inset: f32 = if (a.view.full_screen) chrome.fs_top_inset else chrome.header_height;
+    const side = ui.div(c).column().w(sidebar.widthOf(a)).hFull()
+        .pt(top_inset).pl(chrome.zen_gutter).pr(chrome.zen_gutter / 2.0).pb(chrome.zen_gutter);
     defer side.end();
-    navBody(c, a, k, false);
+    ui.key(c, "zen-settings-nav-card");
+    const nav_card = panel_chrome.zenSidebarOn(c, k, a.view.full_screen).wFull().grow().h(0).pt(4).clip();
+    defer nav_card.end();
+    navBody(c, a, k, a.settings.uiMode() == .zen);
 }
 
 fn navBody(c: *ui.Context, a: *App, k: theme.Colors, zen: bool) void {
     const panel_chrome = @import("view_panel_chrome.zig");
-    const nav_w = if (zen) sidebar.widthOf(a) - @import("panel_chrome.zig").zen_gutter * 1.5 else sidebar.widthOf(a);
+    const nav_w = sidebar.widthOf(a) - @import("panel_chrome.zig").zen_gutter * 1.5;
     {
         const list = ui.div(c).column().wFull().grow().h(0).px(8).clip();
         defer list.end();
         {
-            const h = ui.div(c).row().wFull().px(if (zen) @as(f32, 0) else 4).pt(if (zen) @as(f32, 4) else 10).pb(8).itemsCenter();
+            const h = ui.div(c).row().wFull().pt(4).pb(8).itemsCenter();
             defer h.end();
             ui.key(c, "settings-top-back");
-            if (zen) {
-                const top_back = kit.pressFeedback(ui.div(c).row().wFull().h(30).px(8).gap(7).itemsCenter().rounded(7).hover(k.hover).control());
-                const top_hot = top_back.hovered();
-                icons.icon(c, .@"arrow-left", 14, if (top_hot) k.text else k.muted, 0);
-                ui.text(c, "Back to chats", st(c, 13, .{ .weight = .medium, .color = if (top_hot) k.text else k.muted }));
-                ui.spacer(c);
-                kit.kbdHint(c, k, "esc");
-                if (top_back.clicked()) close(a);
-                top_back.end();
-            } else {
-                const top_back = kit.pressFeedback(ui.div(c).row().h(28).px(8).gap(6).itemsCenter().rounded(7).bg(k.ink(if (k.dark) 0.05 else 0.035)).border(k.border).borderW(1).hover(k.hover).control());
-                const top_hot = top_back.hovered();
-                icons.icon(c, .@"arrow-left", 13, if (top_hot) k.text else k.text.alpha(0.9), 0);
-                ui.text(c, "Back", st(c, 12.5, .{ .weight = .medium, .color = if (top_hot) k.text else k.text.alpha(0.9) }));
-                if (top_back.clicked()) close(a);
-                top_back.end();
-                ui.spacer(c);
-                ui.text(c, "Settings", st(c, 11, .{ .weight = .medium, .color = k.muted.alpha(0.75) }));
-            }
+            const top_back = kit.pressFeedback(ui.div(c).row().wFull().h(32).px(8).gap(7).itemsCenter().rounded(7).hover(k.hover).control());
+            const top_hot = top_back.hovered();
+            icons.icon(c, .@"arrow-left", 14, if (top_hot) k.text else k.muted, 0);
+            ui.text(c, if (zen) "Back to chats" else "Back", st(c, 13, .{ .weight = .medium, .color = if (top_hot) k.text else k.muted }));
+            ui.spacer(c);
+            kit.kbdHint(c, k, "esc");
+            if (top_back.clicked()) close(a);
+            top_back.end();
         }
         {
             // 33 tall: GPUI's search is a composer input, 5 above and below.
-            var s = ui.div(c).row().wFull().h(33).px(8).gap(6).itemsCenter().rounded(8);
-            s = if (zen)
-                s.bg(if (k.dark) k.ink(0.04) else ui.Color.white.alpha(0.75)).border(panel_chrome.zenEdge(k)).borderW(1)
-            else
-                s.bg(k.ink(0.04));
+            const s = ui.div(c).row().wFull().h(33).px(8).gap(6).itemsCenter().rounded(8)
+                .bg(if (k.dark) k.ink(0.04) else ui.Color.white.alpha(0.75)).border(panel_chrome.zenEdge(k)).borderW(1);
             defer s.end();
             icons.icon(c, .magnifer, 14, k.muted, 0);
             const f = ui.div(c).row().grow().w(0);
@@ -140,7 +121,9 @@ fn navBody(c: *ui.Context, a: *App, k: theme.Colors, zen: bool) void {
             anim_h.update(std.mem.asBytes(&salt));
             _ = c.anims.remove(anim_h.final());
             _ = ui.textField(c, &a.view.settings_search, .{ .placeholder = "Search settings", .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 14, .line_height = 22.75 });
-            if (zen and a.view.settings_search.text().len == 0) kit.kbdHint(c, k, "⌘F");
+            // The search's key, in every mode now the page header has no
+            // second way in.
+            if (a.view.settings_search.text().len == 0) kit.kbdHint(c, k, "⌘F");
         }
         space(c, 8);
         const rows = ui.div(c).column().wFull().grow().h(0).gap(2).scrollY();
@@ -182,20 +165,6 @@ fn navBody(c: *ui.Context, a: *App, k: theme.Colors, zen: bool) void {
     }
     // A running cloud sandbox stays in view on every settings page too.
     if (!a.offscreen) @import("view_sandbox_strip.zig").strip(c, a, k, 4);
-    if (!zen) {
-        const foot = ui.div(c).column().wFull().px(8).pb(12);
-        defer foot.end();
-        ui.key(c, "settings-back");
-        const back_bg = k.ink(if (k.dark) 0.05 else 0.035);
-        const back = kit.pressFeedback(ui.div(c).row().wFull().h(34).px(10).gap(7).itemsCenter().rounded(8).bg(back_bg).border(k.border).borderW(1).hover(k.hover).control());
-        defer back.end();
-        const hot = back.hovered();
-        icons.icon(c, .@"arrow-left", 14, if (hot) k.text else k.text.alpha(0.9), 0);
-        ui.text(c, "Back", st(c, 13, .{ .weight = .medium, .color = if (hot) k.text else k.text.alpha(0.9) }));
-        ui.spacer(c);
-        kit.kbdHint(c, k, "esc");
-        if (back.clicked()) close(a);
-    }
 }
 
 fn navRow(c: *ui.Context, k: theme.Colors, s: Section, selected: bool, searching: bool, width: f32) bool {
@@ -239,7 +208,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         const enter = ui.motion.frame(c, .{
             .initial = .{ .opacity = 0 },
             .target = .{ .opacity = 1 },
-            .transition = .{ .tween = .{ .duration = 0.14, .ease = .linear } },
+            .transition = .{ .tween = .{ .duration = 0.14, .ease = ui.motion.Easing.css_ease_out } },
         });
         const col = ui.div(c).column().wFull().maxW(768).px(24).pt(32).pb(64).motion(enter);
         defer col.end();
@@ -247,21 +216,11 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         const main_w = c.size.w - sidebar.widthOf(a);
         inner_w = @min(main_w, 768) - 2 * 24;
         {
+            // Where this page sits. Closing is the sidebar's Back (or
+            // Escape) and searching its field (or ⌘F), not repeated here.
             const context = ui.div(c).row().wFull().pb(16).gap(6).itemsCenter();
             defer context.end();
             ui.text(c, c.print("Settings / {s}", .{a.settings.section.group()}), st(c, 11, .{ .color = k.muted }));
-            ui.spacer(c);
-            if (ghost(c, k, "Find a setting")) {
-                a.view.settings_search_focus = true;
-                a.redraw();
-            }
-            ui.key(c, "settings-page-esc");
-            const esc_btn = kit.pressFeedback(ui.div(c).row().px(10).py(6).gap(6).itemsCenter().rounded(8).hover(k.ink(0.06)).control());
-            const esc_hot = esc_btn.hovered();
-            ui.text(c, "Close", st(c, 13, .{ .color = if (esc_hot) k.text else k.muted }));
-            kit.kbdHint(c, k, "esc");
-            if (esc_btn.clicked()) close(a);
-            esc_btn.end();
         }
         // Appearance's theme menu doesn't outlive its page.
         if (a.settings.section != .appearance) a.view.theme_menu = null;
@@ -276,10 +235,10 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
             .appearance => @import("view_settings_appearance.zig").page(c, a, k),
             .mcp => @import("view_settings_mcp.zig").page(c, a, k),
             .extensions => @import("view_settings_extensions.zig").page(c, a, k),
-            .appshots => @import("view_settings_appshots.zig").page(c, a, k),
             .github_ci => @import("view_settings_github_ci.zig").page(c, a, k),
             .harnesses => @import("view_settings_agents.zig").page(c, a, k),
             .agents => @import("view_settings_accounts.zig").page(c, a, k),
+            .usage => @import("view_settings_usage.zig").pageView(c, a, k),
         }
     }
     switch (a.settings.section) {
@@ -363,10 +322,14 @@ pub fn words(c: *ui.Context, k: theme.Colors, title: []const u8, meta: []const u
 
 /// `toggle_switch` in its 40-point target: true when clicked.
 pub fn toggle(c: *ui.Context, k: theme.Colors, on: bool, enabled: bool) bool {
-    const target = ui.div(c).row().size(40, 40).center();
+    var target = ui.div(c).row().size(40, 40).center();
+    if (!enabled) target = target.opacity(0.55);
     defer target.end();
-    _ = kit.toggleSwitch(c, k, on);
-    return enabled and target.clicked();
+    _ = kit.toggleSwitchTrack(c, k, on);
+    if (enabled) return target.clicked();
+    // An inactive switch still occupies its hit area, not the row's action.
+    _ = target.interaction();
+    return false;
 }
 
 /// A row: tile, title and line, and its switch.
@@ -432,6 +395,7 @@ fn notifications(c: *ui.Context, a: *App, k: theme.Colors) void {
         switchRow(c, a, k, .notifications_enabled, .bell, "Desktop notifications", "Show a system banner on the same events, so pings reach you while Harness is in the background.", false, true);
         switchRow(c, a, k, .notifications_background_only, .monitor, "Only when in the background", "Skip the banner while a Harness window is focused.", false, desktop);
     }
+    space(c, 24);
     fieldLabel(c, k, "Privacy");
     const cd = card(c, k);
     defer cd.end();
@@ -460,7 +424,7 @@ fn files(c: *ui.Context, a: *App, k: theme.Colors) void {
     const cd = card(c, k);
     defer cd.end();
     bareSwitchRow(c, a, k, .files_autosave_enabled, .folder, "Autosave", "Save edited workspace files to disk automatically.", true);
-    bareSwitchRow(c, a, k, .files_word_wrap, .list, "Word wrap", "Wrap long lines in every workspace file.", true);
+    bareSwitchRow(c, a, k, .files_word_wrap, .list, "Word wrap", "Wrap long lines in the workspace file editor and plain-text previews.", false);
     bareSwitchRow(c, a, k, .files_show_all, .eye, "Show all files", "Include hidden and ignored files in every file tree.", false);
     const r = row(c, k, false, false);
     defer r.end();

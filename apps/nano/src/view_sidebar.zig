@@ -24,25 +24,26 @@ pub const width: f32 = @import("settings.zig").sidebar_default;
 pub fn widthOf(a: *const App) f32 {
     return a.settings.sidebarWidth();
 }
-fn cardInnerW(a: *const App) f32 {
-    return if (a.settings.uiMode() == .zen) widthOf(a) - @import("panel_chrome.zig").zen_gutter * 1.5 else widthOf(a);
+pub fn cardInnerW(a: *const App) f32 {
+    return widthOf(a) - @import("panel_chrome.zig").zen_gutter * 1.5;
 }
 pub const titlebar_h: f32 = 38;
 
 pub fn sidebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     const zen = a.settings.uiMode() == .zen;
+    const fs = a.view.full_screen;
+    const chrome = @import("panel_chrome.zig");
+    const panel_chrome = @import("view_panel_chrome.zig");
+    const side = ui.div(c).column().w(widthOf(a)).hFull();
+    defer side.end();
+    sidebarTitlebar(c, a, k);
+    if (!fs) ui.div(c).h(chrome.top_pad).end();
+    const wrap = ui.div(c).column().wFull().grow().h(0).pl(chrome.zen_gutter).pr(chrome.zen_gutter / 2.0).pb(chrome.zen_gutter);
+    defer wrap.end();
+    ui.key(c, "zen-sidebar-card");
+    const card = panel_chrome.zenSidebarOn(c, k, fs).wFull().grow().h(0).pt(6).clip();
+    defer card.end();
     if (zen) {
-        const chrome = @import("panel_chrome.zig");
-        const panel_chrome = @import("view_panel_chrome.zig");
-        const side = ui.div(c).column().w(widthOf(a)).hFull();
-        defer side.end();
-        sidebarTitlebar(c, a, k);
-        ui.div(c).h(chrome.top_pad).end();
-        const wrap = ui.div(c).column().wFull().grow().h(0).pl(chrome.zen_gutter).pr(chrome.zen_gutter / 2.0).pb(chrome.zen_gutter);
-        defer wrap.end();
-        ui.key(c, "zen-sidebar-card");
-        const card = panel_chrome.zenSidebar(c, k).wFull().grow().h(0).pt(6).clip();
-        defer card.end();
         zenNavRows(c, a, k);
         filterRow(c, a, k);
         const search = @import("view_sidebar_search.zig");
@@ -56,10 +57,6 @@ pub fn sidebar(c: *ui.Context, a: *App, k: theme.Colors) void {
         zenFooter(c, a, k, archived_count);
         return;
     }
-    // The edge is drawn over its last column (view.zig), as the GPUI app's.
-    const side = ui.div(c).column().w(widthOf(a)).hFull().bg(k.sidebar);
-    defer side.end();
-    sidebarTitlebar(c, a, k);
     const search = @import("view_sidebar_search.zig");
     filterRow(c, a, k);
     // The session search's field, and its results in the lists' place
@@ -102,26 +99,53 @@ pub fn navHistoryControls(c: *ui.Context, a: *App, k: theme.Colors) void {
 
 fn sidebarTitlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     const zen = a.settings.uiMode() == .zen;
+    const fs = a.view.full_screen;
     const menus = @import("view_sidebar_menus.zig");
     const side_w = widthOf(a);
+    const bar_k = if (fs) theme.colors(true) else k;
     const layout = if (zen) @import("motion_rules.zig").zenSidebarTitlebarLayout(side_w) else @import("motion_rules.zig").sidebarTitlebarLayout(side_w);
     const group_gap: f32 = if (side_w >= 240) 8 else 4;
     const right_margin: f32 = if (zen) 10 else if (side_w >= 240) 8 else 4;
-    const bar = ui.div(c).row().wFull().h(titlebar_h).pt(4).pl(layout.back_x).pr(right_margin).itemsCenter();
+    const lead_x: f32 = if (fs) 10 else layout.back_x;
+    const bar = ui.div(c).row().wFull().h(titlebar_h).pt(4).pl(lead_x).pr(right_margin).itemsCenter();
     defer bar.end();
-    navHistoryControls(c, a, k);
+    if (fs) {
+        const fs_chrome = @import("view_fullscreen_chrome.zig");
+        const peeking = a.view.fs_left_peek and !a.view.sidebar_open;
+        ui.key(c, "fullscreen-sidebar-toggle");
+        if (kit.iconButton(c, bar_k, .@"sidebar-minimalistic-left", .{
+            .size = 24,
+            .radius = 6,
+            .icon = 16,
+            .color = bar_k.muted,
+            .tip = .{ .text = if (peeking) "Dock sidebar (\u{2318}B)" else "Hide sidebar (\u{2318}B)", .delay = tip.quick },
+        })) {
+            fs_chrome.togglingSidebar(a);
+            if (peeking) {
+                a.view.sidebar_open = true;
+            } else {
+                a.view.sidebar_open = false;
+                @import("view_sidebar_search.zig").close(a);
+                a.view.search.focus = false;
+                a.view.focus_composer = true;
+            }
+            a.redraw();
+        }
+        ui.div(c).w(6).end();
+    }
+    navHistoryControls(c, a, bar_k);
     ui.div(c).w(group_gap).end();
     if (!zen) {
         ui.key(c, "sidebar-titlebar-new-session");
-        if (kit.iconButton(c, k, .plus, .{ .size = 24, .radius = 6, .icon = 16, .color = k.muted, .tip = .{ .text = "New session", .delay = tip.quick } }))
+        if (kit.iconButton(c, bar_k, .plus, .{ .size = 24, .radius = 6, .icon = 16, .color = bar_k.muted, .tip = .{ .text = "New session", .delay = tip.quick } }))
             a.newWorkspaceSession();
     }
     ui.spacer(c);
     {
         ui.key(c, "sidebar-view-options");
-        const more = tip.on(ui.div(c).row(), k, .{ .text = if (a.view.more_menu) "" else "Sidebar view options", .delay = tip.quick });
+        const more = tip.on(ui.div(c).row(), bar_k, .{ .text = if (a.view.more_menu) "" else "Sidebar view options", .delay = tip.quick });
         defer more.end();
-        if (kit.iconButton(c, k, .@"more-horizontal", .{ .size = 24, .radius = 6, .icon = 16, .color = k.muted, .on = a.view.more_menu }))
+        if (kit.iconButton(c, bar_k, .@"more-horizontal", .{ .size = 24, .radius = 6, .icon = 16, .color = bar_k.muted, .on = a.view.more_menu }))
             if (a.view.more_menu) menus.close(a) else menus.openView(a);
         if (c.rects.get(c.node(more.index).id)) |r| a.view.more_anchor = r;
     }
@@ -218,7 +242,7 @@ pub fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
             const row_mot = ui.motion.frame(c, .{
                 .initial = .{ .opacity = 0 },
                 .target = .{ .opacity = 1 },
-                .transition = .{ .tween = .{ .duration = 0.14, .ease = .linear } },
+                .transition = .{ .tween = .{ .duration = 0.14, .ease = ui.motion.Easing.css_ease_out } },
             });
             var row = ui.div(c).row().wFull().h(32).px(8).gap(7).itemsCenter().rounded(7).control().motion(row_mot);
             if (sess.active and !multi_tabs) {
@@ -268,7 +292,7 @@ pub fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
                 const tab_mot = ui.motion.frame(c, .{
                     .initial = .{ .opacity = 0 },
                     .target = .{ .opacity = 1 },
-                    .transition = .{ .tween = .{ .duration = 0.12, .ease = .linear } },
+                    .transition = .{ .tween = .{ .duration = 0.12, .ease = ui.motion.Easing.css_ease_out } },
                     .delay = ui.motion.stagger(t_ix, 0.02),
                 });
                 const trow_wrap = ui.div(c).row().wFull().h(28).itemsCenter().motion(tab_mot);
@@ -337,7 +361,6 @@ fn openChatMark(c: *ui.Context, a: *const App, k: theme.Colors, chat_id: ?[]cons
 }
 
 fn zenNavRows(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const mac = builtin.os.tag == .macos;
     const box = ui.div(c).column().wFull().px(8).pt(8).pb(4).gap(2);
     defer box.end();
 
@@ -351,9 +374,12 @@ fn zenNavRows(c: *ui.Context, a: *App, k: theme.Colors) void {
             icons.icon(c, .plus, 15, if (hot) k.text else k.muted, 0);
             ui.text(c, "New chat", .{ .size = 13, .line_height = 17, .weight = theme.ui_medium_weight, .color = k.text.alpha(if (hot) 0.98 else 0.88) });
             ui.spacer(c);
-            ui.text(c, if (mac) "⌘N" else "Ctrl+N", .{ .size = 11, .line_height = 14, .color = k.faint });
+            // The rebindable New chat key (⌘T by default), as the palette shows it.
+            var key_buf: [48]u8 = undefined;
+            const new_key = @import("shortcuts.zig").platformBadge(&key_buf, @import("view_palette.zig").comboFor(a, "newSession"));
+            ui.text(c, new_key, .{ .size = 11, .line_height = 14, .color = k.faint });
         }
-        if (clicked) a.newWorkspaceSession();
+        if (clicked) a.newTab();
     }
 
     {
@@ -369,7 +395,8 @@ fn zenNavRows(c: *ui.Context, a: *App, k: theme.Colors) void {
             icons.icon(c, .magnifer, 15, if (searching or hot) k.text else k.muted, 0);
             ui.text(c, "Search", .{ .size = 13, .line_height = 17, .weight = theme.ui_medium_weight, .color = k.text.alpha(if (searching or hot) 0.98 else 0.88) });
             ui.spacer(c);
-            ui.text(c, if (mac) "⌘K" else "Ctrl+K", .{ .size = 11, .line_height = 14, .color = k.faint });
+            var key_buf: [48]u8 = undefined;
+            ui.text(c, @import("shortcuts.zig").platformBadge(&key_buf, "mod-f"), .{ .size = 11, .line_height = 14, .color = k.faint });
         }
         if (clicked) @import("view_sidebar_search.zig").toggle(a);
     }
@@ -395,7 +422,8 @@ fn zenNavRows(c: *ui.Context, a: *App, k: theme.Colors) void {
 
 fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
     const menus = @import("view_sidebar_menus.zig");
-    if (a.settings.uiMode() == .zen) {
+    const profile = a.settings.hierarchyProfile();
+    if (a.settings.uiMode() == .zen or !profile.shows_multi_axis_filters) {
         const row = ui.div(c).row().wFull().px(10).pt(4).pb(6).itemsCenter();
         defer row.end();
         const rest_bg = k.ink(if (k.dark) 0.065 else 0.045);
@@ -423,35 +451,65 @@ fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (clicked) if (a.view.filter_menu) menus.close(a) else menus.openProjects(a);
         return;
     }
-    const row = ui.div(c).row().wFull().px(8).pt(6).pb(4).itemsCenter();
-    defer row.end();
-    const rest_bg = k.ink(if (k.dark) 0.055 else 0.042);
-    const base = ui.div(c).row().grow().w(0).h(29).px(8).gap(8).itemsCenter().rounded(8).clip();
-    const lh = kit.listenerHover(&a.view.hovers, base.bg(if (a.view.filter_menu) k.hover else rest_bg), k.hover);
-    const t = lh.div;
-    defer t.end();
-    if (t.clicked()) if (a.view.filter_menu) menus.close(a) else menus.openProjects(a);
-    if (c.rects.get(c.node(t.index).id)) |r| a.view.filter_anchor = r;
-    const color = if (lh.hovered or a.view.filter_menu) k.text else k.text.alpha(0.88);
-    const room = @max(0, widthOf(a) - 16 - 16 - 16 - 8);
-    if (a.findSpace(a.view.filter)) |s| {
-        const icon_slot = ui.div(c).row().size(16, 16).center();
-        badge(c, a, k, s.id, lh.hovered or a.view.filter_menu);
-        icon_slot.end();
-        const tag = c.print("@ {s}", .{a.deviceName(s.device_id)});
-        const off = !menus.online(a, s.device_id, a.nowMs());
-        const tag_w = @min(c.text.width(tag, .{ .size = 10 }), room / 2);
-        const name_w = @min(c.text.width(s.name, .{ .size = 13, .weight = theme.ui_medium_weight }), @max(0, room - tag_w - 6 - (if (off) @as(f32, 18) else 0)));
-        const box = ui.div(c).row().grow().w(0).gap(6).itemsCenter().clip();
-        defer box.end();
-        kit.fadeText(c, s.name, .{ .size = 13, .weight = theme.ui_medium_weight, .color = color }, name_w);
-        kit.fadeText(c, tag, .{ .size = 10, .color = k.muted.alpha(0.45) }, tag_w);
-        if (off) icons.icon(c, .@"wifi-off", 12, k.warning.alpha(0.8), 0);
-    } else {
-        icons.icon(c, .folder, 15, if (lh.hovered or a.view.filter_menu) k.text.alpha(0.85) else k.muted.alpha(0.85), 16);
-        const label = ui.div(c).row().grow().w(0).clip();
-        defer label.end();
-        kit.fadeText(c, "All projects", .{ .size = 13, .weight = theme.ui_medium_weight, .color = color }, room);
+    const wrap = ui.div(c).column().wFull().pb(4);
+    defer wrap.end();
+    {
+        const row = ui.div(c).row().wFull().px(10).pt(4).pb(4).itemsCenter();
+        defer row.end();
+        const rest_bg = k.ink(if (k.dark) 0.065 else 0.045);
+        const base = ui.div(c).row().grow().w(0).h(26).px(8).gap(6).itemsCenter().rounded(7)
+            .border(k.border.alpha(0.55)).borderW(1).clip().control();
+        const lh = kit.listenerHover(&a.view.hovers, base.bg(if (a.view.filter_menu) k.hover else rest_bg), k.hover);
+        const t = lh.div;
+        defer t.end();
+        if (t.clicked()) if (a.view.filter_menu) menus.close(a) else menus.openProjects(a);
+        if (c.rects.get(c.node(t.index).id)) |r| a.view.filter_anchor = r;
+        const color = if (lh.hovered or a.view.filter_menu) k.text else k.text.alpha(0.86);
+        const room = @max(0, cardInnerW(a) - 20 - 16 - 16 - 22);
+        if (a.findSpace(a.view.filter)) |s| {
+            const icon_slot = ui.div(c).row().size(15, 15).center();
+            badge(c, a, k, s.id, lh.hovered or a.view.filter_menu);
+            icon_slot.end();
+            const tag = c.print("@ {s}", .{a.deviceName(s.device_id)});
+            const off = !menus.online(a, s.device_id, a.nowMs());
+            const tag_w = @min(c.text.width(tag, .{ .size = 10 }), room / 2);
+            const name_w = @min(c.text.width(s.name, .{ .size = 12.5, .weight = theme.ui_medium_weight }), @max(0, room - tag_w - 6 - (if (off) @as(f32, 18) else 0)));
+            const box = ui.div(c).row().grow().w(0).gap(6).itemsCenter().clip();
+            defer box.end();
+            kit.fadeText(c, s.name, .{ .size = 12.5, .line_height = 16, .weight = theme.ui_medium_weight, .color = color }, name_w);
+            kit.fadeText(c, tag, .{ .size = 10, .color = k.muted.alpha(0.45) }, tag_w);
+            if (off) icons.icon(c, .@"wifi-off", 12, k.warning.alpha(0.8), 0);
+        } else {
+            icons.icon(c, .folder, 14, if (lh.hovered or a.view.filter_menu) k.text.alpha(0.88) else k.muted.alpha(0.85), 14);
+            const label = ui.div(c).row().grow().w(0).clip();
+            defer label.end();
+            kit.fadeText(c, "All projects", .{ .size = 12.5, .line_height = 16, .weight = theme.ui_medium_weight, .color = color }, room);
+        }
+        icons.icon(c, .@"alt-arrow-down", 10, k.muted, 0);
+    }
+
+    // Multi-axis quick activity pills in Developer mode (`shows_multi_axis_filters`).
+    const LastAct = @import("settings.zig").LastActivity;
+    const act = a.settings.lastActivity();
+    const act_wrap = ui.div(c).row().wFull().px(10).gap(4).itemsCenter();
+    defer act_wrap.end();
+    ui.text(c, "Window", .{ .size = 10, .color = k.muted.alpha(0.75) });
+    ui.spacer(c);
+    inline for (.{
+        .{ LastAct.d1, "24h" },
+        .{ LastAct.d7, "Wk" },
+        .{ LastAct.all, "Any" },
+    }) |opt| {
+        const selected = act == opt[0];
+        ui.key(c, opt[1]);
+        var pill = ui.div(c).row().h(20).px(7).center().rounded(5).control();
+        pill = if (selected) pill.bg(k.ink(0.11)) else pill.hover(k.hover);
+        defer pill.end();
+        ui.text(c, opt[1], .{ .size = 10, .weight = if (selected) .medium else .regular, .color = if (selected) k.text else k.muted });
+        if (pill.clicked()) {
+            a.settings.setText("sidebarLastActivity", opt[0].key());
+            a.redraw();
+        }
     }
 }
 
@@ -1488,9 +1546,10 @@ fn compactSearchRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat
     statusSlot(c, k, rowMark(a, ch));
     marks(c, a, k, ch, l, o.lit or hovered);
     const time = rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, now, ch.timeMs());
-    const time_w = if (hovered) 18 else c.text.width(time, .{ .size = 11 });
     const far = remote(a, ch);
-    const title_w = o.inner - l.marksW() - 4 - 6 - time_w - (if (hovered or far) @as(f32, 22) else 0);
+    // Reserve constant trailing slot width across hover/unhover (`Nano.HoverStability.sidebarTitleMaxW`).
+    const trailing_w: f32 = @max(22, c.text.width(time, .{ .size = 11 }) + 6) + (if (far) @as(f32, 22) else 0);
+    const title_w = o.inner - l.marksW() - 4 - 6 - trailing_w;
     const tc = if (o.lit or hovered) k.text else if (ch.archived) k.text.alpha(0.55) else k.text.alpha(0.8);
     {
         const t = ui.div(c).row().grow().w(0).clip();
@@ -1498,20 +1557,22 @@ fn compactSearchRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat
         kit.highlightText(c, k, chatLabel(ch), kit.style(c, 13, 17, .{ .color = tc }), @max(24, title_w), o.query);
     }
     var archive = false;
-    if (hovered) {
-        const b = ui.div(c).row().size(18, 18).center().rounded(4).hover(k.wash(0.10));
-        defer b.end();
-        if (b.clicked()) archive = true;
-        icons.icon(c, if (ch.archived) .@"archive-up-minimalistic" else .@"archive-minimalistic", 13, k.muted, 0);
-    } else if (far) {
-        const b = ui.div(c).row().size(18, 14).center();
-        defer b.end();
-        icons.icon(c, .@"remote-server", 13, k.muted.alpha(0.5), 0);
-    }
     {
-        const tm = ui.div(c).row().pl(6);
-        defer tm.end();
-        if (!hovered) ui.text(c, time, .{ .size = 11, .color = k.subline });
+        const trail = ui.div(c).row().w(trailing_w).gap(4).itemsCenter().justifyEnd();
+        defer trail.end();
+        if (hovered) {
+            const b = ui.div(c).row().size(18, 18).center().rounded(4).hover(k.wash(0.10));
+            defer b.end();
+            if (b.clicked()) archive = true;
+            icons.icon(c, if (ch.archived) .@"archive-up-minimalistic" else .@"archive-minimalistic", 13, k.muted, 0);
+        } else {
+            if (far) {
+                const b = ui.div(c).row().size(18, 14).center();
+                defer b.end();
+                icons.icon(c, .@"remote-server", 13, k.muted.alpha(0.5), 0);
+            }
+            ui.text(c, time, .{ .size = 11, .color = k.subline });
+        }
     }
     if (archive) {
         a.setArchived(ch.id, !ch.archived);
@@ -1669,10 +1730,7 @@ fn sessionRowWith(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, 
     const drag = @import("view_drag.zig");
     const it = r.interaction();
     if (it.pressed and c.input.pressed) drag.press(c, a, ch.id, it.rect);
-    if (r.clicked() and !drag.dragging(a)) {
-        // A Bots page sits in the chat's place: its own row brings it back.
-        if (selected) @import("bots.zig").close(a) else a.openChatInTab(ch.id);
-    }
+    if (r.clicked() and !drag.dragging(a)) a.openChatInTab(ch.id);
 }
 
 fn statusSlot(c: *ui.Context, k: theme.Colors, mark: workspace.Mark) void {
@@ -1835,7 +1893,7 @@ fn zenFooter(c: *ui.Context, a: *App, k: theme.Colors, archived_count: usize) vo
         const btn = tip.on(
             ui.div(c).row().grow().w(0).h(30).px(5).gap(8).itemsCenter().rounded(7).hover(k.hover).control(),
             k,
-            .{ .text = c.print("Account: {s} (click for card, right-click for menu)", .{label}), .delay = tip.quick },
+            .{ .text = c.print("Account: {s} (click for settings, right-click for menu)", .{label}), .delay = tip.quick },
         );
         const clicked = btn.clicked();
         const rclick = kit.secondaryClicked(btn);
@@ -1864,29 +1922,35 @@ fn zenFooter(c: *ui.Context, a: *App, k: theme.Colors, archived_count: usize) vo
             a.settings.setSection(.account);
             @import("view_settings.zig").open(a);
         } else if (rclick) {
-            a.view.account_menu = !a.view.account_menu;
+            const was_open = a.view.account_menu;
+            if (!was_open) @import("view.zig").closeTransientPopovers(a);
+            a.view.account_menu = !was_open;
             if (a.view.account_menu) account.refresh(a);
             a.redraw();
         }
     }
     sidebarThemeButton(c, a, k);
     {
-        const dev = a.settings.uiMode() == .developer;
+        const mode = a.settings.uiMode();
+        const dev = mode == .developer;
+        const des = mode == .design;
+        const label = if (dev) "Dev" else if (des) "Design" else "Zen";
+        const icon_name: icons.Name = if (dev) .terminal else if (des) .@"palette-search" else .@"magic-stick-3";
         ui.key(c, "sidebar-ui-mode-pill");
         var pill = tip.on(
             ui.div(c).row().h(26).px(6).gap(4).itemsCenter().rounded(6)
-                .bg(if (dev) k.ink(0.08) else .transparent)
-                .border(if (dev) k.muted.alpha(0.35) else k.muted.alpha(0.22)).borderW(1)
+                .bg(if (dev or des) k.ink(0.08) else .transparent)
+                .border(if (dev or des) k.muted.alpha(0.35) else k.muted.alpha(0.22)).borderW(1)
                 .hover(k.hover),
             k,
-            .{ .text = "Click to switch Zen / Developer mode (⇧⌘M) · Right-click to customize", .delay = tip.quick },
+            .{ .text = "Click to toggle mode (⇧⌘M cycles Zen/Dev) · Right-click for Zen / Dev / Design", .delay = tip.quick },
         );
         const pill_clicked = pill.clicked();
         const pill_rclick = kit.secondaryClicked(pill);
         {
             defer pill.end();
-            icons.icon(c, if (dev) .terminal else .@"magic-stick-3", 12, if (dev) k.text else k.muted, 0);
-            ui.text(c, if (dev) "Dev" else "Zen", .{ .size = 11, .line_height = 14, .weight = if (dev) .semibold else theme.ui_medium_weight, .color = if (dev) k.text else k.muted });
+            icons.icon(c, icon_name, 12, if (dev or des) k.text else k.muted, 0);
+            ui.text(c, label, .{ .size = 11, .line_height = 14, .weight = if (dev or des) .semibold else theme.ui_medium_weight, .color = if (dev or des) k.text else k.muted });
         }
         if (pill_clicked) {
             a.settings.toggleUiMode();
@@ -1971,29 +2035,38 @@ fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
         @import("view_sandbox_strip.zig").strip(c, a, k, 0);
     @import("view_updates.zig").sidebarFooterRows(c, a, k);
     @import("view_account_notice.zig").strip(c, a, k);
-    const f = ui.div(c).row().wFull().h(44).px(10).itemsCenter();
+    const f = ui.div(c).row().wFull().h(38).px(7).pt(2).pb(4).gap(3).itemsCenter();
     defer f.end();
     {
-        // The desktop's footer is avatar-only; identity stays in its
-        // accessible tooltip and in the menu, not inside the avatar's row.
         const account = @import("app_account.zig");
         const m = account.menu(a.account.scope, a.account.user, a.account.codegraff);
+        const signed_in = a.account.user != null;
+        const has_identity = signed_in or a.account.codegraff.signed_in;
         const display = m.name orelse m.line;
         ui.key(c, "user-menu");
-        var b = ui.div(c).row().size(21, 21).center().roundedFull();
+        var b = ui.div(c).row().size(24, 24).center().rounded(7);
         b = if (a.view.account_menu) b.bg(k.hover) else b.hover(k.hover);
         b = tip.on(b, k, .{ .text = c.print("Account menu: {s}", .{display}) });
         defer b.end();
         if (b.clicked()) {
-            a.view.account_menu = !a.view.account_menu;
+            const was_open = a.view.account_menu;
+            if (!was_open) @import("view.zig").closeTransientPopovers(a);
+            a.view.account_menu = !was_open;
             if (a.view.account_menu) account.refresh(a);
         }
         if (c.rects.get(c.node(b.index).id)) |r| a.view.account_anchor = r;
-        const av = ui.div(c).row().size(13, 13).center().roundedFull().bg(k.text);
-        defer av.end();
-        ui.text(c, c.print("{c}", .{account.initial(display)}), .{ .size = 9, .line_height = 13, .weight = .semibold, .mono = true, .color = k.shell });
+        const drew_avatar = if (a.account.avatar_bytes) |bytes|
+            bytes.len > 0 and ui.image(c, .{
+                .key = "sidebar-account-avatar",
+                .source = .{ .encoded = bytes },
+                .box = .{ .w = 20, .h = 20 },
+                .radius = 10,
+            })
+        else
+            false;
+        if (!drew_avatar) renderFallbackAvatar(c, k, display, has_identity);
     }
-    ui.div(c).w(6).end();
+    sidebarThemeButton(c, a, k);
     {
         const searching = a.view.search.open;
         ui.key(c, "sidebar-search-trigger");
@@ -2005,19 +2078,23 @@ fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     ui.spacer(c);
     {
-        const dev = a.settings.uiMode() == .developer;
+        const mode = a.settings.uiMode();
+        const dev = mode == .developer;
+        const des = mode == .design;
+        const label = if (dev) "Dev" else if (des) "Design" else "Zen";
+        const icon_name: icons.Name = if (dev) .terminal else if (des) .@"palette-search" else .@"magic-stick-3";
         ui.key(c, "sidebar-ui-mode-pill");
         var pill = tip.on(
-            ui.div(c).row().h(26).px(8).gap(5).itemsCenter().rounded(6)
-                .bg(if (dev) k.ink(0.08) else .transparent)
-                .border(if (dev) k.muted.alpha(0.35) else k.muted.alpha(0.22)).borderW(1)
+            ui.div(c).row().h(26).px(7).gap(4).itemsCenter().rounded(7)
+                .bg(if (dev or des) k.ink(0.065) else .transparent)
+                .border(k.border.alpha(0.55)).borderW(1)
                 .hover(k.hover),
             k,
-            .{ .text = "Click to switch Zen / Developer mode (⇧⌘M) · Right-click to customize", .delay = tip.quick },
+            .{ .text = "Click to toggle mode (⇧⌘M) · Right-click for Zen / Dev / Design", .delay = tip.quick },
         );
         defer pill.end();
-        icons.icon(c, if (dev) .terminal else .@"magic-stick-3", 13, if (dev) k.text else k.muted, 0);
-        ui.text(c, if (dev) "Dev" else "Zen", .{ .size = 11.5, .line_height = 14, .weight = if (dev) .semibold else theme.ui_medium_weight, .color = if (dev) k.text else k.muted });
+        icons.icon(c, icon_name, 12, if (dev or des) k.text else k.muted, 0);
+        ui.text(c, label, .{ .size = 11, .line_height = 14, .weight = if (dev or des) .semibold else theme.ui_medium_weight, .color = if (dev or des) k.text else k.muted });
         if (pill.clicked()) {
             a.settings.toggleUiMode();
             a.redraw();
@@ -2026,18 +2103,12 @@ fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
             a.redraw();
         }
     }
-    ui.div(c).w(6).end();
     {
         ui.key(c, "chat-history");
-        const history = tip.on(ui.div(c).row().size(26, 26).center().rounded(6).hover(k.hover), k, .{ .text = "Chat history", .delay = tip.quick });
+        const history = tip.on(ui.div(c).row().size(26, 26).center().rounded(7).hover(k.hover).control(), k, .{ .text = "Chat history", .delay = tip.quick });
         defer history.end();
-        icons.icon(c, .@"clock-circle", 16, k.muted, 0);
+        icons.icon(c, .@"clock-circle", 15, k.muted, 0);
         if (history.clicked()) @import("view_palette.zig").toggle(a, .chat_history);
     }
-    ui.div(c).w(6).end();
-    ui.key(c, "sidebar-session-create");
-    const b = tip.on(ui.div(c).row().size(26, 26).center().rounded(6).border(k.muted.alpha(0.45)).borderW(1).hover(k.hover), k, .{ .text = "New workspace", .delay = tip.quick });
-    defer b.end();
-    icons.icon(c, .plus, 16, k.muted, 0);
-    if (b.clicked()) a.newWorkspaceSession();
+    // No second "+" here: the title row's "New session" is the same action.
 }

@@ -6,7 +6,7 @@ const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
 const App = @import("app.zig").App;
-const strip = @import("view_sandbox_strip.zig");
+const chrome = @import("panel_chrome.zig");
 const sidebar = @import("view_sidebar.zig");
 
 const testing = std.testing;
@@ -152,7 +152,22 @@ test "the strip shows while a sandbox runs, above the account badge, and opens i
     try testing.expect(!h.t.containsText("Cloud sandbox running"));
 }
 
-test "a closed sidebar keeps a chip with Turn off in view under the sidebar toggle" {
+test "closed sidebar sandbox never overlaps the split pane headers" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    for (0..3) |_| h.a.splitPane(.horizontal);
+    try h.answer(one("running"));
+    h.snap("split-sandbox-chrome");
+    const off = h.t.findText("Turn off") orelse return error.NoChip;
+    try testing.expect(off.y + off.h <= chrome.header_height);
+    try testing.expect(h.t.hasText("Split · 4 panes"));
+    const pane = h.a.view.strip.active_tab_anchor orelse return error.NoPaneHeader;
+    try testing.expect(pane.y >= chrome.header_height);
+    try testing.expect(pane.y + pane.h < h.a.view.chrome.y);
+}
+
+test "a closed sidebar keeps Turn off in the toolbar only while a sandbox runs" {
     var h: Harness = undefined;
     try h.init(false);
     defer h.deinit();
@@ -160,10 +175,10 @@ test "a closed sidebar keeps a chip with Turn off in view under the sidebar togg
     try testing.expect(!h.t.hasText("Turn off"));
 
     try h.answer(one("running"));
-    // The chip: Turn off under the toggle, and no strip.
+    // The toolbar shows live controls without mounting the sidebar strip.
     const off = h.t.findText("Turn off") orelse return error.NoChip;
-    try testing.expect(off.x > strip.chip_at.x and off.x < sidebar.width);
-    try testing.expect(off.y > strip.chip_at.y and off.y < strip.chip_at.y + 30);
+    try testing.expect(off.x > 1200 - 180 - @import("window_chrome.zig").trailing);
+    try testing.expect(off.y + off.h <= chrome.header_height);
     try testing.expect(!h.t.containsText("Cloud sandbox running"));
     try testing.expectEqual(@as(usize, 1), h.count("Turn off"));
     h.snap("sandbox-strip-chip");
@@ -178,7 +193,12 @@ test "a closed sidebar keeps a chip with Turn off in view under the sidebar togg
     h.t.settle(1);
 
     // The dot and cloud open Settings › Accounts.
-    h.t.click(strip.chip_at.x + 4 + 12, strip.chip_at.y + 4 + 10);
+    for (h.t.ctx.a11y_items.items) |item| {
+        if (!std.mem.eql(u8, item.label, "Manage cloud sandboxes")) continue;
+        const r = h.t.ctx.rects.get(item.id) orelse continue;
+        h.t.click(r.x + r.w / 2, r.y + r.h / 2);
+        break;
+    }
     h.t.settle(1);
     try testing.expect(h.a.view.settings_open);
     try testing.expectEqual(.agents, h.a.settings.section);

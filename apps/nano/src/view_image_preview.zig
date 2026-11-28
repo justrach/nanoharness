@@ -52,17 +52,31 @@ pub fn keys(c: *ui.Context, a: *App) bool {
     }
     if (c.shortcut(.{ .key = ui.Shortcut.escape }) or c.input.key == .escape) {
         c.input.key = null;
-        dismiss(c, a);
+        if (a.attachments.images.annotate.hasFocus(c.focus)) {
+            c.focus = 0;
+            c.changed = true;
+            a.redraw();
+        } else if (a.attachments.images.annotate.active) {
+            a.attachments.images.annotate.active = false;
+            a.redraw();
+        } else {
+            dismiss(c, a);
+        }
     }
     return true;
 }
 
-pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, bounds: ?ui.Rect) void {
+pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (!visible(a)) return;
-    const r = bounds orelse return;
+    // The transcript owns the preview, but the preview uses the whole
+    // workspace. Neither fitting nor zooming should resize its split.
+    const top = a.view.chrome.y;
+    const r: ui.Rect = .{ .x = 0, .y = top, .w = c.size.w, .h = @max(0, c.size.h - top) };
     const cache = &a.attachments.images;
     const image = cache.preview orelse return;
     cache.focus_scope.begin(c);
+    ui.key(c, "chat-image-preview-backdrop");
+    ui.div(c).fixed().offset(r.x, r.y).size(r.w, r.h).bg(k.ink(0.2)).control().layer(6).end();
     ui.key(c, "chat-image-preview");
     const card = ui.div(c).fixed().offset(r.x + 8, r.y + 8).size(@max(1, r.w - 16), @max(1, r.h - 16)).column().p(12).gap(10).rounded(8).bg(k.background).border(k.accent.alpha(0.4)).borderW(1).clip().control().layer(6);
     defer card.end();
@@ -110,10 +124,10 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, bounds: ?ui.Rect) void {
                 ui.text(c, msg, .{ .size = 10.5, .weight = .medium, .color = color });
             }
         }
-        ui.text(c, c.print("{d:.0}%", .{cache.zoom * 100}), .{ .size = 10.5, .color = k.muted });
+        ui.text(c, c.print("{d:.0}%", .{cache.zoom * 100}), .{ .tabular = true, .size = 10.5, .color = k.muted });
     }
     const hint = if (cache.annotate.active)
-        "Click image to drop callout pins · Click a pin to edit its note · Esc to close"
+        "Click image to drop callout pins · Click a pin to edit its note · Esc to exit annotate"
     else
         "Scroll or pinch to zoom · Drag to inspect · Esc to close";
     ui.text(c, hint, .{ .size = 10.5, .color = k.muted });
@@ -204,7 +218,7 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, bounds: ?ui.Rect) void {
             "No pins yet"
         else
             c.print("{d} {s}", .{ cache.annotate.count, if (cache.annotate.count == 1) "pin" else "pins" });
-        ui.text(c, count_label, .{ .size = 10.5, .color = k.muted });
+        ui.text(c, count_label, .{ .tabular = true, .size = 10.5, .color = k.muted });
         ui.spacer(c);
         if (cache.annotate.count > 0) {
             if (annotateButton(c, k, "Undo", false)) {
@@ -239,7 +253,7 @@ fn drawPinNotes(c: *ui.Context, a: *App, k: theme.Colors, state: *annotate.State
 
         const px: u32 = @intFromFloat(@round(pin.x * 100));
         const py: u32 = @intFromFloat(@round(pin.y * 100));
-        ui.text(c, c.print("({d}%, {d}%)", .{ px, py }), .{ .size = 10.5, .color = k.muted });
+        ui.text(c, c.print("({d}%, {d}%)", .{ px, py }), .{ .tabular = true, .size = 10.5, .color = k.muted });
 
         const field_box = ui.div(c).row().grow().w(0).h(26).px(8).itemsCenter().rounded(6)
             .bg(k.ink(if (k.dark) 0.06 else 0.045)).border(k.border).borderW(1);

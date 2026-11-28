@@ -159,6 +159,23 @@ theorem tween_column_exact_at_cap (tweening : Bool) (raw_col max_col : Nat)
   rw [hlt, Bool.and_false]
   rfl
 
+/-- Transcript column width while the sidebar slides (`slideColumnWidth`): the
+narrower end's column for the whole slide, so visible text breaks once. -/
+def slideColumnWidth (raw_col narrow_col : Nat) : Nat := min raw_col narrow_col
+
+/-- Theorem: the sliding column never exceeds `raw_col` (never overflows its pane). -/
+theorem slide_column_never_exceeds_raw (raw_col narrow_col : Nat) :
+    slideColumnWidth raw_col narrow_col ≤ raw_col :=
+  Nat.min_le_left raw_col narrow_col
+
+/-- Theorem: any two frames of a slide, each at least as wide as its narrower
+end, have the same column. -/
+theorem slide_column_is_constant (raw₁ raw₂ narrow_col : Nat)
+    (h₁ : narrow_col ≤ raw₁) (h₂ : narrow_col ≤ raw₂) :
+    slideColumnWidth raw₁ narrow_col = slideColumnWidth raw₂ narrow_col := by
+  unfold slideColumnWidth
+  rw [Nat.min_eq_right h₁, Nat.min_eq_right h₂]
+
 /-- Upper bound on prefix-width queries in binary-searched `fadeText`
 (`fadePrefixStart` in `view_kit.zig`): `⌈log₂(len + 1)⌉ + 1` prefix probes
 plus at most `1` initial total-width probe (`O(log L)` vs `O(L)` linear shaping). -/

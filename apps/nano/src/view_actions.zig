@@ -78,7 +78,8 @@ pub fn toolbarHeight(a: *const App) f32 {
 
 /// The run dock's height under the chat, with its hairline: none while shut.
 pub fn dockHeight(a: *const App) f32 {
-    return if (!a.actions.dock_open or a.actions.runs.items.len == 0) 0 else dock_h + 1;
+    if (!a.actions.dock_open or !actions.hasVisibleRun(&a.actions, a.selected)) return 0;
+    return dock_h + 1;
 }
 
 /// Release desktop keeps project actions inside the conversation panel.
@@ -149,6 +150,52 @@ pub fn overlays(c: *ui.Context, a: *App, k: theme.Colors) void {
     const x = &a.actions;
     if (x.menu) if (x.anchor) |r| menu(c, a, k, r);
     if (x.editor != null) editor(c, a, k);
+    if (x.command_review != null) reviewCommand(c, a, k);
+}
+
+fn reviewCommand(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const review = if (a.actions.command_review) |*pending| pending else return;
+    const cwd = actions.commandCwd(a, review.chat) orelse return actions.dismissCommand(a);
+    if (!std.mem.eql(u8, cwd, review.cwd) or c.shortcut(.{ .key = ui.Shortcut.escape })) return actions.dismissCommand(a);
+    {
+        const scrim = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(6).bg(.{ .a = 0.35 });
+        defer scrim.end();
+        if (scrim.clicked()) return actions.dismissCommand(a);
+    }
+    const w = @min(560, c.size.w - 24);
+    const card = kit.shadowLg(ui.div(c).fixed().offset((c.size.w - w) / 2, @max(12, c.size.h * 0.16)).w(w).layer(7)
+        .column().p(16).gap(8).bg(k.composer).border(k.border).borderW(1).rounded(12));
+    defer card.end();
+    ui.text(c, "Review command", .{ .size = 15, .weight = .semibold, .color = k.text });
+    ui.text(c, c.print("{s} · This device · {s}", .{ review.shell, review.cwd }), kit.style(c, 12, 16, .{ .wrap = true, .color = k.text }));
+    ui.text(c, "This runs with your account’s permissions, outside the agent sandbox.", kit.style(c, 12, 16, .{ .wrap = true, .color = k.muted }));
+    {
+        ui.scroll(c, .{ .width = .fill, .height = .{ .px = @min(160, c.size.h * 0.28) }, .padding = .{ .left = 8, .right = 8, .top = 6, .bottom = 6 } });
+        defer ui.end(c);
+        // Render-owned copy: either button may free the pending review this frame.
+        const text = c.alloc().dupe(u8, review.source) catch return;
+        ui.text(c, text, kit.style(c, 12, 17, .{ .mono = true, .wrap = true, .color = k.text }));
+    }
+    const row_ = ui.div(c).row().wFull().gap(8).itemsCenter();
+    defer row_.end();
+    ui.spacer(c);
+    // While reviewing, Tab stays within the dialog; Return starts on Cancel.
+    c.focusable_ids.clearRetainingCapacity();
+    ui.key(c, "command-cancel");
+    const focus_cancel = review.want_focus;
+    review.want_focus = false;
+    if (commandReviewButton(c, k, "Cancel", false, focus_cancel)) return actions.dismissCommand(a);
+    ui.key(c, "command-approve");
+    if (commandReviewButton(c, k, "Run in terminal", true, false)) actions.startCommand(a);
+}
+
+fn commandReviewButton(c: *ui.Context, k: theme.Colors, label: []const u8, primary: bool, take_focus: bool) bool {
+    const frame = ui.div(c).row().px(13).py(6).rounded(8).itemsCenter().control()
+        .bg(if (primary) k.solid else k.code_header);
+    defer frame.end();
+    if (take_focus) c.focus = c.node(frame.index).id;
+    ui.text(c, label, .{ .size = 13, .weight = .medium, .color = if (primary) k.on_solid else k.text });
+    return @import("control_behavior.zig").activate(c, frame, k, label, true, false);
 }
 
 fn menu(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
@@ -316,37 +363,134 @@ fn field(c: *ui.Context, k: theme.Colors, buf: *ui.TextBuffer, placeholder: []co
     _ = c.scrollbars.remove(field_id);
 }
 
+/// Focused PTY input is sent directly. Do not store it in a text field or
+/// echo it here; the child controls echo, including password prompts.
+fn terminalKeys(c: *ui.Context, a: *App, k: theme.Colors, r: *actions.Run) void {
+    ui.key(c, c.print("command-input-{x}", .{r.block.?}));
+    const input = ui.div(c).row().wFull().h(28).px(10).gap(6).itemsCenter().control().hover(k.hover);
+    defer input.end();
+    const id = c.node(input.index).id;
+    const ready = r.watch != null and r.exited == null;
+    c.addA11y(input.index, .button, "Focus terminal input", "", false, ready);
+    if (ready) {
+        _ = c.interact(input.index, .{ .focusable = true, .text = true });
+        if (r.want_focus) c.focus = id;
+        r.want_focus = false;
+    }
+    const focused = ready and c.focus == id;
+    icons.icon(c, .terminal, 12, if (focused) k.accent else k.muted, 0);
+    ui.text(c, if (r.opening != null) "Opening terminal…" else if (!ready) "Terminal is not accepting input" else if (focused) "Terminal focused · Ctrl+C to interrupt" else "Click to type in terminal", .{ .size = 11, .color = if (focused) k.text else k.muted });
+    if (!focused or a.actions.command_review != null) return;
+
+    if (c.input.shortcut) |s| {
+        if (s.ctrl and !s.cmd and !s.alt and !s.shift and (s.key == 'c' or s.key == 'd')) {
+            c.input.shortcut = null;
+            c.shortcut_taken = true;
+            actions.terminalInput(a, r, if (s.key == 'c') "\x03" else "\x04");
+            return;
+        }
+        if (s.cmd or s.ctrl) return;
+    }
+    if (c.input.key) |key| {
+        const bytes: []const u8 = switch (key) {
+            .enter => "\r",
+            .backspace => "\x7f",
+            .delete => "\x1b[3~",
+            .up => "\x1b[A",
+            .down => "\x1b[B",
+            .right => "\x1b[C",
+            .left => "\x1b[D",
+            .home => "\x1b[H",
+            .end => "\x1b[F",
+            else => "",
+        };
+        if (bytes.len > 0 and !c.input.cmd and !c.input.ctrl) {
+            c.input.key = null;
+            c.input.chars = "";
+            c.input.ops = &.{};
+            actions.terminalInput(a, r, bytes);
+            return;
+        }
+    }
+    if (c.input.ops.len > 0) {
+        for (c.input.ops) |op| switch (op) {
+            .insert => |text| sendTyped(c, a, r, text),
+            .command => |cmd| actions.terminalInput(a, r, switch (cmd) {
+                .insert_newline => "\r",
+                .delete_backward => "\x7f",
+                .delete_forward => "\x1b[3~",
+                .move_up => "\x1b[A",
+                .move_down => "\x1b[B",
+                .move_left => "\x1b[D",
+                .move_right => "\x1b[C",
+                else => "",
+            }),
+            else => {},
+        };
+        c.input.ops = &.{};
+        c.input.chars = "";
+    } else if (c.input.chars.len > 0) {
+        sendTyped(c, a, r, c.input.chars);
+        c.input.chars = "";
+    }
+}
+
+fn sendTyped(c: *ui.Context, a: *App, r: *actions.Run, text: []const u8) void {
+    // A paste must not double as pressing Return or sending terminal controls.
+    const clean = c.alloc().alloc(u8, text.len) catch return;
+    var n: usize = 0;
+    for (text) |b| if (b >= 32 and b != 127) {
+        clean[n] = b;
+        n += 1;
+    };
+    actions.terminalInput(a, r, clean[0..n]);
+}
+
 /// The dock under the chat: a tab per run, its output as a log.
 pub fn dock(c: *ui.Context, a: *App, k: theme.Colors) void {
     const x = &a.actions;
     if (dockHeight(a) == 0) return;
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
-    const bg = if (a.settings.uiMode() == .zen) @import("view_panel_chrome.zig").zenPageBg(k) else k.background;
+    const bg = @import("view_panel_chrome.zig").zenPageBg(k);
     const d = ui.div(c).column().wFull().h(dock_h).bg(bg);
     defer d.end();
     {
         const strip = ui.div(c).row().wFull().h(32).px(8).gap(4).itemsCenter();
         defer strip.end();
         var close: ?usize = null;
+        if (!x.runs.items[x.dock_active].visible(a.selected)) {
+            for (x.runs.items, 0..) |r, i| if (r.visible(a.selected)) {
+                x.dock_active = i;
+                break;
+            };
+        }
         for (x.runs.items, 0..) |r, i| {
+            if (!r.visible(a.selected)) continue;
             ui.key(c, c.print("run-{d}", .{i}));
             const on = i == x.dock_active;
             var t = ui.div(c).row().h(24).px(8).gap(6).itemsCenter().rounded(6).opacity(if (r.exited != null) 0.55 else 1);
             t = if (on) t.bg(k.wash(0.10)) else t.hover(k.wash(0.06));
             defer t.end();
-            if (t.clicked()) x.dock_active = i;
+            if (t.clicked()) {
+                x.dock_active = i;
+                x.runs.items[i].want_focus = r.block != null;
+            }
             icons.icon(c, .terminal, 12, k.muted, 0);
             ui.text(c, r.name, .{ .size = 11.5, .color = if (on) k.text else k.muted });
-            const xb = ui.div(c).row().size(16, 16).center().rounded(4).hover(k.wash(0.12));
-            defer xb.end();
-            if (xb.clicked()) close = i;
-            icons.icon(c, .close, 10, k.muted, 0);
+            if (r.opening == null) {
+                const xb = ui.div(c).row().size(16, 16).center().rounded(4).hover(k.wash(0.12));
+                defer xb.end();
+                if (xb.clicked()) close = i;
+                icons.icon(c, .close, 10, k.muted, 0);
+            }
         }
         if (close) |i| return actions.closeRun(a, i);
         ui.spacer(c);
         if (kit.iconButton(c, k, .close, .{ .size = 24, .icon = 12 })) x.dock_open = false;
     }
-    const r = &x.runs.items[@min(x.dock_active, x.runs.items.len - 1)];
+    const r = &x.runs.items[x.dock_active];
+    if (r.block != null) terminalKeys(c, a, k, r);
+    ui.key(c, c.print("terminal-output-{d}", .{x.dock_active}));
     ui.scroll(c, .{ .grow = 1, .width = .fill, .padding = .{ .left = 14, .right = 14, .top = 4, .bottom = 10 }, .follow_end = true });
     defer ui.end(c);
     const st = kit.style(c, 12, 18, .{ .mono = true, .color = k.text });

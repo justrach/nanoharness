@@ -18,15 +18,23 @@ pub fn chevron(c: *ui.Context, k: theme.Colors, open: bool, size: f32) void {
 }
 
 pub fn counts(c: *ui.Context, k: theme.Colors, additions: u64, deletions: u64) void {
-    const box = ui.div(c).row().gap(6).itemsCenter();
+    countsCompact(c, k, additions, deletions, false);
+}
+
+pub fn countsCompact(c: *ui.Context, k: theme.Colors, additions: u64, deletions: u64, compact: bool) void {
+    const box = ui.div(c).row().gap(if (compact) 3 else 6).itemsCenter();
     defer box.end();
-    if (additions > 0) ui.text(c, c.print("+{d}", .{additions}), kit.style(c, 11, 18, .{ .color = k.success }));
-    if (deletions > 0) ui.text(c, c.print("−{d}", .{deletions}), kit.style(c, 11, 18, .{ .color = k.danger }));
+    if (additions > 0) ui.text(c, c.print("+{d}", .{additions}), kit.style(c, 11, 18, .{ .tabular = true, .color = k.success }));
+    if (deletions > 0) ui.text(c, c.print("−{d}", .{deletions}), kit.style(c, 11, 18, .{ .tabular = true, .color = k.danger }));
 }
 
 pub fn trail(c: *ui.Context, k: theme.Colors, result: rows.Result, opacity: f32) void {
+    trailCompact(c, k, result, opacity, false);
+}
+
+pub fn trailCompact(c: *ui.Context, k: theme.Colors, result: rows.Result, opacity: f32, compact: bool) void {
     var box = ui.div(c).row().itemsCenter().motion(.{ .opacity = opacity });
-    if (result.washed()) {
+    if (result.washed() and !compact) {
         const label = result.passed;
         box = box.w(@max(80, c.text.width(label, .{ .size = 11, .weight = .semibold }) + 12)).justifyEnd();
     }
@@ -35,18 +43,18 @@ pub fn trail(c: *ui.Context, k: theme.Colors, result: rows.Result, opacity: f32)
         .settled, .failed => {},
         .running => |ms| if (ms) |elapsed| {
             const buf = c.alloc().alloc(u8, 32) catch return;
-            ui.text(c, rows.timer(buf, elapsed), kit.style(c, 11, 18, .{ .color = k.muted }));
+            ui.text(c, rows.timer(buf, elapsed), kit.style(c, 11, 18, .{ .tabular = true, .color = k.muted }));
             if (c.reduced_motion) c.frameIn(1) else kit.loaderFrame(c, 0.1);
         },
         .summary => |text| ui.text(c, text, kit.style(c, 11, 18, .{ .color = k.muted })),
-        .diff => |d| counts(c, k, d.additions, d.deletions),
+        .diff => |d| countsCompact(c, k, d.additions, d.deletions, compact),
         .passed => |text| {
             const color = k.success;
-            const pill = ui.div(c).row().h(18).px(6).itemsCenter().rounded(5).bg(color);
+            const pill = ui.div(c).row().h(if (compact) 16 else 18).px(if (compact) 4 else 6).itemsCenter().rounded(if (compact) 4 else 5).bg(color);
             defer pill.end();
             // WCAG luminance comparison, as desktop's fg_on(color).
             const on = foreground(color);
-            ui.text(c, text, kit.style(c, 11, 18, .{ .weight = .semibold, .color = on }));
+            ui.text(c, text, kit.style(c, if (compact) 10 else 11, if (compact) 16 else 18, .{ .weight = .semibold, .color = on }));
         },
     }
 }
@@ -147,11 +155,32 @@ pub fn summary(c: *ui.Context, k: theme.Colors, stats: []const tr.Stat) void {
 }
 
 /// Slower desktop 3.4s title shimmer (not the per-file scramble clock).
-pub fn title(c: *ui.Context, k: theme.Colors, text: []const u8, active: bool, hot: bool, max_w: f32) void {
+pub fn title(c: *ui.Context, k: theme.Colors, full: []const u8, parts: []const tr.Part, active: bool, hot: bool, max_w: f32) void {
     const st = kit.style(c, 15, 18, .{ .color = if (hot) k.text else k.muted });
-    if (!active or c.reduced_motion) return kit.fadeText(c, text, st, max_w);
-    const box = ui.div(c).row().maxW(max_w).clip();
+    const overflow = c.text.width(full, st) > max_w;
+    // A half-visible count ("read 5…") is ambiguous. Use a complete shorter
+    // summary at split widths and keep the full breakdown on hover.
+    var text = full;
+    var box = ui.div(c).row().maxW(max_w).clip();
     defer box.end();
+    if (overflow) {
+        var calls: usize = 0;
+        var failures: usize = 0;
+        for (parts) |p| if (p.kind == .tool) {
+            calls += 1;
+            if (p.is_error) failures += 1;
+        };
+        if (calls > 0) {
+            text = c.print("{d} tool call{s}", .{ calls, if (calls == 1) "" else "s" });
+            if (failures > 0) {
+                const with_failures = c.print("{s} · {d} failed", .{ text, failures });
+                if (c.text.width(with_failures, st) <= max_w) text = with_failures;
+            }
+            if (c.text.width(text, st) > max_w) text = "Tools";
+        }
+        box = @import("view_tooltip.zig").on(box, k, .{ .text = full });
+    }
+    if (!active or c.reduced_motion or c.text.width(text, st) > max_w) return kit.ellipsisText(c, text, st, max_w);
     const phase: f32 = @floatCast(@mod(c.time / 3.4, 1));
     var spans: std.ArrayList(ui.Span) = .empty;
     var it = std.unicode.Utf8View.initUnchecked(text).iterator();

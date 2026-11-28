@@ -17,7 +17,7 @@ Hermes, Pi, OpenCode และ Antigravity ไว้ในแอปเดสก�
 | <img src="docs/media/readme/nanoharness-agents-light.png" alt="การตั้งค่าเอเจนต์ปัจจุบันของ Harness ในธีม Light Mode" width="520"> | <img src="docs/media/readme/nanoharness-workspace-light.png" alt="บทสนทนาตัวอย่างกับ graff ในธีม Light Mode" width="520"> |
 
 เลือกโมเดล ตรวจการเปลี่ยนแปลงข้างบทสนทนา และเปิดไฟล์หรือเบราว์เซอร์ในแอปได้เลย
-แอปเดสก์ท็อปใช้ Rust/GPUI ส่วนแอป iOS ใช้ SwiftUI เพื่อดูเซสชันที่ซิงก์
+แอปเดสก์ท็อปเขียนด้วย Zig บน nanoui และเอนจินเขียนด้วย Rust ส่วนแอป iOS ใช้ SwiftUI เพื่อดูเซสชันที่ซิงก์
 
 ### ทำงานร่วมกับ CodeGraff
 
@@ -29,18 +29,16 @@ Harness มีอะแดปเตอร์สำหรับ [CodeGraff](https
 
 ## เริ่มจากซอร์สโค้ด
 
-ใช้ Rust รุ่นที่ระบุใน [`rust-toolchain.toml`](rust-toolchain.toml)
+ใช้ Zig `0.17.0` และ Rust รุ่นที่ระบุใน [`rust-toolchain.toml`](rust-toolchain.toml)
 
 | ระบบ | คำสั่ง |
 | --- | --- |
 | macOS | `./scripts/run-macos-dev.sh` |
-| Linux | `cargo build -p harness && ./target/debug/harness` |
-| Windows | `cargo run --locked -p harness` |
+| Linux | `cargo build -p harness-engine --bin harness-engine && (cd apps/nano && zig build) && apps/nano/zig-out/bin/harness-nano` |
+| Windows | `./scripts/package-windows.ps1 -ReleasesUrl https://github.com/justrach/nanoharness/releases/latest/download -CargoProfile release` → `target/package/harness-VERSION-windows-x86_64/harness-nano.exe` |
 
-สคริปต์ macOS จะเปิด `target/macos-dev/Harness.app` หากต้องการเดโมแบบออฟไลน์
-พร้อมเซสชันตัวอย่าง ให้ใช้ `./scripts/dev-demo.sh` อ่านคำแนะนำสำหรับ
-[Windows](docs/reference/windows-development.md) และ [เบราว์เซอร์บน Linux](docs/reference/linux-browser.md)
-เพิ่มเติมได้
+สคริปต์ macOS จะสร้างและเปิด `target/macos-dev/Harness.app` โดยใช้ข้อมูลและพอร์ตเอนจินของตัวเอง
+อ่านคำแนะนำสำหรับ [Windows](docs/reference/windows-development.md) เพิ่มเติมได้
 
 ## วิธีทำงาน
 

@@ -215,8 +215,10 @@ fn registry_with(harness: Arc<dyn Harness>) -> Arc<HarnessRegistry> {
 }
 
 fn assemble(dir: &std::path::Path, harness: Arc<dyn Harness>) -> EngineCore {
-    EngineCore::assemble(dir, registry_with(harness), HarnessId::Mock, None)
-        .expect("engine core assembles")
+    let core = EngineCore::assemble(dir, registry_with(harness), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    core.registry.set_remote_control(true);
+    core
 }
 
 /// Queue a command into the chat doc the way a REMOTE viewer device would: an immutable
@@ -455,81 +457,8 @@ async fn session_status_transitions_idle_working_idle() {
     assert_eq!(seen, vec![SessionStatus::Working, SessionStatus::Idle]);
 }
 
-#[tokio::test]
-async fn interrupt_stamps_streaming_entry_aborted() {
-    let dir = tempfile::tempdir().unwrap();
-    let core = assemble(
-        dir.path(),
-        Arc::new(ScriptedHarness {
-            script: vec![AgentEvent::TextDelta {
-                text: "partial output".into(),
-            }],
-            step_delay: Duration::from_millis(5),
-            hang_until_interrupt: true,
-        }),
-    );
-    let handle = core.doc_host.open(CHAT).unwrap();
-    queue_as_viewer(
-        handle.doc(),
-        "cmd-run-hang",
-        SessionCommandPayload::Run {
-            request: run_request("hang"),
-            message_id: "m-1".into(),
-        },
-    );
-
-    // Wait until the streaming entry is visibly in the doc, then interrupt via a
-    // viewer-queued durable command (based_on = the streaming entry = current turn).
-    wait_for(
-        || {
-            entries(&core)
-                .iter()
-                .any(|e| e.status == Some(MessageStatus::Streaming))
-        },
-        "streaming entry",
-    )
-    .await;
-    queue_as_viewer(
-        handle.doc(),
-        "cmd-int-1",
-        SessionCommandPayload::Interrupt {},
-    );
-
-    wait_for(
-        || {
-            entries(&core)
-                .iter()
-                .any(|e| e.status == Some(MessageStatus::Aborted))
-        },
-        "aborted stamp",
-    )
-    .await;
-
-    let all = entries(&core);
-    let assistant = all
-        .iter()
-        .find(|e| e.role == MessageRole::Assistant)
-        .unwrap();
-    assert_eq!(assistant.status, Some(MessageStatus::Aborted));
-    match &assistant.parts[0] {
-        MessagePart::Text { text, .. } => assert_eq!(text, "partial output"),
-        other => panic!("unexpected part {other:?}"),
-    }
-    // The command's Applied stamp is a separate doc write from the abort
-    // stamp; under a loaded test run it can land a beat later.
-    wait_for(
-        || command_status(&core, "cmd-int-1") == Some((SessionCommandStatus::Applied, None)),
-        "interrupt command applied",
-    )
-    .await;
-    // Journal closed with a Done — nothing left to recover.
-    let journal = RunJournal::open(dir.path().join("orgs/dev-org/dev-user/journals")).unwrap();
-    assert!(journal.stale_sessions().unwrap().is_empty());
-    assert_eq!(
-        core.sessions.session_status(CHAT).map(|s| s.status),
-        Some(SessionStatus::Idle)
-    );
-}
+#[path = "e2e/failed_stream.rs"]
+mod failed_stream;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn interrupt_is_scoped_to_the_target_chat() {
@@ -1085,6 +1014,7 @@ async fn respond_input_resolves_pending_question() {
                     prefill: None,
                     multiline: false,
                     multi_select: false,
+                    requires_human_ui: false,
                 }])
                 .await
                 .unwrap_or_default();
@@ -1164,6 +1094,7 @@ async fn respond_input_resolves_pending_question() {
                 question_id: "q1".into(),
                 labels: vec!["b".into()],
             }],
+            from_agent: false,
         },
     );
 
@@ -1240,6 +1171,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
                     prefill: None,
                     multiline: false,
                     multi_select: false,
+                    requires_human_ui: false,
                 }])
                 .await
                 .unwrap_or_default();
@@ -1308,6 +1240,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
                 question_id: "q1".into(),
                 labels: vec!["a".into()],
             }],
+            from_agent: false,
         },
     );
     wait_for(
@@ -1355,6 +1288,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
                 question_id: "q1".into(),
                 labels: vec!["b".into()],
             }],
+            from_agent: false,
         },
     );
     wait_for(
@@ -1419,6 +1353,7 @@ async fn dismiss_input_cancels_without_answering_and_rejects_stale_requests() {
                     prefill: None,
                     multiline: false,
                     multi_select: false,
+                    requires_human_ui: false,
                 }])
                 .await;
                 cancelled.store(answer.is_err(), Ordering::SeqCst);
@@ -1618,6 +1553,7 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
                         prefill: None,
                         multiline: false,
                         multi_select: false,
+                        requires_human_ui: false,
                     }])
                     .await;
                     interrupt.cancelled().await;
@@ -1767,6 +1703,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
                     prefill: None,
                     multiline: false,
                     multi_select: false,
+                    requires_human_ui: false,
                 };
                 // The pre-fix Claude/Codex shape: surface the question under
                 // the harness's own id BEFORE asking through the bridge.
@@ -1872,6 +1809,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
                 question_id: "q1".into(),
                 labels: vec!["a".into()],
             }],
+            from_agent: false,
         },
     );
 
@@ -3055,7 +2993,9 @@ async fn tool_progress_streams_live_and_never_reaches_the_doc() {
         }),
     );
     let mut rx = core.sessions.watch_tool_progress(CHAT);
-    let seen = Arc::new(std::sync::Mutex::new(Vec::<Vec<harness_proto::ToolProgressItem>>::new()));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<
+        Vec<harness_proto::ToolProgressItem>,
+    >::new()));
     let record = seen.clone();
     tokio::spawn(async move {
         while rx.changed().await.is_ok() {
@@ -3094,7 +3034,10 @@ async fn tool_progress_streams_live_and_never_reaches_the_doc() {
         "the tool's result and the turn's end clear the live log"
     );
     let doc = serde_json::to_string(&entries(&core)).unwrap();
-    assert!(!doc.contains("LIVE-LOG"), "live output leaked into the doc: {doc}");
+    assert!(
+        !doc.contains("LIVE-LOG"),
+        "live output leaked into the doc: {doc}"
+    );
     assert!(doc.contains("tool-1"), "the tool chip itself still folds");
 }
 
@@ -3254,4 +3197,244 @@ async fn stop_ends_only_the_turn_when_the_harness_keeps_its_process() {
         1,
         "one agent process"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn respond_input_rejects_agent_on_human_approval_while_allowing_human_and_normal_questions() {
+    struct ApprovalAndQuestionHarness;
+
+    #[async_trait]
+    impl Harness for ApprovalAndQuestionHarness {
+        fn id(&self) -> HarnessId {
+            HarnessId::Mock
+        }
+        fn display_name(&self) -> &str {
+            "Approval"
+        }
+        fn supports_steering(&self) -> bool {
+            false
+        }
+        fn steering_mode(&self) -> SteeringMode {
+            SteeringMode::TurnBoundary
+        }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] {
+            &[]
+        }
+        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            _request: RunRequest,
+            controls: RunControls,
+        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
+            tokio::spawn(async move {
+                let approval = (controls.request_input)(vec![harness_proto::UserInputQuestion {
+                    id: "perm-1".into(),
+                    header: "Approve tool".into(),
+                    question: "Allow shell execution?".into(),
+                    options: vec!["Approve".into(), "Deny".into()],
+                    prefill: None,
+                    multiline: false,
+                    multi_select: false,
+                    requires_human_ui: true,
+                }])
+                .await
+                .unwrap_or_default();
+                let picked_approval = approval
+                    .first()
+                    .and_then(|a| a.labels.first().cloned())
+                    .unwrap_or_else(|| "none".into());
+                let normal = (controls.request_input)(vec![harness_proto::UserInputQuestion {
+                    id: "q-normal".into(),
+                    header: "Style".into(),
+                    question: "Which option?".into(),
+                    options: vec!["A".into(), "B".into()],
+                    prefill: None,
+                    multiline: false,
+                    multi_select: false,
+                    requires_human_ui: false,
+                }])
+                .await
+                .unwrap_or_default();
+                let picked_normal = normal
+                    .first()
+                    .and_then(|a| a.labels.first().cloned())
+                    .unwrap_or_else(|| "none".into());
+                let _ = tx
+                    .send(Ok(AgentEvent::TextDelta {
+                        text: format!("{picked_approval}:{picked_normal}"),
+                    }))
+                    .await;
+                let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
+            });
+            Ok(futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            })
+            .boxed())
+        }
+    }
+
+    const APPROVAL_CHAT: &str = "chat-approval-gate";
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(dir.path(), Arc::new(ApprovalAndQuestionHarness));
+    let handle = core.doc_host.open(APPROVAL_CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-gate",
+        SessionCommandPayload::Run {
+            request: run_request("run gate"),
+            message_id: "m-gate".into(),
+        },
+    );
+
+    wait_for(
+        || {
+            core.sessions
+                .session_status(APPROVAL_CHAT)
+                .map(|s| s.status)
+                == Some(SessionStatus::AwaitingInput)
+                && entries_for(&core, APPROVAL_CHAT).iter().any(|e| {
+                    e.parts.iter().any(|p| {
+                        matches!(
+                            p,
+                            MessagePart::Input {
+                                resolved: false,
+                                ..
+                            }
+                        )
+                    })
+                })
+        },
+        "approval question pending",
+    )
+    .await;
+
+    let approval_req_id = entries_for(&core, APPROVAL_CHAT)
+        .iter()
+        .find_map(|e| {
+            e.parts.iter().find_map(|p| match p {
+                MessagePart::Input {
+                    request_id,
+                    resolved: false,
+                    ..
+                } => Some(request_id.clone()),
+                _ => None,
+            })
+        })
+        .unwrap();
+
+    // Agent attempt must be rejected and leave the pending resolver intact.
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-agent-approve",
+        SessionCommandPayload::RespondInput {
+            request_id: approval_req_id.clone(),
+            answers: vec![harness_proto::UserInputAnswer {
+                question_id: "perm-1".into(),
+                labels: vec!["Approve".into()],
+            }],
+            from_agent: true,
+        },
+    );
+    let cmd_status = |id: &str| {
+        handle
+            .doc()
+            .read_commands()
+            .expect("read commands")
+            .into_iter()
+            .find(|c| c.id == id)
+            .map(|c| (c.status, c.resolution))
+    };
+    wait_for(
+        || cmd_status("cmd-agent-approve").is_some_and(|(s, _)| s != SessionCommandStatus::Pending),
+        "agent approval command rejected",
+    )
+    .await;
+    let (status, reason) = cmd_status("cmd-agent-approve").unwrap();
+    assert_eq!(status, SessionCommandStatus::Rejected);
+    assert!(
+        reason.as_deref().unwrap_or("").contains("human approval"),
+        "unexpected rejection reason: {reason:?}"
+    );
+    assert_eq!(
+        core.sessions
+            .session_status(APPROVAL_CHAT)
+            .map(|s| s.status),
+        Some(SessionStatus::AwaitingInput)
+    );
+
+    // Human UI answer resolves the preserved approval prompt.
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-human-approve",
+        SessionCommandPayload::RespondInput {
+            request_id: approval_req_id,
+            answers: vec![harness_proto::UserInputAnswer {
+                question_id: "perm-1".into(),
+                labels: vec!["Approve".into()],
+            }],
+            from_agent: false,
+        },
+    );
+    wait_for(
+        || {
+            cmd_status("cmd-human-approve").is_some_and(|(s, _)| s == SessionCommandStatus::Applied)
+                && entries_for(&core, APPROVAL_CHAT).iter().any(|e| {
+                    e.parts.iter().any(|p| {
+                        matches!(
+                            p,
+                            MessagePart::Input {
+                                questions,
+                                resolved: false,
+                                ..
+                            } if questions.iter().any(|q| q.id == "q-normal")
+                        )
+                    })
+                })
+        },
+        "normal question pending after human approval",
+    )
+    .await;
+
+    // Agent answer succeeds on a non-approval question.
+    let normal_req_id = entries_for(&core, APPROVAL_CHAT)
+        .iter()
+        .find_map(|e| {
+            e.parts.iter().find_map(|p| match p {
+                MessagePart::Input {
+                    request_id,
+                    questions,
+                    resolved: false,
+                    ..
+                } if questions.iter().any(|q| q.id == "q-normal") => Some(request_id.clone()),
+                _ => None,
+            })
+        })
+        .unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-agent-normal",
+        SessionCommandPayload::RespondInput {
+            request_id: normal_req_id,
+            answers: vec![harness_proto::UserInputAnswer {
+                question_id: "q-normal".into(),
+                labels: vec!["B".into()],
+            }],
+            from_agent: true,
+        },
+    );
+    wait_for(
+        || {
+            entries_for(&core, APPROVAL_CHAT).iter().any(|e| {
+                e.status == Some(MessageStatus::Complete)
+                    && e.parts
+                        .iter()
+                        .any(|p| matches!(p, MessagePart::Text { text, .. } if text == "Approve:B"))
+            })
+        },
+        "turn completes after human approval + agent answer",
+    )
+    .await;
 }

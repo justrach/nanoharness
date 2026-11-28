@@ -45,6 +45,7 @@ pub const State = struct {
 };
 
 pub fn openProjects(a: *App) void {
+    @import("view.zig").closeTransientPopovers(a);
     const v = &a.view;
     v.more_menu = false;
     v.filter_menu = true;
@@ -60,6 +61,7 @@ pub fn openProjects(a: *App) void {
 }
 
 pub fn openView(a: *App) void {
+    @import("view.zig").closeTransientPopovers(a);
     const v = &a.view;
     v.filter_menu = false;
     v.more_menu = true;
@@ -254,6 +256,8 @@ fn projects(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
     {
         var list_style: ui.Style = .{ .width = .fill, .max_height = 224, .direction = .column, .gap = 2 };
         if (@hasField(ui.Style, "scrollbar")) list_style.scrollbar = .{ .overlay = k.faint.alpha(0.5) };
+        ui.key(c, "spaces-menu-list");
+        const scroll_at = c.nodes.items.len;
         ui.scroll(c, list_style);
         defer ui.end(c);
         const now = a.nowMs();
@@ -263,7 +267,20 @@ fn projects(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
             if (i > 0) caption_at = i;
             break;
         };
-        for (rows, 0..) |row, i| {
+        // Window long project lists so only visible rows are built each frame.
+        const row_step: f32 = 34;
+        const use_window = rows.len > 24;
+        var first: usize = 0;
+        var last: usize = rows.len;
+        if (use_window) {
+            const scroll_id = c.node(@intCast(scroll_at)).id;
+            const max_scroll = @max(0, @as(f32, @floatFromInt(rows.len)) * row_step - 224);
+            const offset = std.math.clamp(c.scroll.get(scroll_id) orelse 0, 0, max_scroll);
+            first = @min(rows.len, @as(usize, @intFromFloat(@floor(@max(0, offset - row_step) / row_step))));
+            last = @min(rows.len, first + @as(usize, @intFromFloat(@ceil(224.0 / row_step))) + 3);
+            if (first > 0) _ = c.leaf(.{ .width = .fill, .height = .{ .px = @as(f32, @floatFromInt(first)) * row_step - 2 } }, .none, null);
+        }
+        for (rows[first..last], first..) |row, i| {
             if (caption_at == i) {
                 const cap = ui.div(c).row().wFull().px(8).pt(8).pb(2);
                 defer cap.end();
@@ -297,6 +314,9 @@ fn projects(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
                 },
                 .add => {},
             }
+        }
+        if (use_window and last < rows.len) {
+            _ = c.leaf(.{ .width = .fill, .height = .{ .px = @as(f32, @floatFromInt(rows.len - last)) * row_step - 2 } }, .none, null);
         }
     }
     // Full-bleed through the card's inset.
@@ -638,6 +658,7 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
         const motion = @import("motion_rules.zig");
         const mode = a.settings.uiMode();
         const dev = mode == .developer;
+        const des = mode == .design;
         const profile = a.settings.hierarchyProfile();
         const customized = !std.meta.eql(profile, motion.HierarchyProfile.ofMode(mode));
         {
@@ -662,21 +683,28 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
             const seg = ui.div(c).row().wFull().p(3).gap(3).rounded(8).bg(k.ink(if (k.dark) 0.08 else 0.055));
             defer seg.end();
             inline for (.{
-                .{ motion.UiMode.zen, "sidebar-preset-zen", icons.Name.@"magic-stick-3", "Zen", !dev },
-                .{ motion.UiMode.developer, "sidebar-view-developer-mode", icons.Name.terminal, "Developer", dev },
+                .{ motion.UiMode.zen, "sidebar-preset-zen", icons.Name.@"magic-stick-3", "Zen", !dev and !des },
+                .{ motion.UiMode.developer, "sidebar-view-developer-mode", icons.Name.terminal, "Dev", dev },
+                .{ motion.UiMode.design, "sidebar-preset-design", icons.Name.@"palette-search", "Design", des },
             }) |item| {
                 ui.key(c, item[1]);
-                var pill = ui.div(c).row().grow().w(0).h(28).gap(5).center().rounded(6).control();
+                var pill = ui.div(c).row().grow().w(0).h(28).gap(4).center().rounded(6).control();
                 pill = if (item[4])
                     pill.bg(if (k.frosted) k.card else k.background).border(k.border_strong).borderW(1)
                 else
                     pill.hover(k.selected);
                 defer pill.end();
-                icons.icon(c, item[2], 12.5, if (item[4]) k.text else k.muted, 0);
-                ui.text(c, item[3], .{ .size = 12, .line_height = 14, .weight = if (item[4]) .semibold else .regular, .color = if (item[4]) k.text else k.muted });
+                icons.icon(c, item[2], 12, if (item[4]) k.text else k.muted, 0);
+                ui.text(c, item[3], .{ .size = 11.5, .line_height = 14, .weight = if (item[4]) .semibold else .regular, .color = if (item[4]) k.text else k.muted });
                 if (pill.clicked()) {
                     m.open = null;
+                    const was_design = a.settings.uiMode() == .design;
                     a.settings.applyUiMode(item[0]);
+                    if (item[0] == .design) {
+                        @import("app_panels.zig").openDesignCanvas(a);
+                    } else if (was_design) {
+                        @import("app_panels.zig").closeDesignCanvas(a);
+                    }
                     a.redraw();
                 }
             }
@@ -684,7 +712,9 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
         const desc_box = ui.div(c).row().wFull().px(8).pt(2).pb(4);
         defer desc_box.end();
         const desc = if (customized)
-            (if (dev) "Customized Developer layout" else "Customized Zen layout")
+            (if (dev) "Customized Developer layout" else if (des) "Customized Design layout" else "Customized Zen layout")
+        else if (des)
+            "Artboard canvas, DESIGN.md audit & pins"
         else if (dev)
             "Grouped projects, git controls & rail"
         else

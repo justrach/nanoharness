@@ -38,34 +38,73 @@ deriving DecidableEq, Repr, BEq
 def iconAndGap : Nat := 13
 def editableExtra : Nat := 18
 def chipGap : Nat := 6
+def compactEditableW : Nat := 16
+def compactStaticW : Nat := 10
+def minChipLabel : Nat := 20
 
-/-- Pure width allocation for a top-strip slot's computer and folder chips. -/
+/-- Pure width allocation for a top-strip slot's computer and folder chips.
+Drops computer words to a bare glyph (`16px`) before either label degrades to a
+bare `"…"` stub or clips its `9px` chevron, then drops both to bare glyphs so
+neither chip ever overflows `room`. -/
 def slotChipWidths
     (room : Nat)
     (devTextW : Nat)
     (devEditable : Bool)
     (pickTextW : Option Nat)
     (pickChangeable : Bool) : ChipLayout :=
-  let devExtra := if devEditable then editableExtra else 0
-  let devNatural := devTextW + iconAndGap + devExtra
+  let devChrome := iconAndGap + (if devEditable then editableExtra else 0)
+  let devIcon := if devEditable then compactEditableW else compactStaticW
+  let devHasText := devTextW > 0
+  let devNat := if devHasText then devTextW + devChrome else devIcon
+  let devMinLab := if devHasText then devChrome + Nat.min devTextW minChipLabel else devIcon
   match pickTextW with
   | none =>
-    let devW := Nat.min devNatural room
-    { devW := devW
-    , devTextMax := devW - (iconAndGap + devExtra)
-    , pickW := 0
-    , pickTextMax := 0 }
+    if devHasText && devNat <= room then
+      { devW := devNat, devTextMax := devTextW, pickW := 0, pickTextMax := 0 }
+    else if devHasText && devMinLab <= room then
+      { devW := room, devTextMax := room - devChrome, pickW := 0, pickTextMax := 0 }
+    else if devIcon <= room then
+      { devW := devIcon, devTextMax := 0, pickW := 0, pickTextMax := 0 }
+    else
+      { devW := 0, devTextMax := 0, pickW := 0, pickTextMax := 0 }
   | some pText =>
-    let pickExtra := if pickChangeable then editableExtra else 0
-    let pickNatural := pText + iconAndGap + pickExtra
-    let devFloor := Nat.max (room / 2) (room - (chipGap + pickNatural))
-    let devW := Nat.min devNatural (Nat.min room devFloor)
-    let pickMax := room - Nat.min room (devW + chipGap)
-    let pickW := if pickChangeable then Nat.min pickMax pickNatural else pickMax
-    { devW := devW
-    , devTextMax := devW - (iconAndGap + devExtra)
-    , pickW := pickW
-    , pickTextMax := pickW - (iconAndGap + pickExtra) }
+    let pickChrome := iconAndGap + (if pickChangeable then editableExtra else 0)
+    let pickIcon := if pickChangeable then compactEditableW else compactStaticW
+    let pickHasText := pText > 0
+    let pickNat := if pickHasText then pText + pickChrome else pickIcon
+    let pickMinLab := if pickHasText then pickChrome + Nat.min pText minChipLabel else pickIcon
+    if devHasText && pickHasText && devNat + chipGap + pickNat <= room then
+      let pickMax := room - (devNat + chipGap)
+      let pickW := if pickChangeable then pickNat else pickMax
+      { devW := devNat
+      , devTextMax := devTextW
+      , pickW := pickW
+      , pickTextMax := pickW - pickChrome }
+    else if devHasText && pickHasText && devMinLab + chipGap + pickMinLab <= room then
+      let devFloor := Nat.max (room / 2) (room - (chipGap + pickNat))
+      let devCap := room - (chipGap + pickMinLab)
+      let devW := Nat.max devMinLab (Nat.min devNat (Nat.min devFloor devCap))
+      let pickMax := room - (devW + chipGap)
+      let pickW := if pickChangeable then Nat.min pickMax pickNat else pickMax
+      { devW := devW
+      , devTextMax := devW - devChrome
+      , pickW := pickW
+      , pickTextMax := pickW - pickChrome }
+    else if pickHasText && devIcon + chipGap + pickMinLab <= room then
+      let pickMax := room - (devIcon + chipGap)
+      let pickW := if pickChangeable then Nat.min pickMax pickNat else pickMax
+      { devW := devIcon
+      , devTextMax := 0
+      , pickW := pickW
+      , pickTextMax := pickW - pickChrome }
+    else if devIcon + chipGap + pickIcon <= room then
+      { devW := devIcon, devTextMax := 0, pickW := pickIcon, pickTextMax := 0 }
+    else if pickIcon <= room then
+      { devW := 0, devTextMax := 0, pickW := pickIcon, pickTextMax := 0 }
+    else if devIcon <= room then
+      { devW := devIcon, devTextMax := 0, pickW := 0, pickTextMax := 0 }
+    else
+      { devW := 0, devTextMax := 0, pickW := 0, pickTextMax := 0 }
 
 def headerHeight : Nat := 42
 
@@ -113,31 +152,57 @@ theorem screenshot_slot_chevron_unclipped :
       { devW := 74, devTextMax := 43, pickW := 71, pickTextMax := 40 } := by
   native_decide
 
+/-- Theorem: On a narrow 105px split slot (`room = 74` unhovered, `room = 50`
+hovered) with `"This Mac"` (`43px`) and `"nanoharness"` (`60px`), computer drops
+to its `16px` glyph so the folder keeps a readable label (`21px`) + unclipped
+`9px` chevron, and when hovered both collapse cleanly to `16px` glyphs. -/
+theorem narrow_slot_drops_to_glyph_without_clipping :
+    slotChipWidths 74 43 true (some 60) true =
+      { devW := 16, devTextMax := 0, pickW := 52, pickTextMax := 21 } ∧
+    slotChipWidths 50 43 true (some 60) true =
+      { devW := 16, devTextMax := 0, pickW := 16, pickTextMax := 0 } := by
+  native_decide
+
 /-- Exhaustive check across slot widths and label lengths:
 1. When `devNatural + 6 + pickNatural ≤ room`, both `devTextMax == devTextW`
    and `pickTextMax == pickTextW` (zero chevron or text clipping).
-2. Total width `devW + 6 + pickW ≤ room` whenever `room ≥ 6`. -/
+2. Drawn chips plus their gap never exceed `room`.
+3. Every drawn chip is either a whole bare glyph (`textMax = 0`, `w = icon`)
+   or carries full chrome + a readable label (`textMax ≥ min(textW, 20)`). -/
 def chipConservationCube : Bool :=
-  let rooms := [60, 100, 140, 151, 180, 240]
+  let rooms := [0, 10, 16, 38, 50, 60, 74, 89, 100, 105, 119, 140, 151, 180, 240]
   let devWidths := [20, 43, 80]
-  let pickWidths := [none, some 20, some 40, some 90]
+  let pickWidths := [none, some 20, some 40, some 60, some 90]
   rooms.all (fun room =>
     devWidths.all (fun dw =>
       [false, true].all (fun de =>
         pickWidths.all (fun pw =>
           [false, true].all (fun pc =>
             let out := slotChipWidths room dw de pw pc
-            let devExtra := if de then editableExtra else 0
-            let devNat := dw + iconAndGap + devExtra
+            let devChrome := iconAndGap + (if de then editableExtra else 0)
+            let devIcon := if de then compactEditableW else compactStaticW
+            let devNat := dw + devChrome
+            let devValid :=
+              out.devW == 0 ||
+              (out.devTextMax == 0 && out.devW == devIcon) ||
+              (out.devTextMax >= Nat.min dw minChipLabel && out.devW == devChrome + out.devTextMax)
             match pw with
             | none =>
-              out.devW <= room &&
-              (if devNat <= room then out.devTextMax == dw else true)
+              out.devW <= room && out.pickW == 0 && devValid &&
+              (if devNat <= room then out.devW == devNat && out.devTextMax == dw else true)
             | some p =>
-              let pickExtra := if pc then editableExtra else 0
-              let pickNat := p + iconAndGap + pickExtra
+              let pickChrome := iconAndGap + (if pc then editableExtra else 0)
+              let pickIcon := if pc then compactEditableW else compactStaticW
+              let pickNat := p + pickChrome
+              let totalW :=
+                if out.devW > 0 && out.pickW > 0 then out.devW + chipGap + out.pickW
+                else out.devW + out.pickW
+              let pickValid :=
+                out.pickW == 0 ||
+                (out.pickTextMax == 0 && out.pickW == pickIcon) ||
+                (out.pickTextMax >= Nat.min p minChipLabel && out.pickW == pickChrome + out.pickTextMax)
               let fitsBoth := devNat + chipGap + pickNat <= room
-              out.devW <= room &&
+              totalW <= room && devValid && pickValid &&
               (if fitsBoth then out.devW == devNat && out.devTextMax == dw &&
                 (if pc then out.pickW == pickNat && out.pickTextMax == p else true)
                else true))))))

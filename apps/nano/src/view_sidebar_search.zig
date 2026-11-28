@@ -58,7 +58,7 @@ pub const State = struct {
 pub fn toggle(a: *App) void {
     const s = &a.view.search;
     if (s.open) return close(a);
-    @import("view_sidebar_menus.zig").close(a);
+    @import("view.zig").closeTransientPopovers(a);
     @import("view_palette.zig").close(a);
     s.open = true;
     s.query.clear();

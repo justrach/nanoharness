@@ -63,10 +63,12 @@ struct SessionView: View {
     /// When the question panel last gave way to the composer (`StopGuard`).
     @State private var questionClosedAtMs: Int64?
     @State private var hostLink: HostLink?
+    @State private var openedArtifact: ArtifactPresentation?
     @State private var renamingSession = false
     @State private var renameChatId: String?
     @State private var renameTitle = ""
     @State private var showingCheckoutChanges = false
+    @State private var githubLaunch: GitHubRepoLaunch?
     @State private var companionsSection: CompanionSection?
     @State private var activeSideChatId: String?
 
@@ -178,6 +180,12 @@ struct SessionView: View {
                         Label("Checkout Changes", systemImage: "arrow.left.arrow.right")
                     }
                     .accessibilityIdentifier("menu-checkout-changes")
+                    Button {
+                        githubLaunch = GitHubRepoLaunch(initialKind: .issues, initialState: .all, initialNumber: nil)
+                    } label: {
+                        Label("GitHub Issues & PRs", systemImage: "arrow.triangle.pull")
+                    }
+                    .accessibilityIdentifier("menu-github-repository")
                     Button {
                         companionsSection = .terminals
                     } label: {
@@ -419,6 +427,11 @@ struct SessionView: View {
                 CheckoutChangesSheet(chat: chat)
             }
         }
+        .sheet(item: $githubLaunch) { launch in
+            if let chat {
+                GitHubRepositorySheet(chat: chat, launch: launch)
+            }
+        }
         .sheet(item: $companionsSection) { section in
             if let chat {
                 SessionCompanionsSheet(chat: chat, initialSection: section) { openedId in
@@ -440,6 +453,10 @@ struct SessionView: View {
                 .harnessAppearance()
             }
         }
+        .sheet(item: $openedArtifact) { item in
+            let host = chat.flatMap { model.sessionStore(for: $0)?.hostDeviceId } ?? chat?.deviceId
+            ArtifactSheetView(artifact: item, hostDeviceId: host)
+        }
         .onAppear {
             model.attachSessionView(chatId: chatId)
             model.markSeen(chatId: chatId)
@@ -447,6 +464,9 @@ struct SessionView: View {
             // Screenshot rig: open on Inspect (the wide Duo swaps the list for it).
             if model.demo != nil, ProcessInfo.processInfo.arguments.contains("-duo-inspect") {
                 InspectState.of(chatId).open = true
+            }
+            if model.demo != nil, ProcessInfo.processInfo.arguments.contains("-github-dashboard"), githubLaunch == nil {
+                githubLaunch = GitHubRepoLaunch(initialKind: .issues, initialState: .all, initialNumber: nil)
             }
             #endif
         }
@@ -521,7 +541,8 @@ struct SessionView: View {
         return VStack(spacing: 0) {
             VStack(spacing: 0) {
                 TranscriptView(store: store, chatId: chat.id, scroll: scroll, cwd: chat.cwd,
-                               onHostLink: { hostLink = $0 }, chat: chat, runLive: running,
+                               onHostLink: { hostLink = $0 },
+                               onOpenArtifact: { openedArtifact = $0 }, chat: chat, runLive: running,
                                hostName: model.deviceName(store.hostDeviceId ?? chat.deviceId),
                                duoChat: duoChat,
                                inspectDiff: { summary in
@@ -566,7 +587,14 @@ struct SessionView: View {
                     } else {
                         ComposerView(store: store, chat: chat, runLive: running,
                                      attachmentDraft: attachmentDraft,
-                                     questionClosedAtMs: questionClosedAtMs)
+                                     questionClosedAtMs: questionClosedAtMs,
+                                     onOpenPullRequest: { pr in
+                                         githubLaunch = GitHubRepoLaunch(
+                                             initialKind: .pulls,
+                                             initialState: .all,
+                                             initialNumber: UInt64(pr.number)
+                                         )
+                                     })
                             .id(chat.id)
                     }
                 }
@@ -638,7 +666,8 @@ struct SessionView: View {
         return HStack(spacing: 0) {
         VStack(spacing: 0) {
             TranscriptView(store: store, chatId: chat.id, scroll: scroll, cwd: chat.cwd,
-                           onHostLink: { hostLink = $0 }, chat: chat, runLive: status == .working,
+                           onHostLink: { hostLink = $0 },
+                           onOpenArtifact: { openedArtifact = $0 }, chat: chat, runLive: status == .working,
                            hostName: model.deviceName(store.hostDeviceId ?? chat.deviceId),
                            duoChat: duoChat,
                            inspectDiff: flat ? { summary in
@@ -707,7 +736,14 @@ struct SessionView: View {
                     } else {
                         ComposerView(store: store, chat: chat, runLive: status == .working,
                                      attachmentDraft: attachmentDraft,
-                                     questionClosedAtMs: questionClosedAtMs)
+                                     questionClosedAtMs: questionClosedAtMs,
+                                     onOpenPullRequest: { pr in
+                                         githubLaunch = GitHubRepoLaunch(
+                                             initialKind: .pulls,
+                                             initialState: .all,
+                                             initialNumber: UInt64(pr.number)
+                                         )
+                                     })
                             .id(chat.id)
                     }
                 }

@@ -49,6 +49,39 @@ test "an overlay bar shows while its box scrolls, then fades out" {
     try testing.expectApproxEqAbs(@as(f32, 5), (bar(&t) orelse return error.NoBar).rect[2], 0.01);
 }
 
+test "the overlay scrollbar thumb drags while held outside the track" {
+    var s: Scene = .{};
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&s, Scene.view), .{ .width = 200, .height = 300 });
+    defer t.deinit();
+    t.scroll(100, 150, -120);
+    t.frame();
+    const thumb = bar(&t) orelse return error.NoBar;
+    const x = thumb.rect[0] + thumb.rect[2] * 0.5;
+    const y = thumb.rect[1] + thumb.rect[3] * 0.5;
+    const id = for (t.ctx.nodes.items) |node| {
+        if (node.style.scrollbar == .overlay) break node.id;
+    } else return error.NoScrollBox;
+
+    t.down(x, y);
+    t.move(150, y + 40);
+    const moved = t.ctx.scroll.get(id) orelse 0;
+    try testing.expectApproxEqAbs(@as(f32, 120 + 40 * 1200.0 / 292.0), moved, 0.01);
+    // The thumb stays fully visible after a stationary hold off the strip.
+    t.advance(2);
+    const held = bar(&t) orelse return error.NoBarDuringDrag;
+    try testing.expectApproxEqAbs(thumb.rect[1] + 40, held.rect[1], 0.01);
+
+    t.move(150, 400);
+    try testing.expectApproxEqAbs(@as(f32, 900), t.ctx.scroll.get(id) orelse 0, 0.01);
+    t.up();
+    t.moveTo(150, y);
+    try testing.expect(t.ctx.scrollbar_drag == null);
+    try testing.expectApproxEqAbs(@as(f32, 900), t.ctx.scroll.get(id) orelse 0, 0.01);
+    t.advance(2);
+    try testing.expect(bar(&t) == null);
+}
+
 test "lighter text is drawn with thicker strokes, none with smoothing off" {
     const atlas = @import("atlas.zig");
     const was = atlas.smoothing_allowed;
@@ -61,4 +94,29 @@ test "lighter text is drawn with thicker strokes, none with smoothing off" {
     try testing.expect(atlas.dilationFor(0, 1, 0) > atlas.dilationFor(0, 0, 1));
     atlas.smoothing_allowed = false;
     try testing.expectEqual(@as(u8, 0), atlas.dilationFor(1, 1, 1));
+}
+
+test "overlay scrollbar skips idle mouse moves inside body and detects strip edge entry" {
+    var s: Scene = .{};
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&s, Scene.view), .{ .width = 200, .height = 300 });
+    defer t.deinit();
+    t.scroll(100, 150, -120);
+    t.frame();
+    try testing.expect(!t.ctx.wants_moves);
+    try testing.expect(!t.ctx.over_overlay_strip);
+    try testing.expect(!t.ctx.pointerOverOverlayStrip());
+
+    // Moving within the scroll body does not arm wants_moves or strip hover.
+    t.moveTo(80, 150);
+    t.ctx.updateHot();
+    try testing.expect(!t.ctx.pointerOverOverlayStrip());
+
+    // Entering the 10px right-edge strip flips pointerOverOverlayStrip before repaint and widens thumb to 5px.
+    t.ctx.input.mouse = .{ .x = 195, .y = 150 };
+    try testing.expect(!t.ctx.over_overlay_strip);
+    try testing.expect(t.ctx.pointerOverOverlayStrip());
+    t.frame();
+    try testing.expect(t.ctx.over_overlay_strip);
+    try testing.expectApproxEqAbs(@as(f32, 5), (bar(&t) orelse return error.NoBar).rect[2], 0.01);
 }

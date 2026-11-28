@@ -57,8 +57,8 @@ const Harness = struct {
     /// chat column.
     fn ticks(h: *Harness, out: []Node) []Node {
         var n: usize = 0;
-        // 16 into the rounded panel's content, inside its one-point border.
-        const left = h.a.view.sidebar_width + 1 + 16;
+        // 16 into the rounded panel's content, inside its leading gutter and one-point border.
+        const left = h.a.view.sidebar_width + h.a.view.chrome.leading + 1 + 16;
         for (h.t.ctx.nodes.items) |node| {
             if (node.rect.h != 2 or @abs(node.rect.x - left) > 0.5) continue;
             if (n == out.len) break;
@@ -92,7 +92,7 @@ test "the rail: a tick per prompt, 12 points wide, the last lit while the transc
     // Ticks 13 points apart, centered in the panel below the 42-point strip.
     try testing.expectEqual(@as(f32, 13), ticks[1].rect.y - ticks[0].rect.y);
     const mid = (ticks[0].rect.y + ticks[2].rect.y + 2) / 2;
-    try testing.expect(@abs(mid - 407) < 1);
+    try testing.expect(@abs(mid - 408) < 1);
     try testing.expectEqual(@as(?usize, 2), h.lit());
 }
 

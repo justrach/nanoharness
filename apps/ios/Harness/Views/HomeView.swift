@@ -1050,7 +1050,9 @@ struct HomeView: View {
                 Section {
                     if totalScoped == 0 {
                         // Nothing started yet: until an agent is ready on a computer, say how to bring one in.
-                        BringYourAgentView()
+                        BringYourAgentView { deviceId in
+                            path.append(.newSession(.chat(deviceId: deviceId)))
+                        }
                             .listRowBackground(Color.clear)
                             .listRowSeparator(.hidden)
                     } else {

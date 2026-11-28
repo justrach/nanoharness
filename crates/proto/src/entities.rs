@@ -258,7 +258,7 @@ pub enum ChatIndicator {
     Working,
     AwaitingInput,
     Errored,
-    /// Finished running (or errored out) but not seen yet on any device.
+    /// A settled session with an unseen message.
     Completed,
     Idle,
 }
@@ -270,7 +270,7 @@ pub fn chat_indicator(chat: &Chat, live: Option<&Session>) -> ChatIndicator {
         Some(SessionStatus::Working) => ChatIndicator::Working,
         Some(SessionStatus::AwaitingInput) => ChatIndicator::AwaitingInput,
         Some(SessionStatus::Errored) if chat.unseen() => ChatIndicator::Errored,
-        _ if chat.unseen() => ChatIndicator::Completed,
+        Some(SessionStatus::Idle) if chat.unseen() => ChatIndicator::Completed,
         _ => ChatIndicator::Idle,
     }
 }

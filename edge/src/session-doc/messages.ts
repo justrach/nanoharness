@@ -21,7 +21,7 @@ export type SessionMessageRole = "user" | "assistant" | "system";
  */
 export interface DocMessagePart {
   readonly id: string;
-  readonly kind: "text" | "reasoning" | "tool" | "input" | "error" | "image" | "visual";
+  readonly kind: "text" | "reasoning" | "tool" | "input" | "error" | "image" | "visual" | "artifact";
   /** kind === "text" — LoroText in the doc, string in mirror state. */
   readonly text?: string;
   readonly path?: string;
@@ -30,6 +30,11 @@ export interface DocMessagePart {
   /** kind === "visual" — bounded atomic source, never prose or LoroText. */
   readonly title?: string;
   readonly script?: string;
+  /** kind === "artifact" — bounded hosted artifact metadata, never prose or signed URLs. */
+  readonly artifactId?: string;
+  readonly format?: "html" | "svg" | "markdown";
+  readonly visibility?: "private" | "public";
+  readonly url?: string;
   /** kind === "reasoning" — LoroText in the doc. Deliberately NOT `text`:
    * old readers' unknown-kind fallback renders `text` as prose, so reasoning
    * on this field degrades to an invisible empty part instead of leaking
@@ -56,6 +61,35 @@ const visualPart = (
     ? { kind: "visual", id, title, script }
     : { kind: "text", id, text: "" };
 
+const ARTIFACT_ID_RE = /^art-[0-9a-f]{24}$/;
+
+/** Match `harness_proto::artifact::validate_artifact`; reject signed URLs and bad metadata. */
+const artifactPart = (
+  id: string,
+  artifactId: unknown,
+  title: unknown,
+  format: unknown,
+  visibility: unknown,
+  url: unknown
+): Extract<SessionMessagePart, { kind: "artifact" | "text" }> => {
+  if (typeof artifactId !== "string" || !ARTIFACT_ID_RE.test(artifactId)) {
+    return { kind: "text", id, text: "" };
+  }
+  if (typeof title !== "string" || title.trim().length === 0 || Array.from(title.trim()).length > 200) {
+    return { kind: "text", id, text: "" };
+  }
+  if (format !== "html" && format !== "svg" && format !== "markdown") {
+    return { kind: "text", id, text: "" };
+  }
+  if (visibility !== "private" && visibility !== "public") {
+    return { kind: "text", id, text: "" };
+  }
+  if (url !== `https://codegraff.com/a/${artifactId}`) {
+    return { kind: "text", id, text: "" };
+  }
+  return { kind: "artifact", id, artifactId, title: title.trim(), format, visibility, url };
+};
+
 /** App-layer parts → doc parts. Input parts key on their requestId. */
 export const toDocParts = (
   parts: ReadonlyArray<SessionMessagePart>
@@ -64,6 +98,10 @@ export const toDocParts = (
     switch (p.kind) {
       case "visual":
         return visualPart(p.id, p.title, p.script);
+      case "artifact":
+        return artifactPart(p.id, p.artifactId, p.title, p.format, p.visibility, p.url);
+      case "artifact":
+        return artifactPart(p.id, p.artifactId, p.title, p.format, p.visibility, p.url);
       case "image":
         return { id: p.id, kind: "image", path: p.path, name: p.name, mimeType: p.mimeType };
       case "text":
@@ -98,6 +136,8 @@ export const fromDocParts = (
     switch (p.kind) {
       case "visual":
         return visualPart(p.id, p.title, p.script);
+      case "artifact":
+        return artifactPart(p.id, p.artifactId, p.title, p.format, p.visibility, p.url);
       case "image":
         return typeof p.path === "string" && p.path.length > 0 && typeof p.name === "string" && p.name.length > 0 && ["image/png", "image/jpeg", "image/webp", "image/gif"].includes(p.mimeType ?? "")
           ? { kind: "image", id: p.id, path: p.path, name: p.name, mimeType: p.mimeType! }

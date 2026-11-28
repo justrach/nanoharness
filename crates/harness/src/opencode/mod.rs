@@ -2910,6 +2910,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                 prefill: None,
                 multiline: false,
                 multi_select: false,
+                requires_human_ui: true,
             };
             tokio::spawn(async move {
                 let server = Server {
@@ -3488,6 +3489,7 @@ fn map_questions(props: &Value) -> Vec<(String, UserInputQuestion)> {
                                 .get("multiple")
                                 .and_then(Value::as_bool)
                                 .unwrap_or(false),
+                            requires_human_ui: false,
                         },
                     ))
                 })

@@ -10,6 +10,7 @@ pub const FailureKind = enum {
     not_local_file,
     url_resolution,
     is_directory,
+    permission_denied,
     unreadable_file,
     empty_file,
     oversize_file,
@@ -33,8 +34,14 @@ pub const State = struct {
 
 const Mounted = struct { id: u64, destination: u64 };
 
+const PendingFile = struct {
+    name: []u8,
+    bytes: []u8,
+};
+
 const Pending = struct {
     urls: [][]u8,
+    files: []PendingFile = &.{},
     tab: usize,
     pane: ?usize,
     destination: u64,
@@ -42,6 +49,11 @@ const Pending = struct {
     fn deinit(p: Pending, gpa: Allocator) void {
         for (p.urls) |url| gpa.free(url);
         gpa.free(p.urls);
+        for (p.files) |f| {
+            gpa.free(f.name);
+            gpa.free(f.bytes);
+        }
+        gpa.free(p.files);
     }
 };
 
@@ -135,7 +147,7 @@ pub fn target(c: *ui.Context, a: *App, index: u32, pane: ?usize) void {
     const drop = c.dropAt(index) orelse return;
     // Text is not an attachment payload. Leave it available to a text drop
     // consumer, without swallowing it or displaying an attachment error.
-    if (drop.urls.len == 0) return;
+    if (drop.urls.len == 0 and drop.files.len == 0) return;
     // The native payload is borrowed for this frame only. Consume it once,
     // and own a copy until the pre-tree boundary can safely focus its pane.
     c.input.drop = null;
@@ -157,8 +169,39 @@ pub fn target(c: *ui.Context, a: *App, index: u32, pane: ?usize) void {
         };
         n += 1;
     }
+    const files = a.gpa.alloc(PendingFile, drop.files.len) catch {
+        for (urls) |owned| a.gpa.free(owned);
+        a.gpa.free(urls);
+        return a.setNotice("Couldn't prepare the dropped files. Try Attach files.");
+    };
+    var fn_count: usize = 0;
+    for (drop.files) |f| {
+        const owned_name = a.gpa.dupe(u8, f.name) catch {
+            for (files[0..fn_count]) |owned| {
+                a.gpa.free(owned.name);
+                a.gpa.free(owned.bytes);
+            }
+            a.gpa.free(files);
+            for (urls) |owned| a.gpa.free(owned);
+            a.gpa.free(urls);
+            return a.setNotice("Couldn't prepare the dropped files. Try Attach files.");
+        };
+        const owned_bytes = a.gpa.dupe(u8, f.bytes) catch {
+            a.gpa.free(owned_name);
+            for (files[0..fn_count]) |owned| {
+                a.gpa.free(owned.name);
+                a.gpa.free(owned.bytes);
+            }
+            a.gpa.free(files);
+            for (urls) |owned| a.gpa.free(owned);
+            a.gpa.free(urls);
+            return a.setNotice("Couldn't prepare the dropped files. Try Attach files.");
+        };
+        files[fn_count] = .{ .name = owned_name, .bytes = owned_bytes };
+        fn_count += 1;
+    }
     if (a.file_drop.pending) |pending| pending.deinit(a.gpa);
-    a.file_drop.pending = .{ .urls = urls, .tab = a.tabs.active, .pane = pane, .destination = signature };
+    a.file_drop.pending = .{ .urls = urls, .files = files, .tab = a.tabs.active, .pane = pane, .destination = signature };
     c.frameIn(0);
     a.redraw();
 }
@@ -168,6 +211,7 @@ pub fn failureNotice(kind: FailureKind) []const u8 {
         .not_local_file => "Only local files and images can be attached. Use Attach files to choose one.",
         .url_resolution => "Couldn't resolve the dropped file reference. Try dragging it again or use Attach files.",
         .is_directory => "Folders can't be attached directly. Drop individual files or use Attach files.",
+        .permission_denied => "Harness doesn't have permission to read the dropped file. Save it to Downloads or Desktop, or use Attach files.",
         .unreadable_file => "Couldn't read the dropped file. Check that it exists and is readable, or use Attach files.",
         .empty_file => "Empty files can't be attached. Choose a non-empty file.",
         .oversize_file => "The dropped file is larger than the 24 MB attachment limit.",
@@ -184,11 +228,12 @@ fn classifyPathError(err: anyerror) FailureKind {
     };
 }
 
-fn classifyReadError(err: anyerror) FailureKind {
+pub fn classifyReadError(err: anyerror) FailureKind {
     return switch (err) {
         error.EmptyAttachment => .empty_file,
         error.AttachmentTooLarge, error.StreamTooLong => .oversize_file,
         error.IsDir => .is_directory,
+        error.AccessDenied => .permission_denied,
         error.OutOfMemory => .staging_failed,
         else => .unreadable_file,
     };
@@ -217,6 +262,29 @@ pub fn prepare(a: *App) void {
     }
     a.file_drop.last_failure = null;
     var focused = false;
+    for (pending.files) |f| {
+        if (f.bytes.len == 0) {
+            recordFailure(a, .empty_file);
+            continue;
+        }
+        if (f.bytes.len > attachments.max_bytes) {
+            recordFailure(a, .oversize_file);
+            continue;
+        }
+        if (!focused) {
+            if (pending.pane) |ix| {
+                a.focusPane(ix);
+                if ((a.tabs.layout() orelse return).focus != ix) {
+                    a.setNotice("Couldn't focus the drop destination. Try again.");
+                    return;
+                }
+            }
+            focused = true;
+        }
+        attachments.stage(a, f.name, f.bytes) catch |err| {
+            recordFailure(a, classifyStageError(err));
+        };
+    }
     for (pending.urls) |url| {
         if (url.len == 0) continue;
         const path = filePath(a.gpa, url) catch |err| {

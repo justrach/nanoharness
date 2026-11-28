@@ -497,7 +497,8 @@ struct NewSessionView: View {
             focused = true
             if model.launchAutosend {
                 model.launchAutosend = false
-                draft = "Sketch the plan for porting the diff pane."
+                draft = model.launchAutosendPrompt ?? "Sketch the plan for porting the diff pane."
+                model.launchAutosendPrompt = nil
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 800_000_000)
                     send()

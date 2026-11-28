@@ -67,6 +67,80 @@ test "a linked agent stays visible and opens its transcript without changing the
     try testing.expectEqual(@as(usize, 1), watches);
 }
 
+fn countWatches(h: *Harness, doc: []const u8) usize {
+    var n: usize = 0;
+    for (h.a.engine.sent.items) |request| {
+        if (std.mem.indexOf(u8, request, "WatchDocMessages") != null and std.mem.indexOf(u8, request, doc) != null) n += 1;
+    }
+    return n;
+}
+
+const running_child =
+    \\{"reset":[{"id":"parent-answer","role":"assistant","status":"streaming","parts":[
+    \\ {"id":"spawn","kind":"tool","resolved":false,"subagentRef":"synthetic-parent--sub--feed","subagentStatus":"running","call":{"kind":"unknown","name":"Agent: Synthetic feed"}}]}]}
+;
+
+test "a subagent feed the engine ended is not re-subscribed" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"WatchDocMessages":{"$items":[{"reset":[{"id":"child","role":"assistant","status":"complete","parts":[{"id":"text","kind":"text","text":"Synthetic child finished"}]}]}]}}
+    , .{});
+    h.a.engine.state = .connected;
+    try h.transcript(running_child);
+    const surfaces = @import("app_subagents.zig");
+    surfaces.open(&h.a, "synthetic-parent", &h.a.transcript.entries.items[0].parts.items[0]);
+    surfaces.settleFrame(&h.a);
+    _ = h.a.engine.pump();
+    try testing.expectEqual(@as(usize, 1), countWatches(&h, "synthetic-parent--sub--feed"));
+    var now: f64 = h.a.now;
+    for (0..30) |_| {
+        now += 2.5;
+        h.a.now = now;
+        _ = surfaces.tick(&h.a, now);
+        _ = h.a.engine.pump();
+    }
+    try testing.expectEqual(@as(usize, 1), countWatches(&h, "synthetic-parent--sub--feed"));
+    h.t.settle(0.1);
+    try testing.expect(h.t.hasText("Synthetic child finished"));
+}
+
+test "a failed subagent feed shows its error and retries with a growing delay" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"WatchDocMessages":{"$err":"synthetic child document is unavailable"}}
+    , .{});
+    h.a.engine.state = .connected;
+    try h.transcript(running_child);
+    const surfaces = @import("app_subagents.zig");
+    surfaces.open(&h.a, "synthetic-parent", &h.a.transcript.entries.items[0].parts.items[0]);
+    surfaces.settleFrame(&h.a);
+    _ = h.a.engine.pump();
+    h.t.settle(0.1);
+    try testing.expect(h.t.containsText("synthetic child document is unavailable"));
+    // Ten minutes of ticks: at most a handful of retries, never one per 2 s.
+    var now: f64 = h.a.now;
+    for (0..300) |_| {
+        now += 2;
+        h.a.now = now;
+        _ = surfaces.tick(&h.a, now);
+        _ = h.a.engine.pump();
+    }
+    const watches = countWatches(&h, "synthetic-parent--sub--feed");
+    try testing.expect(watches > 2);
+    try testing.expect(watches < 30);
+}
+
+test "a failed subagent feed's retry delay doubles from 2 s up to a minute" {
+    const delay = @import("app_subagents.zig").retryDelay;
+    const want = [_]f64{ 0, 2, 4, 8, 16, 32, 60, 60 };
+    for (want, 0..) |w, n| try testing.expectEqual(w, delay(@intCast(n)));
+    try testing.expectEqual(@as(f64, 60), delay(std.math.maxInt(u32)));
+}
+
 test "finished MCP agents use their frozen transcript and the original Harness bot icon" {
     var h: Harness = undefined;
     try h.init();
@@ -197,10 +271,14 @@ test "generated-page chips open only their local host's validated page and lock 
     defer chats.deinit();
     try h.a.chats.replace(chats.value);
     h.a.device_id = try testing.allocator.dupe(u8, "synthetic-remote");
+    h.a.settings.set(.transcript_compact_mode, true);
     try h.transcript(
-        \\{"reset":[{"id":"answer","role":"assistant","parts":[{"id":"page","kind":"tool","resolved":true,
+        \\{"reset":[{"id":"answer","role":"assistant","parts":[
+        \\ {"id":"work","kind":"tool","resolved":true,"call":{"kind":"unknown","name":"ordinary background step"}},
+        \\ {"id":"page","kind":"tool","resolved":true,
         \\ "call":{"kind":"unknown","name":"render_html"},"view":{"kind":"html","id":"0123456789abcdef0123456789abcdef"}}]}]}
     );
+    try testing.expect(!h.t.hasText("ordinary background step"));
     try h.t.clickText("render_html");
     h.t.settle(0.1);
     try testing.expect(h.a.panels.pending_browser == null);
@@ -326,7 +404,7 @@ test "command w closes the page beside the chat before the chat" {
     try testing.expectEqualStrings("synthetic-parent", h.a.selected.?);
 }
 
-test "in-app browser shows passkey handoff banner on OpenAI auth pages and hands off to the system browser" {
+test "in-app browser routes http/https URLs to justrach/browse Connected Apps and supports external handoff" {
     const browser = @import("app_browser.zig");
     const Capture = struct {
         var last_url: [256]u8 = undefined;
@@ -347,18 +425,19 @@ test "in-app browser shows passkey handoff banner on OpenAI auth pages and hands
     defer h.deinit();
     browser.openInternalLink(&h.a, "synthetic-parent", "http://localhost:31997/preview");
     h.t.settle(0.2);
-    try testing.expect(!h.t.hasText("Open in browser"));
-
     const b = h.a.panels.tabs.items[0].browser.?;
+    try testing.expect(b.native == null);
+    try testing.expect(h.t.hasText("browse.app is installed — launch it to pair"));
+
+    h.a.ensureBrowseClient().state = .needs_browse_install;
+    h.t.settle(0.1);
+    try testing.expect(h.t.hasText("Keep your logins & passkeys with browse.app"));
+
     b.navigate("https://auth.openai.com/log-in?synthetic=1");
     h.t.settle(0.2);
-    if (std.c.getenv("NANO_BROWSER_PASSKEY_SNAP_DIR")) |dir| {
-        var buf: [1024]u8 = undefined;
-        const path = try std.fmt.bufPrint(&buf, "{s}/browser-openai-login.png", .{std.mem.span(dir)});
-        try h.t.screenshot(path);
-    }
-    try testing.expect(h.t.hasText("Passkeys aren't supported in the in-app browser."));
-    try h.t.clickText("Open in browser");
+    try testing.expect(b.native == null);
+    try testing.expect(h.t.hasText("Keep your logins & passkeys with browse.app"));
+    try h.t.clickText("Open externally");
     h.t.settle(0.1);
     try testing.expectEqualStrings("https://auth.openai.com/log-in?synthetic=1", Capture.last_url[0..Capture.last_len]);
 }

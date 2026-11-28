@@ -7,7 +7,7 @@ const theme = @import("theme.zig");
 pub const State = struct {
     mounted: bool = false,
     origin: u64 = 0,
-    controls: [4]u64 = @splat(0),
+    controls: [12]u64 = @splat(0),
     count: usize = 0,
 
     pub fn begin(s: *State, c: *ui.Context) void {

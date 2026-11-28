@@ -36,6 +36,14 @@ pub const RestartPlace = enum {
     titlebar,
 };
 
+// Worker-to-main handoff. The rest of the app-update UI state is main-owned.
+const AppInstallResult = struct {
+    installed: [32]u8 = undefined,
+    installed_len: usize = 0,
+    failure: [160]u8 = undefined,
+    failure_len: usize = 0,
+};
+
 pub const State = struct {
     lock: std.atomic.Value(bool) = .init(false),
     dirty: bool = false,
@@ -59,11 +67,17 @@ pub const State = struct {
     /// parity scenes recorded against an unmanaged binary.
     desktop_update: bool = true,
     /// Only a production macOS bundle with its own sibling CLI may install.
+    app_install_result: ?AppInstallResult = null,
     app_install_checked: bool = false,
     app_can_install: bool = false,
     /// The CLI has already replaced the bundle on disk; reopening uses it.
-    app_ready: bool = false,
+    app_installed: [32]u8 = undefined,
+    app_installed_len: usize = 0,
     app_downloading: bool = false,
+    restart_after_verify: bool = false,
+    test_relaunch_count: u32 = 0,
+    test_relaunch_version: [32]u8 = undefined,
+    test_relaunch_version_len: usize = 0,
     app_checking: bool = false,
     app_checked_ms: i64 = 0,
     app_failed: [160]u8 = undefined,
@@ -71,6 +85,14 @@ pub const State = struct {
     app_updated: [32]u8 = undefined,
     app_updated_len: usize = 0,
     app_updated_until: f64 = 0,
+    test_opened_terminal_count: u32 = 0,
+
+    pub fn setAppInstalled(s: *State, version: []const u8) void {
+        s.app_installed_len = 0;
+        if (version.len > s.app_installed.len) return;
+        @memcpy(s.app_installed[0..version.len], version);
+        s.app_installed_len = version.len;
+    }
 
     pub fn appFailed(s: *const State) ?[]const u8 {
         return if (s.app_failed_len == 0) null else s.app_failed[0..s.app_failed_len];
@@ -134,7 +156,20 @@ pub const State = struct {
             whatsNew(&s.graff_highlights, &s.graff_highlight_lens, out, from, to)
         else
             0;
-        s.graff_card_open = kind != .updating;
+        s.graff_card_open = kind == .updated or kind == .available;
+        s.graff_updating_manual = false;
+        s.dirty = true;
+    }
+
+    pub fn clearGraff(s: *State) void {
+        s.acquire();
+        defer s.release();
+        s.graff_kind = .none;
+        s.graff_from_len = 0;
+        s.graff_to_len = 0;
+        s.graff_highlight_lens = @splat(0);
+        s.graff_highlights_total = 0;
+        s.graff_card_open = false;
         s.graff_updating_manual = false;
         s.dirty = true;
     }
@@ -283,8 +318,9 @@ pub fn appRestartVersion(a: *const App) ?[]const u8 {
     if (a.env) |env| {
         if (env.get("HARNESS_DEV_APP_UPDATE")) |v| if (std.mem.eql(u8, v, "1")) return "preview";
     }
-    if (!a.updates.app_ready) return null;
-    return appUpdateVersion(a);
+    if (a.updates.app_downloading) return null;
+    const latest = appUpdateVersion(a) orelse return null;
+    return if (std.mem.eql(u8, a.updates.app_installed[0..a.updates.app_installed_len], latest)) latest else null;
 }
 
 pub fn sidebarFits(a: *const App) bool {
@@ -339,10 +375,11 @@ pub fn updateSummary(buf: []u8, a: *const App, now_ms: i64) UpdateSummary {
             .action = .none,
         };
     }
-    if (a.updates.app_checking and !a.updates.app_ready and !a.updates.app_downloading) {
+    const restart_ver = appRestartVersion(a);
+    if (a.updates.app_checking and restart_ver == null and !a.updates.app_downloading) {
         return .{ .line = "Checking for updates…", .action = .none };
     }
-    if (a.release.schedule.failures > 0 and !a.updates.app_ready and !a.updates.app_downloading) {
+    if (a.release.schedule.failures > 0 and restart_ver == null and !a.updates.app_downloading) {
         return .{ .line = "Couldn't check for updates. Will retry automatically; check your connection.", .action = .check };
     }
     if (a.updates.app_install_checked and !a.updates.app_can_install) {
@@ -354,15 +391,16 @@ pub fn updateSummary(buf: []u8, a: *const App, now_ms: i64) UpdateSummary {
             .action = if (a.updates.app_checking) .none else .check,
         };
     }
-    if (a.updates.app_ready) {
-        const ver = latest orelse @import("build_info").version;
+    if (restart_ver) |ver| {
         return .{
             .line = std.fmt.bufPrint(buf, "Harness v{s} is installed. Restart when you're ready to use it.", .{ver}) catch "Update installed. Restart when ready.",
             .action = .{ .restart = ver },
         };
     }
     if (a.updates.app_downloading) {
-        const line = if (latest) |ver|
+        const line = if (a.updates.restart_after_verify)
+            "Checking and installing the latest update…"
+        else if (latest) |ver|
             std.fmt.bufPrint(buf, "Downloading v{s}…", .{ver}) catch "Downloading update…"
         else
             "Downloading update…";
@@ -448,7 +486,7 @@ pub fn onReleaseChecked(a: *App) void {
 fn automaticallyInstall(a: *App) void {
     if (!a.settings.get(.automatically_install_updates) or !a.release.succeeded or
         a.release.schedule.in_flight or a.release.schedule.failures > 0 or
-        a.updates.app_ready or a.updates.app_downloading) return;
+        appRestartVersion(a) != null or a.updates.app_downloading) return;
     if (a.env) |env| {
         if (env.get("HARNESS_AUTO_UPDATE")) |v| if (std.mem.eql(u8, v, "0")) return;
     }
@@ -456,7 +494,7 @@ fn automaticallyInstall(a: *App) void {
     if (std.mem.eql(u8, ver, "preview")) return;
     initialize(a);
     if (!a.updates.app_can_install) return;
-    startAppDownload(a);
+    startAppDownload(a, false);
 }
 
 pub fn triggerAppUpdate(a: *App, ver: []const u8) void {
@@ -466,26 +504,30 @@ pub fn triggerAppUpdate(a: *App, ver: []const u8) void {
         openExternalUrl("https://github.com/justrach/nanoharness/releases/latest");
         return;
     }
-    if (a.updates.app_ready) {
-        restartIntoUpdate(a);
-        return;
+    if (a.updates.app_downloading) return;
+    const latest = appUpdateVersion(a) orelse return;
+    if (appRestartVersion(a)) |ready| {
+        if (std.mem.eql(u8, ready, ver) and std.mem.eql(u8, latest, ver)) {
+            startAppDownload(a, true);
+            return;
+        }
     }
-    startAppDownload(a);
+    // A stale click must never restart into an older bundle. If the latest
+    // target is already ready, wait for a click on that version's control.
+    if (appRestartVersion(a) == null) startAppDownload(a, false);
 }
 
-fn startAppDownload(a: *App) void {
-    a.updates.acquire();
-    const already = a.updates.app_downloading;
+fn startAppDownload(a: *App, restart_after_verify: bool) void {
+    if (a.updates.app_downloading) return;
+    a.updates.restart_after_verify = restart_after_verify;
     a.updates.app_downloading = true;
     a.updates.app_failed_len = 0;
-    a.updates.release();
     a.redraw();
-    if (already or a.offscreen or builtin.is_test) return;
+    if (a.offscreen or builtin.is_test) return;
     const t = std.Thread.spawn(.{}, appUpdateWorker, .{a}) catch {
-        a.updates.acquire();
         a.updates.app_downloading = false;
+        a.updates.restart_after_verify = false;
         a.updates.setAppFailed("couldn't start background installer");
-        a.updates.release();
         a.redraw();
         return;
     };
@@ -511,22 +553,37 @@ pub fn productionBundleId(id: []const u8) bool {
     return std.mem.eql(u8, std.mem.trim(u8, id, " \t\r\n"), "harness.codegraff.app");
 }
 
-fn productionBundle(gpa: std.mem.Allocator, io: std.Io, bundle: []const u8) bool {
-    if (builtin.os.tag != .macos or builtin.is_test) return false;
-    const plist = std.fmt.allocPrint(gpa, "{s}/Contents/Info.plist", .{bundle}) catch return false;
+fn bundlePlistValue(gpa: std.mem.Allocator, io: std.Io, bundle: []const u8, key: []const u8) ?[]u8 {
+    if (builtin.os.tag != .macos) return null;
+    const plist = std.fmt.allocPrint(gpa, "{s}/Contents/Info.plist", .{bundle}) catch return null;
     defer gpa.free(plist);
     // Read binary and XML plists alike; fail closed for dev/standalone bundles.
     const r = std.process.run(gpa, io, .{
-        .argv = &.{ "/usr/bin/plutil", "-extract", "CFBundleIdentifier", "raw", "-o", "-", plist },
+        .argv = &.{ "/usr/bin/plutil", "-extract", key, "raw", "-o", "-", plist },
         .stdout_limit = .limited(256),
         .stderr_limit = .limited(1024),
-    }) catch return false;
+    }) catch return null;
     defer gpa.free(r.stdout);
     defer gpa.free(r.stderr);
     return switch (r.term) {
-        .exited => |code| code == 0 and productionBundleId(r.stdout),
-        else => false,
+        .exited => |code| if (code == 0) gpa.dupe(u8, std.mem.trim(u8, r.stdout, " \t\r\n")) catch null else null,
+        else => null,
     };
+}
+
+fn productionBundle(gpa: std.mem.Allocator, io: std.Io, bundle: []const u8) bool {
+    if (builtin.is_test) return false;
+    const id = bundlePlistValue(gpa, io, bundle, "CFBundleIdentifier") orelse return false;
+    defer gpa.free(id);
+    return productionBundleId(id);
+}
+
+fn installedBundleVersion(gpa: std.mem.Allocator, io: std.Io, bundle: []const u8) ?[]u8 {
+    if (!productionBundle(gpa, io, bundle)) return null;
+    const ver = bundlePlistValue(gpa, io, bundle, "CFBundleShortVersionString") orelse return null;
+    if (ver.len <= 32 and @import("updates_host.zig").versionNewer(ver, @import("build_info").version)) return ver;
+    gpa.free(ver);
+    return null;
 }
 
 fn findHarnessCli(gpa: std.mem.Allocator, io: std.Io) ?[]u8 {
@@ -555,12 +612,7 @@ pub fn initialize(a: *App) void {
 
 fn appUpdateWorker(a: *App) void {
     const bin = findHarnessCli(a.gpa, a.io) orelse {
-        a.updates.acquire();
-        a.updates.app_downloading = false;
-        a.updates.setAppFailed("This installation cannot update itself. Install the latest release manually.");
-        a.updates.dirty = true;
-        a.updates.release();
-        _ = nanoui.App.onMain(a, appUpdateDelivered);
+        queueAppInstallResult(a, "", "This installation cannot update itself. Install the latest release manually.");
         return;
     };
     defer a.gpa.free(bin);
@@ -569,13 +621,8 @@ fn appUpdateWorker(a: *App) void {
         .stdout_limit = .limited(64 << 10),
         .stderr_limit = .limited(64 << 10),
     }) catch |err| {
-        a.updates.acquire();
-        a.updates.app_downloading = false;
         var ebuf: [96]u8 = undefined;
-        a.updates.setAppFailed(std.fmt.bufPrint(&ebuf, "{t}", .{err}) catch "update command failed");
-        a.updates.dirty = true;
-        a.updates.release();
-        _ = nanoui.App.onMain(a, appUpdateDelivered);
+        queueAppInstallResult(a, "", std.fmt.bufPrint(&ebuf, "{t}", .{err}) catch "update command failed");
         return;
     };
     defer a.gpa.free(res.stdout);
@@ -584,22 +631,31 @@ fn appUpdateWorker(a: *App) void {
         .exited => |code| code == 0,
         else => false,
     };
-    a.updates.acquire();
-    a.updates.app_downloading = false;
-    switch (classifyUpdateOutput(ok, res.stdout, res.stderr)) {
-        .installed => {
-            a.updates.app_ready = true;
-            a.updates.app_failed_len = 0;
-        },
-        .up_to_date => {
-            a.updates.app_ready = false;
-            a.updates.app_failed_len = 0;
-        },
-        .failed => |line| {
-            a.updates.setAppFailed(line);
-        },
+    const outcome = classifyUpdateOutput(ok, res.stdout, res.stderr);
+    const installed = if (outcome != .failed)
+        installedBundleVersion(a.gpa, a.io, bin[0 .. bin.len - "/Contents/MacOS/harness".len])
+    else
+        null;
+    defer if (installed) |ver| a.gpa.free(ver);
+    const ready = confirmedAppVersion(outcome, installed, res.stdout);
+    const failure = if (ready != null) "" else switch (outcome) {
+        .installed => "Couldn't verify the installed Harness version. Try the update again.",
+        .up_to_date => "The installer found no matching update. Check for updates and try again.",
+        .failed => |line| line,
+    };
+    queueAppInstallResult(a, ready orelse "", failure);
+}
+
+fn queueAppInstallResult(a: *App, installed: []const u8, failure: []const u8) void {
+    var result: AppInstallResult = .{};
+    if (installed.len <= result.installed.len) {
+        @memcpy(result.installed[0..installed.len], installed);
+        result.installed_len = installed.len;
     }
-    a.updates.dirty = true;
+    result.failure_len = @min(failure.len, result.failure.len);
+    @memcpy(result.failure[0..result.failure_len], failure[0..result.failure_len]);
+    a.updates.acquire();
+    a.updates.app_install_result = result;
     a.updates.release();
     _ = nanoui.App.onMain(a, appUpdateDelivered);
 }
@@ -610,9 +666,23 @@ pub const UpdateCommandOutcome = union(enum) {
     failed: []const u8,
 };
 
-/// Pure classifier for `harness update` process output (ADR 0008). Only a
-/// bundle swap (`"relaunch Harness to finish"`) marks an update ready; a no-op
-/// (`"is up to date"`) must never mark `app_ready` or trigger a relaunch loop.
+/// A no-op alone proves nothing: an already-swapped bundle is restartable
+/// only when its independently read, newer version matches both CLI versions.
+fn confirmedAppVersion(outcome: UpdateCommandOutcome, disk_version: ?[]const u8, stdout: []const u8) ?[]const u8 {
+    const ver = disk_version orelse return null;
+    switch (outcome) {
+        .installed => return ver,
+        .failed => return null,
+        .up_to_date => {
+            var buf: [160]u8 = undefined;
+            const expected = std.fmt.bufPrint(&buf, "Harness {s} is up to date (latest: {s}).", .{ ver, ver }) catch return null;
+            return if (std.mem.eql(u8, firstLine(stdout) orelse "", expected)) ver else null;
+        },
+    }
+}
+
+/// Pure classifier for `harness update` process output (ADR 0008). A no-op
+/// is distinct from a bundle swap and never causes an automatic relaunch.
 pub fn classifyUpdateOutput(exited_zero: bool, stdout: []const u8, stderr: []const u8) UpdateCommandOutcome {
     if (exited_zero and std.mem.indexOf(u8, stdout, "relaunch Harness to finish") != null) {
         return .installed;
@@ -635,18 +705,51 @@ fn firstLine(s: []const u8) ?[]const u8 {
 
 fn appUpdateDelivered(ctx: ?*anyopaque) callconv(.c) void {
     const a: *App = @ptrCast(@alignCast(ctx.?));
+    a.updates.acquire();
+    const pending = a.updates.app_install_result;
+    a.updates.app_install_result = null;
+    a.updates.release();
+    const restart = a.updates.restart_after_verify;
+    a.updates.restart_after_verify = false;
+    const result = pending orelse return;
+    a.updates.setAppInstalled(result.installed[0..result.installed_len]);
+    a.updates.setAppFailed(result.failure[0..result.failure_len]);
+    a.updates.app_downloading = false;
     // Applying an update is not permission to stop agents or close a window.
-    // A separate, explicit Restart click is required after installation.
+    // A separate, explicit Restart click starts a fresh manifest check, and
+    // only that check's verified on-disk target may be relaunched.
+    if (restart and result.installed_len > 0 and result.failure_len == 0) {
+        const installed = result.installed[0..result.installed_len];
+        const superseded = if (a.release.succeeded) (if (a.release.version()) |latest|
+            @import("updates_host.zig").versionNewer(latest, installed)
+        else
+            false) else false;
+        if (!superseded) restartIntoUpdate(a, installed);
+    }
     a.redraw();
 }
 
-pub fn restartIntoUpdate(a: *App) void {
-    if (builtin.is_test or a.offscreen) return;
+fn restartIntoUpdate(a: *App, target: []const u8) void {
+    if (builtin.is_test) {
+        a.updates.test_relaunch_count += 1;
+        const n = @min(target.len, a.updates.test_relaunch_version.len);
+        @memcpy(a.updates.test_relaunch_version[0..n], target[0..n]);
+        a.updates.test_relaunch_version_len = n;
+        return;
+    }
+    if (a.offscreen) return;
     if (builtin.os.tag == .macos) {
         const exe = std.process.executablePathAlloc(a.io, a.gpa) catch return;
         defer a.gpa.free(exe);
         const bundle = currentBundle(exe, builtin.os.tag) orelse return;
-        if (!productionBundle(a.gpa, a.io, bundle)) return;
+        const installed = installedBundleVersion(a.gpa, a.io, bundle);
+        defer if (installed) |ver| a.gpa.free(ver);
+        if (!std.mem.eql(u8, target, installed orelse "")) {
+            a.updates.setAppInstalled("");
+            a.updates.setAppFailed("The installed Harness version changed. Check for updates and try again.");
+            a.redraw();
+            return;
+        }
         var pid_buf: [32]u8 = undefined;
         const pid = std.fmt.bufPrint(&pid_buf, "{d}", .{std.c.getpid()}) catch return;
         // Pass the bundle as an argument, never interpolate it into a shell.
@@ -659,6 +762,7 @@ pub fn restartIntoUpdate(a: *App) void {
         })) |child| {
             var c = child;
             _ = &c;
+            a.flushRememberedTabs();
             @import("engine_start.zig").stopForUpdate(a);
             std.process.exit(0);
         } else |_| {
@@ -675,6 +779,62 @@ pub fn restartIntoUpdate(a: *App) void {
 pub fn openExternalUrl(url: []const u8) void {
     if (builtin.is_test) return;
     _ = nanoui.shell.openUrl(url);
+}
+
+pub const xcode_license_cmd = "sudo xcodebuild -license";
+
+fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (haystack.len < needle.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        var matched = true;
+        for (0..needle.len) |j| {
+            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(needle[j])) {
+                matched = false;
+                break;
+            }
+        }
+        if (matched) return true;
+    }
+    return false;
+}
+
+/// Phrases rather than loose words: `xcode` is also an npm package with a
+/// LICENSE file. The engine's `contains_xcode_license_blocker`
+/// (harness_updates.rs) matches the same ones.
+const xcode_license_phrases = [_][]const u8{
+    "xcodebuild -license",
+    "xcode license",
+    "xcode/ios license",
+    "xcode and apple sdks license",
+};
+
+pub fn isXcodeLicenseBlocker(msg: ?[]const u8) bool {
+    const text = msg orelse return false;
+    for (xcode_license_phrases) |phrase| {
+        if (containsAsciiIgnoreCase(text, phrase)) return true;
+    }
+    return false;
+}
+
+fn openTerminalApp(a: *App) void {
+    if (builtin.is_test or a.offscreen) {
+        a.updates.test_opened_terminal_count += 1;
+        return;
+    }
+    if (builtin.os.tag == .macos) {
+        // Open Terminal.app only; never execute `sudo` or auto-accept a license.
+        if (std.process.spawn(a.io, .{
+            .argv = &.{ "/usr/bin/open", "-a", "Terminal" },
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+        })) |child| {
+            var ch = child;
+            _ = &ch;
+        } else |_| {}
+    }
 }
 
 /// Height contributed to the sidebar footer by any active update pills.
@@ -759,7 +919,7 @@ fn sidebarGraffRow(c: *ui.Context, a: *App, k: theme.Colors) void {
 }
 
 fn sidebarAppUpdateRow(c: *ui.Context, a: *App, k: theme.Colors, ver: []const u8) void {
-    const ready = a.updates.app_ready or std.mem.eql(u8, ver, "preview");
+    const ready = appRestartVersion(a) != null;
     const pad = ui.div(c).column().wFull().px(8).pt(4);
     defer pad.end();
     ui.key(c, "sidebar-update-row");
@@ -767,16 +927,25 @@ fn sidebarAppUpdateRow(c: *ui.Context, a: *App, k: theme.Colors, ver: []const u8
         .bg(k.accent_wash).hover(k.accent.alpha(0.18)).border(k.accent.alpha(0.3)).borderW(1);
     defer row.end();
     {
+        const failed = !ready and !a.updates.app_downloading and a.updates.appFailed() != null;
         const hint = if (ready)
             c.print("Harness v{s} is ready. Click to restart into it.", .{ver})
+        else if (a.updates.restart_after_verify)
+            "Checking and installing the latest release before restart."
+        else if (failed)
+            c.print("Updating to v{s} failed: {s}. Click to retry.", .{ ver, a.updates.appFailed().? })
         else
             c.print("Harness v{s} is available. {s}", .{ ver, if (a.updates.app_install_checked and !a.updates.app_can_install) "Click to view the release; install manually." else "Click to update." });
         const label = if (ready)
             "Restart to update"
+        else if (a.updates.restart_after_verify)
+            "Checking latest update…"
         else if (a.updates.app_downloading)
             c.print("Downloading v{s}…", .{ver})
         else if (a.updates.app_install_checked and !a.updates.app_can_install)
             "View release"
+        else if (failed)
+            "Retry update"
         else
             c.print("Update to v{s}", .{ver});
         ui.key(c, "sidebar-update-restart");
@@ -821,7 +990,7 @@ pub fn titlebarControl(c: *ui.Context, a: *App, k: theme.Colors) void {
     const ver = appUpdateVersion(a).?;
     ui.div(c).w(4).end();
     ui.key(c, "titlebar-update");
-    const ready = a.updates.app_ready or std.mem.eql(u8, ver, "preview");
+    const ready = appRestartVersion(a) != null;
     const label = if (ready)
         c.print("v{s} is ready — click to restart now.", .{ver})
     else
@@ -882,6 +1051,11 @@ pub const UnifiedRow = struct {
     busy: bool = false,
     updated: bool = false,
     failed: bool = false,
+    version_delta: ?[]const u8 = null,
+    failure_headline: ?[]const u8 = null,
+    failure_note: ?[]const u8 = null,
+    xcode_license: bool = false,
+    is_local: bool = false,
     skippable: bool = true,
     enabled: bool = true,
     action_label: ?[]const u8 = null,
@@ -913,6 +1087,14 @@ fn deviceLabel(a: *const App, id: []const u8) []const u8 {
     return id;
 }
 
+fn graffUpdateActionable(a: *const App) bool {
+    return graffVisible(a) and (a.updates.graff_kind != .updated or a.updates.graff_updating_manual);
+}
+
+fn agentUpdateActionable(st: agent_updates.Status) bool {
+    return st.showUpdateNotice() and st.phase != .updated;
+}
+
 pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const UnifiedRow {
     var out: std.ArrayList(UnifiedRow) = .empty;
 
@@ -923,12 +1105,14 @@ pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const Unifi
             (std.fmt.allocPrint(alloc, "failed:{s}:{s}", .{ ver, err }) catch ver)
         else
             ver;
-        const skipped = !a.updates.app_downloading and !a.updates.app_ready and a.settings.isUpdateSkipped("app:harness", app_tok);
+        const skipped = !a.updates.app_downloading and appRestartVersion(a) == null and a.settings.isUpdateSkipped("app:harness", app_tok);
         if (!dismissed and !skipped) {
             const cur = @import("build_info").version;
-            const ready = a.updates.app_ready or std.mem.eql(u8, ver, "preview");
+            const ready = appRestartVersion(a) != null;
             const detail = if (ready)
                 (std.fmt.allocPrint(alloc, "{s} \u{2192} {s} · Ready", .{ cur, ver }) catch "Ready to restart")
+            else if (a.updates.app_downloading and a.updates.restart_after_verify)
+                "Checking and installing the latest update…"
             else if (a.updates.app_downloading)
                 (std.fmt.allocPrint(alloc, "Downloading v{s}…", .{ver}) catch "Downloading…")
             else if (a.updates.appFailed()) |err|
@@ -955,7 +1139,7 @@ pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const Unifi
     }
 
     // 2. Managed Codegraff engine update (`engine:graff`).
-    if (graffVisible(a)) {
+    if (graffUpdateActionable(a)) {
         if (a.updates.graffTo()) |to| {
             const busy = a.updates.graff_kind == .updating or a.updates.graff_updating_manual;
             const skipped = !busy and a.settings.isUpdateSkipped("engine:graff", to);
@@ -987,7 +1171,7 @@ pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const Unifi
     for (a.agent_updates.devices.items) |w| {
         var any_for_dev = false;
         for (w.statuses) |st| {
-            if (!st.showUpdateNotice()) continue;
+            if (!agentUpdateActionable(st)) continue;
             const row_id = std.fmt.allocPrint(alloc, "agent:{s}:{s}", .{ w.device_id, st.harness }) catch continue;
             const tok = skipToken(alloc, st);
             const active = st.phase.isActive();
@@ -1001,26 +1185,50 @@ pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const Unifi
     for (a.agent_updates.devices.items) |w| {
         const connected = w.online and w.connected;
         const dev_name = deviceLabel(a, w.device_id);
+        const is_local = if (a.device_id) |me| std.mem.eql(u8, me, w.device_id) else false;
         for (w.statuses) |st| {
-            if (!st.showUpdateNotice()) continue;
+            if (!agentUpdateActionable(st)) continue;
             const row_id = std.fmt.allocPrint(alloc, "agent:{s}:{s}", .{ w.device_id, st.harness }) catch continue;
             const tok = skipToken(alloc, st);
             const active = st.phase.isActive();
             if (!active and a.settings.isUpdateSkipped(row_id, tok)) continue;
 
-            const base_detail: []const u8 = if (st.installed_version != null and st.latest_version != null and !std.mem.eql(u8, st.installed_version.?, st.latest_version.?))
-                (std.fmt.allocPrint(alloc, "{s} \u{2192} {s}", .{ st.installed_version.?, st.latest_version.? }) catch "Update available")
+            const agent_title = agent_updates.agentName(st.harness);
+            const version_delta: ?[]const u8 = if (st.installed_version != null and st.latest_version != null and !std.mem.eql(u8, st.installed_version.?, st.latest_version.?))
+                (std.fmt.allocPrint(alloc, "{s} \u{2192} {s}", .{ st.installed_version.?, st.latest_version.? }) catch null)
+            else
+                null;
+            const xcode_blocker = st.phase == .failed and isXcodeLicenseBlocker(st.error_message);
+            const failure_headline: ?[]const u8 = if (xcode_blocker)
+                (std.fmt.allocPrint(alloc, "Homebrew can\u{2019}t update {s} until you accept the Xcode license.", .{agent_title}) catch "Homebrew can\u{2019}t update until you accept the Xcode license.")
+            else
+                null;
+            const failure_note: ?[]const u8 = if (st.phase != .failed)
+                null
+            else if (xcode_blocker)
+                (if (is_local)
+                    "Open Terminal, run sudo xcodebuild -license, review and accept the license, then retry."
+                else
+                    (std.fmt.allocPrint(alloc, "Run sudo xcodebuild -license on {s}, review and accept the license, then retry.", .{dev_name}) catch "Run sudo xcodebuild -license on that device, review and accept the license, then retry."))
+            else
+                st.error_message;
+
+            const base_detail: []const u8 = if (st.phase == .failed) blk: {
+                if (version_delta) |vd| break :blk vd;
+                if (xcode_blocker) break :blk "Blocked by Xcode license";
+                break :blk if (st.error_kind == .install) "Update failed" else "Couldn't check for updates";
+            } else if (version_delta) |vd|
+                vd
             else switch (st.phase) {
                 .updated => if (st.latest_version orelse st.installed_version) |ver|
-                    (std.fmt.allocPrint(alloc, "{s} · Updated", .{ver}) catch "Updated")
+                    (std.fmt.allocPrint(alloc, "{s} \u{00b7} Updated", .{ver}) catch "Updated")
                 else
                     "Updated",
-                .failed => st.error_message orelse if (st.error_kind == .install) "Update failed" else "Couldn't check for updates",
                 .waiting_for_idle => "Waiting for current run",
-                .preparing => "Preparing update…",
-                .downloading => st.progress_message orelse "Downloading…",
-                .installing => "Installing…",
-                .verifying => "Verifying…",
+                .preparing => "Preparing update\u{2026}",
+                .downloading => st.progress_message orelse "Downloading\u{2026}",
+                .installing => "Installing\u{2026}",
+                .verifying => "Verifying\u{2026}",
                 .manual_action_required => "Check and update",
                 else => if (st.latest_version) |lat|
                     (std.fmt.allocPrint(alloc, "v{s} available", .{lat}) catch "Update available")
@@ -1029,14 +1237,14 @@ pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const Unifi
             };
 
             const detail = if (dev_with_notices > 1)
-                (std.fmt.allocPrint(alloc, "{s} · {s}", .{ base_detail, dev_name }) catch base_detail)
+                (std.fmt.allocPrint(alloc, "{s} \u{00b7} {s}", .{ base_detail, dev_name }) catch base_detail)
             else
                 base_detail;
 
             const action_label: ?[]const u8 = switch (st.phase) {
                 .available => if (st.can_apply) "Update" else "Steps",
                 .manual_action_required => if (st.can_apply) "Check and update" else null,
-                .waiting_for_idle, .preparing, .downloading => "Cancel",
+                .waiting_for_idle, .preparing, .downloading, .installing => "Cancel",
                 .failed => if (st.can_apply and st.error_kind == .install) "Retry" else "Check",
                 .updated => "Done",
                 else => null,
@@ -1051,7 +1259,7 @@ pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const Unifi
                     .{ .agent_rpc = .{ .device_id = w.device_id, .method = "ApplyHarnessUpdate", .harness = st.harness } }
                 else
                     .none,
-                .waiting_for_idle, .preparing, .downloading => .{ .agent_rpc = .{
+                .waiting_for_idle, .preparing, .downloading, .installing => .{ .agent_rpc = .{
                     .device_id = w.device_id,
                     .method = "CancelHarnessUpdate",
                     .harness = st.harness,
@@ -1075,12 +1283,17 @@ pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const Unifi
                 .kind = .agent,
                 .id = row_id,
                 .token = tok,
-                .title = agent_updates.agentName(st.harness),
+                .title = agent_title,
                 .detail = detail,
                 .mark_id = st.harness,
                 .busy = active,
                 .updated = st.phase == .updated,
                 .failed = st.phase == .failed,
+                .version_delta = version_delta,
+                .failure_headline = failure_headline,
+                .failure_note = failure_note,
+                .xcode_license = xcode_blocker,
+                .is_local = is_local,
                 .skippable = !active and st.phase != .updated,
                 .enabled = can_act,
                 .action_label = action_label,
@@ -1102,11 +1315,11 @@ pub fn topbarUpdatesCount(a: *const App) usize {
             (std.fmt.bufPrint(&tok_buf, "failed:{s}:{s}", .{ ver, err }) catch ver)
         else
             ver;
-        const skipped = !a.updates.app_downloading and !a.updates.app_ready and a.settings.isUpdateSkipped("app:harness", app_tok);
+        const skipped = !a.updates.app_downloading and appRestartVersion(a) == null and a.settings.isUpdateSkipped("app:harness", app_tok);
         if (!dismissed and !skipped) count += 1;
     }
 
-    if (graffVisible(a)) {
+    if (graffUpdateActionable(a)) {
         if (a.updates.graffTo()) |to| {
             const busy = a.updates.graff_kind == .updating or a.updates.graff_updating_manual;
             const skipped = !busy and a.settings.isUpdateSkipped("engine:graff", to);
@@ -1116,7 +1329,7 @@ pub fn topbarUpdatesCount(a: *const App) usize {
 
     for (a.agent_updates.devices.items) |w| {
         for (w.statuses) |st| {
-            if (!st.showUpdateNotice()) continue;
+            if (!agentUpdateActionable(st)) continue;
             var id_buf: [192]u8 = undefined;
             const row_id = std.fmt.bufPrint(&id_buf, "agent:{s}:{s}", .{ w.device_id, st.harness }) catch continue;
             var tok_buf: [256]u8 = undefined;
@@ -1143,13 +1356,43 @@ pub fn topbarUpdatesWidth(a: *const App) f32 {
     return 5 + stack_w + 6 + 16 + 8;
 }
 
-pub fn topbarTrailingReserve(a: *const App) f32 {
-    if (a.view.settings_open) return 0;
-    const uw = topbarUpdatesWidth(a);
-    const zen = a.settings.uiMode() == .zen;
-    if (uw == 0 and !zen) return 0;
-    const total = uw + (if (uw > 0 and zen) @as(f32, 6) else 0) + (if (zen) @as(f32, 28) else 0);
-    return total + 4;
+pub const TrailingMetrics = struct { avail: u32, last_slot: u32 };
+
+pub fn trailingMetrics(a: *const App) TrailingMetrics {
+    return trailingMetricsFor(a, @import("window_chrome.zig").trailing);
+}
+
+pub fn trailingMetricsFor(a: *const App, caption_trailing: f32) TrailingMetrics {
+    const avail_f = @max(0, a.view.chrome.width - caption_trailing);
+    var last_f: f32 = avail_f;
+    const strip = @import("view_tab_strip.zig");
+    const chrome = @import("panel_chrome.zig");
+    const github = @import("app_github_repository.zig");
+    if (a.panels.files_open and a.view.chrome.files_width > 0) {
+        last_f = @max(0, a.view.chrome.files_width - caption_trailing);
+    } else if (a.tabs.layout()) |s| {
+        const in_row = s.axis == .horizontal and !s.zoomed;
+        const hp = if (strip.hasHost(a) and github.surface(a)) github.parentPane(a) else null;
+        if (strip.hasHost(a) and hp == null and a.view.chrome.host_width > 0) {
+            last_f = @max(0, a.view.chrome.host_width - caption_trailing);
+        } else if (in_row and s.panes.items.len > 1) {
+            const last_ix = s.panes.items.len - 1;
+            if (strip.hasHost(a) and hp != null and hp.? == last_ix and a.view.chrome.host_width > 0) {
+                last_f = @max(0, a.view.chrome.host_width - caption_trailing);
+            } else {
+                const span = chrome.paneSpanIn(a.view.chrome.chat_width, s.shares.items[last_ix], s.panes.items.len, true, chrome.zen_gutter);
+                last_f = @max(0, span - caption_trailing);
+            }
+        } else if (strip.hasHost(a) and a.view.chrome.host_width > 0) {
+            last_f = @max(0, a.view.chrome.host_width - caption_trailing);
+        }
+    } else if (strip.hasHost(a) and a.view.chrome.host_width > 0) {
+        last_f = @max(0, a.view.chrome.host_width - caption_trailing);
+    }
+    return .{
+        .avail = @intFromFloat(@round(@max(0, avail_f))),
+        .last_slot = @intFromFloat(@round(@max(0, last_f))),
+    };
 }
 
 pub fn topbarUpdatesButton(c: *ui.Context, a: *App, k: theme.Colors) void {
@@ -1214,7 +1457,9 @@ pub fn topbarUpdatesButton(c: *ui.Context, a: *App, k: theme.Colors) void {
         }
     }
     if (clicked) {
-        a.view.updates_popover = !a.view.updates_popover;
+        const was_open = a.view.updates_popover;
+        if (!was_open) @import("view.zig").closeTransientPopovers(a);
+        a.view.updates_popover = !was_open;
         a.redraw();
     }
 }
@@ -1280,9 +1525,13 @@ pub fn updatesPopover(c: *ui.Context, a: *App, k: theme.Colors) void {
         }
     }
 
+    var any_failed = false;
+    for (rows) |row| {
+        if (row.failed) any_failed = true;
+    }
     if (rows.len > 3) {
         ui.key(c, "updates-popover-list");
-        const list = ui.div(c).column().wFull().maxH(164).gap(8).scrollY()
+        const list = ui.div(c).column().wFull().maxH(if (any_failed) 260 else 164).gap(8).scrollY()
             .scrollbar(.{ .overlay = k.faint.alpha(0.5) });
         c.node(list.index).style.scroll_edge_fade = 18;
         defer list.end();
@@ -1294,67 +1543,150 @@ pub fn updatesPopover(c: *ui.Context, a: *App, k: theme.Colors) void {
 
 fn drawUnifiedRow(c: *ui.Context, a: *App, k: theme.Colors, row: UnifiedRow) void {
     ui.key(c, c.print("updates-row-{s}", .{row.id}));
-    const line = ui.div(c).row().wFull().py(4).gap(10).itemsCenter();
-    defer line.end();
+    const outer = ui.div(c).column().wFull().py(4).gap(6);
+    defer outer.end();
 
     {
-        const plate = ui.div(c).row().size(32, 32).center().rounded(8)
-            .bg(ui.Color.white).border(ui.Color.black.alpha(0.08)).borderW(1);
-        defer plate.end();
-        const mark = icons.harnessMark(row.mark_id);
-        icons.icon(c, mark.name, 18, mark.brand orelse ui.Color.hex(0x18181b), 0);
-    }
+        const line = ui.div(c).row().wFull().gap(10).itemsCenter();
+        defer line.end();
 
-    {
-        const info = ui.div(c).column().grow().w(0).gap(2);
-        defer info.end();
-        kit.ellipsisText(c, row.title, .{
-            .size = 13,
-            .line_height = 17,
-            .weight = .medium,
-            .color = k.text,
-        }, 136);
-        kit.ellipsisText(c, row.detail, .{
-            .size = 11.5,
-            .line_height = 15,
-            .color = if (row.failed) k.danger else k.muted,
-        }, 152);
-    }
-
-    const ctrl = ui.div(c).row().gap(8).itemsCenter();
-    defer ctrl.end();
-    if (row.skippable) {
-        ui.key(c, c.print("updates-skip-{s}", .{row.id}));
-        const skip_btn = ui.div(c).row().h(26).px(6).center().roundedFull().hover(k.hover).control();
-        const skip_hot = skip_btn.hovered();
-        const skip_clicked = skip_btn.clicked();
         {
-            defer skip_btn.end();
-            ui.text(c, "Skip", .{
-                .size = 11.5,
-                .line_height = 15,
-                .color = if (skip_hot) k.text else k.muted,
-            });
+            const plate = ui.div(c).row().size(32, 32).center().rounded(8)
+                .bg(ui.Color.white).border(ui.Color.black.alpha(0.08)).borderW(1);
+            defer plate.end();
+            const mark = icons.harnessMark(row.mark_id);
+            icons.icon(c, mark.name, 18, mark.brand orelse ui.Color.hex(0x18181b), 0);
         }
-        if (skip_clicked) skipUnifiedRow(a, row);
-    }
 
-    if (row.action_label) |lbl| {
-        ui.key(c, c.print("updates-act-{s}", .{row.id}));
-        var act_btn = ui.div(c).row().h(26).px(12).center().roundedFull()
-            .bg(k.ink(if (k.dark) 0.08 else 0.06)).border(k.border.alpha(0.7)).borderW(1);
-        act_btn = if (row.enabled) act_btn.hover(k.hover).control() else act_btn.opacity(0.45);
-        const act_clicked = row.enabled and act_btn.clicked();
         {
-            defer act_btn.end();
-            ui.text(c, lbl, .{
-                .size = 11.5,
-                .line_height = 15,
+            const info = ui.div(c).column().grow().w(0).gap(2);
+            defer info.end();
+            kit.ellipsisText(c, row.title, .{
+                .size = 13,
+                .line_height = 17,
                 .weight = .medium,
                 .color = k.text,
+            }, 136);
+            kit.ellipsisText(c, row.detail, .{
+                .size = 11.5,
+                .line_height = 15,
+                .color = if (row.failed) k.danger else k.muted,
+            }, 152);
+        }
+
+        const ctrl = ui.div(c).row().gap(8).itemsCenter();
+        defer ctrl.end();
+        if (row.skippable) {
+            ui.key(c, c.print("updates-skip-{s}", .{row.id}));
+            const skip_btn = ui.div(c).row().h(26).px(6).center().roundedFull().hover(k.hover).control();
+            const skip_hot = skip_btn.hovered();
+            const skip_clicked = skip_btn.clicked();
+            {
+                defer skip_btn.end();
+                ui.text(c, "Skip", .{
+                    .size = 11.5,
+                    .line_height = 15,
+                    .color = if (skip_hot) k.text else k.muted,
+                });
+            }
+            if (skip_clicked) skipUnifiedRow(a, row);
+        }
+
+        if (row.action_label) |lbl| {
+            ui.key(c, c.print("updates-act-{s}", .{row.id}));
+            var act_btn = ui.div(c).row().h(26).px(12).center().roundedFull()
+                .bg(k.ink(if (k.dark) 0.08 else 0.06)).border(k.border.alpha(0.7)).borderW(1);
+            act_btn = if (row.enabled) act_btn.hover(k.hover).control() else act_btn.opacity(0.45);
+            const act_clicked = row.enabled and act_btn.clicked();
+            {
+                defer act_btn.end();
+                ui.text(c, lbl, .{
+                    .size = 11.5,
+                    .line_height = 15,
+                    .weight = .medium,
+                    .color = k.text,
+                });
+            }
+            if (act_clicked) triggerUnifiedAction(a, row);
+        }
+    }
+
+    if (row.failed and (row.xcode_license or row.failure_note != null)) {
+        const card = ui.div(c).column().wFull().p(8).gap(4).rounded(8)
+            .bg(k.danger.alpha(if (k.dark) 0.14 else 0.07))
+            .border(k.danger.alpha(if (k.dark) 0.30 else 0.20)).borderW(1);
+        defer card.end();
+        if (row.xcode_license) {
+            if (row.failure_headline) |headline| {
+                const hcol = ui.div(c).column().w(298);
+                defer hcol.end();
+                ui.text(c, headline, .{
+                    .size = 11.5,
+                    .line_height = 15,
+                    .weight = .medium,
+                    .color = k.danger,
+                    .wrap = true,
+                });
+            }
+            if (row.failure_note) |note| {
+                const ncol = ui.div(c).column().w(298);
+                defer ncol.end();
+                ui.text(c, note, .{
+                    .size = 11,
+                    .line_height = 15,
+                    .color = k.muted,
+                    .wrap = true,
+                });
+            }
+            const acts = ui.div(c).row().wFull().gap(6).pt(2).itemsCenter();
+            defer acts.end();
+            {
+                ui.key(c, c.print("updates-copy-cmd-{s}", .{row.id}));
+                const copy_btn = ui.div(c).row().h(24).px(10).center().roundedFull()
+                    .bg(k.ink(if (k.dark) 0.09 else 0.06)).border(k.border.alpha(0.75)).borderW(1)
+                    .hover(k.hover).control();
+                const copy_clicked = copy_btn.clicked();
+                {
+                    defer copy_btn.end();
+                    ui.text(c, "Copy command", .{
+                        .size = 11,
+                        .line_height = 14,
+                        .weight = .medium,
+                        .color = k.text,
+                    });
+                }
+                if (copy_clicked) {
+                    c.clipboard.write(c.clipboard.ctx, xcode_license_cmd);
+                    a.setNotice("Copied sudo xcodebuild -license");
+                }
+            }
+            if (row.is_local and (builtin.os.tag == .macos or builtin.is_test)) {
+                ui.key(c, c.print("updates-open-term-{s}", .{row.id}));
+                const term_btn = ui.div(c).row().h(24).px(10).center().roundedFull()
+                    .bg(k.ink(if (k.dark) 0.09 else 0.06)).border(k.border.alpha(0.75)).borderW(1)
+                    .hover(k.hover).control();
+                const term_clicked = term_btn.clicked();
+                {
+                    defer term_btn.end();
+                    ui.text(c, "Open Terminal", .{
+                        .size = 11,
+                        .line_height = 14,
+                        .weight = .medium,
+                        .color = k.text,
+                    });
+                }
+                if (term_clicked) openTerminalApp(a);
+            }
+        } else if (row.failure_note) |msg| {
+            const ecol = ui.div(c).column().w(298);
+            defer ecol.end();
+            ui.text(c, msg, .{
+                .size = 11.5,
+                .line_height = 15,
+                .color = k.danger,
+                .wrap = true,
             });
         }
-        if (act_clicked) triggerUnifiedAction(a, row);
     }
 }
 
@@ -1601,7 +1933,7 @@ test "native updater release completion with installation disabled never install
     a.release.succeeded = true;
     onReleaseChecked(&a);
     try std.testing.expect(!a.updates.app_downloading);
-    try std.testing.expect(!a.updates.app_ready);
+    try std.testing.expect(appRestartVersion(&a) == null);
     try std.testing.expect(a.settings.get(.restart_to_install_updates));
     try std.testing.expect(a.updates.app_checked_ms > 0);
     var buf: [200]u8 = undefined;
@@ -1635,12 +1967,27 @@ test "native updater default automatic installation requires fresh success and i
     a.updates.app_can_install = true;
     onReleaseChecked(&a);
     try std.testing.expect(a.updates.app_downloading);
-    try std.testing.expect(!a.updates.app_ready); // Installation is not a restart.
+    try std.testing.expect(appRestartVersion(&a) == null); // Installation is not a restart.
     a.updates.app_downloading = false;
-    a.updates.app_ready = true;
+    a.updates.setAppInstalled(ver);
     onReleaseChecked(&a);
     try std.testing.expect(!a.updates.app_downloading); // Never reinstall a staged update.
-    a.updates.app_ready = false;
+    const newer = "99.0.1";
+    @memcpy(a.release.latest[0..newer.len], newer);
+    a.release.latest_len = newer.len;
+    try std.testing.expect(appRestartVersion(&a) == null);
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(newer, updateSummary(&buf, &a, a.nowMs()).action.update);
+    triggerAppUpdate(&a, ver); // A click from the old frame must not restart into it.
+    try std.testing.expect(a.updates.app_downloading);
+    a.updates.app_downloading = false;
+    onReleaseChecked(&a);
+    try std.testing.expect(a.updates.app_downloading); // Automatic path also supersedes the previous install.
+    a.updates.app_downloading = false;
+    a.updates.setAppInstalled(newer);
+    try std.testing.expectEqualStrings(newer, appRestartVersion(&a).?);
+    try std.testing.expectEqualStrings(newer, updateSummary(&buf, &a, a.nowMs()).action.restart);
+    a.updates.setAppInstalled("");
     a.settings.set(.automatically_install_updates, false);
     onReleaseChecked(&a);
     try std.testing.expect(!a.updates.app_downloading);
@@ -1713,6 +2060,15 @@ test "restartPlace chooses sidebar row when open and titlebar when collapsed" {
     try std.testing.expectEqual(RestartPlace.none, restartPlace("0.2.175", true, "0.2.175"));
 }
 
+test "native updater recovers a verified ahead-of-process bundle after a CLI no-op" {
+    const same = "Harness 99.0.1 is up to date (latest: 99.0.1).\n";
+    const withdrawn = "Harness 99.0.1 is up to date (latest: 99.0.0).\n";
+    try std.testing.expectEqualStrings("99.0.1", confirmedAppVersion(.up_to_date, "99.0.1", same).?);
+    try std.testing.expect(confirmedAppVersion(.up_to_date, "99.0.1", withdrawn) == null);
+    try std.testing.expect(confirmedAppVersion(.up_to_date, null, same) == null);
+    try std.testing.expect(confirmedAppVersion(.{ .failed = "download failed" }, "99.0.1", same) == null);
+}
+
 test "classifyUpdateOutput distinguishes an installed bundle from a no-op (ADR 0008)" {
     try std.testing.expectEqual(
         UpdateCommandOutcome.up_to_date,
@@ -1729,4 +2085,179 @@ test "classifyUpdateOutput distinguishes an installed bundle from a no-op (ADR 0
     // Verify build_info.version tracks Cargo.toml and is never a stale 0.2.175 cache.
     try std.testing.expect(!std.mem.eql(u8, @import("build_info").version, "0.2.175"));
     try std.testing.expect(!std.mem.eql(u8, @import("build_info").version, "0.0.0"));
+}
+
+test "multi-surface updater never offers Restart before installed target matches feed (#85)" {
+    var a: App = .init(std.testing.allocator, std.testing.io, 1);
+    defer a.deinit();
+    a.updates.app_install_checked = true;
+    a.updates.app_can_install = true;
+
+    const ver_b = "99.0.1";
+    const ver_c = "99.0.2";
+    @memcpy(a.release.latest[0..ver_b.len], ver_b);
+    a.release.latest_len = ver_b.len;
+    a.release.succeeded = true;
+
+    // 1. Update available but not downloaded: every surface must offer Update, not Restart.
+    var sum_buf: [256]u8 = undefined;
+    try std.testing.expect(appRestartVersion(&a) == null);
+    try std.testing.expectEqualStrings(ver_b, updateSummary(&sum_buf, &a, a.nowMs()).action.update);
+    {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const rows = collectUnifiedRows(&a, arena.allocator());
+        try std.testing.expectEqual(@as(usize, 1), rows.len);
+        try std.testing.expectEqualStrings("Update", rows[0].action_label.?);
+        try std.testing.expect(!rows[0].updated);
+    }
+
+    // 2. Downloading shows progress and never Restart.
+    a.updates.app_downloading = true;
+    try std.testing.expect(appRestartVersion(&a) == null);
+    try std.testing.expect(updateSummary(&sum_buf, &a, a.nowMs()).action == .downloading);
+
+    // 3. vB finished installing, then vC became latest: stale vB must NOT show Restart as vC.
+    a.updates.app_downloading = false;
+    a.updates.setAppInstalled(ver_b);
+    try std.testing.expectEqualStrings(ver_b, appRestartVersion(&a).?);
+    @memcpy(a.release.latest[0..ver_c.len], ver_c);
+    a.release.latest_len = ver_c.len;
+    try std.testing.expect(appRestartVersion(&a) == null);
+    try std.testing.expectEqualStrings(ver_c, updateSummary(&sum_buf, &a, a.nowMs()).action.update);
+
+    // 4. Download of vC fails: Retry is offered on unified rows & Settings, not Restart.
+    a.updates.setAppFailed("checksum mismatch");
+    try std.testing.expect(appRestartVersion(&a) == null);
+    try std.testing.expectEqualStrings(ver_c, updateSummary(&sum_buf, &a, a.nowMs()).action.retry);
+    {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const rows = collectUnifiedRows(&a, arena.allocator());
+        try std.testing.expectEqual(@as(usize, 1), rows.len);
+        try std.testing.expectEqualStrings("Retry", rows[0].action_label.?);
+        try std.testing.expect(rows[0].failed);
+    }
+
+    // 5. vC succeeds: Restart is offered once with exact verified target vC.
+    a.updates.setAppFailed("");
+    a.updates.setAppInstalled(ver_c);
+    try std.testing.expectEqualStrings(ver_c, appRestartVersion(&a).?);
+    try std.testing.expectEqualStrings(ver_c, updateSummary(&sum_buf, &a, a.nowMs()).action.restart);
+}
+
+fn deliverTestAppInstall(a: *App, installed: []const u8, failure: []const u8) void {
+    var result: AppInstallResult = .{};
+    result.installed_len = @min(installed.len, result.installed.len);
+    @memcpy(result.installed[0..result.installed_len], installed[0..result.installed_len]);
+    result.failure_len = @min(failure.len, result.failure.len);
+    @memcpy(result.failure[0..result.failure_len], failure[0..result.failure_len]);
+    a.updates.acquire();
+    a.updates.app_install_result = result;
+    a.updates.release();
+    appUpdateDelivered(@ptrCast(a));
+}
+
+test "restart refreshes the feed and relaunches only its verified current result" {
+    const b = "99.0.1";
+    const c = "99.0.2";
+    const d = "99.0.3";
+    var a: App = .init(std.testing.allocator, std.testing.io, 1);
+    defer a.deinit();
+    a.updates.app_install_checked = true;
+    a.updates.app_can_install = true;
+    a.release.succeeded = true;
+    a.updates.setAppInstalled(b);
+    @memcpy(a.release.latest[0..b.len], b);
+    a.release.latest_len = b.len;
+
+    triggerAppUpdate(&a, b);
+    try std.testing.expect(a.updates.app_downloading);
+    try std.testing.expect(a.updates.restart_after_verify);
+    try std.testing.expectEqual(@as(u32, 0), a.updates.test_relaunch_count);
+
+    // The feed changes after the Restart button was rendered. The worker's
+    // fresh updater result is vC, so the single relaunch must use vC.
+    @memcpy(a.release.latest[0..c.len], c);
+    a.release.latest_len = c.len;
+    deliverTestAppInstall(&a, c, "");
+    try std.testing.expect(!a.updates.app_downloading);
+    try std.testing.expect(!a.updates.restart_after_verify);
+    try std.testing.expectEqual(@as(u32, 1), a.updates.test_relaunch_count);
+    try std.testing.expectEqualStrings(c, a.updates.test_relaunch_version[0..a.updates.test_relaunch_version_len]);
+
+    // A confirmed vB no-op remains restartable when the refreshed feed is
+    // still vB; a failed refresh must leave the running app alone.
+    var same: App = .init(std.testing.allocator, std.testing.io, 1);
+    defer same.deinit();
+    same.updates.app_install_checked = true;
+    same.updates.app_can_install = true;
+    same.release.succeeded = true;
+    same.updates.setAppInstalled(b);
+    @memcpy(same.release.latest[0..b.len], b);
+    same.release.latest_len = b.len;
+    triggerAppUpdate(&same, b);
+    deliverTestAppInstall(&same, b, "");
+    try std.testing.expectEqual(@as(u32, 1), same.updates.test_relaunch_count);
+    try std.testing.expectEqualStrings(b, same.updates.test_relaunch_version[0..same.updates.test_relaunch_version_len]);
+
+    var failed: App = .init(std.testing.allocator, std.testing.io, 1);
+    defer failed.deinit();
+    failed.updates.app_install_checked = true;
+    failed.updates.app_can_install = true;
+    failed.release.succeeded = true;
+    failed.updates.setAppInstalled(b);
+    @memcpy(failed.release.latest[0..b.len], b);
+    failed.release.latest_len = b.len;
+    triggerAppUpdate(&failed, b);
+    deliverTestAppInstall(&failed, "", "synthetic download failure");
+    try std.testing.expectEqual(@as(u32, 0), failed.updates.test_relaunch_count);
+    try std.testing.expect(!failed.updates.restart_after_verify);
+    try std.testing.expectEqualStrings("synthetic download failure", failed.updates.appFailed().?);
+
+    // A normal update/Retry can never inherit permission to restart.
+    var normal: App = .init(std.testing.allocator, std.testing.io, 1);
+    defer normal.deinit();
+    normal.updates.app_install_checked = true;
+    normal.updates.app_can_install = true;
+    normal.release.succeeded = true;
+    @memcpy(normal.release.latest[0..c.len], c);
+    normal.release.latest_len = c.len;
+    triggerAppUpdate(&normal, c);
+    try std.testing.expect(!normal.updates.restart_after_verify);
+    deliverTestAppInstall(&normal, c, "");
+    try std.testing.expectEqual(@as(u32, 0), normal.updates.test_relaunch_count);
+
+    // If the UI already knows about a newer release than the worker verified,
+    // keep the app open rather than relaunching into a superseded version.
+    var superseded: App = .init(std.testing.allocator, std.testing.io, 1);
+    defer superseded.deinit();
+    superseded.updates.app_install_checked = true;
+    superseded.updates.app_can_install = true;
+    superseded.release.succeeded = true;
+    superseded.updates.setAppInstalled(b);
+    @memcpy(superseded.release.latest[0..b.len], b);
+    superseded.release.latest_len = b.len;
+    triggerAppUpdate(&superseded, b);
+    @memcpy(superseded.release.latest[0..d.len], d);
+    superseded.release.latest_len = d.len;
+    deliverTestAppInstall(&superseded, c, "");
+    try std.testing.expectEqual(@as(u32, 0), superseded.updates.test_relaunch_count);
+}
+
+test "unified agent update row exposes Cancel during installing" {
+    var a: App = .init(std.testing.allocator, std.testing.io, 1);
+    defer a.deinit();
+    try agent_updates.setTestStatuses(&a, "synthetic-device", true,
+        \\[{"harness":"claude-code","installedVersion":"2.1.319","latestVersion":"2.1.322","phase":"installing","canApply":true}]
+    );
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const rows = collectUnifiedRows(&a, arena.allocator());
+    try std.testing.expectEqual(@as(usize, 1), rows.len);
+    try std.testing.expectEqual(.agent, rows[0].kind);
+    try std.testing.expect(rows[0].busy);
+    try std.testing.expectEqualStrings("Cancel", rows[0].action_label.?);
+    try std.testing.expectEqualStrings("CancelHarnessUpdate", rows[0].action.agent_rpc.method);
+    try std.testing.expectEqualStrings("claude-code", rows[0].action.agent_rpc.harness);
 }

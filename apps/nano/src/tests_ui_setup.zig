@@ -180,3 +180,168 @@ test "Skip setup leaves the defaults alone" {
     try testing.expectEqualStrings("codex", h.a.new_harness);
     try testing.expect(h.a.settings.get(.notifications_enabled));
 }
+
+test "onboarding renders as a dedicated opaque screen that hides and blocks the workspace below" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.a.dark = false;
+    h.a.settings.setText("surface", "frosted");
+    var chats_json = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"c1","deviceId":"local","title":"Cedar Notes","archived":false}]
+    , .{});
+    defer chats_json.deinit();
+    try h.a.chats.replace(chats_json.value);
+    h.a.openChat("c1", null);
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("Cedar Notes"));
+
+    setup.open(&h.a, 0);
+    h.t.settle(1);
+    if (std.c.getenv("NANO_SNAP_DIR")) |dir| {
+        var buf: [1024]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, "{s}/setup-screen.png", .{std.mem.span(dir)})) |path| {
+            h.t.screenshot(path) catch {};
+        } else |_| {}
+    }
+
+    // Setup content is visible, while nothing from the workspace/sidebar/tab strip is mounted underneath.
+    try testing.expect(h.t.hasText("Start with Graff"));
+    try testing.expect(!h.t.hasText("Cedar Notes"));
+    try testing.expect(!h.t.hasText("New session"));
+
+    // Setup panes are fully opaque even when frosted glass is enabled.
+    var saw_full_root = false;
+    for (h.t.ctx.nodes.items) |node| {
+        if (@abs(node.rect.w - 1200) < 0.5 and @abs(node.rect.h - 780) < 0.5 and node.style.background != null) {
+            try testing.expectApproxEqAbs(@as(f32, 1.0), node.style.background.?.a, 0.001);
+            saw_full_root = true;
+        }
+    }
+    try testing.expect(saw_full_root);
+
+    // Workspace shortcuts (e.g. Cmd+T) are blocked while onboarding is active.
+    const tabs_before = h.a.tabs.items.items.len;
+    h.press(.{ .key = 't', .cmd = true });
+    try testing.expectEqual(tabs_before, h.a.tabs.items.items.len);
+    try testing.expect(h.a.view.setup != null);
+
+    // Skipping onboarding restores the workspace cleanly.
+    try h.t.clickText("Skip setup");
+    h.t.settle(1);
+    try testing.expect(h.a.view.setup == null);
+    try testing.expect(h.t.hasText("Cedar Notes"));
+}
+
+test "onboarding queries autonomy and Graff models once the engine connects after cold open" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.a.engine.state = .disconnected;
+    setup.open(&h.a, 0);
+    h.t.settle(1);
+    try testing.expect(!h.a.view.setup.?.engine_seeded);
+    try testing.expectEqual(@as(usize, 0), h.a.engine.sent.items.len);
+
+    // Engine finishes connecting while onboarding is already on screen.
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"GetAutonomy":{"autonomy":"read-only","chosen":true},"ListModels":{"models":[{"id":"graff-test","label":"Graff Test"}]}}
+    , .{});
+    h.a.engine.state = .connected;
+    h.t.settle(2);
+    while (h.a.engine.pump()) {}
+    h.t.settle(1);
+    try testing.expect(h.a.view.setup.?.engine_seeded);
+    var saw_autonomy = false;
+    var saw_models = false;
+    for (h.a.engine.sent.items) |frame| {
+        if (std.mem.indexOf(u8, frame, "\"GetAutonomy\"") != null) saw_autonomy = true;
+        if (std.mem.indexOf(u8, frame, "\"ListModels\"") != null) saw_models = true;
+    }
+    try testing.expect(saw_autonomy);
+    try testing.expect(saw_models);
+    try testing.expectEqual(setup.Autonomy.read_only, h.a.view.setup.?.autonomy);
+}
+
+test "onboarding stays within narrow and short window bounds without clipping controls" {
+    @import("theme.zig").registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.dark = false;
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, harnesses, .{});
+    defer parsed.deinit();
+    try a.harnesses.replace(parsed.value);
+    a.view.setup_checked = true;
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 760, .height = 520, .dark = false });
+    defer t.deinit();
+
+    setup.open(&a, 0);
+    t.settle(2);
+    if (std.c.getenv("NANO_UX_SNAP_DIR")) |dir| {
+        var buf: [1024]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, "{s}/after-setup-narrow.png", .{std.mem.span(dir)})) |path| {
+            t.screenshot(path) catch {};
+        } else |_| {}
+    }
+
+    try testing.expect(setup.layoutMetrics(760).stacked);
+    try testing.expect(t.hasText("Skip setup"));
+    try testing.expect(t.hasText("Next"));
+    try testing.expect(t.hasText("Ready locally — sign in to CodeGraff anytime in Settings"));
+    for (t.ctx.nodes.items) |node| {
+        if (node.rect.w > 0 and node.rect.h > 0) {
+            try testing.expect(node.rect.x + node.rect.w <= 760.5);
+        }
+    }
+}
+
+test "onboarding guards Next during active CLI install and supports arrow keys on notify and ready steps" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const missing =
+        \\[{"id":"graff","name":"graff","installed":true,"enabled":true},
+        \\ {"id":"claude-code","name":"Claude Code","installed":false,"enabled":false,"canInstall":true},
+        \\ {"id":"codex","name":"Codex","installed":false,"enabled":false,"canInstall":true}]
+    ;
+    var p_missing = try std.json.parseFromSlice(std.json.Value, testing.allocator, missing, .{});
+    defer p_missing.deinit();
+    try h.a.harnesses.replace(p_missing.value);
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"InstallHarness":{},"CancelInstall":{}}
+    , .{});
+    h.a.engine.state = .connected;
+
+    setup.open(&h.a, 0);
+    h.t.settle(1);
+    setup.installExtra(&h.a, 0);
+    const held = try h.a.engine.queued.toOwnedSlice(testing.allocator);
+    defer {
+        for (held) |frame| testing.allocator.free(frame);
+        testing.allocator.free(held);
+    }
+    h.t.settle(1);
+    h.press(.{ .key = S.enter });
+    try testing.expectEqual(@as(usize, 0), h.a.view.setup.?.step);
+    try testing.expect(h.t.hasText("Wait for the CLI install to finish, or click Cancel first."));
+
+    // Escape cancels active CLI install rather than ignoring it.
+    h.press(.{ .key = S.escape });
+    try testing.expect(h.a.view.setup.?.installing == null);
+
+    // Notify and ready steps respond to Left/Right arrows.
+    h.a.view.setup.?.step = 3;
+    h.t.settle(1);
+    h.press(.{ .key = S.right });
+    try testing.expect(!h.a.view.setup.?.notify);
+    h.press(.{ .key = S.left });
+    try testing.expect(h.a.view.setup.?.notify);
+
+    h.a.view.setup.?.step = 4;
+    h.t.settle(1);
+    h.press(.{ .key = S.right });
+    try testing.expectEqual(@as(?usize, 0), h.a.view.setup.?.starter);
+    h.press(.{ .key = S.right });
+    try testing.expectEqual(@as(?usize, 1), h.a.view.setup.?.starter);
+}

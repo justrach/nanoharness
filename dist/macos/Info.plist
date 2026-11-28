@@ -9,7 +9,7 @@
     <key>CFBundleDisplayName</key>
     <string>Harness</string>
     <key>CFBundleExecutable</key>
-    <string>harness</string>
+    <string>harness-nano</string>
     <key>CFBundleIconFile</key>
     <string>harness.icns</string>
     <key>CFBundleIdentifier</key>

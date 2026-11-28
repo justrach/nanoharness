@@ -19,11 +19,11 @@ comptime {
     if (@import("builtin").os.tag == .windows) @export(&checkD3d, .{ .name = "nanoui_scroll_fade_check_d3d" });
 }
 
-const Scene = struct {
+pub const Scene = struct {
     opacity: f32 = 1,
     id: u64 = 0,
 
-    fn view(s: *Scene, c: *ui.Context) void {
+    pub fn view(s: *Scene, c: *ui.Context) void {
         const root = ui.div(c).size(140, 110);
         defer root.end();
         ui.div(c).absolute().size(70, 110).bg(.hex(0x204060)).end();

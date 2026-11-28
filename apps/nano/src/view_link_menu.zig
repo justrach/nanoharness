@@ -67,8 +67,10 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
         m.open = false;
         return;
     }
-    const local = @import("artifact_links.zig").isLocal(m.url.items);
-    const labels: []const []const u8 = if (local) &.{ "Open file", "Copy link" } else &.{ "Open in Harness", "Open in browser", "Copy link" };
+    const artifact_links = @import("artifact_links.zig");
+    const local = artifact_links.isLocal(m.url.items);
+    // A file reference is a path on the chat's host, not a web address.
+    const labels: []const []const u8 = if (local) &.{ "Open file", "Copy file path" } else &.{ "Open in Harness", "Open in browser", "Copy link" };
     if (c.shortcut(.{ .key = ui.Shortcut.down })) m.selected = (m.selected + 1) % labels.len;
     if (c.shortcut(.{ .key = ui.Shortcut.up })) m.selected = (m.selected + labels.len - 1) % labels.len;
     const rules = @import("rules.zig");
@@ -86,7 +88,10 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (row.clicked() or (m.selected == action and c.shortcut(.{ .key = ui.Shortcut.enter }))) {
             m.open = false;
             if (local) {
-                if (action == 0) @import("artifact_links.zig").open(a, m.parent.items, m.url.items) else c.clipboard.write(c.clipboard.ctx, m.url.items);
+                if (action == 0) artifact_links.openReference(a, m.parent.items, m.url.items) else {
+                    var buf: [artifact_links.max_path]u8 = undefined;
+                    if (artifact_links.localPath(m.url.items, &buf)) |path| c.clipboard.write(c.clipboard.ctx, path) else |_| {}
+                }
             } else switch (action) {
                 0 => browser.openInternalLink(a, m.parent.items, m.url.items),
                 1 => browser.openExternalLink(a, m.parent.items, m.url.items),

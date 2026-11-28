@@ -10,6 +10,8 @@ struct TranscriptView: View {
     var cwd: String? = nil
     /// A tapped link that only opens on the host computer.
     var onHostLink: (HostLink) -> Void = { _ in }
+    /// A tapped CodeGraff hosted artifact card.
+    var onOpenArtifact: (ArtifactPresentation) -> Void = { _ in }
     /// The chat this transcript shows, and whether a turn is running in it: the reconnect row's
     /// Resume needs the chat's own agent and model, and waits for a running turn.
     var chat: Chat? = nil
@@ -204,6 +206,13 @@ struct TranscriptView: View {
                                    onResize: { scroll.refreshLayout?() })
             case .visual(let title, let script):
                 VisualCardView(partKey: row.id, title: title, script: script, cache: visualCache)
+            case .artifact(let artifactId, let title, let format, let visibility, let url):
+                ArtifactCardView(artifact: ArtifactPresentation(artifactId: artifactId, title: title,
+                                                              format: format, visibility: visibility, url: url),
+                                 onOpen: {
+                    onOpenArtifact(ArtifactPresentation(artifactId: artifactId, title: title,
+                                                        format: format, visibility: visibility, url: url))
+                })
             case .markdown(let block, let streaming):
                 MarkdownRowView(row: row, block: block, streaming: streaming, veils: veils)
             case .toolGroup(let tools, let autoOpen):

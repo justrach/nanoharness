@@ -33,6 +33,10 @@ export interface Env {
   CODEGRAFF_OAUTH_CLIENT_ID: string;
   /** Secret for short-lived Harness JWTs; set with `wrangler secret put`. */
   HARNESS_AUTH_SIGNING_KEY?: string;
+  /** Optional Ed25519 seed (base64url, 32 bytes) for access-token signing. */
+  HARNESS_AUTH_ED25519_PRIVATE?: string;
+  /** Fail closed on unsigned mutating chat2 pushes. */
+  HARNESS_REQUIRE_DEVICE_AUTH?: string;
   /** "codegraff" or "dev" (bearer == userId, never prod). */
   AUTH_MODE: string;
   /** Gateway that vouches for a sandbox's device token (default https://gateway.codegraff.com); tests point it elsewhere. */
@@ -67,3 +71,13 @@ export const AUTH_USER_HEADER = "x-harness-auth-user";
  * Worker; the SessionRoom DO sees this and skips its per-chat
  * claim-on-first-join ownership discipline for the room. */
 export const ROOM_KIND_HEADER = "x-harness-room-kind";
+
+/** Verified caller trust tier stamped by the Worker ("personal" | "sandbox"). */
+export const AUTH_TRUST_TIER_HEADER = "x-harness-auth-tier";
+
+/** Verified caller sandbox id when `AUTH_TRUST_TIER_HEADER` is "sandbox". */
+export const AUTH_SANDBOX_ID_HEADER = "x-harness-auth-sandbox-id";
+
+/** Stamped by the Worker on `/chat2/:chatId/*` when RegistryRoom confirms the
+ * chat is hosted on the caller's own sandbox device. */
+export const CHAT_HOST_SANDBOX_HEADER = "x-harness-chat-host-sandbox";

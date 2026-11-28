@@ -80,6 +80,7 @@ pub fn main(init: std.process.Init) !void {
         a.openChat(id, null);
         if (scene.get("toolProgress")) |v| try @import("app_progress.zig").apply(&a, id, v);
     }
+    applyPostOpenExtras(&a, scene);
     if (str(scene, "openSettings")) |sec_key| {
         if (@import("settings.zig").Section.fromKey(sec_key)) |sec| a.settings.setSection(sec);
         @import("view_settings.zig").open(&a);
@@ -243,6 +244,7 @@ fn parity(init: std.process.Init, scene: json.ObjectMap, name: []const u8, out: 
             a.transcript.apply(frame) catch {};
         }
     }
+    applyPostOpenExtras(&a, scene);
     if (str(scene, "openSettings")) |sec_key| {
         if (@import("settings.zig").Section.fromKey(sec_key)) |sec| a.settings.setSection(sec);
         @import("view_settings.zig").open(&a);
@@ -382,7 +384,7 @@ fn copyFixed(dst: []u8, len_slot: *usize, src: []const u8) void {
 
 fn applySceneExtras(a: *App, arena: std.mem.Allocator, scene: json.ObjectMap) !void {
     if (str(scene, "uiMode")) |m| {
-        if (std.mem.eql(u8, m, "zen")) a.settings.applyUiMode(.zen) else if (std.mem.eql(u8, m, "developer")) a.settings.applyUiMode(.developer);
+        if (std.mem.eql(u8, m, "zen")) a.settings.applyUiMode(.zen) else if (std.mem.eql(u8, m, "developer")) a.settings.applyUiMode(.developer) else if (std.mem.eql(u8, m, "design")) a.settings.applyUiMode(.design);
     }
     if (scene.get("harnesses")) |v| try a.harnesses.replace(v);
     if (scene.get("models")) |v| {
@@ -405,9 +407,6 @@ fn applySceneExtras(a: *App, arena: std.mem.Allocator, scene: json.ObjectMap) !v
         if (u.get("desktopUpdate")) |b| if (b == .bool) {
             a.updates.desktop_update = b.bool;
         };
-        if (u.get("appReady")) |b| if (b == .bool) {
-            a.updates.app_ready = b.bool;
-        };
         if (u.get("appCanInstall")) |b| if (b == .bool) {
             a.updates.app_can_install = b.bool;
         };
@@ -417,6 +416,9 @@ fn applySceneExtras(a: *App, arena: std.mem.Allocator, scene: json.ObjectMap) !v
         if (str(u, "appLatest")) |ver| {
             copyFixed(&a.release.latest, &a.release.latest_len, ver);
             a.release.succeeded = true;
+            if (u.get("appReady")) |b| if (b == .bool and b.bool) {
+                a.updates.setAppInstalled(ver);
+            };
         }
         if (str(u, "graffKind")) |gk| {
             if (std.mem.eql(u8, gk, "none")) a.updates.graff_kind = .none else if (std.mem.eql(u8, gk, "updating")) a.updates.graff_kind = .updating else if (std.mem.eql(u8, gk, "updated")) a.updates.graff_kind = .updated else if (std.mem.eql(u8, gk, "available")) a.updates.graff_kind = .available;
@@ -443,6 +445,41 @@ fn applySceneExtras(a: *App, arena: std.mem.Allocator, scene: json.ObjectMap) !v
         s.copied = @intCast(v.integer);
         s.copied_until = 9999.0;
     };
+}
+
+fn applyPostOpenExtras(a: *App, scene: json.ObjectMap) void {
+    if (str(scene, "splitChat")) |sid| {
+        a.splitPane(.horizontal);
+        a.openChat(sid, null);
+        a.focusPane(0);
+    }
+    if (str(scene, "designPreset")) |p| {
+        if (std.mem.eql(u8, p, "mobile")) a.view.design.setPreset(.mobile) else if (std.mem.eql(u8, p, "tablet")) a.view.design.setPreset(.tablet) else if (std.mem.eql(u8, p, "desktop")) a.view.design.setPreset(.desktop);
+    }
+    if (flag(scene, "openDesignCanvas")) {
+        @import("app_panels.zig").openDesignCanvas(a);
+        if (flag(scene, "designSamplePins")) {
+            a.view.design.pin_mode = true;
+            if (a.view.design.addPinNorm(0.28, 0.24)) |ix| a.view.design.pins[ix].note.set("Tighten card spacing to 12px");
+            if (a.view.design.addPinNorm(0.64, 0.56)) |ix| a.view.design.pins[ix].note.set("Check WCAG contrast on mute badge");
+        }
+    }
+    if (str(scene, "openBrowserUrl")) |url| {
+        @import("app_browser.zig").openLink(a, a.selected orelse "default", url);
+    }
+    if (str(scene, "browseState")) |bs| {
+        const bc = a.ensureBrowseClient();
+        if (std.mem.eql(u8, bs, "needs_browse_install")) {
+            bc.state = .needs_browse_install;
+        } else if (std.mem.eql(u8, bs, "waiting_browse_launch")) {
+            bc.state = .waiting_browse_launch;
+        } else if (std.mem.eql(u8, bs, "pairing_pending")) {
+            bc.state = .pairing_pending;
+            bc.pair.code_display = "482 917".*;
+        } else if (std.mem.eql(u8, bs, "discovered")) {
+            bc.state = .discovered;
+        }
+    }
 }
 
 /// Runs frames until the view is still, giving every chat on screen (the

@@ -103,7 +103,7 @@ test "retention 309 a clipped header retains its invocation until the pane has r
     try h.a.transcript.apply(doc.value);
     h.t.settle(1);
     try h.click("Ran 1 command");
-    h.t.resize(420, 1000);
+    h.t.resize(360, 1000);
     h.t.settle(1);
     try h.click("Run");
     try testing.expect(h.t.containsText("\"command\""));
@@ -460,4 +460,68 @@ test "a newly mounted agent title settles to its actual available width" {
     try h.a.transcript.apply(parsed.value);
     h.t.settle(0.3);
     try testing.expect(h.t.hasText("Review synthetic glyph clipping"));
+}
+
+test "narrow split tool tree shows target filenames and commands instead of anonymous verbs" {
+    const Fixture = struct {
+        a: App,
+        fn view(f: *@This(), c: *ui.Context) void {
+            f.a.view.chrome.width = c.size.w;
+            f.a.view.chrome.chat_width = c.size.w;
+            const k = @import("theme.zig").colors(true);
+            const box = ui.div(c).column().sizeFull().bg(k.background).px(16).py(10);
+            defer box.end();
+            const entry = &f.a.transcript.entries.items[0];
+            @import("view_tool_tree.zig").group(c, &f.a, k, entry, entry.parts.items, false, "synthetic-parent");
+        }
+    };
+    @import("theme.zig").registerFonts();
+    var f: Fixture = .{ .a = .init(testing.allocator, testing.io, 1) };
+    defer f.a.deinit();
+    f.a.offscreen = true;
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"reply","role":"assistant","status":"complete","parts":[
+        \\ {"id":"r1","kind":"tool","call":{"kind":"readFile","path":"src/view_diffs.zig"},"resolved":true,"output":"fn diff() void {}"},
+        \\ {"id":"r2","kind":"tool","call":{"kind":"readFile","path":"src/view_composer.zig"},"resolved":true,"output":"fn pill() void {}"},
+        \\ {"id":"e1","kind":"tool","call":{"kind":"exec","command":"zig build test"},"resolved":true,"output":"12 passed"},
+        \\ {"id":"e2","kind":"tool","call":{"kind":"exec","command":"git status --short"},"resolved":true,"output":"M src/view_diffs.zig"},
+        \\ {"id":"ed","kind":"tool","call":{"kind":"editFile","path":"src/view_tool_tree.zig"},"resolved":true,"diffStats":[{"path":"src/view_tool_tree.zig","additions":8,"deletions":3}]}]}]}
+    , .{});
+    defer parsed.deinit();
+    try f.a.transcript.apply(parsed.value);
+    f.a.view.toggleGroup(f.a.gpa, "synthetic-parent/reply/r1", false);
+
+    for ([_]f32{ 160, 190, 240, 320 }) |w| {
+        var t: ui.Tester = undefined;
+        try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = w, .height = 340, .scale = 2, .dark = true });
+        defer t.deinit();
+        t.settle(1.2);
+        if (w == 160) if (std.c.getenv("NANO_NARROW_SNAP_DIR")) |dir| {
+            var buf: [1024]u8 = undefined;
+            const path = try std.fmt.bufPrint(&buf, "{s}/narrow-tool-tree.png", .{std.mem.span(dir)});
+            try t.screenshot(path);
+        };
+        if (w == 240) {
+            const file = try textRect(&t, "view_diffs.zig");
+            for (t.ctx.nodes.items) |node| switch (node.content) {
+                .text => |tx| if (std.mem.eql(u8, tx.str, "view_diffs.zig")) {
+                    const badge = t.ctx.node(node.parent).rect;
+                    try testing.expect(file.x + file.w <= badge.x + badge.w + 0.5);
+                },
+                else => {},
+            };
+            try testing.expect(t.hasText("5 tool calls"));
+        }
+        const expected_prefixes = [_][]const u8{ "view_di", "view_co", "zig bui", "git sta", "view_to" };
+        for (expected_prefixes) |prefix| {
+            var visible = false;
+            for (t.ctx.nodes.items) |node| switch (node.content) {
+                .text => |tx| if (std.mem.indexOf(u8, tx.str, prefix) != null and node.rect.w >= 28) {
+                    visible = true;
+                },
+                else => {},
+            };
+            if (!visible) return error.MissingNarrowToolTarget;
+        }
+    }
 }

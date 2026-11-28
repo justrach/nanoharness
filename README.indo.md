@@ -18,8 +18,9 @@ sesi dari perangkat lain yang tepercaya.
 | <img src="docs/media/readme/nanoharness-agents-light.png" alt="Pengaturan agen Harness terbaru dalam tema Light Mode" width="520"> | <img src="docs/media/readme/nanoharness-workspace-light.png" alt="Contoh percakapan graff dalam tema Light Mode" width="520"> |
 
 Pilih model, tinjau perubahan di samping percakapan, serta buka berkas dan
-peramban tanpa meninggalkan aplikasi. Desktop memakai Rust/GPUI; pendamping
-iOS memakai SwiftUI untuk menampilkan sesi tersinkron.
+peramban tanpa meninggalkan aplikasi. Desktop dibuat dengan Zig di atas nanoui
+dan mesinnya dengan Rust; pendamping iOS memakai SwiftUI untuk menampilkan sesi
+tersinkron.
 
 ### Terhubung dengan CodeGraff
 
@@ -31,17 +32,16 @@ di [pemberitahuan pihak ketiga](THIRD_PARTY_NOTICES.md).
 
 ## Jalankan dari sumber
 
-Gunakan versi Rust dalam [`rust-toolchain.toml`](rust-toolchain.toml).
+Gunakan Zig `0.17.0` dan versi Rust dalam [`rust-toolchain.toml`](rust-toolchain.toml).
 
 | Platform | Perintah |
 | --- | --- |
 | macOS | `./scripts/run-macos-dev.sh` |
-| Linux | `cargo build -p harness && ./target/debug/harness` |
-| Windows | `cargo run --locked -p harness` |
+| Linux | `cargo build -p harness-engine --bin harness-engine && (cd apps/nano && zig build) && apps/nano/zig-out/bin/harness-nano` |
+| Windows | `./scripts/package-windows.ps1 -ReleasesUrl https://github.com/justrach/nanoharness/releases/latest/download -CargoProfile release` → `target/package/harness-VERSION-windows-x86_64/harness-nano.exe` |
 
-Skrip macOS membuka `target/macos-dev/Harness.app`. Jalankan
-`./scripts/dev-demo.sh` untuk demo offline dengan sesi contoh. Petunjuk
-[Windows](docs/reference/windows-development.md) dan [peramban Linux](docs/reference/linux-browser.md)
+Skrip macOS membangun dan membuka `target/macos-dev/Harness.app` dengan data dan
+port mesinnya sendiri. Petunjuk [Windows](docs/reference/windows-development.md)
 tersedia terpisah.
 
 ## Cara kerja

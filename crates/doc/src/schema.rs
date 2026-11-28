@@ -56,9 +56,10 @@ pub struct SessionMessageEntry {
     pub status: Option<MessageStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation_of: Option<String>,
-    /// Wall-clock length of this assistant turn, stamped when the segment
-    /// finishes. Absent on user rows, live streams, and docs written before
-    /// the field existed.
+    /// Active awake duration of this assistant turn, stamped when the segment
+    /// finishes (monotonic clock where available, excluding system sleep, with
+    /// wall-clock fallback only when resumed without an explicit origin).
+    /// Absent on user rows, live streams, and docs written before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<i64>,
 }
@@ -80,6 +81,14 @@ struct DocPartJson {
     title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     script: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    visibility: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     text: Option<String>,
     /// Thinking body for `kind: "reasoning"` (additive). Deliberately NOT the
@@ -160,6 +169,33 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
                 kind: "visual".into(),
                 title: Some(title.clone()),
                 script: Some(script.clone()),
+                ..Default::default()
+            }
+        }
+        MessagePart::Artifact {
+            id,
+            artifact_id,
+            title,
+            format,
+            visibility,
+            url,
+        } => {
+            harness_proto::artifact::validate_artifact(
+                artifact_id,
+                title,
+                format,
+                visibility,
+                url,
+            )
+            .map_err(|error| DocError::Schema(error.into()))?;
+            DocPartJson {
+                id: id.clone(),
+                kind: "artifact".into(),
+                artifact_id: Some(artifact_id.clone()),
+                title: Some(title.trim().to_owned()),
+                format: Some(format.clone()),
+                visibility: Some(visibility.clone()),
+                url: Some(url.clone()),
                 ..Default::default()
             }
         }
@@ -265,11 +301,55 @@ fn visual_part(id: String, title: Option<String>, script: Option<String>) -> Mes
     }
 }
 
+/// Keep invalid or off-origin artifact records out of rendering, including salvage reads.
+fn artifact_part(
+    id: String,
+    artifact_id: Option<String>,
+    title: Option<String>,
+    format: Option<String>,
+    visibility: Option<String>,
+    url: Option<String>,
+) -> MessagePart {
+    match (artifact_id, title, format, visibility, url) {
+        (Some(artifact_id), Some(title), Some(format), Some(visibility), Some(url))
+            if harness_proto::artifact::validate_artifact(
+                &artifact_id,
+                &title,
+                &format,
+                &visibility,
+                &url,
+            )
+            .is_ok() =>
+        {
+            MessagePart::Artifact {
+                id,
+                artifact_id,
+                title: title.trim().to_owned(),
+                format,
+                visibility,
+                url,
+            }
+        }
+        _ => MessagePart::Text {
+            id,
+            text: String::new(),
+        },
+    }
+}
+
 /// Doc part json → app part (mirror of `fromDocParts`; malformed degrades to empty text).
 fn from_doc_part(p: DocPartJson) -> MessagePart {
     match p.kind.as_str() {
         "image" => image_part(p.id, p.path, p.name, p.mime_type),
         "visual" => visual_part(p.id, p.title, p.script),
+        "artifact" => artifact_part(
+            p.id,
+            p.artifact_id,
+            p.title,
+            p.format,
+            p.visibility,
+            p.url,
+        ),
         "tool" => match p.call.and_then(|c| serde_json::from_value(c).ok()) {
             Some(call) => MessagePart::Tool {
                 id: p.id,
@@ -650,6 +730,73 @@ impl SessionDoc {
         Ok(join_continuation_entries(entries))
     }
 
+    /// Read the transcript's newest entries — each WHOLE and joined exactly as
+    /// [`Self::read_entries`] + [`join_continuation_entries`] produce it — from
+    /// their Loro containers without expanding older history.
+    ///
+    /// Stops once `max_entries` have been read (and all included continuations
+    /// have found their root) or adding the next entry's parts would exceed
+    /// `max_parts` (no entry is ever read in part). Any continuation whose root
+    /// lies beyond the scan reach is dropped so it never appears as an orphan;
+    /// the full read that follows supplies the complete transcript.
+    pub fn read_newest_entries(
+        &self,
+        max_entries: usize,
+        max_parts: usize,
+    ) -> Result<Vec<SessionMessageEntry>, DocError> {
+        use loro::{Container, ValueOrContainer};
+        if max_entries == 0 || max_parts == 0 {
+            return Ok(Vec::new());
+        }
+        let messages = self.doc.get_list("messages");
+        let reach = max_entries.saturating_mul(4).max(max_entries + 16);
+        let mut parts_read = 0usize;
+        let mut entries = Vec::new();
+        let mut roots = std::collections::HashSet::new();
+        let mut missing = std::collections::HashSet::new();
+        for (scanned, index) in (0..messages.len()).rev().enumerate() {
+            if scanned >= reach || (entries.len() >= max_entries && missing.is_empty()) {
+                break;
+            }
+            let value = match messages.get(index) {
+                Some(ValueOrContainer::Container(Container::Map(map))) => {
+                    let parts = match map.get("parts") {
+                        Some(ValueOrContainer::Container(Container::List(parts))) => parts.len(),
+                        _ => 0,
+                    };
+                    if parts_read + parts > max_parts {
+                        break;
+                    }
+                    parts_read += parts;
+                    map.get_deep_value().to_json_value()
+                }
+                Some(ValueOrContainer::Value(value)) => value.to_json_value(),
+                _ => continue,
+            };
+            let Ok(entry) = entry_from_json(value) else {
+                continue;
+            };
+            match &entry.continuation_of {
+                Some(root) if !roots.contains(root) => {
+                    missing.insert(root.clone());
+                }
+                Some(_) => {}
+                None => {
+                    missing.remove(&entry.id);
+                    roots.insert(entry.id.clone());
+                }
+            }
+            entries.push(entry);
+        }
+        entries.reverse();
+        entries.retain(|e| {
+            e.continuation_of
+                .as_ref()
+                .is_none_or(|root| roots.contains(root))
+        });
+        Ok(join_continuation_entries(entries))
+    }
+
     /// Read the commands ledger.
     ///
     /// Same skip-not-fail policy as `read_entries`: any device can append
@@ -1003,6 +1150,10 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
         ("mimeType", &doc_part.mime_type),
         ("title", &doc_part.title),
         ("script", &doc_part.script),
+        ("artifactId", &doc_part.artifact_id),
+        ("format", &doc_part.format),
+        ("visibility", &doc_part.visibility),
+        ("url", &doc_part.url),
     ] {
         if let Some(value) = value {
             map.insert(key, value.as_str())?;
@@ -1198,6 +1349,17 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
         let field = |key| obj.get(key).and_then(|v| v.as_str()).map(str::to_owned);
         return Some(visual_part(id, field("title"), field("script")));
     }
+    if obj.get("kind").and_then(|v| v.as_str()) == Some("artifact") {
+        let field = |key| obj.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+        return Some(artifact_part(
+            id,
+            field("artifactId"),
+            field("title"),
+            field("format"),
+            field("visibility"),
+            field("url"),
+        ));
+    }
     if obj.get("kind").and_then(|v| v.as_str()) == Some("image") {
         let field = |key| obj.get(key).and_then(|v| v.as_str()).map(str::to_owned);
         return Some(image_part(
@@ -1342,6 +1504,7 @@ pub struct SegmentWriter<'a> {
     /// Mirror of what we've written so far (part id → app part).
     written: Vec<MessagePart>,
     created_at: i64,
+    started_instant: Option<std::time::Instant>,
 }
 
 impl<'a> SegmentWriter<'a> {
@@ -1375,6 +1538,7 @@ impl<'a> SegmentWriter<'a> {
             entry_index,
             written: Vec::new(),
             created_at,
+            started_instant: Some(std::time::Instant::now()),
         })
     }
 
@@ -1397,6 +1561,7 @@ impl<'a> SegmentWriter<'a> {
             entry_index,
             written,
             created_at,
+            started_instant: None,
         }
     }
 
@@ -1508,9 +1673,21 @@ impl<'a> SegmentWriter<'a> {
     }
 
     /// Finish the stream: sync final parts, stamp a terminal status, and
-    /// record how long the turn ran (`now - createdAt`).
+    /// record how long the turn ran (preferring monotonic awake duration over
+    /// wall-clock `now - createdAt`).
     pub fn finish(self, folded: &[MessagePart], status: MessageStatus) -> Result<(), DocError> {
-        self.finish_slice(folded, status)
+        self.finish_slice(folded, status, None)
+    }
+
+    /// Finish the stream with an explicit awake duration in milliseconds
+    /// (used when the segment was resumed or its writer was created after turn start).
+    pub fn finish_with_duration(
+        self,
+        folded: &[MessagePart],
+        status: MessageStatus,
+        duration_ms: Option<i64>,
+    ) -> Result<(), DocError> {
+        self.finish_slice(folded, status, duration_ms)
     }
 
     pub fn finish_cows(
@@ -1518,23 +1695,44 @@ impl<'a> SegmentWriter<'a> {
         folded: &[std::borrow::Cow<'_, MessagePart>],
         status: MessageStatus,
     ) -> Result<(), DocError> {
-        self.finish_slice(folded, status)
+        self.finish_slice(folded, status, None)
+    }
+
+    pub fn finish_cows_with_duration(
+        self,
+        folded: &[std::borrow::Cow<'_, MessagePart>],
+        status: MessageStatus,
+        duration_ms: Option<i64>,
+    ) -> Result<(), DocError> {
+        self.finish_slice(folded, status, duration_ms)
     }
 
     fn finish_slice<P: std::borrow::Borrow<MessagePart>>(
         mut self,
         folded: &[P],
         status: MessageStatus,
+        duration_ms: Option<i64>,
     ) -> Result<(), DocError> {
         self.sync_slice(folded)?;
         let map = self.entry_map()?;
         map.insert("status", status_str(status))?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(self.created_at);
-        if self.created_at > 0 {
-            map.insert("durationMs", (now - self.created_at).max(0))?;
+        let elapsed = duration_ms
+            .map(|ms| ms.max(0))
+            .or_else(|| {
+                self.started_instant
+                    .map(|s| s.elapsed().as_millis().min(i64::MAX as u128) as i64)
+            })
+            .or_else(|| {
+                (self.created_at > 0).then(|| {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(self.created_at);
+                    (now - self.created_at).max(0)
+                })
+            });
+        if let Some(ms) = elapsed {
+            map.insert("durationMs", ms)?;
         }
         self.doc.doc.commit();
         Ok(())
@@ -1557,6 +1755,10 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
         ("mimeType", &doc_part.mime_type),
         ("title", &doc_part.title),
         ("script", &doc_part.script),
+        ("artifactId", &doc_part.artifact_id),
+        ("format", &doc_part.format),
+        ("visibility", &doc_part.visibility),
+        ("url", &doc_part.url),
     ] {
         if let Some(value) = value {
             map.insert(key, value.as_str())?;
@@ -1958,6 +2160,54 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn generated_artifact_persists_updates_roundtrips_and_salvages() {
+        let art_id = "art-0123456789abcdef01234567";
+        let url = format!("https://codegraff.com/a/{art_id}");
+        let doc = SessionDoc::init("artifacts").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a", "owner", 1).unwrap();
+        let mut parts = vec![MessagePart::Artifact {
+            id: format!("show-artifact:{art_id}"),
+            artifact_id: art_id.into(),
+            title: "Diagram".into(),
+            format: "html".into(),
+            visibility: "private".into(),
+            url: url.clone(),
+        }];
+        writer.sync(&parts).unwrap();
+        if let MessagePart::Artifact { visibility, .. } = &mut parts[0] {
+            *visibility = "public".into();
+        }
+        writer.sync(&parts).unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0].parts, parts);
+        let valid = serde_json::json!({
+            "kind": "artifact",
+            "id": "a1",
+            "artifactId": art_id,
+            "title": "Diagram",
+            "format": "html",
+            "visibility": "private",
+            "url": url,
+            "isError": 42
+        });
+        assert!(matches!(
+            salvage_part(&valid, "a", 0),
+            Some(MessagePart::Artifact { .. })
+        ));
+        for bad in [
+            serde_json::json!({"kind":"artifact", "id":"a1", "text":"must not leak"}),
+            serde_json::json!({"kind":"artifact", "id":"a1", "artifactId":"bad", "title":"X", "format":"html", "visibility":"private", "url":"https://codegraff.com/a/bad"}),
+            serde_json::json!({"kind":"artifact", "id":"a1", "artifactId":art_id, "title":"X", "format":"html", "visibility":"private", "url":format!("{url}?t=secret")}),
+        ] {
+            assert!(
+                matches!(from_doc_part(serde_json::from_value(bad.clone()).unwrap()), MessagePart::Text { text, .. } if text.is_empty())
+            );
+            assert!(
+                matches!(salvage_part(&bad, "a", 0), Some(MessagePart::Text { text, .. }) if text.is_empty())
+            );
+        }
     }
 
     #[test]
@@ -2697,5 +2947,126 @@ mod context_usage_tests {
         assert_eq!(rebuilt.context_usage(), host.context_usage());
         rebuilt.clear_context_usage().unwrap();
         assert_eq!(rebuilt.context_usage(), None);
+    }
+
+    #[test]
+    fn read_newest_entries_reads_whole_entries_and_joins_continuations() {
+        let doc = SessionDoc::init("newest-tail").unwrap();
+        for i in 0..8 {
+            doc.push_message(&SessionMessageEntry {
+                id: format!("m{i}"),
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Text {
+                    id: format!("p{i}"),
+                    text: format!("body {i}"),
+                }],
+                created_at: i as i64,
+                device_id: "dev".into(),
+                status: Some(MessageStatus::Complete),
+                continuation_of: None,
+                duration_ms: None,
+            })
+            .unwrap();
+        }
+        // Continuation of m5 placed at the tail: reading 2 entries must pull m5's root too.
+        doc.push_message(&SessionMessageEntry {
+            id: "m5-cont".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Text {
+                id: "p5c".into(),
+                text: "continued".into(),
+            }],
+            created_at: 9,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: Some("m5".into()),
+            duration_ms: None,
+        })
+        .unwrap();
+
+        let newest = doc.read_newest_entries(2, 64).unwrap();
+        let ids: Vec<&str> = newest.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["m5", "m6", "m7"]);
+        assert_eq!(newest[0].parts.len(), 2);
+        // Zero part budget reads no partial entries.
+        assert!(doc.read_newest_entries(4, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn segment_writer_begin_uses_monotonic_duration_not_wall_clock_skew() {
+        let doc = SessionDoc::init("duration-monotonic").unwrap();
+        let skewed_created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            - 54 * 60 * 1000;
+        let w = SegmentWriter::begin(&doc, "e1", "dev", skewed_created_at).unwrap();
+        w.finish(
+            &[MessagePart::Text {
+                id: "p1".into(),
+                text: "done".into(),
+            }],
+            MessageStatus::Complete,
+        )
+        .unwrap();
+        let entries = doc.read_entries().unwrap();
+        let d = entries[0].duration_ms.expect("durationMs stamped");
+        assert!(
+            d < 5_000,
+            "expected monotonic duration < 5s despite 54m wall-clock skew, got {d}"
+        );
+    }
+
+    #[test]
+    fn segment_writer_resume_uses_explicit_duration_over_wall_clock() {
+        let doc = SessionDoc::init("duration-explicit").unwrap();
+        let skewed_created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            - 54 * 60 * 1000;
+        let w = SegmentWriter::begin(&doc, "e1", "dev", skewed_created_at).unwrap();
+        let (ix, written) = w.into_state();
+        let resumed = SegmentWriter::resume(&doc, ix, written);
+        resumed
+            .finish_with_duration(
+                &[MessagePart::Text {
+                    id: "p1".into(),
+                    text: "resumed".into(),
+                }],
+                MessageStatus::Complete,
+                Some(612_000),
+            )
+            .unwrap();
+        let entries = doc.read_entries().unwrap();
+        assert_eq!(entries[0].duration_ms, Some(612_000));
+    }
+
+    #[test]
+    fn segment_writer_resume_falls_back_to_wall_clock_when_no_duration_given() {
+        let doc = SessionDoc::init("duration-fallback").unwrap();
+        let past_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            - 10_000;
+        let w = SegmentWriter::begin(&doc, "e1", "dev", past_ms).unwrap();
+        let (ix, written) = w.into_state();
+        let resumed = SegmentWriter::resume(&doc, ix, written);
+        resumed
+            .finish(
+                &[MessagePart::Text {
+                    id: "p1".into(),
+                    text: "fallback".into(),
+                }],
+                MessageStatus::Complete,
+            )
+            .unwrap();
+        let entries = doc.read_entries().unwrap();
+        let d = entries[0].duration_ms.expect("durationMs stamped");
+        assert!(
+            d >= 9_000,
+            "resumed writer without explicit duration falls back to wall clock, got {d}"
+        );
     }
 }

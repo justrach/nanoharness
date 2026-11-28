@@ -53,13 +53,13 @@ pub const Servers = workspace.List(Server, parseServer);
 
 /// The page's state, kept between visits as the GPUI app keeps its page.
 pub const Mcp = struct {
-    phase: enum { idle, loading, loaded, failed } = .idle,
+    phase: enum { idle, loading, recovering, loaded, partial, failed } = .idle,
     servers: Servers,
     failure: std.ArrayList(u8) = .empty,
     /// An action's error, over the list; cleared by a click.
     notice: std.ArrayList(u8) = .empty,
     /// The server an action is running for; "" for Check all.
-    busy: ?std.ArrayList(u8) = null,
+    busy: ?struct { name: []const u8, call: ?u64 = null } = null,
     open: std.StringHashMapUnmanaged(void) = .empty,
     /// The project (its space id) the last load was for (`McpTarget`);
     /// none for every project, as before the engine was up.
@@ -73,10 +73,19 @@ pub const Mcp = struct {
         m.servers.deinit();
         m.failure.deinit(gpa);
         m.notice.deinit(gpa);
-        if (m.busy) |*b| b.deinit(gpa);
+        m.endAction(gpa);
         m.closeAll(gpa);
         m.open.deinit(gpa);
         m.target.deinit(gpa);
+    }
+
+    fn loading(m: *const Mcp) bool {
+        return m.phase == .loading or m.phase == .recovering;
+    }
+
+    fn endAction(m: *Mcp, gpa: Allocator) void {
+        if (m.busy) |b| gpa.free(b.name);
+        m.busy = null;
     }
 
     fn closeAll(m: *Mcp, gpa: Allocator) void {
@@ -89,9 +98,9 @@ pub const Mcp = struct {
 /// A state's words and its dot's colour (`McpServerState`).
 pub fn stateLabel(s: []const u8) []const u8 {
     const names = .{
-        .{ "ready", "Connected" },          .{ "on_demand", "Starts on first use" }, .{ "connecting", "Connecting" },
-        .{ "failed", "Failed" },            .{ "needs_login", "Sign-in required" },  .{ "off", "Off" },
-        .{ "opt_in", "Off (optional)" },    .{ "not_started", "Not started" },
+        .{ "ready", "Connected" },       .{ "on_demand", "Starts on first use" }, .{ "connecting", "Connecting" },
+        .{ "failed", "Failed" },         .{ "needs_login", "Sign-in required" },  .{ "off", "Off" },
+        .{ "opt_in", "Off (optional)" }, .{ "not_started", "Not started" },
     };
     inline for (names) |n| if (std.mem.eql(u8, s, n[0])) return n[1];
     return "Not checked yet";
@@ -115,25 +124,38 @@ fn retargeted(a: *const App) bool {
     return !std.mem.eql(u8, a.mcp.target.items, a.space orelse "");
 }
 
-fn load(a: *App) void {
-    a.mcp.phase = .loading;
+fn load(a: *App, recovering: bool) void {
+    const m = &a.mcp;
+    m.notice.clearRetainingCapacity();
     // Without the engine there's no list, and the target stays as it was.
-    if (a.engine.up()) {
-        a.mcp.target.clearRetainingCapacity();
-        a.mcp.target.appendSlice(a.gpa, a.space orelse "") catch {};
+    if (a.engine.up() and retargeted(a)) {
+        // A pending action belongs to the previous project, even if it
+        // completes after the new list has loaded.
+        m.endAction(a.gpa);
+        m.closeAll(a.gpa);
+        const target = a.space orelse "";
+        m.target.ensureTotalCapacity(a.gpa, target.len) catch {
+            fail(a, "Could not load project MCP servers");
+            return;
+        };
+        m.target.clearRetainingCapacity();
+        m.target.appendSliceAssumeCapacity(target);
     }
-    if (project(a)) |p| {
-        a.call("ListMcpServers", .{ .cwd = p.path }, .of(App, a, onList));
-    } else a.call("ListMcpServers", .{}, .of(App, a, onList));
+    m.phase = if (recovering) .recovering else .loading;
+    const handler: rpc.Handler = .of(App, a, onList);
+    const call = if (project(a)) |p|
+        a.engine.call("ListMcpServers", .{ .cwd = p.path }, handler)
+    else
+        a.engine.call("ListMcpServers", rpc.empty, handler);
+    if (call == null and m.loading()) onList(a, 0, .{ .err = "Could not send MCP list request" });
 }
 
 fn onList(a: *App, _: u64, r: rpc.Reply) void {
     switch (r) {
-        .ok => |v| {
-            a.mcp.servers.replace(v) catch return fail(a, "Unexpected reply");
+        .ok => |v| if (a.mcp.servers.replace(v)) |_| {
             a.mcp.phase = .loaded;
-            a.mcp.closeAll(a.gpa);
-        },
+            a.mcp.failure.clearRetainingCapacity();
+        } else |_| fail(a, "Unexpected reply"),
         .err => |e| fail(a, if (std.mem.eql(u8, e, "not connected")) "Engine not connected" else e),
         else => {},
     }
@@ -141,34 +163,48 @@ fn onList(a: *App, _: u64, r: rpc.Reply) void {
 }
 
 fn fail(a: *App, why: []const u8) void {
-    a.mcp.phase = .failed;
+    a.mcp.phase = if (a.mcp.phase == .recovering) .partial else .failed;
     a.mcp.failure.clearRetainingCapacity();
     a.mcp.failure.appendSlice(a.gpa, why) catch {};
 }
 
 fn act(a: *App, action: []const u8, name: ?[]const u8) void {
-    if (a.mcp.busy != null) return;
-    a.mcp.notice.clearRetainingCapacity();
-    var b: std.ArrayList(u8) = .empty;
-    b.appendSlice(a.gpa, name orelse "") catch {};
-    a.mcp.busy = b;
-    if (project(a)) |p| {
-        a.call("McpServerAction", .{ .action = action, .name = name, .cwd = p.path }, .of(App, a, onAction));
-    } else a.call("McpServerAction", .{ .action = action, .name = name }, .of(App, a, onAction));
+    const m = &a.mcp;
+    if (m.busy != null or m.loading() or retargeted(a)) return;
+    m.notice.clearRetainingCapacity();
+    m.busy = .{ .name = a.gpa.dupe(u8, name orelse "") catch return };
+    const call = if (project(a)) |p|
+        a.engine.call("McpServerAction", .{ .action = action, .name = name, .cwd = p.path }, .of(App, a, onAction))
+    else
+        a.engine.call("McpServerAction", .{ .action = action, .name = name }, .of(App, a, onAction));
+    // Failed sends can reply synchronously, clearing busy before call returns.
+    if (m.busy) |*b| {
+        if (call) |id| b.call = id else onAction(a, 0, .{ .err = "Could not send MCP action" });
+    }
 }
 
-fn onAction(a: *App, _: u64, r: rpc.Reply) void {
-    if (a.mcp.busy) |*b| b.deinit(a.gpa);
-    a.mcp.busy = null;
+fn onAction(a: *App, id: u64, r: rpc.Reply) void {
+    const m = &a.mcp;
+    const busy = m.busy orelse return;
+    if (busy.call) |call| if (call != id) return;
+    const check_all = busy.name.len == 0;
+    m.endAction(a.gpa);
+    if (retargeted(a)) return a.redraw();
     switch (r) {
-        .ok => |v| merge(a, v) catch {
-            a.mcp.notice.clearRetainingCapacity();
-            a.mcp.notice.appendSlice(a.gpa, "Unexpected reply") catch {};
+        .ok => |v| if (v != .array) {
+            m.notice.appendSlice(a.gpa, "Unexpected reply") catch {};
+        } else if (check_all and (m.phase == .failed or m.phase == .partial)) {
+            // graff reconnect --all returns only enabled servers. Keep those
+            // results, but reload the full list to include switched-off ones.
+            m.servers.replace(v) catch {
+                m.notice.appendSlice(a.gpa, "Unexpected reply") catch {};
+                return a.redraw();
+            };
+            load(a, true);
+        } else merge(a, v) catch {
+            m.notice.appendSlice(a.gpa, "Unexpected reply") catch {};
         },
-        .err => |e| {
-            a.mcp.notice.clearRetainingCapacity();
-            a.mcp.notice.appendSlice(a.gpa, e) catch {};
-        },
+        .err => |e| m.notice.appendSlice(a.gpa, e) catch {},
         else => {},
     }
     a.redraw();
@@ -176,7 +212,7 @@ fn onAction(a: *App, _: u64, r: rpc.Reply) void {
 
 /// The servers an action touched, in place by name; new ones after.
 fn merge(a: *App, reply: json.Value) !void {
-    if (a.mcp.phase != .loaded or reply != .array) return;
+    if (a.mcp.phase != .loaded and a.mcp.phase != .partial) return;
     var arena: std.heap.ArenaAllocator = .init(a.gpa);
     defer arena.deinit();
     const ar = arena.allocator();
@@ -220,21 +256,22 @@ fn asJson(ar: Allocator, s: Server) !json.Value {
 const phi: f32 = 1.618;
 
 pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
-    if (a.mcp.phase == .idle or (a.mcp.phase != .loading and a.engine.up() and retargeted(a))) load(a);
+    if (a.mcp.phase == .idle or (!a.mcp.loading() and a.engine.up() and retargeted(a))) load(a, false);
     const m = &a.mcp;
     {
         const h = ui.div(c).row().wFull().itemsCenter();
         defer h.end();
         set.header(c, k, "MCP servers", if (m.phase == .loaded and m.servers.items.len > 0) m.servers.items.len else null);
         ui.spacer(c);
-        const checking = if (m.busy) |b| b.items.len == 0 else false;
-        var b = ui.div(c).row().px(11).py(7).gap(6).itemsCenter().rounded(8).border(k.border).borderW(1).hover(k.ink(0.06));
-        if (checking) b = b.opacity(0.5);
+        const checking = if (m.busy) |b| b.name.len == 0 else false;
+        const actionable = m.busy == null and !m.loading() and !retargeted(a);
+        var b = ui.div(c).row().px(11).py(7).gap(6).itemsCenter().rounded(8).border(k.border).borderW(1);
+        b = if (actionable) b.hover(k.ink(0.06)) else b.opacity(0.5);
         defer b.end();
         const hot = b.hovered();
         icons.icon(c, .refresh, 14, k.muted, 0);
         ui.text(c, if (checking) "Checking…" else "Check all", .{ .size = 12, .line_height = 12 * phi, .color = if (hot) k.text else k.muted });
-        if (b.clicked()) act(a, "reconnect", null);
+        if (b.clicked() and actionable) act(a, "reconnect", null);
     }
     const copy = if (project(a)) |p|
         c.print("Servers graff starts for agents in {s}: this project's .mcp.json plus your user-level and imported servers. Reconnect runs a fresh handshake and refreshes the tools the next turn sees.", .{p.name})
@@ -247,13 +284,26 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
             set.space(c, 24);
             ui.text(c, "Loading MCP servers…", .{ .size = 12.5, .line_height = 12.5 * phi, .color = k.muted.alpha(0.6) });
         },
-        .failed => {
-            _ = errorStrip(c, k, m.failure.items);
+        .recovering => {
+            set.subtitle(c, k, "Loading the full list…", false);
+            if (!retargeted(a) and m.servers.items.len > 0) list(c, a, k);
+        },
+        .failed, .partial => {
+            const partial = m.phase == .partial;
+            const message = if (partial)
+                c.print("Couldn't load the full list. Only Check all results are available: {s}", .{m.failure.items})
+            else
+                m.failure.items;
+            _ = errorStrip(c, k, message);
             set.space(c, 8);
-            const r = ui.div(c).row().px(10).py(6).rounded(8).hover(k.ink(0.06));
-            defer r.end();
-            ui.text(c, "Retry", .{ .size = 12, .line_height = 12 * phi, .color = k.muted });
-            if (r.clicked()) load(a);
+            {
+                var r = ui.div(c).row().px(10).py(6).rounded(8);
+                r = if (m.busy == null) r.hover(k.ink(0.06)) else r.opacity(0.5);
+                defer r.end();
+                ui.text(c, "Retry", .{ .size = 12, .line_height = 12 * phi, .color = k.muted });
+                if (r.clicked() and m.busy == null) load(a, partial and !retargeted(a));
+            }
+            if (partial and m.servers.items.len > 0) list(c, a, k);
         },
         .loaded => if (m.servers.items.len == 0) empty(c, k) else list(c, a, k),
     }
@@ -304,7 +354,8 @@ fn list(c: *ui.Context, a: *App, k: theme.Colors) void {
 
 fn server(c: *ui.Context, a: *App, k: theme.Colors, s: Server) void {
     const m = &a.mcp;
-    const busy = if (m.busy) |b| (b.items.len == 0 and s.enabled) or std.mem.eql(u8, b.items, s.name) else false;
+    const actionable = m.busy == null and !m.loading() and !retargeted(a);
+    const busy = if (m.busy) |b| (b.name.len == 0 and s.enabled) or std.mem.eql(u8, b.name, s.name) else false;
     const open = m.open.contains(s.name);
     const box = ui.div(c).column().wFull();
     defer box.end();
@@ -355,10 +406,10 @@ fn server(c: *ui.Context, a: *App, k: theme.Colors, s: Server) void {
             }
         }
         if (sign_in) {
-            if (button(c, k, .@"key-minimalistic", if (busy) "Signing in…" else "Sign in", busy)) act(a, "login", s.name);
+            if (button(c, k, .@"key-minimalistic", if (busy) "Signing in…" else "Sign in", !actionable) and actionable) act(a, "login", s.name);
         }
-        if (s.enabled) if (button(c, k, .restart, if (busy) "Connecting…" else "Reconnect", busy)) act(a, "reconnect", s.name);
-        if (set.toggle(c, k, s.enabled, true)) act(a, if (s.enabled) "disable" else "enable", s.name);
+        if (s.enabled) if (button(c, k, .restart, if (busy) "Connecting…" else "Reconnect", !actionable) and actionable) act(a, "reconnect", s.name);
+        if (set.toggle(c, k, s.enabled, actionable)) act(a, if (s.enabled) "disable" else "enable", s.name);
     }
     if (r.clicked()) toggleOpen(a, s.name);
     if (!open) return;
@@ -408,6 +459,138 @@ fn button(c: *ui.Context, k: theme.Colors, icon: icons.Name, label: []const u8, 
 }
 
 const testing = std.testing;
+
+test "settings audit MCP Check all recovers a failed list without losing switched-off servers or expansion" {
+    const Harness = @import("tests_ui_tab_strip.zig").Harness;
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.engine.scene = try json.parseFromSlice(json.Value, testing.allocator,
+        \\{"ListMcpServers":{"$seq":[{"$err":"Synthetic MCP list failure"},
+        \\  [{"name":"demo-tools","state":"ready","toolCount":1,"tools":[{"name":"first-tool"}]},
+        \\   {"name":"demo-off","state":"off","enabled":false}]]},
+        \\ "McpServerAction":{"$seq":[[{"name":"demo-tools","state":"ready","toolCount":1,"tools":[{"name":"first-tool"}]}],
+        \\   [{"name":"demo-tools","state":"ready","toolCount":1,"tools":[{"name":"updated-tool"}]}]]}}
+    , .{});
+    h.a.engine.state = .connected;
+    h.a.settings.section = .mcp;
+    set.open(&h.a);
+    h.t.advance(0.2);
+    try testing.expect(h.t.hasText("Synthetic MCP list failure"));
+
+    try h.t.clickText("Check all");
+    h.t.advance(0.2);
+    try testing.expect(!h.t.hasText("Synthetic MCP list failure"));
+    try testing.expect(h.t.hasText("demo-tools"));
+    try testing.expect(h.t.hasText("demo-off"));
+    try testing.expect(!h.t.hasText("Retry"));
+
+    try h.t.clickText("demo-tools");
+    h.t.advance(0.1);
+    try testing.expect(h.t.hasText("first-tool"));
+    try h.t.clickText("Check all");
+    h.t.advance(0.2);
+    try testing.expect(h.t.hasText("updated-tool"));
+    try testing.expect(h.t.hasText("demo-off"));
+}
+
+test "settings audit MCP shows checked rows when the full-list recovery fails and Retry preserves expansion" {
+    const Harness = @import("tests_ui_tab_strip.zig").Harness;
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.engine.scene = try json.parseFromSlice(json.Value, testing.allocator,
+        \\{"ListMcpServers":{"$seq":[{"$err":"Synthetic initial failure"},{"$err":"Synthetic recovery failure"},
+        \\  [{"name":"demo-tools","state":"on_demand","tools":[{"name":"demo-tool"}]},{"name":"demo-off","enabled":false}]]},
+        \\ "McpServerAction":[{"name":"demo-tools","state":"ready","tools":[{"name":"demo-tool"}]}]}
+    , .{});
+    h.a.engine.state = .connected;
+    h.a.settings.section = .mcp;
+    set.open(&h.a);
+    h.t.advance(0.2);
+    try h.t.clickText("Check all");
+    h.t.advance(0.2);
+    try testing.expect(!h.t.hasText("Synthetic initial failure"));
+    try testing.expect(h.t.containsText("Synthetic recovery failure"));
+    try testing.expect(h.t.hasText("demo-tools"));
+    try testing.expect(!h.t.hasText("No MCP servers configured"));
+
+    try h.t.clickText("demo-tools");
+    h.t.advance(0.1);
+    try testing.expect(h.t.hasText("demo-tool"));
+    try h.t.clickText("Retry");
+    h.t.advance(0.2);
+    try testing.expect(h.t.hasText("demo-tool"));
+    try testing.expect(h.t.hasText("demo-off"));
+    try testing.expect(!h.t.containsText("Synthetic recovery failure"));
+}
+
+test "settings audit MCP disabled switch does not toggle the server disclosure" {
+    const Harness = @import("tests_ui_tab_strip.zig").Harness;
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.engine.scene = try json.parseFromSlice(json.Value, testing.allocator,
+        \\{"ListMcpServers":[{"name":"demo-tools","state":"ready"}],
+        \\ "McpServerAction":[{"name":"demo-tools","state":"ready"}]}
+    , .{});
+    h.a.engine.state = .connected;
+    h.a.settings.section = .mcp;
+    set.open(&h.a);
+    h.t.advance(0.2);
+    h.a.mcp.busy = .{ .name = try testing.allocator.dupe(u8, "demo-tools") };
+    h.t.advance(0.2);
+    const track = for (h.t.ctx.nodes.items) |node| {
+        if (node.rect.w == 32 and node.rect.h == 18 and node.rect.x > h.t.size.w / 2) break node.rect;
+    } else return error.MissingServerSwitch;
+    const before = h.a.engine.sent.items.len;
+    h.t.click(track.x + 16, track.y + 9);
+    try testing.expect(!h.a.mcp.open.contains("demo-tools"));
+    h.t.click(track.x + 16, track.y - 4);
+    try testing.expectEqual(before, h.a.engine.sent.items.len);
+    try testing.expect(!h.a.mcp.open.contains("demo-tools"));
+    try h.t.clickText("demo-tools");
+    try testing.expect(h.a.mcp.open.contains("demo-tools"));
+}
+
+test "settings audit MCP ignores Check all replies from the previous project" {
+    const Harness = @import("tests_ui_tab_strip.zig").Harness;
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.select(null, "local-project");
+    h.a.engine.scene = try json.parseFromSlice(json.Value, testing.allocator,
+        \\{"ListMcpServers":{"$seq":[[{"name":"local-tools"}],[{"name":"remote-tools"}]]},
+        \\ "McpServerAction":[{"name":"local-action-result"}]}
+    , .{});
+    h.a.engine.state = .connected;
+    h.a.settings.section = .mcp;
+    set.open(&h.a);
+    h.t.advance(0.2);
+    try testing.expect(h.t.hasText("local-tools"));
+
+    // Send the same action directly so we can hold the reply before the
+    // tester renders another frame and pumps the scene.
+    act(&h.a, "reconnect", null);
+    const held = try h.a.engine.queued.toOwnedSlice(testing.allocator);
+    defer {
+        for (held) |frame| testing.allocator.free(frame);
+        testing.allocator.free(held);
+    }
+    try testing.expectEqual(@as(usize, 1), held.len);
+    const action = try json.parseFromSlice(json.Value, testing.allocator, h.a.engine.sent.items[h.a.engine.sent.items.len - 1], .{});
+    defer action.deinit();
+    try testing.expectEqualStrings("McpServerAction", action.value.object.get("method").?.string);
+    try testing.expectEqualStrings("/synthetic/fieldnotes", action.value.object.get("params").?.object.get("cwd").?.string);
+
+    h.a.select(null, "remote-project");
+    h.t.advance(0.2);
+    try testing.expect(h.t.hasText("remote-tools"));
+    try h.a.engine.mux.dispatch(held[0]);
+    h.t.advance(0.2);
+    try testing.expect(h.t.hasText("remote-tools"));
+    try testing.expect(!h.t.hasText("local-action-result"));
+}
 
 test "servers read as the engine sends them, and state names as the GPUI app's" {
     var l: Servers = .init(testing.allocator);

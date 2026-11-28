@@ -129,6 +129,47 @@ mouse state. Harness's `retention selection window deactivation cancels` and
 `retention selection swallowed release` tests cover offscreen cancellation,
 cross-pane movement, exact Copy and the next ordinary selection.
 
+SDR-clean Windows D3D11/DirectWrite/DXGI parity is selectively cherry-picked
+from upstream `justrach/nanoui` `v0.14.11` (`07d7a34284aeab78ae4ea958a128ca3573bf2673`,
+commits `66b9741`, `0c71af4`, `ac97477`, `ac8dfb1`):
+- `src/ui/corner_sdf.hlsl`, `src/ui/shader.hlsl`, `src/ui/d3d11_glue.zig`,
+  `src/ui/d3d11.zig`, `src/ui/tests_d3d11.zig`, `src/windows/d3d.zig`, and
+  `src/windows/surface_gpu.zig` add continuous/circular `corner_sdf_aa`,
+  8-sample shadow blur with `shadow_dither`, multi-stop `gradient_stops` via
+  `StructuredBuf`, and explicit `DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709`
+  sRGB swap-chain configuration.
+- `src/ui/{dwrite,atlas_tt,text_tt,raster,tests_dwrite}.zig` add GDI Classic
+  per-analysis blend parameters/tags (`254`/`127`) and `GetGdiCompatibleGlyphMetrics`
+  whole-pixel advances + rounded kerning.
+- `src/ui/{gpu,paint,raster,shader.metal,shader.glsl,tests_raster}.zig`
+  preserve negative circular radii through rounded clip packing (`clipRound` /
+  `clipCorners`).
+Harness-local reduce-motion preference support adds
+`Context.system_reduce_motion` and `Context.reduce_motion_override` in
+`src/ui/context.zig`. `src/ui/a11y.zig` (macOS), `src/ios/surface.zig` and
+`src/android/{app,surface}.zig` record what the system asks for and apply an
+app's override before each frame, so Settings › Appearance's System/On/Off
+choice also governs the frame's scrolling. Harness's `settings controls:
+reduce motion` tests cover it.
+
+All Harness-local patches above (including `scroll_fade`, `d3d11_texture`,
+`d3d11_device`, `color_text`, `text_selection`, `should_terminate`, and
+`after_frame`) are retained, and HDR files (`d3d11_hdr.zig`, `hdr.hlsl`,
+`hdr_output.zig`) remain excluded.
+
+NanoHarness-local layout reuse in `src/ui/{layout,context}.zig`: `measure`
+returns a box's size without working it out again when it is asked for the
+width it was last measured at in the same layout (`Node.measured_at`, reset
+when the root is measured). `fitRow` and `arrange` measure a flexible child
+again at its share; without the reuse, rows nested in growing rows cost
+2^depth. `Context.layout_measures` counts the measures done and
+`Context.layout_reuse = false` restores measuring every request; the layout
+tests `nested flexible rows measure a box at most once per row around it` and
+`layout reusing measured boxes places every box as measuring each again does`
+check the cost and that every rect, size and line count is unchanged.
+`Node` and `Context` gained fields, so rebuild the native runtime through the
+package graph rather than reusing one compiled against the older layout.
+
 These changes live in this checked-in package, not an ignored download cache.
 
 To update: start with the pinned upstream distribution, retain the notices,

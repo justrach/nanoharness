@@ -1038,23 +1038,19 @@ structure SessionFooterLayout where
   showActions     : Bool
 deriving DecidableEq, Repr, BEq
 
-def sessionFooterFromInner (pad inner : Nat) : SessionFooterLayout :=
-  if inner < 28 then
-    { pad := 0, showCheckout := false, checkoutTextMax := 0, showBranch := false, branchTextMax := 0, showActions := false }
-  else if inner < 60 then
-    let textMax := if inner >= 54 then min 126 (inner - 34) else 0
-    { pad := pad, showCheckout := true, checkoutTextMax := textMax, showBranch := false, branchTextMax := 0, showActions := false }
-  else if inner < 132 then
-    let bMax := if inner >= 86 then min 126 (inner - 32 - 34) else 0
-    { pad := pad, showCheckout := true, checkoutTextMax := 0, showBranch := true, branchTextMax := bMax, showActions := false }
-  else
-    let each := (inner - 4) / 2
-    let textMax := min 126 (each - 34)
-    { pad := pad, showCheckout := true, checkoutTextMax := textMax, showBranch := true, branchTextMax := textMax, showActions := inner >= 360 }
-
 def sessionFooterLayout (slotW : Nat) : SessionFooterLayout :=
-  let pad := if slotW >= 200 then 10 else if slotW >= 36 then 4 else 0
-  sessionFooterFromInner pad (slotW - 2 * pad)
+  if slotW >= 260 then
+    let textMax := min 126 ((slotW - 92) / 2)
+    { pad := 10, showCheckout := true, checkoutTextMax := textMax, showBranch := true, branchTextMax := textMax, showActions := slotW >= 380 }
+  else if slotW >= 156 then
+    let bMax := min 126 (slotW - 86)
+    { pad := 10, showCheckout := true, checkoutTextMax := 0, showBranch := true, branchTextMax := bMax, showActions := false }
+  else if slotW >= 80 then
+    { pad := 10, showCheckout := true, checkoutTextMax := 0, showBranch := true, branchTextMax := 0, showActions := false }
+  else if slotW >= 48 then
+    { pad := 10, showCheckout := false, checkoutTextMax := 0, showBranch := true, branchTextMax := 0, showActions := false }
+  else
+    { pad := 0, showCheckout := false, checkoutTextMax := 0, showBranch := false, branchTextMax := 0, showActions := false }
 
 /-- Minimum horizontal width required to draw `l`'s visible icons and pads without clipping an icon. -/
 def sessionFooterIconFloor (l : SessionFooterLayout) : Nat :=
@@ -1072,45 +1068,23 @@ def sessionFooterMaxLabelsWidth (l : SessionFooterLayout) : Nat :=
   let pads := if l.showCheckout || l.showBranch then 2 * l.pad else 0
   pads + cW + gap + bW
 
-theorem session_footer_inner_fits (pad inner : Nat) :
-    sessionFooterIconFloor (sessionFooterFromInner pad inner) ≤ 2 * pad + inner ∧
-    sessionFooterMaxLabelsWidth (sessionFooterFromInner pad inner) ≤ 2 * pad + inner := by
-  unfold sessionFooterFromInner
-  by_cases h1 : inner < 28
-  · simp [h1, sessionFooterIconFloor, sessionFooterMaxLabelsWidth]
-  · by_cases h2 : inner < 60
-    · by_cases h2a : inner >= 54
-      · have hpos : 0 < min 126 (inner - 34) := by omega
-        simp [h1, h2, h2a, hpos, sessionFooterIconFloor, sessionFooterMaxLabelsWidth]
-        omega
-      · simp [h1, h2, h2a, sessionFooterIconFloor, sessionFooterMaxLabelsWidth]
-        omega
-    · by_cases h3 : inner < 132
-      · by_cases h3a : inner >= 86
-        · have hpos : 0 < min 126 (inner - 32 - 34) := by omega
-          simp [h1, h2, h3, h3a, hpos, sessionFooterIconFloor, sessionFooterMaxLabelsWidth]
-          omega
-        · simp [h1, h2, h3, h3a, sessionFooterIconFloor, sessionFooterMaxLabelsWidth]
-          omega
-      · have hpos : 0 < min 126 ((inner - 4) / 2 - 34) := by omega
-        simp [h1, h2, h3, hpos, sessionFooterIconFloor, sessionFooterMaxLabelsWidth]
-        omega
-
 theorem session_footer_never_overflows_slot (slotW : Nat) :
     sessionFooterIconFloor (sessionFooterLayout slotW) ≤ slotW ∧
     sessionFooterMaxLabelsWidth (sessionFooterLayout slotW) ≤ slotW := by
-  unfold sessionFooterLayout
-  by_cases h200 : slotW >= 200
-  · simp only [h200, ↓reduceIte]
-    have hfit := session_footer_inner_fits 10 (slotW - 2 * 10)
+  unfold sessionFooterLayout sessionFooterIconFloor sessionFooterMaxLabelsWidth
+  by_cases h260 : slotW >= 260
+  · have hpos : min 126 ((slotW - 92) / 2) > 0 := by omega
+    simp [h260, hpos]
     omega
-  · by_cases h36 : slotW >= 36
-    · simp only [h200, h36, ↓reduceIte]
-      have hfit := session_footer_inner_fits 4 (slotW - 2 * 4)
+  · by_cases h156 : slotW >= 156
+    · have hpos : min 126 (slotW - 86) > 0 := by omega
+      simp [h260, h156, hpos]
       omega
-    · simp only [h200, h36, ↓reduceIte]
-      have hfit := session_footer_inner_fits 0 (slotW - 2 * 0)
-      omega
+    · by_cases h80 : slotW >= 80
+      · simp [h260, h156, h80]
+      · by_cases h48 : slotW >= 48
+        · simp [h260, h156, h80, h48]
+        · simp [h260, h156, h80, h48]
 
 theorem session_footer_wide_preserves_full_labels (slotW : Nat) (h : slotW ≥ 380) :
     let l := sessionFooterLayout slotW
@@ -1119,16 +1093,13 @@ theorem session_footer_wide_preserves_full_labels (slotW : Nat) (h : slotW ≥ 3
     l.showBranch = true ∧
     l.branchTextMax = 126 ∧
     l.showActions = true := by
-  unfold sessionFooterLayout sessionFooterFromInner
-  have h1 : slotW >= 200 := by omega
-  have h2 : ¬(slotW - 20 < 28) := by omega
-  have h3 : ¬(slotW - 20 < 60) := by omega
-  have h4 : ¬(slotW - 20 < 132) := by omega
-  have h5 : min 126 ((slotW - 20 - 4) / 2 - 34) = 126 := by omega
-  have h6 : decide (slotW - 20 ≥ 360) = true := by
+  unfold sessionFooterLayout
+  have h1 : slotW >= 260 := by omega
+  have h2 : min 126 ((slotW - 92) / 2) = 126 := by omega
+  have h3 : decide (slotW ≥ 380) = true := by
     rw [decide_eq_true_eq]
     omega
-  simp [h1, h2, h3, h4, h5, h6]
+  simp [h1, h2, h3]
 
 /-! ## Zeron Sidebar Titlebar Cluster, Smooth Disclosure & Agent-Update Island -/
 

@@ -68,6 +68,51 @@ pub const Listener = struct {
         return pathStartsWith(l.cwd, root);
     }
 
+    /// True when the listening process is a recognized test runner whose
+    /// fixture server should never receive discovery `HEAD /` probes.
+    pub fn isTestRun(l: Listener) bool {
+        if (l.args.len == 0) return false;
+        const cmd = baseName(l.args[0]);
+        for ([_][]const u8{
+            "pytest", "vitest",  "jest",    "mocha",      "ava",
+            "rspec",  "phpunit", "cypress", "playwright", "bun-test",
+            "tap",
+        }) |runner| {
+            if (std.ascii.eqlIgnoreCase(cmd, runner)) return true;
+        }
+        // Check `cargo test`, `go test`, `zig build test`, `python -m pytest|unittest`, `npm|pnpm|yarn|bun test`.
+        for (l.args[1..], 1..) |arg, idx| {
+            const b = baseName(arg);
+            if (std.ascii.eqlIgnoreCase(b, "pytest") or std.ascii.eqlIgnoreCase(b, "vitest") or
+                std.ascii.eqlIgnoreCase(b, "jest") or std.ascii.eqlIgnoreCase(b, "mocha") or
+                std.ascii.eqlIgnoreCase(b, "unittest") or std.ascii.eqlIgnoreCase(b, "playwright"))
+            {
+                return true;
+            }
+            if (std.mem.eql(u8, arg, "test")) {
+                if (idx == 1 and (std.ascii.eqlIgnoreCase(cmd, "cargo") or std.ascii.eqlIgnoreCase(cmd, "go") or
+                    std.ascii.eqlIgnoreCase(cmd, "npm") or std.ascii.eqlIgnoreCase(cmd, "pnpm") or
+                    std.ascii.eqlIgnoreCase(cmd, "yarn") or std.ascii.eqlIgnoreCase(cmd, "bun") or
+                    std.ascii.eqlIgnoreCase(cmd, "deno")))
+                {
+                    return true;
+                }
+                if (idx == 2 and std.ascii.eqlIgnoreCase(cmd, "zig") and std.mem.eql(u8, l.args[1], "build")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    fn baseName(path: []const u8) []const u8 {
+        const trimmed = std.mem.trimEnd(u8, path, "/\\");
+        const slash = std.mem.lastIndexOfAny(u8, trimmed, "/\\");
+        const base = if (slash) |s| trimmed[s + 1 ..] else trimmed;
+        if (std.ascii.endsWithIgnoreCase(base, ".exe")) return base[0 .. base.len - 4];
+        return base;
+    }
+
     fn dupe(l: Listener, a: Allocator) !Listener {
         const args = try a.alloc([]const u8, l.args.len);
         for (l.args, 0..) |arg, i| args[i] = try a.dupe(u8, arg);
@@ -324,7 +369,10 @@ fn uuidV4(io: Io, out: *[36]u8) void {
 
 /// A socket is probed until it answers HTTP once; that verdict holds while the
 /// same process owns it. A silent one is retried with a capped backoff.
+/// Sockets are never probed before staying up for `probe_settle_ms` so
+/// short-lived test fixture servers are never hit with stray `HEAD /` probes.
 pub const ProbeMemory = struct {
+    pub const probe_settle_ms: i64 = 3_000;
     pub const initial_backoff_ms: i64 = 4_000;
     pub const max_backoff_ms: i64 = 60_000;
 
@@ -332,45 +380,93 @@ pub const ProbeMemory = struct {
     const Verdict = union(enum) { http, not_http: struct { retry_at: i64, backoff: i64 } };
 
     verdicts: std.ArrayList(struct { key: Key, verdict: Verdict }) = .empty,
+    first_seen: std.ArrayList(struct { key: Key, seen_at: i64 }) = .empty,
 
     pub fn deinit(m: *ProbeMemory, gpa: Allocator) void {
         m.verdicts.deinit(gpa);
+        m.first_seen.deinit(gpa);
     }
 
     fn keyOf(l: Listener) Key {
         return .{ .pid = l.pid, .started_at = l.started_at, .address = l.address };
     }
 
+    fn keyEql(a: Key, b: Key) bool {
+        return a.pid == b.pid and a.started_at == b.started_at and a.address.eql(b.address);
+    }
+
     fn find(m: *ProbeMemory, k: Key) ?usize {
         for (m.verdicts.items, 0..) |v, i| {
-            if (v.key.pid == k.pid and v.key.started_at == k.started_at and v.key.address.eql(k.address)) return i;
+            if (keyEql(v.key, k)) return i;
+        }
+        return null;
+    }
+
+    fn findSeen(m: *ProbeMemory, k: Key) ?usize {
+        for (m.first_seen.items, 0..) |s, i| {
+            if (keyEql(s.key, k)) return i;
         }
         return null;
     }
 
     pub const Plan = enum { known, probe, skip };
 
-    /// Forget verdicts for sockets no longer listed, then classify each.
-    pub fn plan(m: *ProbeMemory, candidates: []const Observation, now_ms: i64, out: []Plan) void {
+    /// Forget verdicts and settle timestamps for sockets no longer listed,
+    /// then classify each candidate. Returns the earliest timestamp when a
+    /// still-settling socket becomes eligible to probe.
+    pub fn plan(m: *ProbeMemory, gpa: Allocator, candidates: []const Observation, now_ms: i64, out: []Plan) ?i64 {
         var i: usize = 0;
         while (i < m.verdicts.items.len) {
             const k = m.verdicts.items[i].key;
             var present = false;
             for (candidates) |c| {
-                const ck = keyOf(c.listener);
-                if (ck.pid == k.pid and ck.started_at == k.started_at and ck.address.eql(k.address)) {
+                if (keyEql(keyOf(c.listener), k)) {
                     present = true;
                     break;
                 }
             }
             if (present) i += 1 else _ = m.verdicts.swapRemove(i);
         }
-        for (candidates, 0..) |c, idx| {
-            out[idx] = if (m.find(keyOf(c.listener))) |vi| switch (m.verdicts.items[vi].verdict) {
-                .http => .known,
-                .not_http => |n| if (n.retry_at > now_ms) .skip else .probe,
-            } else .probe;
+        var si: usize = 0;
+        while (si < m.first_seen.items.len) {
+            const k = m.first_seen.items[si].key;
+            var present = false;
+            for (candidates) |c| {
+                if (keyEql(keyOf(c.listener), k)) {
+                    present = true;
+                    break;
+                }
+            }
+            if (present) si += 1 else _ = m.first_seen.swapRemove(si);
         }
+
+        var settling_until: ?i64 = null;
+        for (candidates, 0..) |c, idx| {
+            if (c.listener.isTestRun()) {
+                out[idx] = .skip;
+                continue;
+            }
+            const k = keyOf(c.listener);
+            if (m.find(k)) |vi| {
+                out[idx] = switch (m.verdicts.items[vi].verdict) {
+                    .http => .known,
+                    .not_http => |n| if (n.retry_at > now_ms) .skip else .probe,
+                };
+                continue;
+            }
+            const seen_at = if (m.findSeen(k)) |fi| m.first_seen.items[fi].seen_at else blk: {
+                m.first_seen.append(gpa, .{ .key = k, .seen_at = now_ms }) catch {};
+                break :blk now_ms;
+            };
+            const ready_at = seen_at + probe_settle_ms;
+            if (now_ms < ready_at) {
+                out[idx] = .skip;
+                settling_until = if (settling_until) |cur| @min(cur, ready_at) else ready_at;
+            } else {
+                out[idx] = .probe;
+            }
+        }
+        return settling_until;
     }
 
     pub fn record(m: *ProbeMemory, gpa: Allocator, l: Listener, http: bool, now_ms: i64) !void {
@@ -948,36 +1044,52 @@ test "preview paths compare by component" {
     try testing.expectEqual(@as(usize, 3), pathComponents("/a/b"));
 }
 
-test "a confirmed http server is never probed again; silent ones back off" {
+test "a confirmed http server is never probed again; silent ones back off; new sockets settle first" {
     const a = testing.allocator;
     var m: ProbeMemory = .{};
     defer m.deinit(a);
     const l7: Listener = .{ .pid = 7, .cwd = "/work/app", .args = &.{"node"}, .started_at = 1000, .address = .loopback4(8081) };
     const obs = [_]Observation{.{ .root = "/work/app", .listener = l7 }};
     var out: [1]ProbeMemory.Plan = undefined;
-    m.plan(&obs, 0, &out);
+    // First sight skips probing until probe_settle_ms has elapsed.
+    const settle_at = m.plan(a, &obs, 0, &out);
+    try testing.expectEqual(ProbeMemory.Plan.skip, out[0]);
+    try testing.expectEqual(@as(?i64, ProbeMemory.probe_settle_ms), settle_at);
+    _ = m.plan(a, &obs, ProbeMemory.probe_settle_ms - 1, &out);
+    try testing.expectEqual(ProbeMemory.Plan.skip, out[0]);
+    _ = m.plan(a, &obs, ProbeMemory.probe_settle_ms, &out);
     try testing.expectEqual(ProbeMemory.Plan.probe, out[0]);
-    try m.record(a, l7, true, 0);
+    try m.record(a, l7, true, ProbeMemory.probe_settle_ms);
     for (1..1000) |cycle| {
-        m.plan(&obs, @intCast(2000 * cycle), &out);
+        _ = m.plan(a, &obs, ProbeMemory.probe_settle_ms + 2000 * @as(i64, @intCast(cycle)), &out);
         try testing.expectEqual(ProbeMemory.Plan.known, out[0]);
     }
     var silent: ProbeMemory = .{};
     defer silent.deinit(a);
     try silent.record(a, l7, false, 0);
-    silent.plan(&obs, 2000, &out);
+    _ = silent.plan(a, &obs, 2000, &out);
     try testing.expectEqual(ProbeMemory.Plan.skip, out[0]);
-    silent.plan(&obs, 5000, &out);
+    _ = silent.plan(a, &obs, 5000, &out);
     try testing.expectEqual(ProbeMemory.Plan.probe, out[0]);
     try silent.record(a, l7, false, 5000);
-    silent.plan(&obs, 10_000, &out);
+    _ = silent.plan(a, &obs, 10_000, &out);
     try testing.expectEqual(ProbeMemory.Plan.skip, out[0]);
-    // Another process on the same port carries no verdict over.
+    // Another process on the same port carries no verdict over and settles afresh.
     var l8 = l7;
     l8.pid = 8;
     const obs8 = [_]Observation{.{ .root = "/work/app", .listener = l8 }};
-    silent.plan(&obs8, 10_000, &out);
+    _ = silent.plan(a, &obs8, 10_000, &out);
+    try testing.expectEqual(ProbeMemory.Plan.skip, out[0]);
+    _ = silent.plan(a, &obs8, 10_000 + ProbeMemory.probe_settle_ms, &out);
     try testing.expectEqual(ProbeMemory.Plan.probe, out[0]);
+    // Test runner fixtures are never probed, even after settling.
+    const test_l: Listener = .{ .pid = 9, .cwd = "/work/app", .args = &.{ "cargo", "test", "--lib" }, .started_at = 1000, .address = .loopback4(8099) };
+    try testing.expect(test_l.isTestRun());
+    const obs_test = [_]Observation{.{ .root = "/work/app", .listener = test_l }};
+    _ = silent.plan(a, &obs_test, 20_000, &out);
+    try testing.expectEqual(ProbeMemory.Plan.skip, out[0]);
+    _ = silent.plan(a, &obs_test, 30_000, &out);
+    try testing.expectEqual(ProbeMemory.Plan.skip, out[0]);
     // Capped backoff: still retried once per max backoff.
     var capped: ProbeMemory = .{};
     defer capped.deinit(a);
@@ -986,7 +1098,7 @@ test "a confirmed http server is never probed again; silent ones back off" {
         try capped.record(a, l7, false, now);
         now += ProbeMemory.max_backoff_ms;
     }
-    capped.plan(&obs, now, &out);
+    _ = capped.plan(a, &obs, now, &out);
     try testing.expectEqual(ProbeMemory.Plan.probe, out[0]);
 }
 

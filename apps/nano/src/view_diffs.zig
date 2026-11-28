@@ -34,11 +34,33 @@ pub fn diffs(c: *ui.Context, a: *App, k: theme.Colors) void {
         .turn => "No changes this turn",
     });
     {
+        const panel_w = if (a.view.chrome.host_width > 0) a.view.chrome.host_width else host_view.width;
+        const viewport = ui.div(c).column().wFull().grow().h(0).clip();
+        defer viewport.end();
+        const scroll_at = c.nodes.items.len;
+        ui.key(c, "diffs-scroll");
         ui.scroll(c, .{ .grow = 1, .width = .fill });
-        defer ui.end(c);
+        const scroll_id = c.node(@intCast(scroll_at)).id;
+        const scroll_y = c.scroll.get(scroll_id) orelse 0;
+        var sticky_file: ?*const diff.File = null;
+        var block_top: f32 = 0;
         for (d.files, 0..) |*f, i| {
+            const sep_h: f32 = if (i > 0) 1 else 0;
+            const folded = a.panels.folded.contains(f.path);
+            const est_h = fileBlockHeight(f, folded, panel_w, c);
+            if (!folded and scroll_y > block_top + sep_h + 2 and scroll_y < block_top + sep_h + est_h - 38) {
+                sticky_file = f;
+            }
+            block_top += sep_h + est_h;
             ui.key(c, c.print("df-{s}", .{f.path}));
-            fileBlock(c, a, k, f, i == 0);
+            fileBlock(c, a, k, f, i == 0, panel_w);
+        }
+        ui.end(c);
+        if (sticky_file) |sf| {
+            ui.key(c, "diffs-sticky-header");
+            const pin = ui.div(c).absolute().offset(0, 0).wFull().layer(1).column();
+            defer pin.end();
+            fileHeader(c, a, k, sf, false, panel_w, true);
         }
     }
     if (p.scope == .workingTree and !d.truncated) reviewFooter(c, a, k);
@@ -58,7 +80,8 @@ fn reviewFooter(c: *ui.Context, a: *App, k: theme.Colors) void {
     {
         const note = ui.div(c).column().grow().w(0).clip();
         defer note.end();
-        kit.ellipsisText(c, review_note, .{ .size = 11, .color = k.muted }, host_view.width - 260);
+        const panel_w = if (a.view.chrome.host_width > 0) a.view.chrome.host_width else host_view.width;
+        kit.ellipsisText(c, review_note, .{ .size = 11, .color = k.muted }, @max(40, panel_w - 260));
     }
     {
         const undo = ui.div(c).row().px(12).py(6).rounded(8).hover(k.ink(0.06));
@@ -95,16 +118,23 @@ fn toolbar(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     ui.spacer(c);
     const clean = if (p.diff) |d| d.files.len == 0 or d.truncated else true;
-    if (p.scope == .workingTree and kit.iconButton(c, k, .@"trash-bin-minimalistic", .{ .icon = 14, .disabled = clean }))
+    // The footer's "Undo all changes", as an icon: the same name.
+    if (p.scope == .workingTree and kit.iconButton(c, k, .@"trash-bin-minimalistic", .{ .icon = 14, .disabled = clean, .tip = .{ .text = review_undo } }))
         p.discard_confirm = true;
-    if (kit.iconButton(c, k, .@"fold-vertical", .{ .icon = 14 })) foldAll(a);
+    if (kit.iconButton(c, k, .@"fold-vertical", .{ .icon = 14, .tip = .{ .text = if (anyOpen(a)) "Collapse all files" else "Expand all files" } })) foldAll(a);
+}
+
+/// Whether any file of the diff is unfolded: the fold button collapses
+/// them all, else expands them all.
+fn anyOpen(a: *const App) bool {
+    const d = a.panels.diff orelse return false;
+    for (d.files) |f| if (!a.panels.folded.contains(f.path)) return true;
+    return false;
 }
 
 fn foldAll(a: *App) void {
     const d = a.panels.diff orelse return;
-    const any_open = for (d.files) |f| {
-        if (!a.panels.folded.contains(f.path)) break true;
-    } else false;
+    const any_open = anyOpen(a);
     for (d.files) |f| {
         if (a.panels.folded.contains(f.path) != any_open) panels.toggleFold(a, f.path);
     }
@@ -131,28 +161,77 @@ fn summary(c: *ui.Context, a: *App, k: theme.Colors, d: panels.Diff) void {
     }
 }
 
-fn fileBlock(c: *ui.Context, a: *App, k: theme.Colors, f: *const diff.File, first: bool) void {
-    const folded = a.panels.folded.contains(f.path);
-    if (!first) _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.wash(0.04) }, .none, null);
+fn fileHeader(c: *ui.Context, a: *App, k: theme.Colors, f: *const diff.File, folded: bool, panel_w: f32, sticky: bool) void {
+    const surface = if (sticky) k.composer else k.ink(0.025);
+    const wrap = ui.div(c).column().wFull();
+    defer wrap.end();
     {
-        const h = ui.div(c).row().wFull().h(38).px(12).gap(8).itemsCenter().bg(k.ink(0.025)).hover(k.ink(0.05));
+        var h = ui.div(c).row().wFull().h(38).px(12).gap(8).itemsCenter().bg(surface).hover(k.ink(0.05)).control();
+        if (sticky) h = h.rounded(6);
         defer h.end();
         if (h.clicked()) panels.toggleFold(a, f.path);
         icons.icon(c, if (folded) .@"alt-arrow-right" else .@"alt-arrow-down", 13, k.muted.alpha(0.7), 0);
         file_icons.icon(c, f.path, false, k.dark, 14);
-        kit.fadeText(c, f.path, .{ .size = 12, .mono = true, .color = k.text.alpha(0.85) }, host_view.width - 180);
+        kit.fadeText(c, f.path, .{ .size = 12, .mono = true, .color = k.text.alpha(0.85) }, @max(60, panel_w - 180));
         if (f.binary) ui.text(c, "BIN", .{ .size = 10, .color = k.faint });
         ui.spacer(c);
         ui.text(c, c.print("+{d}", .{f.additions}), .{ .size = 11, .mono = true, .color = k.diff_add });
         ui.text(c, c.print("−{d}", .{f.deletions}), .{ .size = 11, .mono = true, .color = k.diff_del });
     }
+    if (sticky) _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
+}
+
+fn fileContentWidth(c: *ui.Context, f: *const diff.File, panel_w: f32) f32 {
+    var widest: u32 = 1;
+    var code_width: f32 = 0;
+    var header_width: f32 = 0;
+    for (f.hunks) |h| {
+        header_width = @max(header_width, c.text.width(h.header, .{ .size = 11, .mono = true }) + 24);
+        for (h.lines) |l| {
+            widest = @max(widest, l.old orelse 0, l.new orelse 0);
+            code_width = @max(code_width, c.text.width(l.text, .{ .size = 12, .mono = true }));
+        }
+    }
+    const digits: f32 = @floatFromInt(std.fmt.count("{d}", .{widest}));
+    const gutter = @max(36, digits * 6.6 + 14);
+    return @max(panel_w, @max(header_width, code_width + 2 * gutter + 3 + 28 + 12 + 16));
+}
+
+fn fileBlockHeight(f: *const diff.File, folded: bool, panel_w: f32, c: *ui.Context) f32 {
+    var h: f32 = 38;
+    if (folded) return h;
+    if (f.added) h += 24;
+    if (f.deleted) h += 24;
+    if (f.old_path != null) h += 24;
+    if (f.mode != null) h += 24;
+    if (f.binary) h += 24;
+    for (f.hunks) |hunk| {
+        h += 28 + @as(f32, @floatFromInt(hunk.lines.len)) * 21;
+    }
+    if (fileContentWidth(c, f, panel_w) > panel_w + 0.5) h += 8;
+    return h;
+}
+
+fn fileBlock(c: *ui.Context, a: *App, k: theme.Colors, f: *const diff.File, first: bool, panel_w: f32) void {
+    const folded = a.panels.folded.contains(f.path);
+    if (!first) _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.wash(0.04) }, .none, null);
+    fileHeader(c, a, k, f, folded, panel_w, false);
     if (folded) return;
     if (f.added) notice(c, k, "New file");
     if (f.deleted) notice(c, k, "Deleted file");
     if (f.old_path) |old| notice(c, k, c.print("Renamed from {s}", .{old}));
     if (f.mode) |m| notice(c, k, c.print("Mode changed to {s}", .{m}));
     if (f.binary) notice(c, k, "Binary file — contents not shown");
-    body(c, k, f);
+    const content_w = fileContentWidth(c, f, panel_w);
+    if (content_w > panel_w + 0.5) {
+        _ = c.open(.{ .direction = .column, .width = .fill, .scroll_x = true, .padding = .{ .bottom = 8 } }, "diff-scroll-x");
+        defer c.end();
+        const inner = ui.div(c).column().w(content_w);
+        defer inner.end();
+        body(c, k, f);
+    } else {
+        body(c, k, f);
+    }
 }
 
 /// A file's hunks: each header, then its lines with both numbers, the

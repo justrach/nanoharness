@@ -84,11 +84,11 @@ const Harness = struct {
         for (h.t.ctx.nodes.items) |node| {
             const r = node.rect;
             if (@abs(r.x - x) < 1 and @abs(r.w - (1200 - x)) < 1 and r.h == 780) main = true;
-            if (r.w == sidebar_width and r.h == 780 and std.meta.eql(node.style.background, @import("theme.zig").colors(false).sidebar)) {
+            if (r.w == sidebar_width and r.h == 780) {
                 try testing.expectApproxEqAbs(x - sidebar_width, r.x, 1);
                 side = true;
             }
-            if (node.style.radius == chrome.body_radius and @abs(r.x - panel_x) < 1 and @abs(r.y - chrome.header_height) < 1 and @abs(r.h - h.a.view.chrome.height) < 1) body = true;
+            if (node.style.radius == chrome.zen_radius and @abs(r.x - panel_x) < 1 and @abs(r.y - chrome.header_height) < 1 and @abs(r.h - h.a.view.chrome.height) < 1) body = true;
             // The panel's own one-point border, then the rail's16px inset.
             if (r.h == 2 and r.w == 12 and @abs(r.x - (panel_x + 1 + 16)) < 1) rail_ticks += 1;
             switch (node.content) {

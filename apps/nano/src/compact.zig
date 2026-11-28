@@ -93,7 +93,7 @@ pub fn finalAnswerPart(e: *const tr.Entry) ?usize {
             .text => if (!blank(p)) {
                 first = i;
             },
-            .image, .visual => {},
+            .image, .visual, .artifact => {},
             else => break,
         }
     }

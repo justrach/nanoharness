@@ -978,6 +978,60 @@ async fn antigravity_config_sets(
     run_to_end(&antigravity_harness(), req, controls).await
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_acp_login_records_the_browser_url_and_accepts_a_pasted_code() {
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::io::AsyncWriteExt;
+    let workspace = tempfile::tempdir().unwrap();
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-antigravity-acp.sh");
+    let agy = workspace.path().join("agy");
+    std::fs::copy(&fixture, &agy).unwrap();
+    std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let gemini = workspace.path().join("gemini");
+    std::fs::create_dir_all(&gemini).unwrap();
+    let browser_dir = workspace.path().join("browser");
+    std::fs::create_dir_all(&browser_dir).unwrap();
+    let browser = browser_dir.join("record");
+    std::fs::write(
+        &browser,
+        "#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$0.url\"\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&browser, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut cmd = AcpHarness::antigravity()
+        .with_executable(&agy)
+        .login_command()
+        .await
+        .expect("login command");
+    cmd.env("BROWSER", &browser)
+        .env("GEMINI_HOME", &gemini)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn agy acp --login");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let url_file = harness_adapters::acp::browser_recorded_url_path(&browser);
+    while std::time::Instant::now() < deadline && !url_file.exists() {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let recorded = std::fs::read_to_string(&url_file).unwrap_or_default();
+    assert!(
+        recorded.contains("accounts.google.com"),
+        "recorded url: {recorded:?}"
+    );
+    stdin.write_all(b"pasted-code\n").await.unwrap();
+    drop(stdin);
+    let status = child.wait().await.unwrap();
+    assert!(status.success(), "{status}");
+    let creds =
+        std::fs::read_to_string(gemini.join("antigravity-cli").join("oauth_creds.json")).unwrap();
+    assert!(creds.contains("pasted-code"), "{creds}");
+}
+
 #[tokio::test]
 async fn antigravity_sign_in_reports_the_browser_url_and_authenticates() {
     let seen: std::sync::Arc<std::sync::Mutex<Vec<SignInProgress>>> = Default::default();
@@ -2282,6 +2336,35 @@ async fn antigravity_load_and_prompt_auth_expiry_point_to_sign_in() {
 }
 
 #[tokio::test]
+async fn antigravity_missing_session_does_not_send_a_contextless_followup() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut req = request("Do option one.");
+    req.model = None;
+    req.resume = Some("missing-session".into());
+    req.cwd = workspace.path().display().to_string();
+    let (controls, _, _) = controls();
+    let events = run_to_end(&antigravity_harness(), req, controls).await;
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            AgentEvent::SessionStarted { .. } | AgentEvent::TextDelta { .. }
+        )),
+        "must not start a replacement session or send a follow-up: {events:?}"
+    );
+    let done = dones(&events);
+    assert_eq!(done.len(), 1, "{events:?}");
+    assert_eq!(done[0].0, DoneStatus::Errored, "{events:?}");
+    assert!(
+        done[0]
+            .1
+            .as_deref()
+            .unwrap_or_default()
+            .contains("your message was not sent"),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
 async fn antigravity_empty_reply_completes_once() {
     let workspace = tempfile::Builder::new()
         .prefix("empty-reply")
@@ -2292,6 +2375,52 @@ async fn antigravity_empty_reply_completes_once() {
     req.cwd = workspace.path().display().to_string();
     let (controls, _, _) = controls();
     let events = run_to_end(&antigravity_harness(), req, controls).await;
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
+async fn antigravity_questions_round_trip_through_the_input_bridge() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut req = request("scenario ask-question");
+    req.model = None;
+    req.cwd = workspace.path().display().to_string();
+    let (mut controls, _steer, _token) = controls();
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = std::sync::Arc::clone(&asked);
+    controls.request_input = Box::new(move |questions| {
+        let (tx, rx) = oneshot::channel();
+        let answers = questions
+            .iter()
+            .map(|q| UserInputAnswer {
+                question_id: q.id.clone(),
+                labels: if q.multi_select {
+                    vec!["Red".into(), "Blue".into()]
+                } else {
+                    vec!["Banana".into()]
+                },
+            })
+            .collect();
+        seen.lock().unwrap().extend(questions);
+        let _ = tx.send(answers);
+        rx
+    });
+    let events = run_to_end(&antigravity_harness(), req, controls).await;
+    let asked = asked.lock().unwrap();
+    // Without a form offered, agy writes its questions into the reply.
+    assert_eq!(asked.len(), 2, "{events:?}");
+    assert_eq!(asked[0].question, "Which fruit?");
+    assert_eq!(asked[0].options, ["Apple", "Banana", "Cherry"]);
+    assert!(!asked[0].multi_select);
+    assert_eq!(asked[1].question, "Which colours?");
+    assert_eq!(asked[1].options, ["Red", "Green", "Blue"]);
+    assert!(asked[1].multi_select);
+    // The fixture says answered only for q1 "2" and q2 ["1","3"].
+    assert!(
+        events.contains(&AgentEvent::TextDelta {
+            text: "answered".into()
+        }),
+        "{events:?}"
+    );
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
 
@@ -3144,5 +3273,73 @@ async fn clarification_recovery_does_not_replay_reported_post_answer_work() {
         !events.iter().any(
             |e| matches!(e, AgentEvent::TextDelta { text } if text.contains("continuing once"))
         )
+    );
+}
+
+#[tokio::test]
+async fn open_tool_across_turn_end_emits_background_task_lifecycle() {
+    let (controls, steer, _token) = controls();
+    let harness = harness();
+    let stream = harness
+        .run(request("scenario:background-tool"), controls)
+        .await
+        .expect("run starts");
+    let events = tokio::time::timeout(Duration::from_secs(15), async move {
+        let mut events = Vec::new();
+        let mut stream = stream;
+        let mut steer = Some(steer);
+        while let Some(ev) = stream.next().await {
+            let ev = ev.expect("stream event");
+            if matches!(ev, AgentEvent::TextDelta { ref text } if text == "FINISHED")
+                && let Some(tx) = &steer
+            {
+                tx.send(SteerMessage {
+                    prompt: "merge now".into(),
+                    message_id: None,
+                    attachments: Vec::new(),
+                })
+                .await
+                .expect("steer sent");
+            }
+            if matches!(ev, AgentEvent::TextDelta { ref text } if text == "FOLLOWUP_OK") {
+                steer = None;
+            }
+            events.push(ev);
+        }
+        events
+    })
+    .await
+    .expect("run finished in time");
+
+    let started = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::BackgroundTask { id, running: true } if id == "bg-1"))
+        .expect("open tool at end_turn must emit BackgroundTask { running: true }");
+    let first_done = events
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    ..
+                }
+            )
+        })
+        .expect("initial Done");
+    let settled = events
+        .iter()
+        .position(
+            |e| matches!(e, AgentEvent::BackgroundTask { id, running: false } if id == "bg-1"),
+        )
+        .expect("post-turn ToolResult must emit BackgroundTask { running: false }");
+    let wakeup = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TextDelta { text } if text == "FINISHED"))
+        .expect("reactive wakeup text");
+
+    assert!(
+        started < first_done && first_done < settled && settled < wakeup,
+        "expected BackgroundTask start < Done < settle < wakeup, got: {events:?}"
     );
 }

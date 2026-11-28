@@ -42,6 +42,7 @@ mod http_error;
 pub mod instance_lock;
 pub mod keep_awake;
 pub mod local_import;
+pub mod local_token_usage;
 pub mod localhost_view;
 pub mod mcp_servers;
 mod model_catalogs;
@@ -78,9 +79,12 @@ pub use doc_host::{ChatDocHandle, DocHost, DocHostConfig, EdgeConfig};
 pub use instance_lock::InstanceLock;
 pub use profile::EngineProfile;
 pub use project_actions::ProjectActionsStore;
-pub use registry::{HarnessDescriptor, HarnessRegistry, default_registry};
+pub use registry::{
+    HarnessDescriptor, HarnessRegistry, default_registry, env_opted_in, parse_harness_id,
+    parse_opted_in_list,
+};
 pub use repos::{CheckoutIdentity, Repos, is_own_branch, worktree_branch_from_title};
-pub use rpc::EngineRpc;
+pub use rpc::{DeviceNames, EngineRpc, RelayRpc, relay_request_digest};
 pub use run_journal::{JournalError, RunJournal};
 pub use sessions::{JournaledEvent, SessionsEngine, SteerOutcome};
 pub use source_control::{
@@ -259,7 +263,10 @@ impl EngineCore {
         let device_id = load_or_create_device_id(data_dir)?;
         // This device's harness enablement (Settings → Agents) rides the
         // engine data dir — per-device, like the CLI installs it gates.
+        // Headless hosts overlay HARNESS_OPTED_IN / HARNESS_PROVIDER in
+        // memory so a prefs-file or env opt-in works without the GUI.
         registry.load_prefs(data_dir);
+        registry.apply_env_opt_ins();
         let store = Arc::new(DocsStore::open(profile.store_root())?);
         let store_for_import = store.clone();
         let journal = Arc::new(RunJournal::open(profile.store_root().join("journals"))?);
@@ -508,9 +515,10 @@ impl EngineCore {
             .map_err(|e| EngineError::Other(e.to_string()))
     }
 
-    /// Start hosting our device room: serve the full RPC surface to relay clients and
-    /// warm-open chat docs on nudges (§7 cold-chat command delivery). The token source
-    /// re-reads auth on every (re)dial, so token refreshes take effect at reconnect.
+    /// Start hosting our device room: serve ControlRpc to relay clients (gated
+    /// by Settings → Devices → Allow remote control) and warm-open chat docs
+    /// on nudges (§7 cold-chat command delivery). The token source re-reads
+    /// auth on every (re)dial, so token refreshes take effect at reconnect.
     pub fn start_host_relay(&self, edge_url: &str) -> harness_rpc::HostRelay {
         let auth = self.auth();
         let config =
@@ -540,7 +548,7 @@ impl EngineCore {
                 }
             }
         });
-        harness_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
+        harness_rpc::HostRelay::spawn(config, self.relay_rpc_service(), on_nudge)
     }
 
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
@@ -577,6 +585,25 @@ impl EngineCore {
             .with_external_history(self.external_history.clone())
             .with_harness_updates(self.harness_updates.clone());
         Arc::new(rpc)
+    }
+
+    /// The ControlRpc surface exposed on this computer's device-room host
+    /// socket. Same handlers as [`Self::rpc_service`], gated by Settings →
+    /// Devices → Allow remote control so a compromised edge cannot drive
+    /// commands on a machine that never opted in.
+    pub fn relay_rpc_service(&self) -> std::sync::Arc<dyn harness_rpc::RpcService> {
+        let doc_host = self.doc_host.clone();
+        let names: crate::rpc::DeviceNames =
+            std::sync::Arc::new(move |device_id: &str| doc_host.device_name(device_id));
+        std::sync::Arc::new(rpc::RemoteRelayRpc::new(
+            crate::rpc::RelayRpc::wrap_named(
+                self.rpc_service(),
+                self.registry.clone(),
+                self.device_id.clone(),
+                names,
+            ),
+            self.device_id.clone(),
+        ))
     }
 
     /// Revoke every account-scoped transport before any slower graceful
@@ -664,17 +691,123 @@ pub struct EngineRuntime {
     host_relay: std::sync::Mutex<Option<harness_rpc::HostRelay>>,
 }
 
-/// IPC-only lifecycle control owned by `harness headless`. The regular
-/// [`EngineRpc`] deliberately does not expose this method, so a viewport
-/// attached to another headed process cannot shut down that process's engine.
+/// Operations reserved for local `harness headless` IPC, not relayed to peers.
 struct HeadlessRpc {
     inner: Arc<dyn RpcService>,
     stop_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    #[cfg(unix)]
+    terminals: Terminals,
+}
+
+fn open_local_command_terminal(
+    #[cfg(unix)] terminals: &Terminals,
+    params: serde_json::Value,
+) -> Result<RpcReply, RpcError> {
+    #[cfg(not(unix))]
+    {
+        let _ = params;
+        Err(RpcError::Failed(
+            "Transcript commands are not supported on this host".into(),
+        ))
+    }
+    #[cfg(unix)]
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            #[serde(rename = "chatId")]
+            _chat_id: String,
+            cwd: String,
+            command: Command,
+            cols: u16,
+            rows: u16,
+        }
+        #[derive(serde::Deserialize)]
+        struct Command {
+            shell: String,
+            source: String,
+        }
+        let p: Params = serde_json::from_value(params)
+            .map_err(|_| RpcError::Failed("Invalid command terminal parameters".into()))?;
+        if !std::path::Path::new(&p.cwd).is_absolute() {
+            return Err(RpcError::Failed(
+                "An absolute working directory is required".into(),
+            ));
+        }
+        let source = &p.command.source;
+        if source.trim().is_empty()
+            || source.len() > 32 * 1024
+            || source
+                .bytes()
+                .any(|b| (b < 32 && b != b'\n' && b != b'\t') || b == 127)
+        {
+            return Err(RpcError::Failed("Invalid terminal command source".into()));
+        }
+        let session = terminals
+            .open_transcript_command(&p.cwd, p.cols, p.rows, &p.command.shell, source)
+            .map_err(|err| RpcError::Failed(err.to_string()))?;
+        RpcReply::value(&session)
+    }
+}
+
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn local_command_terminal_keeps_its_pty_interactive() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use harness_proto::TerminalEvent;
+
+    let cwd = tempfile::tempdir().unwrap();
+    let terminals = Terminals::new();
+    let source = "stty -echo\nprintf 'Synthetic input: '\nIFS= read -r reply\nstty echo\n[ \"$reply\" = synthetic-answer ] && printf 'Synthetic response accepted\\n'";
+    let params = serde_json::json!({
+        "chatId": "synthetic-chat", "cwd": cwd.path(), "cols": 80, "rows": 24,
+        "command": {"shell": "sh", "source": source}
+    });
+    let mut remote = params.clone();
+    remote["targetDeviceId"] = serde_json::json!("synthetic-peer");
+    assert!(open_local_command_terminal(&terminals, remote).is_err());
+
+    let value = open_local_command_terminal(&terminals, params)
+        .unwrap()
+        .into_value()
+        .unwrap();
+    let id = value["id"].as_str().unwrap();
+    let mut rx = terminals.subscribe(id, None).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(6), async {
+        let mut output = Vec::new();
+        let mut answered = false;
+        while let Some(event) = rx.recv().await {
+            if let TerminalEvent::Data { data, .. } = event {
+                output.extend(STANDARD.decode(data).unwrap());
+                let text = String::from_utf8_lossy(&output);
+                if text.contains("Synthetic input: ") && !answered {
+                    terminals.write_bytes(id, b"synthetic-answer\r").unwrap();
+                    answered = true;
+                }
+                if text.contains("Synthetic response accepted") {
+                    assert!(!text.contains("synthetic-answer"));
+                    return true;
+                }
+            }
+        }
+        false
+    })
+    .await;
+    terminals.close(id).unwrap();
+    assert_eq!(result.ok(), Some(true));
 }
 
 #[async_trait]
 impl RpcService for HeadlessRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        if method == methods::OPEN_LOCAL_COMMAND_TERMINAL {
+            return open_local_command_terminal(
+                #[cfg(unix)]
+                &self.terminals,
+                params,
+            );
+        }
         if method != methods::STOP_ENGINE {
             return self.inner.handle(method, params).await;
         }
@@ -916,18 +1049,22 @@ impl Engine {
             EdgeConfig::new(config.edge_url.clone(), Arc::new(auth.clone())).with_device(device_id)
         });
 
+        let registry = Arc::new(default_registry());
+        if auth.is_sandbox() {
+            registry.set_sandbox_host(true);
+        }
         let preview_org = profile.org_id().to_string();
         let core = match lock {
             Some(lock) => EngineCore::assemble_with_profile_locked(
                 profile,
-                Arc::new(default_registry()),
+                registry,
                 config.default_harness,
                 edge.clone(),
                 lock,
             )?,
             None => EngineCore::assemble_with_profile(
                 profile,
-                Arc::new(default_registry()),
+                registry,
                 config.default_harness,
                 edge.clone(),
             )?,
@@ -964,7 +1101,10 @@ impl Engine {
             let quiescent: update_bridge::QuiescentCheck = {
                 let sessions = core.sessions.clone();
                 let terminals = core.terminals.clone();
-                Arc::new(move || !sessions.any_active() && !terminals.any_open())
+                let harness_updates = core.harness_updates.clone();
+                Arc::new(move || {
+                    !sessions.any_active() && !terminals.any_open() && !harness_updates.any_active()
+                })
             };
             let updater = update_bridge::Updater::spawn(config.edge_url.clone(), Some(quiescent));
             if let Some(mut token_changes) = edge.as_ref().and_then(EdgeConfig::token_changes) {
@@ -1043,8 +1183,40 @@ impl Engine {
         let service: Arc<dyn RpcService> = Arc::new(HeadlessRpc {
             inner: runtime.core().rpc_service(),
             stop_tx,
+            #[cfg(unix)]
+            terminals: runtime.core().terminals.clone(),
         });
-        let server = serve_ipc(config.ipc_port, service).await?;
+        let mcp_service: Arc<dyn RpcService> =
+            Arc::new(rpc::McpScopedRpc::new(runtime.core().rpc_service()));
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.ipc_port)).await?;
+        let bound_port = listener.local_addr()?.port();
+        let admin_token = new_ipc_token();
+        let mcp_token = new_ipc_token();
+        runtime.core().sessions.set_ipc_mcp_token(mcp_token.clone());
+
+        let is_sandbox =
+            std::env::var_os("HARNESS_SANDBOX_TOKEN_FILE").is_some_and(|v| !v.is_empty());
+        let admin_path = ipc_token_path(&config.data_dir, bound_port);
+        let mcp_path = ipc_mcp_token_path(&config.data_dir, bound_port);
+        if is_sandbox {
+            // In a sandbox runtime, keep the admin token out of reach on disk and
+            // deliver only the scoped MCP token directly to ACP's harness MCP server.
+            let _ = std::fs::remove_file(&admin_path);
+            let _ = std::fs::remove_file(&mcp_path);
+        } else {
+            write_secret_token_file(&admin_path, &admin_token)?;
+            write_secret_token_file(&mcp_path, &mcp_token)?;
+        }
+
+        let server = serve_ipc_authenticated_listener(
+            listener,
+            harness_rpc::IpcAuth {
+                admin_token,
+                admin_service: service,
+                mcp_token,
+                mcp_service,
+            },
+        );
         // Bot routines run only while this engine does: it checks them once
         // a minute, and graff records what came due in between.
         let bot_ticker = bots::spawn_ticker(
@@ -1072,6 +1244,10 @@ impl Engine {
             }
         }
         tracing::info!("shutting down");
+        if !is_sandbox {
+            let _ = std::fs::remove_file(&admin_path);
+            let _ = std::fs::remove_file(&mcp_path);
+        }
         bot_ticker.abort();
         server.abort();
         runtime.shutdown().await;
@@ -1115,6 +1291,70 @@ async fn shutdown_signal() -> std::io::Result<()> {
 /// engine. That second case is the point — an embedded engine that keeps the
 /// port to itself forces anyone wanting a second viewport (the terminal app) to
 /// stop the desktop app, start a daemon, and start it again in the right order.
+pub fn ipc_token_path(data_dir: &Path, port: u16) -> PathBuf {
+    data_dir.join(format!("ipc-token-{port}"))
+}
+
+pub fn ipc_mcp_token_path(data_dir: &Path, port: u16) -> PathBuf {
+    data_dir.join(format!("ipc-mcp-token-{port}"))
+}
+
+fn new_ipc_token() -> String {
+    use rand_core::RngCore;
+    let mut bytes = [0u8; 32];
+    rand_core::OsRng.fill_bytes(&mut bytes);
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(&mut hex, "{b:02x}");
+    }
+    hex
+}
+
+fn write_secret_token_file(path: &Path, token: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_file_name(format!(
+        ".ipc-token-{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    {
+        let mut file = opts.open(&tmp)?;
+        file.write_all(token.as_bytes())?;
+        file.sync_all()?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
+}
+
+pub fn serve_ipc_authenticated_listener(
+    listener: tokio::net::TcpListener,
+    auth: harness_rpc::IpcAuth,
+) -> tokio::task::JoinHandle<()> {
+    let port = listener.local_addr().ok().map(|addr| addr.port());
+    tracing::info!(?port, "IPC server listening (authenticated)");
+    tokio::spawn(harness_rpc::serve_ws_listener_authenticated(
+        listener, auth,
+    ))
+}
+
 /// Serving here means any viewport can just attach.
 ///
 /// Localhost only, exactly as before: this widens *which process* can serve the

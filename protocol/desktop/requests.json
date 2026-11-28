@@ -4,6 +4,7 @@
     {"name": "create a project", "method": "Mutate", "stream": false, "params": {"op":"createSpace","spaceId":"space-parity","deviceId":"$DEVICE","path":"$DIR","gitDetected":false}},
     {"name": "create a chat", "method": "Mutate", "stream": false, "params": {"op":"createChat","chatId":"chat-parity","spaceId":"space-parity","config":{"harness":"mock","modelOptions":{},"sandbox":"workspace-write"}}},
     {"name": "engine info", "method": "EngineInfo", "stream": false, "params": {}},
+    {"name": "local token usage", "method": "LocalTokenUsage", "stream": false, "params": {}},
     {"name": "engine ready", "method": "EngineReady", "stream": false, "params": {}},
     {"name": "list agents", "method": "ListHarnesses", "stream": false, "params": {}},
     {"name": "list models", "method": "ListModels", "stream": false, "params": {"harness":"mock"}},

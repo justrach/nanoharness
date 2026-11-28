@@ -64,6 +64,35 @@ test "the tree reads text, headings, controls and implied buttons in order" {
     for (els) |e| try testing.expect(e.rect.w > 0 and e.rect.h > 0);
 }
 
+test "accessibility labels keep the frame text when the app overwrites it" {
+    const Model = struct {
+        label: [6]u8 = "Before".*,
+        fn view(m: *@This(), c: *ui.Context) void {
+            const row = ui.div(c).p(8).control();
+            defer row.end();
+            _ = row.clicked();
+            ui.text(c, &m.label, .{});
+        }
+    };
+    var model: Model = .{};
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&model, Model.view), .{});
+    defer t.deinit();
+    // The model can change independently of painting. AX can ask for the
+    // last frame's labels before the redraw happens.
+    model.label = "Edited".*;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const before = try elements(&t, arena.allocator());
+    try testing.expectEqual(@as(usize, 1), before.len);
+    try testing.expectEqualStrings("Before", before[0].label);
+    t.size.w += 100;
+    t.frame();
+    const after = try elements(&t, arena.allocator());
+    try testing.expectEqual(@as(usize, 1), after.len);
+    try testing.expectEqualStrings("Edited", after[0].label);
+}
+
 test "activating an element clicks it on the next frame" {
     var p: Page = .{};
     var t: ui.Tester = undefined;

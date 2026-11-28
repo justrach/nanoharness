@@ -11,18 +11,37 @@ const workspace = @import("workspace.zig");
 /// An appearance action the palette runs (`AppearanceMode`).
 pub const Appearance = enum { toggle, system, light, dark };
 
+/// An open tab target (either another workspace tab, or a conversation tab
+/// inside the focused split panel).
+pub const OpenTab = struct {
+    ws: usize,
+    pane_tab: ?usize = null,
+};
+
 /// A palette result (`Entry`).
 pub const Entry = union(enum) {
     new_chat,
     new_project,
     settings,
     theme: Appearance,
+    full_screen: bool,
+    toggle_sidebar,
+    split_right,
+    split_down,
+    close_tab,
+    tab_overview,
+    toggle_side_panel,
+    toggle_files,
+    toggle_terminal,
+    chat_history,
     custom_theme_studio,
     custom_theme: []const u8,
     ui_mode: @import("motion_rules.zig").UiMode,
     toggle_part: @import("motion_rules.zig").MovingPart,
     /// An unfocused split pane (its index): picking it moves focus there.
     pane: usize,
+    /// Another open tab in the workspace or focused split panel.
+    open_tab: OpenTab,
     /// A chat, by id.
     chat: []const u8,
     /// Another tool's conversation, by its index in the list kept.
@@ -42,11 +61,22 @@ pub const Entry = union(enum) {
                 .light => "Switch to light theme",
                 .dark => "Switch to dark theme",
             },
+            .full_screen => |is_fs| if (is_fs) "Exit full screen" else "Enter full screen",
+            .toggle_sidebar => "Toggle sidebar",
+            .split_right => "Split pane right",
+            .split_down => "Split pane down",
+            .close_tab => "Close tab or pane",
+            .tab_overview => "Tab overview",
+            .toggle_side_panel => "Toggle side panel",
+            .toggle_files => "Toggle files panel",
+            .toggle_terminal => "Toggle terminal",
+            .chat_history => "Chat history",
             .custom_theme_studio => "Open Backdrop & Scene Studio",
             .custom_theme => |id| if (@import("custom_themes.zig").findPreset(id)) |p| p.name else null,
             .ui_mode => |m| switch (m) {
                 .zen => "Switch to Zen mode (simple flat view)",
                 .developer => "Switch to Developer mode (full hierarchy)",
+                .design => "Switch to Design mode (Paper canvas)",
             },
             .toggle_part => |part| switch (part) {
                 .open_workspaces_tree => "Toggle open workspaces tree",
@@ -68,6 +98,16 @@ pub const Entry = union(enum) {
                 .system => "Default system theme switch to system theme auto macos reset",
                 else => e.label(),
             },
+            .full_screen => |is_fs| if (is_fs) "Exit full screen fullscreen minimal focus mode" else "Enter full screen fullscreen minimal focus mode",
+            .toggle_sidebar => "Toggle sidebar show hide sessions left panel",
+            .split_right => "Split pane right horizontal side by side",
+            .split_down => "Split pane down vertical stack",
+            .close_tab => "Close tab or pane current",
+            .tab_overview => "Tab overview grid all open sessions workspaces",
+            .toggle_side_panel => "Toggle right side panel diff changes browser",
+            .toggle_files => "Toggle files explorer panel",
+            .toggle_terminal => "Toggle terminal actions dock",
+            .chat_history => "Chat history recent sessions",
             else => e.label(),
         };
     }
@@ -76,7 +116,7 @@ pub const Entry = union(enum) {
     /// other tools' conversations (`Entry::section`).
     pub fn section(e: Entry) u8 {
         return switch (e) {
-            .pane => 0,
+            .pane, .open_tab => 0,
             .chat => 2,
             .external => 3,
             else => 1,
@@ -87,6 +127,8 @@ pub const Entry = union(enum) {
         if (std.meta.activeTag(x) != std.meta.activeTag(y)) return false;
         return switch (x) {
             .theme => |m| m == y.theme,
+            .full_screen => |fs| fs == y.full_screen,
+            .open_tab => |t| t.ws == y.open_tab.ws and t.pane_tab == y.open_tab.pane_tab,
             .custom_theme => |id| std.mem.eql(u8, id, y.custom_theme),
             .ui_mode => |m| m == y.ui_mode,
             .toggle_part => |part| part == y.toggle_part,
@@ -108,11 +150,22 @@ pub fn matchesQuery(query: []const u8, text: []const u8) bool {
     return true;
 }
 
+/// Whether flipping `part` changes anything in `mode`: Zen draws its one
+/// filter row whatever the project & activity setting says
+/// (`view_sidebar.filterRow`), so that toggle is not offered there.
+pub fn partTogglesIn(part: @import("motion_rules.zig").MovingPart, mode: @import("motion_rules.zig").UiMode) bool {
+    return !(part == .multi_axis_filters and mode == .zen);
+}
+
 /// The actions a query keeps, in their order; `Switch theme` and
 /// `Default system theme` stay in the core list so typing `"switch theme"`
 /// or opening ⌘K always offers them, while explicit light/dark actions stay
 /// searchable for direct selection.
 pub fn actionsFor(query: []const u8, is_dark: bool) Actions {
+    return actionsForContext(query, is_dark, false);
+}
+
+pub fn actionsForContext(query: []const u8, is_dark: bool, full_screen: bool) Actions {
     var out: Actions = .{};
     const core = [_]Entry{
         .new_chat,
@@ -125,15 +178,47 @@ pub fn actionsFor(query: []const u8, is_dark: bool) Actions {
         out.items[out.len] = e;
         out.len += 1;
     };
+    if (full_screen) {
+        const fs_idle = [_]Entry{
+            .{ .full_screen = true },
+            .toggle_sidebar,
+            .split_right,
+        };
+        for (fs_idle) |e| if (matchesQuery(query, e.searchText().?)) {
+            if (out.len < out.items.len) {
+                out.items[out.len] = e;
+                out.len += 1;
+            }
+        };
+    }
     if (query.len > 0) {
         const opposite: Appearance = if (is_dark) .light else .dark;
         const current: Appearance = if (is_dark) .dark else .light;
+        const extra_fullscreen = if (!full_screen) &[_]Entry{
+            .{ .full_screen = false },
+            .toggle_sidebar,
+            .split_right,
+        } else &[_]Entry{};
+        for (extra_fullscreen) |e| if (matchesQuery(query, e.searchText().?)) {
+            if (out.len < out.items.len) {
+                out.items[out.len] = e;
+                out.len += 1;
+            }
+        };
         const extra = [_]Entry{
+            .split_down,
+            .close_tab,
+            .tab_overview,
+            .toggle_side_panel,
+            .toggle_files,
+            .toggle_terminal,
+            .chat_history,
             .{ .theme = opposite },
             .{ .theme = current },
             .custom_theme_studio,
             .{ .ui_mode = .zen },
             .{ .ui_mode = .developer },
+            .{ .ui_mode = .design },
             .{ .toggle_part = .open_workspaces_tree },
             .{ .toggle_part = .git_checkout_chrome },
             .{ .toggle_part = .prompt_rail },
@@ -142,7 +227,7 @@ pub fn actionsFor(query: []const u8, is_dark: bool) Actions {
             .{ .toggle_part = .row_tech_badges },
             .{ .toggle_part = .multi_axis_filters },
         };
-        for (extra) |e| if (matchesQuery(query, e.label().?)) {
+        for (extra) |e| if (matchesQuery(query, e.searchText().?)) {
             if (out.len < out.items.len) {
                 out.items[out.len] = e;
                 out.len += 1;
@@ -168,7 +253,7 @@ pub fn actionsFor(query: []const u8, is_dark: bool) Actions {
 }
 
 pub const Actions = struct {
-    items: [64]Entry = undefined,
+    items: [96]Entry = undefined,
     len: usize = 0,
 
     pub fn slice(x: *const Actions) []const Entry {
@@ -452,6 +537,11 @@ fn expectActions(want: []const Entry, q: []const u8, dark: bool) !void {
 
 test "action search hides an empty section and keeps the order" {
     try expectActions(&.{ .new_chat, .new_project, .settings, .{ .theme = .toggle }, .{ .theme = .system } }, "", true);
+    const fs_idle = actionsForContext("", true, true);
+    try testing.expectEqual(@as(usize, 8), fs_idle.len);
+    try testing.expect(fs_idle.slice()[5].eql(.{ .full_screen = true }));
+    try testing.expect(fs_idle.slice()[6].eql(.toggle_sidebar));
+    try testing.expect(fs_idle.slice()[7].eql(.split_right));
     try expectActions(&.{ .new_chat, .new_project }, "new", true);
     try expectActions(&.{.settings}, "settings", true);
     try expectActions(&.{ .{ .theme = .toggle }, .{ .theme = .system }, .{ .theme = .light }, .{ .theme = .dark } }, "theme", true);

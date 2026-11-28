@@ -45,6 +45,12 @@ pub fn hasWindow(a: *const App) bool {
 
 /// The ring and its percentage, muted until 75% (warning) and 90% (danger).
 pub fn indicator(c: *ui.Context, a: *App, k: theme.Colors) void {
+    indicatorCompact(c, a, k, false);
+}
+
+/// Compact ring-only mode omits the percentage label so narrow split footers
+/// never clip digits while hovering/clicking still opens the full usage card.
+pub fn indicatorCompact(c: *ui.Context, a: *App, k: theme.Colors, compact: bool) void {
     const s = &a.view.context;
     if (!hasWindow(a)) {
         s.anchor = null;
@@ -55,15 +61,16 @@ pub fn indicator(c: *ui.Context, a: *App, k: theme.Colors) void {
     const f = cw.fraction(a.transcript.tokens, a.transcript.window);
     const color = if (f) |v| (if (v >= 0.9) k.danger else if (v >= 0.75) k.warning else k.muted) else k.faint;
     ui.key(c, "context-usage");
-    // A hit target at least 32 wide, the row's full height. The footer
-    // slop GPUI adds around this chip is checked against the measured pill
-    // below, so it widens the pointer target without moving any footer item.
-    const hit = ui.div(c).row().minW(32).hFull().center();
+    // A hit target at least 32 wide (24 in compact narrow footers), the row's
+    // full height. The footer slop GPUI adds around this chip is checked
+    // against the measured pill below, so it widens the pointer target without
+    // moving any footer item.
+    const hit = ui.div(c).row().minW(if (compact) 24 else 32).hFull().center();
     defer hit.end();
     // GPUI's `HitSlop::RING` reaches 2 points left and 4 right of the pill.
     const near = if (s.anchor) |r| c.input.mouse.x >= r.x - 2 and c.input.mouse.x < r.x + r.w + 4 and c.input.mouse.y >= r.y and c.input.mouse.y < r.y + r.h else false;
     const hot = hit.hovered() or near or s.open;
-    var pill = ui.div(c).row().h(24).px(6).gap(5).itemsCenter().rounded(6);
+    var pill = ui.div(c).row().h(24).px(if (compact) 4 else 6).gap(if (compact) 0 else 5).itemsCenter().rounded(6);
     if (hot) pill = pill.bg(k.ink(0.05));
     defer pill.end();
     if (c.rects.get(c.node(pill.index).id)) |r| s.anchor = r;
@@ -87,8 +94,10 @@ pub fn indicator(c: *ui.Context, a: *App, k: theme.Colors) void {
         return;
     }
     drawRing(c, f, color, k.faint.alpha(0.25));
-    const pct = if (f) |v| c.print("{d:.0}%", .{v * 100}) else "—";
-    ui.text(c, pct, .{ .tabular = true, .size = 12, .line_height = 12 * 1.618, .color = color });
+    if (!compact) {
+        const pct = if (f) |v| c.print("{d:.0}%", .{v * 100}) else "—";
+        ui.text(c, pct, .{ .tabular = true, .size = 12, .line_height = 12 * 1.618, .color = color });
+    }
     if (a.view.account_usage.open) {
         s.hover_since = null;
         return;

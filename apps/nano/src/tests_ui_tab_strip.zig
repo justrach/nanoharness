@@ -47,6 +47,30 @@ pub const Harness = struct {
         };
         return null;
     }
+    fn captionControl(h: *Harness) !u32 {
+        for (h.t.ctx.nodes.items, 0..) |node, i| {
+            if (!node.style.control or node.rect.h != 28) continue;
+            var child = node.first_child;
+            while (child != std.math.maxInt(u32)) : (child = h.t.ctx.nodes.items[child].next) {
+                const dot = h.t.ctx.nodes.items[child];
+                if (dot.rect.w == 5 and dot.rect.h == 5) return @intCast(i);
+            }
+        }
+        return error.MissingChatCaptionControl;
+    }
+    fn button(h: *Harness, comptime name: []const u8) !ui.Rect {
+        for (h.t.ctx.nodes.items, 0..) |node, i| switch (node.content) {
+            .image => |im| if (node.rect.y < chrome.header_height and im.source == .encoded and std.mem.eql(u8, im.source.encoded, @import("icons_svg").get(name))) {
+                var at: u32 = @intCast(i);
+                while (at != std.math.maxInt(u32)) : (at = h.t.ctx.nodes.items[at].parent) {
+                    const parent = h.t.ctx.nodes.items[at];
+                    if (parent.style.control and parent.rect.w == 24 and parent.rect.h == 24) return parent.rect;
+                }
+            },
+            else => {},
+        };
+        return error.MissingTitlebarButton;
+    }
     fn snap(h: *Harness, name: []const u8) void {
         const dir = std.c.getenv("NANO_SNAP_DIR") orelse return;
         var buf: [1024]u8 = undefined;
@@ -58,6 +82,235 @@ fn replace(list: anytype, text: []const u8) !void {
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, text, .{});
     defer parsed.deinit();
     try list.replace(parsed.value);
+}
+
+test "single Zen chat ends beside the device and controls with or without its sidebar" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.items.items.len);
+
+    var flat = true;
+    var sidebar_x: ?f32 = null;
+    for ([_]bool{ true, false }) |sidebar_open| {
+        h.a.view.sidebar_open = sidebar_open;
+        h.t.settle(1);
+        h.snap(if (sidebar_open) "caption-sidebar-open" else "caption-sidebar-closed");
+        const cap = h.t.ctx.nodes.items[try h.captionControl()];
+        flat = flat and (if (cap.style.background) |bg| bg.a == 0 else true) and
+            cap.style.border == null and cap.style.shadows.len == 0;
+
+        const native_caption = @import("window_chrome.zig");
+        const utilities = strip.rendering.utilityWidth(&h.a);
+        const expected_end = h.t.ctx.size.w - native_caption.trailing - utilities - 10 - chrome.device_room - 12;
+        try testing.expectApproxEqAbs(expected_end, cap.rect.x + cap.rect.w, 1);
+        const sidebar = try h.button("sidebar-minimalistic-left");
+        try testing.expectApproxEqAbs(h.t.ctx.size.w - native_caption.trailing - 10, sidebar.x + sidebar.w, 1);
+        try testing.expectApproxEqAbs(@as(f32, 21), sidebar.y + sidebar.h / 2, 0.01);
+        if (sidebar_x) |x| try testing.expectApproxEqAbs(x, sidebar.x, 1) else sidebar_x = sidebar.x;
+        if (sidebar_open) {
+            try testing.expectError(error.MissingTitlebarButton, h.button("list"));
+        } else {
+            const history = try h.button("list");
+            const mode = try h.button("magic-stick-3");
+            try testing.expect(history.x < mode.x and mode.x < sidebar.x);
+            try testing.expect(history.x >= cap.rect.x + cap.rect.w);
+            try testing.expectApproxEqAbs(@as(f32, 21), history.y + history.h / 2, 0.01);
+            try testing.expectApproxEqAbs(@as(f32, 21), mode.y + mode.h / 2, 0.01);
+        }
+    }
+    h.a.view.full_screen = true;
+    h.t.settle(1);
+    h.snap("caption-fullscreen");
+    try testing.expect(flat);
+    try testing.expectEqualStrings("a", h.a.selected.?);
+}
+
+test "session navigation parity opens archived history outside a blank split pane" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try replace(&h.a.chats,
+        \\[ {"id":"a","deviceId":"local","title":"Live session","spaceId":"local-project","archived":false},
+        \\  {"id":"history","deviceId":"local","title":"Archived session","spaceId":"local-project","archived":true} ]
+    );
+    h.a.settings.applyUiMode(.developer);
+    h.a.splitPane(.horizontal);
+    const live = h.a.tabs.active;
+    try testing.expect(h.a.selected == null);
+    h.a.openChatInTab("history");
+    h.t.settle(2);
+    h.snap("archive-split");
+
+    try testing.expectEqualStrings("history", h.a.selected.?);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expect(h.a.tabs.active != live);
+    try testing.expect(h.a.tabs.layout() == null);
+    const history = h.a.tabs.active;
+    h.a.showTab(live);
+    h.a.openChatInTab("history");
+    try testing.expectEqual(history, h.a.tabs.active);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    h.a.closeTab(history);
+    try testing.expectEqual(live, h.a.tabs.active);
+    const split = h.a.tabs.layout() orelse return error.MissingSplit;
+    try testing.expectEqual(@as(usize, 2), split.panes.items.len);
+    try testing.expectEqualStrings("a", split.panes.items[0].?);
+    try testing.expectEqual(@as(usize, 1), split.focus);
+    try testing.expect(split.panes.items[1] == null and h.a.selected == null);
+}
+
+test "session parity followup restores split picks without replacing either chat prompt" {
+    for ([_]bool{ false, true }) |new_workspace| {
+        var h: Harness = undefined;
+        try h.init(true);
+        defer h.deinit();
+        h.a.newTab();
+        h.a.showTab(0);
+        if (h.a.new_model) |old| h.a.retireSlice(old);
+        h.a.new_model = try h.a.gpa.dupe(u8, "alpha-pick");
+        h.a.composer.set("Unsent Alpha prompt");
+        h.a.splitOpening(.horizontal, "b");
+        if (h.a.new_model) |old| h.a.retireSlice(old);
+        h.a.new_model = try h.a.gpa.dupe(u8, "beta-pick");
+        h.a.composer.set("Unsent Beta prompt");
+
+        if (new_workspace) h.a.newWorkspaceSession() else h.a.showTab(1);
+        if (h.a.new_model) |old| h.a.retireSlice(old);
+        h.a.new_model = try h.a.gpa.dupe(u8, "other-workspace-pick");
+        h.a.openChatInTab("b");
+        try testing.expectEqualStrings("b", h.a.selected.?);
+        try testing.expectEqualStrings("Unsent Beta prompt", h.a.composer.text());
+        try testing.expectEqualStrings("beta-pick", h.a.new_model orelse "");
+
+        h.a.openChatInTab("a");
+        try testing.expectEqualStrings("Unsent Alpha prompt", h.a.composer.text());
+        try testing.expectEqualStrings("alpha-pick", h.a.new_model orelse "");
+        h.a.openChatInTab("b");
+        try testing.expectEqualStrings("Unsent Beta prompt", h.a.composer.text());
+        try testing.expectEqualStrings("beta-pick", h.a.new_model orelse "");
+        try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
+    }
+}
+
+test "session parity followup clicking the selected session returns input from expanded Host and Files" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.developer);
+    h.a.settings.setText("sidebarOrganization", "inOneList");
+    h.a.settings.setText("sidebarLastActivity", "all");
+    h.a.splitOpening(.horizontal, "b");
+    h.a.composer.set("Unsent Beta prompt");
+    const workspace_count = h.a.tabs.items.items.len;
+    for ([_]strip.Panel{ .host, .files }) |cover| {
+        h.a.view.strip.focused = cover;
+        h.a.view.strip.expanded = cover;
+        h.t.settle(2);
+        try testing.expect(!@import("app_question.zig").ownsActivePane(&h.a));
+        var target: ?ui.Rect = null;
+        for (h.t.ctx.nodes.items) |node| switch (node.content) {
+            .text => |tx| if (std.mem.eql(u8, tx.str, "Beta") and node.rect.x < h.a.view.sidebar_width) {
+                if (target == null or node.rect.y > target.?.y) target = node.rect;
+            },
+            else => {},
+        };
+        const row = target orelse return error.MissingSelectedSessionRow;
+        h.t.click(row.x + row.w / 2, row.y + row.h / 2);
+        h.t.settle(2);
+
+        try testing.expectEqualStrings("b", h.a.selected.?);
+        try testing.expect(@import("app_question.zig").ownsActivePane(&h.a));
+        try testing.expectEqualStrings("Unsent Beta prompt", h.a.composer.text());
+        try testing.expectEqual(workspace_count, h.a.tabs.items.items.len);
+        const split = h.a.tabs.layout().?;
+        try testing.expectEqual(@as(usize, 1), split.focus);
+        try testing.expectEqual(@as(usize, 2), split.panes.items.len);
+        try testing.expectEqualStrings("a", split.panes.items[0].?);
+    }
+}
+
+test "session parity followup opening a live chat leaves an archive-only workspace alone" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try replace(&h.a.chats,
+        \\[ {"id":"a","deviceId":"local","title":"Alpha","spaceId":"local-project","archived":false},
+        \\  {"id":"archive","deviceId":"local","title":"Older session","spaceId":"local-project","archived":true},
+        \\  {"id":"next","deviceId":"local","title":"Newer session","spaceId":"local-project","archived":false} ]
+    );
+    h.a.openChatInTab("archive");
+    const archive = h.a.tabs.active;
+    try testing.expect(archive != 0);
+    try testing.expect(h.a.tabs.layout() == null);
+    // Creating a new workspace can give the old archive view a one-pane
+    // layout shell. It is still a standalone archive, not a live group.
+    h.a.newWorkspaceSession();
+    h.a.closeTab(h.a.tabs.active);
+    try testing.expectEqual(archive, h.a.tabs.active);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.panes.items.len);
+    h.a.openChatInTab("next");
+    try testing.expectEqualStrings("next", h.a.selected.?);
+    try testing.expectEqual(@as(usize, 0), h.a.tabs.active);
+    try testing.expectEqual(archive, h.a.tabs.find("archive").?.tab);
+    try testing.expectEqual(@as(usize, 0), h.a.tabs.find("a").?.tab);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    h.a.showTab(archive);
+    try testing.expectEqualStrings("archive", h.a.selected.?);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.groups[0].count());
+}
+
+test "session parity followup blank pane reuse only checks attachments owned by its composer" {
+    const attachments = @import("app_attachments.zig");
+    for ([_]bool{ false, true }) |attached_to_blank| {
+        var h: Harness = undefined;
+        try h.init(true);
+        defer h.deinit();
+        if (attached_to_blank) h.a.splitPane(.horizontal);
+        try attachments.stage(&h.a, "synthetic.txt", "Synthetic attachment");
+        if (!attached_to_blank) h.a.splitPane(.horizontal);
+        try testing.expect(h.a.selected == null);
+        const workspace = h.a.tabs.active;
+        h.a.openChatInTab("b");
+        try testing.expectEqualStrings("b", h.a.selected.?);
+        if (attached_to_blank) {
+            try testing.expect(h.a.tabs.active != workspace);
+            h.a.showTab(workspace);
+            try testing.expect(h.a.selected == null);
+        } else {
+            try testing.expectEqual(workspace, h.a.tabs.active);
+            try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.focus);
+            h.a.openChatInTab("a");
+        }
+        try testing.expectEqual(@as(usize, 1), attachments.count(&h.a));
+    }
+}
+
+test "session parity followup two blank split panes keep their own attachments" {
+    const attachments = @import("app_attachments.zig");
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.developer);
+    h.a.newWorkspaceSession();
+    const workspace = h.a.tabs.active;
+    try attachments.stage(&h.a, "synthetic.txt", "Synthetic attachment");
+    h.a.splitPane(.horizontal);
+    try testing.expect(h.a.selected == null);
+    const attachments_on_right = attachments.count(&h.a);
+    h.a.openChatInTab("b");
+    h.t.settle(2);
+    h.snap("blank-split-attachment");
+
+    try testing.expectEqual(@as(usize, 0), attachments_on_right);
+    try testing.expectEqual(workspace, h.a.tabs.active);
+    try testing.expectEqualStrings("b", h.a.selected.?);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.focus);
+    try testing.expectEqual(@as(usize, 0), attachments.count(&h.a));
+    h.a.focusPane(0);
+    try testing.expect(h.a.selected == null);
+    try testing.expectEqual(@as(usize, 1), attachments.count(&h.a));
 }
 
 test "question tab attention remains visible with hidden sidebar without selecting the question chat" {
@@ -79,7 +332,7 @@ test "question tab attention remains visible with hidden sidebar without selecti
         h.t.settle(1);
         var markers: usize = 0;
         for (h.t.ctx.nodes.items) |node| switch (node.content) {
-            .text => |tx| if (std.mem.eql(u8, tx.str, "?") and node.rect.y < 42) {
+            .text => |tx| if (std.mem.eql(u8, tx.str, "?") and node.rect.y < h.a.view.chrome.y) {
                 markers += 1;
             },
             else => {},
@@ -110,6 +363,36 @@ test "workspace tab labels do not cover the conversation with hover tooltips" {
             try testing.expect(h.t.tooltipText() == null);
         }
     }
+}
+
+test "workspace chrome hides the unused side panel control and keeps New tab accessible without a bubble" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.view.sidebar_open = false;
+    h.a.splitPane(.horizontal);
+    h.t.settle(1);
+
+    var plus: ?ui.Rect = null;
+    for (h.t.ctx.a11y_items.items) |item| {
+        const r = h.t.ctx.rects.get(item.id) orelse continue;
+        if (r.y >= chrome.header_height) continue;
+        try testing.expect(!std.mem.eql(u8, item.label, "Toggle side panel"));
+        if (std.mem.eql(u8, item.label, "New tab")) plus = r;
+    }
+    const rect = plus orelse return error.MissingNewTabButton;
+    h.t.moveTo(rect.x + rect.w / 2, rect.y + rect.h / 2);
+    h.t.advance(0.8);
+    try testing.expect(h.t.tooltipText() == null);
+
+    h.a.focusPane(0);
+    h.t.settle(1);
+    h.press(.{ .key = 'r', .cmd = true });
+    try testing.expect(h.a.panels.host_open);
+    for (h.t.ctx.a11y_items.items) |item| {
+        if (std.mem.eql(u8, item.label, "Toggle side panel")) return;
+    }
+    return error.MissingSidePanelToggle;
 }
 
 test "saved GPUI tabs reopen in order with their active chat" {
@@ -160,14 +443,14 @@ test "unified strip: one panel has top folder tabs and a 42px content boundary" 
         const title = h.topText("Alpha") orelse return error.MissingTopTab;
         try testing.expect(title.y >= 5 and title.y + title.h <= 37);
         try testing.expectEqual(@as(f32, 42), h.a.view.chrome.y);
-        try testing.expectEqual(@as(f32, 730), h.a.view.chrome.height);
+        try testing.expectEqual(@as(f32, 732), h.a.view.chrome.height);
         try testing.expect(!h.a.view.chrome.strip);
         const computer = h.topText(@import("strip_device.zig").localLabel()) orelse return error.MissingDeviceLabel;
         try testing.expect(computer.x > 1000 - @import("window_chrome.zig").trailing);
         try testing.expect(computer.x + computer.w <= 1200 - @import("window_chrome.zig").trailing);
         var surface = false;
         for (h.t.ctx.nodes.items) |node| {
-            if (node.style.radius == 10 and @abs(node.rect.y - 42) < 0.1 and node.rect.x >= h.a.view.sidebar_width) surface = true;
+            if (node.style.radius == chrome.zen_radius and @abs(node.rect.y - 42) < 0.1 and node.rect.x >= h.a.view.sidebar_width) surface = true;
         }
         try testing.expect(surface);
     }
@@ -179,16 +462,22 @@ test "unified strip: split slots own both titles without a second peer header" {
     defer h.deinit();
     h.a.splitPane(.horizontal);
     h.t.settle(1);
-    const alpha = h.topText("Alpha") orelse return error.MissingFirstSlot;
-    const draft = h.topText("New tab") orelse return error.MissingSecondSlot;
-    try testing.expect(draft.x > alpha.x);
-    try testing.expect(h.a.view.chrome.strip);
-    const expected = chrome.paneSpan(h.a.view.chrome.chat_width, 0.5, 2, true);
-    try testing.expect(expected > 220);
+    var alpha: ?ui.Rect = null;
+    var draft: ?ui.Rect = null;
     for (h.t.ctx.nodes.items) |node| switch (node.content) {
-        .text => |tx| if (std.mem.eql(u8, tx.str, "Alpha") and node.rect.x >= h.a.view.sidebar_width and node.rect.y >= 42) return error.DuplicatePeerHeader,
+        .text => |tx| {
+            if (node.rect.x < h.a.view.sidebar_width) continue;
+            if (std.mem.eql(u8, tx.str, "Alpha")) {
+                try testing.expect(alpha == null);
+                try testing.expect(node.rect.y >= chrome.header_height and node.rect.y < h.a.view.chrome.y);
+                alpha = node.rect;
+            }
+            if (std.mem.eql(u8, tx.str, "New tab") and node.rect.y >= chrome.header_height and node.rect.y < h.a.view.chrome.y) draft = node.rect;
+        },
         else => {},
     };
+    try testing.expect((draft orelse return error.MissingSecondSlot).x > (alpha orelse return error.MissingFirstSlot).x);
+    try testing.expect(h.a.view.chrome.strip);
 }
 
 test "unified strip: Cmd T opens a new top-level tab and restores the split draft on close" {
@@ -387,27 +676,29 @@ test "strip slot close button closes a tab and then its panel" {
     h.t.settle(1);
     try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
     try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.groups[1].count());
-    const slot_title = h.topText("New tab") orelse return error.MissingRightSlot;
-    h.t.moveTo(slot_title.x + 8, slot_title.y + 4);
-    h.t.settle(1);
-    // Click the slot's ✕ button on the right edge of the second slot.
-    var close_rect: ?ui.Rect = null;
-    for (h.t.ctx.nodes.items) |node| {
-        if (node.rect.y < chrome.header_height and node.rect.x > slot_title.x and @abs(node.rect.w - 18) < 0.5 and @abs(node.rect.h - 18) < 0.5) {
-            if (close_rect == null or node.rect.x > close_rect.?.x) close_rect = node.rect;
+    for (0..2) |closed| {
+        const slot = h.a.view.strip.active_tab_anchor orelse return error.MissingRightSlot;
+        try testing.expect(slot.y >= chrome.header_height and slot.y + slot.h <= h.a.view.chrome.y);
+        h.t.moveTo(slot.x + slot.w / 2, slot.y + slot.h / 2);
+        h.t.settle(1);
+        var close_rect: ?ui.Rect = null;
+        for (h.t.ctx.a11y_items.items) |item| {
+            if (!std.mem.eql(u8, item.label, "Close tab")) continue;
+            const r = h.t.ctx.rects.get(item.id) orelse continue;
+            if (slot.contains(.{ .x = r.x + r.w / 2, .y = r.y + r.h / 2 })) {
+                close_rect = r;
+                break;
+            }
+        }
+        const r = close_rect orelse return error.MissingSlotCloseButton;
+        h.t.click(r.x + r.w / 2, r.y + r.h / 2);
+        h.t.settle(1);
+        // First click closes the active tab; the second removes its pane.
+        if (closed == 0) {
+            try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
+            try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.groups[1].count());
         }
     }
-    const r = close_rect orelse return error.MissingSlotCloseButton;
-    h.t.click(r.x + r.w / 2, r.y + r.h / 2);
-    h.t.settle(1);
-    // First click closes the active tab in pane 1, leaving 1 tab in pane 1.
-    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
-    try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.groups[1].count());
-    // Second click on the same slot's ✕ closes the last tab and removes pane 1.
-    h.t.moveTo(r.x + r.w / 2, r.y + r.h / 2);
-    h.t.settle(1);
-    h.t.click(r.x + r.w / 2, r.y + r.h / 2);
-    h.t.settle(1);
     try testing.expect(h.a.tabs.layout() == null);
     try testing.expectEqualStrings("a", h.a.selected.?);
 }
@@ -671,14 +962,14 @@ test "overflow tab window keeps selected tab background aligned with displayed a
         }
     }.run;
 
-    // 1. Exact #36 reproduction: 2 tabs in a narrow single-slot Developer-mode lane showing "+1".
+    // 1. #36 reproduction: 2 tabs in a genuinely overflowing single-slot Developer-mode lane showing "+1".
     h.a.openChat("t0", "local-project");
     h.a.newTab();
     h.a.openChat("t1", "local-project");
     h.a.view.sidebar_open = true;
     h.a.view.sidebar_width = h.a.settings.sidebarWidth();
     h.a.showTab(1);
-    h.t.resize(740, 520);
+    h.t.resize(580 + @import("window_chrome.zig").trailing, 520);
     h.t.settle(2);
     if (std.c.getenv("NANO_TAB_SNAP_DIR")) |dir| {
         var buf: [1024]u8 = undefined;
@@ -694,13 +985,13 @@ test "overflow tab window keeps selected tab background aligned with displayed a
     h.t.settle(2);
     try checkAlignment(&h);
 
-    // 2. Ultra-narrow single-slot lane where slot_w shrinks below tabWidth, with trailing update pill.
+    // 2. Ultra-narrow single-slot lane where slot_w shrinks below 112pt, with trailing update pill.
     h.a.updates.graff_kind = .updated;
     const ver = "0.302.74.75";
     @memcpy(h.a.updates.graff_to[0..ver.len], ver);
     h.a.updates.graff_to_len = ver.len;
     h.a.showTab(1);
-    h.t.resize(620, 520);
+    h.t.resize(560, 520);
     h.t.settle(2);
     try checkAlignment(&h);
 
@@ -725,22 +1016,38 @@ test "overflow tab window keeps selected tab background aligned with displayed a
 
 test "singleWindow pure layout matches visible slot for first, last, and narrow single-slot tabs (#36)" {
     const render = @import("view_tab_strip_render.zig");
-    // Issue #36 example: 350pt lane, 2 tabs, add_room=27 -> visible_count=1, slot_w=167.5.
-    const w0 = render.singleWindow(350, 2, 0, 27);
-    const w1 = render.singleWindow(350, 2, 1, 27);
+    // 350pt lane with 2 tabs fits both at 160pt without false "+1" overflow.
+    const fit2 = render.singleWindow(350, 2, 1, 27);
+    try testing.expectEqual(@as(usize, 0), fit2.hidden_count);
+    try testing.expectApproxEqAbs(@as(f32, 160), fit2.slot_w, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 163), fit2.selected_left, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 323), fit2.selected_right, 0.01);
+
+    // 930pt lane with 7 tabs fits all 7 at 126pt without false "+1" overflow; 8 tabs overflows to 7 at 121pt + "+1".
+    const fit7 = render.singleWindow(930, 7, 3, 27);
+    try testing.expectEqual(@as(usize, 0), fit7.hidden_count);
+    try testing.expectApproxEqAbs(@as(f32, 126), fit7.slot_w, 0.01);
+    const over8 = render.singleWindow(930, 8, 3, 27);
+    try testing.expectEqual(@as(usize, 1), over8.hidden_count);
+    try testing.expectEqual(@as(usize, 7), over8.win_end - over8.win_start);
+    try testing.expectApproxEqAbs(@as(f32, 121), over8.slot_w, 0.01);
+
+    // Genuine single-slot overflow (#36): 240pt lane, 2 tabs, add_room=27 -> visible_count=1, slot_w=176.
+    const w0 = render.singleWindow(240, 2, 0, 27);
+    const w1 = render.singleWindow(240, 2, 1, 27);
     try testing.expectEqual(@as(usize, 0), w0.win_start);
     try testing.expectEqual(@as(usize, 1), w0.win_end);
     try testing.expectEqual(@as(usize, 1), w0.hidden_count);
     try testing.expectApproxEqAbs(@as(f32, 0), w0.selected_left, 0.01);
-    try testing.expectApproxEqAbs(@as(f32, 167.5), w0.selected_right, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 176), w0.selected_right, 0.01);
 
     try testing.expectEqual(@as(usize, 1), w1.win_start);
     try testing.expectEqual(@as(usize, 2), w1.win_end);
     try testing.expectEqual(@as(usize, 1), w1.hidden_count);
     try testing.expectApproxEqAbs(@as(f32, 0), w1.selected_left, 0.01);
-    try testing.expectApproxEqAbs(@as(f32, 167.5), w1.selected_right, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 176), w1.selected_right, 0.01);
 
-    // Narrow single-slot lane where slot_w shrinks below tabWidth (112).
+    // Narrow single-slot lane where slot_w shrinks below 112pt.
     const narrow = render.singleWindow(154, 2, 1, 27);
     try testing.expectEqual(@as(usize, 1), narrow.win_start);
     try testing.expectEqual(@as(usize, 2), narrow.win_end);
@@ -903,4 +1210,568 @@ test "Cmd-3 and openChatInTab keep projectless conversations independent and nev
     h.press((ui.Shortcut{ .key = '2', .cmd = true }).native());
     try testing.expectEqualStrings("b", h.a.selected.?);
     try testing.expectEqual(@as(usize, 5), h.a.tabs.items.items.len);
+}
+
+test "narrow split-pane slot chips never render bare ellipses or clip chevrons" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    try replace(&h.a.spaces,
+        \\[{"id":"p1","deviceId":"local","path":"/synthetic/fieldnotes"},
+        \\ {"id":"p2","deviceId":"local","path":"/synthetic/workshop"},
+        \\ {"id":"p3","deviceId":"local","path":"/synthetic/sandbox"},
+        \\ {"id":"p4","deviceId":"local","path":"/synthetic/archive"}]
+    );
+    try replace(&h.a.chats,
+        \\[{"id":"a","deviceId":"local","title":"Cedar Notes","spaceId":"p1","archived":false},
+        \\ {"id":"b","deviceId":"local","title":"Maple Draft","spaceId":"p2","archived":false},
+        \\ {"id":"c","deviceId":"local","title":"Birch Plan","spaceId":"p3","archived":false},
+        \\ {"id":"d","deviceId":"local","title":"Alder Audit","spaceId":"p4","archived":false}]
+    );
+    // Open 6 horizontal split panes with a collapsed sidebar.
+    h.a.openChat("a", "p1");
+    h.a.splitPane(.horizontal);
+    h.a.select(null, "p1");
+    h.a.splitPane(.horizontal);
+    h.a.openChat("b", "p2");
+    h.a.splitPane(.horizontal);
+    h.a.select(null, "p1");
+    h.a.splitPane(.horizontal);
+    h.a.openChat("d", "p4");
+    h.a.splitPane(.horizontal);
+    h.a.openChat("c", "p3");
+    h.a.focusPane(1);
+    h.a.view.sidebar_open = false;
+    h.a.view.sidebar_width = 0;
+
+    // Check across narrow panes, with the tab row below the window controls.
+    const caption_trailing = @import("window_chrome.zig").trailing;
+    for ([_]f32{ 720, 840, 900 }) |win_w| {
+        h.t.resize(win_w + caption_trailing, 620);
+        h.t.settle(2);
+
+        // Hover the first slot (reproducing hovered + unhovered narrow slots side by side).
+        const first_title = for (h.t.ctx.nodes.items) |node| {
+            if (node.content == .text and node.rect.y < h.a.view.chrome.y and std.mem.startsWith(u8, node.content.text.str, "Cedar")) break node.rect;
+        } else null;
+        if (first_title) |r| {
+            h.t.moveTo(r.x + 8, r.y + 4);
+            h.t.settle(1);
+        }
+        if (win_w == 840) h.snap("narrow-slot-chips-105pt");
+        if (win_w == 900) h.snap("narrow-slot-chips");
+
+        // 1. No top-strip chip may render a bare "…" placeholder label.
+        for (h.t.ctx.nodes.items) |node| {
+            if (node.content == .text and node.rect.y < h.a.view.chrome.y and node.rect.y >= 18) {
+                try testing.expect(!std.mem.eql(u8, node.content.text.str, "…"));
+            }
+        }
+
+        // 2. Every child inside a clipped 14px chip row (icon, text, chevron) must fit inside its chip box.
+        for (h.t.ctx.nodes.items) |node| {
+            if (node.rect.y >= h.a.view.chrome.y) continue;
+            if (node.parent >= h.t.ctx.nodes.items.len) continue;
+            const parent = h.t.ctx.node(node.parent);
+            if (!parent.style.clip or @abs(parent.rect.h - 14) > 0.5) continue;
+            if (@abs(parent.style.radius - 3) > 0.5) continue;
+            try testing.expect(node.rect.x >= parent.rect.x - 0.5);
+            try testing.expect(node.rect.x + node.rect.w <= parent.rect.x + parent.rect.w + 0.5);
+        }
+    }
+
+    // 3. Moving onto an active narrow slot's folder chip and clicking opens `.folder`,
+    //    and clicking the compact computer glyph beside it switches directly to `.device`.
+    //    Interior pane 3 at 900pt stays un-squeezed by edge controls on both macOS and Windows.
+    h.a.focusPane(3);
+    h.t.resize(900 + caption_trailing, 620);
+    h.t.settle(2);
+    const initial_folder = h.a.view.strip.active_folder_anchor orelse return error.MissingActiveFolderAnchor;
+    h.t.moveTo(initial_folder.x + 6, initial_folder.y + initial_folder.h / 2);
+    h.t.settle(1);
+    const hovered_folder = h.a.view.strip.active_folder_anchor orelse return error.MissingHoveredFolderAnchor;
+    h.t.click(hovered_folder.x + hovered_folder.w / 2, hovered_folder.y + hovered_folder.h / 2);
+    h.t.settle(1);
+    try testing.expectEqual(@as(?strip.Menu, .folder), h.a.view.strip.menu);
+    h.snap("narrow-slot-chips-folder-open");
+
+    // The computer chip ends 6pt to the left of the folder chip.
+    const dev_x = hovered_folder.x - 6 - 8;
+    h.t.click(dev_x, hovered_folder.y + hovered_folder.h / 2);
+    h.t.settle(1);
+    try testing.expectEqual(@as(?strip.Menu, .device), h.a.view.strip.menu);
+}
+
+test "zen top tab bar avoids false overflow, keeps single-line split badges, and never hard-clips titles" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    try replace(&h.a.spaces,
+        \\[{"id":"p1","deviceId":"local","path":"/synthetic/fieldnotes"}]
+    );
+    try replace(&h.a.chats,
+        \\[{"id":"c1","deviceId":"local","title":"Cedar Integration Suite","spaceId":"p1","archived":false},
+        \\ {"id":"c2","deviceId":"local","title":"Standard Harbor Layout","spaceId":"p1","archived":false},
+        \\ {"id":"c3","deviceId":"local","title":"Willow Review Notes","spaceId":"p1","archived":false},
+        \\ {"id":"c4","deviceId":"local","title":"Birch Kernel Proofs","spaceId":"p1","archived":false},
+        \\ {"id":"c5","deviceId":"local","title":"Alder Storage Spec","spaceId":"p1","archived":false}]
+    );
+    // Build 7 workspaces matching the reported Zen bar: 5 chats/drafts + a 6-pane split workspace + 7th tab.
+    h.a.openChat("c1", "p1");
+    h.a.newWorkspaceSession();
+    h.a.newWorkspaceSession();
+    h.a.openChat("c2", "p1");
+    h.a.newWorkspaceSession();
+    h.a.openChat("c3", "p1");
+    h.a.newWorkspaceSession();
+    h.a.newWorkspaceSession();
+    h.a.openChat("c4", "p1");
+    for (0..5) |_| h.a.splitPane(.horizontal);
+    h.a.newWorkspaceSession();
+    h.a.openChat("c5", "p1");
+    h.a.showTab(3); // Active single-chat tab ("Willow Review Notes")
+    h.a.view.sidebar_open = false;
+    h.a.view.sidebar_width = 0;
+    h.t.resize(1240 + @import("window_chrome.zig").trailing, 620);
+    h.t.settle(2);
+    h.snap("zen-tab-bar");
+
+    // 1. All 7 tabs fit in ~930pt without a false "+1" overflow pill.
+    try testing.expect(h.topText("+1") == null);
+
+    // 2. Every visible tab title text node must fit inside its clipped parent column (no hard-clipped ".").
+    for (h.t.ctx.nodes.items) |node| {
+        if (node.content != .text or node.rect.y >= chrome.header_height) continue;
+        if (node.parent >= h.t.ctx.nodes.items.len) continue;
+        const parent = h.t.ctx.node(node.parent);
+        if (!parent.style.clip) continue;
+        try testing.expect(node.rect.x + node.rect.w <= parent.rect.x + parent.rect.w + 1.0);
+    }
+
+    // 3. Split-pane workspace tab in Zen mode stays single-line with a compact pane-count badge ("6").
+    try testing.expect(h.topText("6 split panes") == null);
+    try testing.expect(h.topText("6") != null);
+}
+
+test "opening a sidebar chat from a blank New tab replaces it in place instead of opening elsewhere" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try replace(&h.a.spaces,
+        \\[{"id":"p1","deviceId":"local","path":"/synthetic/p1"},
+        \\ {"id":"p2","deviceId":"local","path":"/synthetic/p2"}]
+    );
+    try replace(&h.a.chats,
+        \\[{"id":"a","deviceId":"local","title":"Alpha","spaceId":"p1","archived":false},
+        \\ {"id":"b","deviceId":"local","title":"Beta","spaceId":"p2","archived":false},
+        \\ {"id":"c","deviceId":"local","title":"Gamma","spaceId":"p1","archived":false},
+        \\ {"id":"d","deviceId":"local","title":"Delta","spaceId":"p2","archived":false}]
+    );
+    h.a.openChat("a", "p1");
+
+    // 1. Top-level blank New tab + clicking a sidebar chat from another project replaces the New tab in place.
+    h.a.newTab();
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.active);
+    try testing.expect(h.a.selected == null);
+    h.a.openChatInTab("b");
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.active);
+    try testing.expectEqualStrings("b", h.a.selected.?);
+    try testing.expectEqualStrings("a", h.a.tabs.items.items[0].?);
+
+    // 2. Top-level blank New tab + clicking a sidebar chat from an already-open project (p1) replaces the New tab in place
+    //    rather than jumping back to tab 0 and leaving the New tab abandoned.
+    h.a.newTab();
+    try testing.expectEqual(@as(usize, 3), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.active);
+    h.a.openChatInTab("c");
+    try testing.expectEqual(@as(usize, 3), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.active);
+    try testing.expectEqualStrings("c", h.a.selected.?);
+
+    // 3. Split-pane blank New tab (Cmd+D) + clicking a chat from another project opens it right in that split pane.
+    h.a.showTab(0);
+    h.a.splitPane(.horizontal);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.focus);
+    try testing.expect(h.a.selected == null);
+    h.a.openChatInTab("d");
+    try testing.expectEqual(@as(usize, 3), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 0), h.a.tabs.active);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.focus);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.groups[1].count());
+    try testing.expectEqualStrings("d", h.a.selected.?);
+
+    // 4. A New tab with an unsent typed draft is NOT overwritten when opening another chat.
+    h.a.newTab();
+    h.a.composer.set("Keep this unsent draft");
+    const draft_tab = h.a.tabs.active;
+    try replace(&h.a.chats,
+        \\[{"id":"a","deviceId":"local","title":"Alpha","spaceId":"p1","archived":false},
+        \\ {"id":"b","deviceId":"local","title":"Beta","spaceId":"p2","archived":false},
+        \\ {"id":"c","deviceId":"local","title":"Gamma","spaceId":"p1","archived":false},
+        \\ {"id":"d","deviceId":"local","title":"Delta","spaceId":"p2","archived":false},
+        \\ {"id":"e","deviceId":"local","title":"Epsilon","archived":false}]
+    );
+    h.a.openChatInTab("e");
+    try testing.expectEqualStrings("e", h.a.selected.?);
+    try testing.expect(h.a.tabs.active != draft_tab);
+    h.a.showTab(draft_tab);
+    try testing.expectEqualStrings("Keep this unsent draft", h.a.composer.text());
+}
+
+test "narrow side panel picker cards stay unclipped and topbar plus never overlaps Toggle side panel" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    // Split chats + open the blank side panel ("New tab" surface picker) at a narrow window width
+    // so host_width < 280pt and edge controls squeeze pane 0 (macOS) or pane 3 (Windows) below slot_min.
+    h.a.splitPane(.horizontal);
+    h.a.openChat("b", "remote-project");
+    h.a.splitPane(.horizontal);
+    @import("app_panels.zig").toggleHost(&h.a);
+    h.a.view.sidebar_open = false;
+    h.a.view.sidebar_width = 0;
+    h.t.resize(780 + @import("window_chrome.zig").trailing, 620);
+    h.t.settle(2);
+    h.snap("side-panel-narrow");
+
+    // 1. All four surface picker labels and their bordered row cards fit strictly inside the host panel.
+    const host_left = h.a.view.chrome.x + h.a.view.chrome.width - h.a.view.chrome.host_width;
+    const host_right = h.a.view.chrome.x + h.a.view.chrome.width;
+    for ([_][]const u8{ "Browser", "Diffs", "Git history", "GitHub" }) |label| {
+        const txt = h.t.findText(label) orelse return error.MissingPickerLabel;
+        try testing.expect(txt.x >= host_left + 4);
+        try testing.expect(txt.x + txt.w <= host_right - 4);
+        // Check the card row containing the label is also inside [host_left, host_right].
+        for (h.t.ctx.nodes.items) |node| {
+            if (node.content == .text and std.mem.eql(u8, node.content.text.str, label)) {
+                const row = h.t.ctx.node(node.parent);
+                try testing.expect(row.rect.x >= host_left + 1);
+                try testing.expect(row.rect.x + row.rect.w <= host_right - 1);
+            }
+        }
+    }
+
+    // 2. Topbar `+` (`instrument-new-tab`) sits cleanly left of `Toggle side panel` with zero overlap,
+    //    and all 4 split tabs stay evenly sized across the top bar.
+    const active_tab = h.a.view.strip.active_tab_anchor orelse return error.MissingActiveTabAnchor;
+    try testing.expect(active_tab.w >= 100);
+    var plus_rect: ?ui.Rect = null;
+    var toggle_rect: ?ui.Rect = null;
+    for (h.t.ctx.a11y_items.items) |item| {
+        const r = h.t.ctx.rects.get(item.id) orelse continue;
+        if (r.y >= chrome.header_height) continue;
+        if (std.mem.eql(u8, item.label, "New tab")) plus_rect = r;
+        if (std.mem.eql(u8, item.label, "Toggle side panel")) toggle_rect = r;
+    }
+    const plus = plus_rect orelse return error.MissingNewTabButton;
+    const toggle = toggle_rect orelse return error.MissingSidePanelToggle;
+    try testing.expect(plus.x + plus.w <= toggle.x - 2);
+}
+
+test "collapsed-sidebar horizontal split keeps tabs aligned to panes" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    try replace(&h.a.spaces,
+        \\[{"id":"p1","deviceId":"local","path":"/synthetic/fieldnotes"},
+        \\ {"id":"p2","deviceId":"local","path":"/synthetic/workshop"}]
+    );
+    try replace(&h.a.chats,
+        \\[{"id":"c1","deviceId":"local","title":"Lean Proofs","spaceId":"p1","archived":false},
+        \\ {"id":"c2","deviceId":"local","title":"Debug Layout","spaceId":"p1","archived":false},
+        \\ {"id":"c3","deviceId":"local","title":"Review And Test Integration","spaceId":"p2","archived":false},
+        \\ {"id":"c4","deviceId":"local","title":"Release Notes","spaceId":"p2","archived":false}]
+    );
+    h.a.openChat("c1", "p1");
+    h.a.splitPane(.horizontal);
+    h.a.openChat("c2", "p1");
+    h.a.splitPane(.horizontal);
+    h.a.openChat("c3", "p2");
+    h.a.splitPane(.horizontal);
+    h.a.openChat("c4", "p2");
+    h.a.focusPane(1);
+    h.a.view.sidebar_open = false;
+    h.a.view.sidebar_width = 0;
+
+    const caption_trailing = @import("window_chrome.zig").trailing;
+    h.t.resize(780 + caption_trailing, 420);
+    h.t.settle(2);
+    try expectSplitTabsAligned(&h);
+
+    // Uneven shares must not make the strip fall back to equal-width tabs.
+    const split = h.a.tabs.layout().?;
+    @memcpy(split.shares.items, &[_]f32{ 0.17, 0.28, 0.23, 0.32 });
+    h.t.settle(2);
+    try expectSplitTabsAligned(&h);
+}
+
+fn expectSplitTabsAligned(h: *Harness) !void {
+    var tabs_found: usize = 0;
+    var panes_found: usize = 0;
+    var tab_rects: [4]ui.Rect = undefined;
+    var pane_rects: [4]ui.Rect = undefined;
+    for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (r.y < h.a.view.chrome.y and @abs(r.h - chrome.tab_height) < 0.5 and @abs(node.style.radius - 6) < 0.5 and node.style.control and r.w >= 40) {
+            try testing.expect(tabs_found < tab_rects.len);
+            tab_rects[tabs_found] = r;
+            tabs_found += 1;
+        }
+        if (@abs(r.y - h.a.view.chrome.y) < 0.5 and @abs(r.h - h.a.view.chrome.height) < 0.5 and node.style.radius == chrome.zen_radius) {
+            try testing.expect(panes_found < pane_rects.len);
+            pane_rects[panes_found] = r;
+            panes_found += 1;
+        }
+    }
+    try testing.expectEqual(tab_rects.len, tabs_found);
+    try testing.expectEqual(pane_rects.len, panes_found);
+    for (tab_rects, pane_rects) |tab, pane| {
+        try testing.expectApproxEqAbs(pane.x, tab.x, 0.5);
+        try testing.expectApproxEqAbs(pane.w, tab.w, 0.5);
+    }
+}
+
+test "developer mode uses the same inset rounded-12 card chrome as zen while keeping developer hierarchy" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.developer);
+    try replace(&h.a.spaces,
+        \\[{"id":"p1","deviceId":"local","path":"/synthetic/fieldnotes","gitDetected":true},
+        \\ {"id":"p2","deviceId":"local","path":"/synthetic/workshop","gitDetected":true}]
+    );
+    try replace(&h.a.chats,
+        \\[{"id":"c1","deviceId":"local","title":"Cedar Integration","spaceId":"p1","cwd":"/synthetic/fieldnotes","branch":"feat/cards","archived":false,"config":{"harness":"graff","model":"gpt-5.4"}},
+        \\ {"id":"c2","deviceId":"local","title":"Maple Draft","spaceId":"p2","cwd":"/synthetic/workshop","branch":"main","archived":false}]
+    );
+    h.a.openChat("c1", "p1");
+    h.a.view.sidebar_open = true;
+    h.a.view.sidebar_width = h.a.settings.sidebarWidth();
+    h.t.resize(1100, 680);
+    h.t.settle(1);
+    if (std.c.getenv("NANO_NARROW_SNAP_DIR")) |dir| {
+        var buf: [1024]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, "{s}/dev-mode-chrome.png", .{std.mem.span(dir)});
+        try h.t.screenshot(path);
+    }
+
+    var sidebar_card = false;
+    var main_card = false;
+    for (h.t.ctx.nodes.items) |n| {
+        if (@abs(n.style.radius - chrome.zen_radius) < 0.1 and n.rect.h > 400 and n.style.border != null and n.style.shadows.len == 0) {
+            if (n.rect.x < h.a.view.sidebar_width and n.rect.w > 180) sidebar_card = true;
+            if (n.rect.x >= h.a.view.sidebar_width and n.rect.w > 400) main_card = true;
+        }
+    }
+    try testing.expect(sidebar_card);
+    try testing.expect(main_card);
+    // Developer hierarchy controls remain present.
+    try testing.expect(h.t.hasText("Local checkout"));
+    try testing.expect(h.t.hasText("Dev"));
+}
+
+test "tabStyle gives only active tabs an elevated surface and keeps inactive tabs transparent" {
+    const theme = @import("theme.zig");
+    const surfaces = @import("surface_palette.zig");
+    const render = @import("view_tab_strip_render.zig");
+    for ([_]bool{ false, true }) |dark| {
+        for ([_]bool{ false, true }) |frosted| {
+            const k = surfaces.apply(theme.colors(dark), frosted);
+            const inactive = render.tabStyle(k, false, false);
+            try testing.expectEqual(@as(f32, 0), inactive.bg.a);
+            try testing.expect(inactive.border == null);
+            try testing.expectEqual(@as(usize, 0), inactive.shadows.len);
+            try testing.expectEqual(ui.Weight.regular, inactive.weight);
+            try testing.expectEqualDeep(k.muted, inactive.fg);
+
+            const hovered = render.tabStyle(k, false, true);
+            try testing.expectEqual(@as(f32, 0), hovered.bg.a);
+            try testing.expectEqualDeep(k.text, hovered.fg);
+
+            const active = render.tabStyle(k, true, false);
+            try testing.expect(active.bg.a > 0);
+            try testing.expect(!std.meta.eql(active.bg, k.shell));
+            try testing.expect(active.border != null);
+            try testing.expect(active.shadows.len > 0);
+            try testing.expectEqual(ui.Weight.medium, active.weight);
+            try testing.expectEqualDeep(k.text, active.fg);
+            if (!frosted) {
+                try testing.expect(theme.contrast(active.fg, active.bg) >= 4.5);
+            }
+        }
+    }
+}
+
+test "browse-style top tab bar highlights only the active tab in stable index order across split and single workspaces" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    const topPrefix = struct {
+        fn find(ctx: *ui.Context, side_w: f32, prefix: []const u8) ?ui.Rect {
+            for (ctx.nodes.items) |node| switch (node.content) {
+                .text => |tx| if (std.mem.startsWith(u8, tx.str, prefix) and node.rect.y < chrome.header_height and node.rect.x >= side_w) return node.rect,
+                else => {},
+            };
+            return null;
+        }
+    }.find;
+
+    try replace(&h.a.spaces,
+        \\[{"id":"p1","deviceId":"local","path":"/synthetic/fieldnotes"},
+        \\ {"id":"p2","deviceId":"local","path":"/synthetic/harbor"}]
+    );
+    try replace(&h.a.chats,
+        \\[{"id":"c0","deviceId":"local","title":"Cedar Layout Notes","spaceId":"p1","archived":false},
+        \\ {"id":"c1","deviceId":"local","title":"Maple Cache Plan","spaceId":"p1","archived":false},
+        \\ {"id":"c2","deviceId":"local","title":"Birch Query Pass","spaceId":"p1","archived":false},
+        \\ {"id":"c3","deviceId":"local","title":"Alder Stream Spec","spaceId":"p1","archived":false},
+        \\ {"id":"c4","deviceId":"local","title":"Willow Table Review","spaceId":"p1","archived":false},
+        \\ {"id":"c5","deviceId":"local","title":"Spruce Build Guide","spaceId":"p2","archived":false},
+        \\ {"id":"c6","deviceId":"local","title":"Juniper Design Notes","spaceId":"p2","archived":false},
+        \\ {"id":"c7","deviceId":"local","title":"Linden Sync Audit","spaceId":"p2","archived":false}]
+    );
+
+    // 6 workspaces in order: [0: split, 1: split, 2: split (c4 | New tab), 3: single, 4: single, 5: single]
+    h.a.openChat("c0", "p1");
+    h.a.splitPane(.horizontal);
+    h.a.openChat("c1", "p1");
+
+    h.a.newWorkspaceSession();
+    h.a.openChat("c2", "p1");
+    h.a.splitPane(.horizontal);
+    h.a.openChat("c3", "p1");
+
+    h.a.newWorkspaceSession();
+    h.a.openChat("c4", "p1");
+    h.a.splitPane(.horizontal); // Pane 0: Willow Table Review, Pane 1 (focused): New tab
+
+    for ([_][]const u8{ "c5", "c6", "c7" }) |cid| {
+        h.a.newWorkspaceSession();
+        h.a.openChat(cid, "p2");
+    }
+
+    h.a.showTab(2);
+    h.a.focusPane(1);
+    h.a.view.sidebar_open = false;
+    h.a.view.sidebar_width = 0;
+    h.t.resize(1280, 680);
+    h.t.settle(2);
+    if (std.c.getenv("NANO_TAB_POLISH_SNAP_DIR")) |dir| {
+        var buf: [1024]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, "{s}/after-tab-bar-split.png", .{std.mem.span(dir)})) |path| {
+            h.t.screenshot(path) catch {};
+        } else |_| {}
+    }
+
+    // 1. Active split workspace stays in its true slot (index 2) rather than jumping to slot 0.
+    const t0 = topPrefix(&h.t.ctx, h.a.view.sidebar_width, "Maple Cache") orelse return error.MissingWorkspace0;
+    const t1 = topPrefix(&h.t.ctx, h.a.view.sidebar_width, "Alder Stream") orelse return error.MissingWorkspace1;
+    const t2 = h.topText("Split · 2 panes") orelse return error.MissingActiveSplitTab;
+    const t3 = topPrefix(&h.t.ctx, h.a.view.sidebar_width, "Spruce Build") orelse return error.MissingWorkspace3;
+    const t4 = topPrefix(&h.t.ctx, h.a.view.sidebar_width, "Juniper Design") orelse return error.MissingWorkspace4;
+    const t5 = topPrefix(&h.t.ctx, h.a.view.sidebar_width, "Linden Sync") orelse return error.MissingWorkspace5;
+    try testing.expect(t0.x < t1.x and t1.x < t2.x and t2.x < t3.x and t3.x < t4.x and t4.x < t5.x);
+
+    // 2. Only the active top workspace tab has a filled surface + border + shadow; the other 5 stay transparent.
+    var top_active: usize = 0;
+    var top_inactive: usize = 0;
+    var active_x: f32 = 0;
+    var rightmost_tab_right: f32 = 0;
+    var pane_active: usize = 0;
+    var pane_inactive: usize = 0;
+    var pane_active_x: f32 = 0;
+    var pane_inactive_x: f32 = 0;
+    for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (!node.style.control) continue;
+        if (r.y < chrome.header_height and @abs(r.h - 28) < 0.5 and r.w >= 72) {
+            rightmost_tab_right = @max(rightmost_tab_right, r.x + r.w);
+            const bg = node.style.background orelse return error.MissingTabBackground;
+            if (bg.a > 0.5) {
+                try testing.expect(node.style.border != null);
+                try testing.expect(node.style.shadows.len > 0);
+                top_active += 1;
+                active_x = r.x;
+            } else {
+                try testing.expectEqual(@as(f32, 0), bg.a);
+                try testing.expect(node.style.border == null);
+                try testing.expectEqual(@as(usize, 0), node.style.shadows.len);
+                top_inactive += 1;
+            }
+        } else if (r.y >= chrome.header_height - 0.5 and r.y < h.a.view.chrome.y and @abs(r.h - chrome.tab_height) < 0.5 and @abs(node.style.radius - 6) < 0.5) {
+            const bg = node.style.background orelse return error.MissingPaneHeaderBackground;
+            if (bg.a > 0.5) {
+                try testing.expect(node.style.border != null);
+                pane_active += 1;
+                pane_active_x = r.x;
+            } else {
+                try testing.expectEqual(@as(f32, 0), bg.a);
+                try testing.expect(node.style.border == null);
+                pane_inactive += 1;
+                pane_inactive_x = r.x;
+            }
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), top_active);
+    try testing.expectEqual(@as(usize, 5), top_inactive);
+    try testing.expect(active_x > t1.x and active_x < t3.x);
+    try testing.expectEqual(@as(usize, 1), pane_active);
+    try testing.expectEqual(@as(usize, 1), pane_inactive);
+    try testing.expect(pane_active_x > pane_inactive_x);
+
+    // 3. New-tab (+) button sits immediately after the tab run instead of pinned far right.
+    var plus_rect: ?ui.Rect = null;
+    for (h.t.ctx.a11y_items.items) |item| {
+        const r = h.t.ctx.rects.get(item.id) orelse continue;
+        if (r.y < chrome.header_height and std.mem.eql(u8, item.label, "New tab")) {
+            plus_rect = r;
+            break;
+        }
+    }
+    const plus = plus_rect orelse return error.MissingNewTabButton;
+    try testing.expect(plus.x >= rightmost_tab_right - 1);
+    try testing.expect(plus.x - rightmost_tab_right <= 40);
+
+    // 4. Switching to a single-pane workspace highlights only its tab in place too.
+    h.a.showTab(4);
+    h.t.settle(2);
+    if (std.c.getenv("NANO_TAB_POLISH_SNAP_DIR")) |dir| {
+        var buf: [1024]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, "{s}/after-tab-bar-single.png", .{std.mem.span(dir)})) |path| {
+            h.t.screenshot(path) catch {};
+        } else |_| {}
+    }
+    const juniper = topPrefix(&h.t.ctx, h.a.view.sidebar_width, "Juniper") orelse return error.MissingActiveSingleTab;
+    const linden = topPrefix(&h.t.ctx, h.a.view.sidebar_width, "Linden") orelse return error.MissingTrailingSingleTab;
+    var single_active: usize = 0;
+    var single_inactive: usize = 0;
+    var single_active_r: ui.Rect = .{};
+    for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (!node.style.control) continue;
+        if (r.y < chrome.header_height and @abs(r.h - 28) < 0.5 and r.w >= 72) {
+            const bg = node.style.background orelse return error.MissingSingleTabBackground;
+            if (bg.a > 0.5) {
+                try testing.expect(node.style.border != null);
+                single_active += 1;
+                single_active_r = r;
+            } else {
+                try testing.expectEqual(@as(f32, 0), bg.a);
+                try testing.expect(node.style.border == null);
+                single_inactive += 1;
+            }
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), single_active);
+    try testing.expectEqual(@as(usize, 5), single_inactive);
+    try testing.expect(juniper.x >= single_active_r.x and juniper.x < single_active_r.x + single_active_r.w);
+    try testing.expect(linden.x >= single_active_r.x + single_active_r.w);
 }

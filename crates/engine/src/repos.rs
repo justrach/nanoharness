@@ -53,6 +53,25 @@ const FILE_SEARCH_TIMEOUT: Duration = Duration::from_secs(6);
 const GITHUB_AVATAR_TIMEOUT: Duration = Duration::from_secs(6);
 const FILE_INDEX_TTL: Duration = Duration::from_secs(10);
 const FILE_INDEX_MAX_ENTRIES: usize = 250_000;
+/// When `@` file indexing runs directly against the user's home directory,
+/// bound recursion depth and skip OS-managed / cache trees so indexing stays
+/// responsive and never triggers macOS TCC folder prompts.
+const HOME_WALK_MAX_DEPTH: usize = 4;
+const HOME_SKIP_TOP_DIRS: &[&str] = &[
+    "Library",
+    "Applications",
+    "Pictures",
+    "Music",
+    "Movies",
+    "Public",
+    "Downloads",
+    ".Trash",
+    ".cache",
+    ".npm",
+    ".cargo",
+    ".rustup",
+    ".local",
+];
 const RANK_BUFFER: usize = 1_024;
 pub const GIT_HISTORY_DEFAULT_LIMIT: usize = 100;
 pub const GIT_HISTORY_MAX_LIMIT: usize = 200;
@@ -481,6 +500,11 @@ impl Repos {
         repos
     }
 
+    /// Known registered repository paths as stored on disk.
+    pub(crate) fn registered_paths(&self) -> Vec<PathBuf> {
+        self.load_paths().into_iter().map(PathBuf::from).collect()
+    }
+
     /// Remember an existing repository the user pointed us at.
     pub async fn add(&self, path: &str) -> Result<Repo, EngineError> {
         let abs = absolutize(Path::new(path));
@@ -503,16 +527,14 @@ impl Repos {
     /// `git clone <url>` under `{data_dir}/repos`. (Named `clone_repo` to keep
     /// `Clone::clone` unambiguous on the service handle.)
     pub async fn clone_repo(&self, url: &str) -> Result<Repo, EngineError> {
-        let trimmed = url.trim().trim_end_matches('/');
-        let name = trimmed
-            .trim_end_matches(".git")
-            .rsplit(['/', ':'])
-            .next()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("repo")
-            .to_string();
+        let (trimmed, name) = validate_clone_target(url)?;
         let repos_dir = self.inner.data_dir.join("repos");
         let target = repos_dir.join(&name);
+        if target.parent() != Some(repos_dir.as_path()) {
+            return Err(EngineError::Other(format!(
+                "Invalid repository destination: {name}"
+            )));
+        }
         if target.exists() {
             return Err(EngineError::Other(format!(
                 "Already exists: {}",
@@ -520,7 +542,7 @@ impl Repos {
             )));
         }
         std::fs::create_dir_all(&repos_dir)?;
-        self.git(&["clone", trimmed, &target.to_string_lossy()], None)
+        self.git(&["clone", "--", &trimmed, &target.to_string_lossy()], None)
             .await?;
         self.register(&target.to_string_lossy())?;
         self.to_repo(&target).await
@@ -1204,12 +1226,14 @@ impl Repos {
     /// already checked out in another worktree fails with git's own message.
     /// Returns the resulting current branch.
     pub async fn switch_ref(&self, cwd: &Path, ref_name: &str) -> Result<String, EngineError> {
+        validate_git_ref_arg(ref_name)?;
         let local = self
             .git(
                 &[
                     "show-ref",
                     "--verify",
                     "--quiet",
+                    "--",
                     &format!("refs/heads/{ref_name}"),
                 ],
                 Some(cwd),
@@ -1226,6 +1250,7 @@ impl Repos {
                         "show-ref",
                         "--verify",
                         "--quiet",
+                        "--",
                         &format!("refs/remotes/{remote}"),
                     ],
                     Some(cwd),
@@ -1367,6 +1392,7 @@ impl Repos {
                     "add",
                     "-b",
                     &branch_name,
+                    "--",
                     &path.to_string_lossy(),
                     &base_ref,
                 ],
@@ -1400,6 +1426,7 @@ impl Repos {
     /// object id. Qualify branches so a same-named tag cannot make Git's DWIM
     /// lookup fail, but retain remote refs (and their upstream setup behavior).
     async fn worktree_base_ref(&self, path: &Path, base: &str) -> Result<String, EngineError> {
+        validate_git_ref_arg(base)?;
         if matches!(base.len(), 40 | 64) && base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             // `git worktree add -b` can prefer a branch named like an object id.
             // Peeling forces object-expression resolution for recorded snapshots.
@@ -1621,6 +1648,7 @@ impl Repos {
                     "worktree",
                     "remove",
                     "--force",
+                    "--",
                     &worktree_path.to_string_lossy(),
                 ],
                 Some(repo_path),
@@ -1629,7 +1657,9 @@ impl Repos {
         }
         let _ = self.git(&["worktree", "prune"], Some(repo_path)).await;
         if managed {
-            let _ = self.git(&["branch", "-D", &branch], Some(repo_path)).await;
+            let _ = self
+                .git(&["branch", "-D", "--", &branch], Some(repo_path))
+                .await;
         }
         Ok(())
     }
@@ -2382,8 +2412,42 @@ fn canonical_search_root(root: &Path) -> Result<PathBuf, EngineError> {
         .map_err(|e| EngineError::Other(format!("could not search workspace: {e}")))
 }
 
+fn is_home_root(root: &Path) -> bool {
+    let home = home_dir();
+    if root == home {
+        return true;
+    }
+    match (std::fs::canonicalize(root), std::fs::canonicalize(&home)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn should_skip_index_entry(depth: usize, name: &std::ffi::OsStr, is_home: bool) -> bool {
+    if depth == 0 {
+        return false;
+    }
+    if name == ".git" {
+        return true;
+    }
+    if is_home && depth == 1 {
+        return name
+            .to_str()
+            .is_some_and(|s| HOME_SKIP_TOP_DIRS.contains(&s));
+    }
+    false
+}
+
 fn walk_file_index<F: Fn() -> bool + Sync>(
     root: &Path,
+    cancelled: &F,
+) -> Result<Vec<IndexedPath>, EngineError> {
+    walk_file_index_in(root, is_home_root(root), cancelled)
+}
+
+fn walk_file_index_in<F: Fn() -> bool + Sync>(
+    root: &Path,
+    is_home: bool,
     cancelled: &F,
 ) -> Result<Vec<IndexedPath>, EngineError> {
     if cancelled() {
@@ -2394,77 +2458,82 @@ fn walk_file_index<F: Fn() -> bool + Sync>(
         .unwrap_or(4);
     let collected: std::sync::Mutex<Vec<IndexedPath>> = std::sync::Mutex::new(Vec::new());
     let was_cancelled = AtomicBool::new(false);
-    ignore::WalkBuilder::new(root)
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder
         .hidden(false)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
         .threads(threads)
-        .filter_entry(|entry| entry.depth() == 0 || entry.file_name() != ".git")
-        .build_parallel()
-        .run(|| {
-            const BATCH: usize = 512;
-            struct Batch<'a> {
-                items: Vec<IndexedPath>,
-                sink: &'a std::sync::Mutex<Vec<IndexedPath>>,
-            }
-            impl Drop for Batch<'_> {
-                fn drop(&mut self) {
-                    if self.items.is_empty() {
-                        return;
-                    }
-                    if let Ok(mut all) = self.sink.lock() {
-                        all.append(&mut self.items);
-                    }
-                }
-            }
-            let mut batch = Batch {
-                items: Vec::with_capacity(BATCH),
-                sink: &collected,
-            };
-            let was_cancelled = &was_cancelled;
-            Box::new(move |entry| {
-                if was_cancelled.load(Ordering::Relaxed) {
-                    return ignore::WalkState::Quit;
-                }
-                if cancelled() {
-                    was_cancelled.store(true, Ordering::Relaxed);
-                    return ignore::WalkState::Quit;
-                }
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(err) => {
-                        tracing::debug!(%err, "file mention index skipped entry");
-                        return ignore::WalkState::Continue;
-                    }
-                };
-                let path = entry.path();
-                if path == root {
-                    return ignore::WalkState::Continue;
-                }
-                let Ok(relative) = path.strip_prefix(root) else {
-                    return ignore::WalkState::Continue;
-                };
-                let relative = relative.to_string_lossy().replace('\\', "/");
-                if relative == ".git" || relative.starts_with(".git/") {
-                    return ignore::WalkState::Continue;
-                }
-                batch.items.push(IndexedPath {
-                    haystack: nucleo_matcher::Utf32String::from(relative.as_str()),
-                    path: relative,
-                    is_dir: entry.file_type().is_some_and(|kind| kind.is_dir()),
-                });
-                if batch.items.len() >= BATCH
-                    && let Ok(mut all) = batch.sink.lock()
-                {
-                    all.append(&mut batch.items);
-                    if all.len() >= FILE_INDEX_MAX_ENTRIES {
-                        return ignore::WalkState::Quit;
-                    }
-                }
-                ignore::WalkState::Continue
-            })
+        .filter_entry(move |entry| {
+            !should_skip_index_entry(entry.depth(), entry.file_name(), is_home)
         });
+    if is_home {
+        builder.max_depth(Some(HOME_WALK_MAX_DEPTH));
+    }
+    builder.build_parallel().run(|| {
+        const BATCH: usize = 512;
+        struct Batch<'a> {
+            items: Vec<IndexedPath>,
+            sink: &'a std::sync::Mutex<Vec<IndexedPath>>,
+        }
+        impl Drop for Batch<'_> {
+            fn drop(&mut self) {
+                if self.items.is_empty() {
+                    return;
+                }
+                if let Ok(mut all) = self.sink.lock() {
+                    all.append(&mut self.items);
+                }
+            }
+        }
+        let mut batch = Batch {
+            items: Vec::with_capacity(BATCH),
+            sink: &collected,
+        };
+        let was_cancelled = &was_cancelled;
+        Box::new(move |entry| {
+            if was_cancelled.load(Ordering::Relaxed) {
+                return ignore::WalkState::Quit;
+            }
+            if cancelled() {
+                was_cancelled.store(true, Ordering::Relaxed);
+                return ignore::WalkState::Quit;
+            }
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    tracing::debug!(%err, "file mention index skipped entry");
+                    return ignore::WalkState::Continue;
+                }
+            };
+            let path = entry.path();
+            if path == root {
+                return ignore::WalkState::Continue;
+            }
+            let Ok(relative) = path.strip_prefix(root) else {
+                return ignore::WalkState::Continue;
+            };
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            if relative == ".git" || relative.starts_with(".git/") {
+                return ignore::WalkState::Continue;
+            }
+            batch.items.push(IndexedPath {
+                haystack: nucleo_matcher::Utf32String::from(relative.as_str()),
+                path: relative,
+                is_dir: entry.file_type().is_some_and(|kind| kind.is_dir()),
+            });
+            if batch.items.len() >= BATCH
+                && let Ok(mut all) = batch.sink.lock()
+            {
+                all.append(&mut batch.items);
+                if all.len() >= FILE_INDEX_MAX_ENTRIES {
+                    return ignore::WalkState::Quit;
+                }
+            }
+            ignore::WalkState::Continue
+        })
+    });
     if was_cancelled.load(Ordering::Relaxed) || cancelled() {
         return Err(EngineError::Other("file search cancelled".into()));
     }
@@ -2735,6 +2804,39 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
         out.push_str(&format!("{byte:02x}"));
     }
     out
+}
+
+/// Reject empty, control-bearing, or option-like (`-...`) Git ref/revision arguments
+/// before passing them to `git` subcommands where `--` denotes pathspecs.
+pub(crate) fn validate_git_ref_arg(value: &str) -> Result<&str, EngineError> {
+    if value.is_empty() || value.starts_with('-') || value.chars().any(|c| c.is_control()) {
+        return Err(EngineError::Other(format!("Invalid git ref: {value}")));
+    }
+    Ok(value)
+}
+
+/// Validate a `git clone` URL and derive a single safe destination directory name
+/// under `{data_dir}/repos`.
+fn validate_clone_target(url: &str) -> Result<(String, String), EngineError> {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.is_empty() || trimmed.starts_with('-') || trimmed.chars().any(|c| c.is_control()) {
+        return Err(EngineError::Other(format!("Invalid repository URL: {url}")));
+    }
+    let name = trimmed
+        .trim_end_matches(".git")
+        .rsplit(['/', ':', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("repo");
+    if matches!(name, "." | "..")
+        || name.contains(['/', '\\', '\0'])
+        || name.chars().any(|c| c.is_control())
+    {
+        return Err(EngineError::Other(format!(
+            "Invalid repository name: {name}"
+        )));
+    }
+    Ok((trimmed.to_string(), name.to_string()))
 }
 
 #[cfg(test)]
@@ -3534,5 +3636,87 @@ tmpfs /run tmpfs rw 0 0
         let expected: Vec<FolderEntry> = all.entries.into_iter().filter(|e| e.is_dir).collect();
         assert_eq!(dirs.entries, expected);
         assert!(dirs.entries.iter().any(|e| e.name == "beta" && e.is_repo));
+    }
+
+    #[test]
+    fn home_walk_skips_os_managed_dirs_and_caps_depth() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("Library/Caches/big")).unwrap();
+        std::fs::write(home.path().join("Library/Caches/big/skip.txt"), "x").unwrap();
+        std::fs::create_dir_all(home.path().join("Projects/a/b/c/d/e")).unwrap();
+        std::fs::write(home.path().join("Projects/a/shallow.txt"), "ok").unwrap();
+        std::fs::write(home.path().join("Projects/a/b/c/d/e/too-deep.txt"), "deep").unwrap();
+
+        let home_entries = walk_file_index_in(home.path(), true, &|| false).unwrap();
+        let home_paths: Vec<&str> = home_entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(home_paths.contains(&"Projects/a/shallow.txt"));
+        assert!(!home_paths.iter().any(|p| p.starts_with("Library")));
+        assert!(!home_paths.iter().any(|p| p.ends_with("too-deep.txt")));
+
+        // Regular project roots are not depth-capped or Library-filtered.
+        let project_entries = walk_file_index_in(home.path(), false, &|| false).unwrap();
+        let project_paths: Vec<&str> = project_entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(project_paths.contains(&"Library/Caches/big/skip.txt"));
+        assert!(project_paths.contains(&"Projects/a/b/c/d/e/too-deep.txt"));
+    }
+
+    #[test]
+    fn validate_clone_target_blocks_git_options_and_path_escapes() {
+        for bad in [
+            "",
+            "   ",
+            "--upload-pack=touch /tmp/pwn",
+            "-c core.sshCommand=sh",
+            "https://example.com/org/..",
+            "https://example.com/org/..git",
+            "https://example.com/org/.",
+            "https://example.com/org/..git/",
+            "https://example.com/org/repo\n--upload-pack=x",
+        ] {
+            // Note: `..git` trims `.git` to `.`!
+            assert!(
+                validate_clone_target(bad).is_err(),
+                "expected clone target rejection for {bad:?}"
+            );
+        }
+        assert_eq!(
+            validate_clone_target("https://github.com/org/demo.git").unwrap(),
+            ("https://github.com/org/demo.git".into(), "demo".into())
+        );
+        assert_eq!(
+            validate_clone_target("git@github.com:org/demo.git/").unwrap(),
+            ("git@github.com:org/demo.git".into(), "demo".into())
+        );
+    }
+
+    #[test]
+    fn validate_git_ref_arg_rejects_flag_injection() {
+        for bad in ["", "-", "--orphan", "-b", "--output=/tmp/x", "main\n--flag"] {
+            assert!(
+                validate_git_ref_arg(bad).is_err(),
+                "expected ref rejection for {bad:?}"
+            );
+        }
+        for good in ["main", "feature/foo", "HEAD~1", "origin/main", "deadbeef"] {
+            assert!(validate_git_ref_arg(good).is_ok(), "{good:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn clone_repo_and_switch_ref_reject_flag_injection_before_spawning_git() {
+        let data = tempfile::tempdir().unwrap();
+        let repos =
+            Repos::with_worktrees_root(data.path(), "device", data.path().join("worktrees"));
+        let marker = data.path().join("pwned-by-upload-pack");
+        let attack = format!("--upload-pack=touch {}", marker.display());
+        assert!(repos.clone_repo(&attack).await.is_err());
+        assert!(!marker.exists(), "git must not execute --upload-pack");
+        assert!(
+            repos
+                .clone_repo("https://example.com/org/..")
+                .await
+                .is_err()
+        );
+        assert!(repos.switch_ref(data.path(), "--orphan").await.is_err());
     }
 }

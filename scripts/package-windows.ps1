@@ -1,7 +1,7 @@
 ﻿param(
     [Parameter(Mandatory)][string]$ReleasesUrl,
-    # `dist` is what ships; CI passes `release` to package the build it has.
-    [ValidateSet('dist', 'release')][string]$CargoProfile = 'dist'
+    # `headless` is the smaller shipped engine; CI passes `release` for smoke.
+    [ValidateSet('headless', 'dist', 'release')][string]$CargoProfile = 'headless'
 )
 $ErrorActionPreference = 'Stop'
 if (-not $ReleasesUrl.StartsWith('https://')) { throw 'Release feed must use HTTPS' }
@@ -28,7 +28,7 @@ try {
     }
     Push-Location (Join-Path $root 'apps/nano')
     try {
-        zig build -Dtarget=x86_64-windows-msvc -Doptimize=ReleaseSafe "-Dwebview2-loader=$loader"
+        zig build -Dtarget=x86_64-windows-msvc -Dcpu=baseline -Doptimize=ReleaseSafe "-Dwebview2-loader=$loader"
         if ($LASTEXITCODE -ne 0) { throw 'harness-nano Windows build failed' }
     } finally { Pop-Location }
     # Explicit pipes also work for the GUI-subsystem executable in CI. A

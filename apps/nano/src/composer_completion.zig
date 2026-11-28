@@ -1,5 +1,7 @@
-//! Catalog-backed completion provenance. Plain / and $ text is never promoted
-//! by matching a catalog. Only acceptance mints existing harness-invoke links.
+//! Catalog-backed completion provenance. Plain / and $ text inside a draft is
+//! never promoted by matching a catalog: only acceptance mints harness-invoke
+//! links. Sending a draft that is nothing but one `/name` the catalog lists is
+//! that acceptance (`sendGate`).
 const std = @import("std");
 const ui = @import("nanoui").ui;
 const rpc = @import("rpc.zig");
@@ -8,7 +10,7 @@ const rules = @import("completion_rules.zig");
 const App = @import("app.zig").App;
 const Allocator = std.mem.Allocator;
 
-pub const Action = enum { model, new, resume_chat, settings, diff, files, terminal, rename, stop, help, custom_theme, zen_mode };
+pub const Action = enum { model, new, resume_chat, settings, diff, files, terminal, rename, stop, help, custom_theme, zen_mode, design_mode };
 pub const SkillCommand = struct { name: []const u8, harness: []const u8 };
 pub const Entry = struct {
     name: []const u8,
@@ -21,6 +23,9 @@ pub const Entry = struct {
     }
 };
 const Selection = struct { start: usize, end: usize, display: []u8, link: []u8 };
+const FollowUp = @import("app_queue.zig").FollowUp;
+/// A send that waits for the catalog: the draft it was asked for, and how.
+const HeldSend = struct { text: []u8, explicit: ?FollowUp };
 const LongEdit = struct {
     before: []u8,
     after: []u8,
@@ -60,6 +65,11 @@ pub const State = struct {
     parked: std.StringHashMapUnmanaged([]u8) = .empty,
     undo_refs: std.ArrayList([]u8) = .empty,
     long_edit: ?LongEdit = null,
+    /// A bare `/name` sent before the catalog answered; it goes once it does.
+    held_send: ?HeldSend = null,
+    /// A bare `/name` stopped once because discovery failed: sending this same
+    /// draft again sends it as plain text.
+    plain_ok: std.ArrayList(u8) = .empty,
 
     pub fn deinit(s: *State, gpa: Allocator) void {
         s.clearSelections(gpa);
@@ -77,6 +87,8 @@ pub const State = struct {
         for (s.undo_refs.items) |v| gpa.free(v);
         s.undo_refs.deinit(gpa);
         if (s.long_edit) |*x| x.deinit(gpa);
+        if (s.held_send) |held| gpa.free(held.text);
+        s.plain_ok.deinit(gpa);
         if (s.arena) |*ar| ar.deinit();
         if (s.scope) |v| gpa.free(v);
         s.* = .{};
@@ -92,6 +104,13 @@ pub const State = struct {
         const sel = s.selected.orderedRemove(ix);
         gpa.free(sel.display);
         gpa.free(sel.link);
+    }
+    fn dropOverlapping(s: *State, gpa: Allocator, lo: usize, hi: usize) void {
+        var ix: usize = 0;
+        while (ix < s.selected.items.len) {
+            const ref = s.selected.items[ix];
+            if (lo < ref.end and hi > ref.start) s.drop(gpa, ix) else ix += 1;
+        }
     }
     /// Minimal changed span: edits wholly before a reference move it; any
     /// overlap or appended name suffix invalidates it rather than retargeting.
@@ -145,6 +164,10 @@ fn ensure(a: *App) void {
         if (s.scope) |old| a.gpa.free(old);
         s.scope = key;
         s.clearSelections(a.gpa);
+        if (s.held_send) |held| a.gpa.free(held.text);
+        s.held_send = null;
+        clearLoadingNotice(a);
+        s.plain_ok.clearRetainingCapacity();
         s.commands.clearRetainingCapacity();
         s.skills.clearRetainingCapacity();
         if (s.arena) |*ar| ar.deinit();
@@ -229,9 +252,11 @@ fn receive(a: *App, id: u64, reply: rpc.Reply, skill: bool) void {
 }
 fn commandsReply(a: *App, id: u64, r: rpc.Reply) void {
     receive(a, id, r, false);
+    releaseHeld(a);
 }
 fn skillsReply(a: *App, id: u64, r: rpc.Reply) void {
     receive(a, id, r, true);
+    releaseHeld(a);
 }
 
 pub fn refresh(a: *App, caret: usize) ?rules.Token {
@@ -253,7 +278,8 @@ pub fn refresh(a: *App, caret: usize) ?rules.Token {
     return tok;
 }
 
-const Native = struct { action: Action, name: []const u8, description: []const u8, chat: bool = false };
+/// `chat`: needs an open chat; `run`: needs its run to be going.
+const Native = struct { action: Action, name: []const u8, description: []const u8, chat: bool = false, run: bool = false };
 const native = [_]Native{
     .{ .action = .model, .name = "model", .description = "Choose agent, model and reasoning" },
     .{ .action = .new, .name = "new", .description = "Start a new session" },
@@ -262,12 +288,30 @@ const native = [_]Native{
     .{ .action = .help, .name = "help", .description = "Show keyboard shortcuts" },
     .{ .action = .custom_theme, .name = "custom-theme", .description = "Create or pick a custom theme and animated backdrop" },
     .{ .action = .zen_mode, .name = "zen", .description = "Toggle Zen / Developer workspace mode" },
+    .{ .action = .design_mode, .name = "design", .description = "Toggle Design mode (Paper canvas)" },
     .{ .action = .diff, .name = "diff", .description = "Open changes", .chat = true },
     .{ .action = .files, .name = "files", .description = "Open files", .chat = true },
     .{ .action = .terminal, .name = "terminal", .description = "Open terminal", .chat = true },
     .{ .action = .rename, .name = "rename", .description = "Rename this session", .chat = true },
-    .{ .action = .stop, .name = "stop", .description = "Stop the current run", .chat = true },
+    .{ .action = .stop, .name = "stop", .description = "Stop the current run", .chat = true, .run = true },
 };
+
+/// Whether the slash menu offers a native command: chat commands need an
+/// open chat, and `/stop` a run to stop.
+fn nativeOffered(n: Native, has_chat: bool, running: bool) bool {
+    if (n.chat and !has_chat) return false;
+    return !n.run or running;
+}
+
+test "slash menu offers /stop only while a run goes" {
+    const stop = for (native) |n| {
+        if (n.action == .stop) break n;
+    } else unreachable;
+    try std.testing.expect(!nativeOffered(stop, false, false));
+    try std.testing.expect(!nativeOffered(stop, true, false));
+    try std.testing.expect(nativeOffered(stop, true, true));
+    for (native) |n| if (!n.run) try std.testing.expectEqual(!n.chat, nativeOffered(n, false, false));
+}
 
 pub fn entries(a: *App, gpa: Allocator, tok: rules.Token) ![]Entry {
     var all: std.ArrayList(Entry) = .empty;
@@ -278,8 +322,9 @@ pub fn entries(a: *App, gpa: Allocator, tok: rules.Token) ![]Entry {
         if (!skill_command) try all.append(gpa, command);
     };
     try all.appendSlice(gpa, a.completion.skills.items);
+    const running = a.selectedStatus() == .working;
     if (tok.prefix == '/') for (native) |n| {
-        if (n.chat and a.selected == null) continue;
+        if (!nativeOffered(n, a.selected != null, running)) continue;
         // Until provider discovery completes, use an explicitly local namespace
         // rather than temporarily stealing a provider's unqualified command.
         var name = if (a.completion.commands_done) n.name else try std.fmt.allocPrint(gpa, "harness:{s}", .{n.name});
@@ -341,6 +386,8 @@ pub fn accept(a: *App, c: *ui.Context, tok: rules.Token, entry: Entry) void {
         if (display) |v| a.gpa.free(v);
         if (link) |v| a.gpa.free(v);
     };
+    var undo_before = captureUndoState(a, text) catch null;
+    defer if (undo_before) |blob| a.gpa.free(blob);
     // The pinned toolkit intentionally omits >1KiB snapshots. Preserve this
     // formerly shipped one-step completion transaction without changing its
     // general editor history or copying/truncating a long draft.
@@ -377,7 +424,11 @@ pub fn accept(a: *App, c: *ui.Context, tok: rules.Token, entry: Entry) void {
     }
     s.sync(a.gpa, a.composer.text()) catch return;
     if (display != null) {
-        s.selected.append(a.gpa, .{ .start = range.start, .end = range.start + display.?.len, .display = display.?, .link = link.? }) catch return;
+        // `sync` keeps a reference whose text did not change, so accepting over
+        // one again would leave two for the same span (#178). The newest wins.
+        s.selected.ensureUnusedCapacity(a.gpa, 1) catch return;
+        s.dropOverlapping(a.gpa, range.start, range.start + display.?.len);
+        s.selected.appendAssumeCapacity(.{ .start = range.start, .end = range.start + display.?.len, .display = display.?, .link = link.? });
         std.sort.insertion(Selection, s.selected.items, {}, struct {
             fn less(_: void, x: Selection, y: Selection) bool {
                 return x.start < y.start;
@@ -386,10 +437,11 @@ pub fn accept(a: *App, c: *ui.Context, tok: rules.Token, entry: Entry) void {
         keep = true;
     }
     s.dismissed = true;
-    if (capture(a, a.composer.text()) catch null) |blob| {
-        if (s.undo_refs.items.len >= 12) a.gpa.free(s.undo_refs.orderedRemove(0));
-        s.undo_refs.append(a.gpa, blob) catch a.gpa.free(blob);
+    if (undo_before) |blob| {
+        rememberUndoState(a, blob);
+        undo_before = null;
     }
+    if (captureUndoState(a, a.composer.text()) catch null) |blob| rememberUndoState(a, blob);
     if (long_edit) |*x| {
         x.after_refs = capture(a, a.composer.text()) catch null;
         if (s.long_edit) |*old| old.deinit(a.gpa);
@@ -402,10 +454,10 @@ pub fn accept(a: *App, c: *ui.Context, tok: rules.Token, entry: Entry) void {
     a.redraw();
 }
 
-fn activate(a: *App, action: Action) void {
+pub fn activate(a: *App, action: Action) void {
     switch (action) {
         .model => a.togglePicker(),
-        .new => a.newTab(),
+        .new => a.replaceCurrent(null),
         .resume_chat => @import("view_palette.zig").toggle(a, .replace_current),
         .settings => @import("view_settings.zig").open(a),
         .help => {
@@ -418,7 +470,20 @@ fn activate(a: *App, action: Action) void {
         .stop => a.interrupt(),
         .custom_theme => @import("view_custom_theme_studio.zig").open(a),
         .zen_mode => {
+            const was_design = a.settings.uiMode() == .design;
             a.settings.toggleUiMode();
+            if (was_design and a.settings.uiMode() != .design) @import("app_panels.zig").closeDesignCanvas(a);
+            a.redraw();
+        },
+        .design_mode => {
+            const panels = @import("app_panels.zig");
+            if (a.settings.uiMode() == .design) {
+                a.settings.applyUiMode(.zen);
+                panels.closeDesignCanvas(a);
+            } else {
+                a.settings.applyUiMode(.design);
+                panels.openDesignCanvas(a);
+            }
             a.redraw();
         },
         .rename => if (a.selected) |id| {
@@ -433,7 +498,110 @@ fn activate(a: *App, action: Action) void {
     }
 }
 
+pub const Gate = enum { proceed, held };
+
+/// The whole draft, but for surrounding whitespace, as one `/name`.
+fn bareCommand(text: []const u8) ?rules.Range {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    if (trimmed.len < 2) return null;
+    const start = @intFromPtr(trimmed.ptr) - @intFromPtr(text.ptr);
+    const end = start + trimmed.len;
+    const tok = rules.token(text, end) orelse return null;
+    if (tok.prefix != '/' or tok.range.start != start or tok.range.end != end) return null;
+    return .{ .start = start, .end = end };
+}
+
+/// Root send hook, before `prompt`. A draft that is nothing but `/name` is the
+/// agent's command when its catalog lists exactly that name: sending it is the
+/// acceptance the menu would have taken, so it gets the same reference. While
+/// the catalog is still loading the send waits for it. Sent as plain text, the
+/// agent would answer `/compact` as a prompt instead of running it.
+pub fn sendGate(a: *App, explicit: ?FollowUp) Gate {
+    const s = &a.completion;
+    if (a.wizard != null or a.queue_edit != null) return .proceed;
+    const text = a.composer.text();
+    const bare = bareCommand(text) orelse {
+        s.plain_ok.clearRetainingCapacity();
+        return .proceed;
+    };
+    const name = text[bare.start + 1 .. bare.end];
+    // The workspace's own: `sendFollowUp` handles them as typed.
+    for ([_][]const u8{ "resume", "zen", "custom-theme" }) |own| if (std.mem.eql(u8, name, own)) return .proceed;
+    ensure(a);
+    s.sync(a.gpa, text) catch return .proceed;
+    for (s.selected.items) |sel| if (sel.start == bare.start and sel.end == bare.end) return .proceed;
+    if (s.plain_ok.items.len > 0 and std.mem.eql(u8, s.plain_ok.items, text)) return .proceed;
+    s.plain_ok.clearRetainingCapacity();
+    if (s.remote or !a.engine.up()) return .proceed;
+    if (!s.commands_done or !s.skills_done) {
+        // Nothing asked for, so nothing would answer: don't wait forever.
+        if ((!s.commands_done and s.commands_request == null) or (!s.skills_done and s.skills_request == null)) return .proceed;
+        if (s.held_send) |old| a.gpa.free(old.text);
+        s.held_send = null;
+        const copy_ = a.gpa.dupe(u8, text) catch return .proceed;
+        s.held_send = .{ .text = copy_, .explicit = explicit };
+        // Otherwise nothing shows the send is pending, and the draft that
+        // stays in the composer looks like a send that never happened.
+        var buf: [200]u8 = undefined;
+        a.setNotice(std.fmt.bufPrint(&buf, loading_notice ++ " /{s} goes out as soon as they're in.", .{name}) catch loading_notice ++ " Your command goes out as soon as they're in.");
+        return .held;
+    }
+    // As in `entries`: a skill that claims the command speaks for it.
+    for (s.skills.items) |skill| if (skill.command) |native_command| if (std.mem.eql(u8, native_command.name, name)) {
+        mint(a, bare, skill) catch {};
+        return .proceed;
+    };
+    for (s.commands.items) |command| if (std.mem.eql(u8, command.name, name)) {
+        mint(a, bare, command) catch {};
+        return .proceed;
+    };
+    if (s.failed) {
+        s.plain_ok.appendSlice(a.gpa, text) catch return .proceed;
+        a.setNotice("Couldn't load this agent's commands, so the slash command wasn't sent. Send again to send it as plain text.");
+        return .held;
+    }
+    return .proceed;
+}
+
+/// The reference `accept` would have left on the typed name.
+fn mint(a: *App, range: rules.Range, entry: Entry) !void {
+    const s = &a.completion;
+    const display = try a.gpa.dupe(u8, a.composer.text()[range.start..range.end]);
+    errdefer a.gpa.free(display);
+    const link = try canonical(a.gpa, entry);
+    errdefer a.gpa.free(link);
+    try s.selected.ensureUnusedCapacity(a.gpa, 1);
+    s.dropOverlapping(a.gpa, range.start, range.end);
+    s.selected.appendAssumeCapacity(.{ .start = range.start, .end = range.end, .display = display, .link = link });
+    std.sort.insertion(Selection, s.selected.items, {}, struct {
+        fn less(_: void, x: Selection, y: Selection) bool {
+            return x.start < y.start;
+        }
+    }.less);
+}
+
+const loading_notice = "Loading this agent's commands.";
+
+/// The held send's notice, and no one else's.
+fn clearLoadingNotice(a: *App) void {
+    if (a.noticeText()) |notice| if (std.mem.startsWith(u8, notice, loading_notice)) a.clearNotice();
+}
+
+/// Both catalog answers are in: a send that waited for them goes now, if the
+/// draft is still the one it was asked for.
+fn releaseHeld(a: *App) void {
+    const s = &a.completion;
+    if (!s.commands_done or !s.skills_done) return;
+    const held = s.held_send orelse return;
+    s.held_send = null;
+    clearLoadingNotice(a);
+    defer a.gpa.free(held.text);
+    if (std.mem.eql(u8, held.text, a.composer.text())) a.sendFollowUp(held.explicit);
+}
+
 /// Root send/queue/steer hook. Null means untouched ordinary prompt text.
+/// References out of order, overlapping or outside the draft are an error, not
+/// an out-of-range slice, so the caller can keep the draft.
 pub fn prompt(a: *App) !?[]u8 {
     const s = &a.completion;
     const key = try scopeKey(a, a.gpa);
@@ -445,6 +613,7 @@ pub fn prompt(a: *App) !?[]u8 {
     errdefer out.deinit(a.gpa);
     var at: usize = 0;
     for (s.selected.items) |sel| {
+        if (sel.start < at or sel.end < sel.start or sel.end > a.composer.text().len) return error.InvalidReferences;
         try out.appendSlice(a.gpa, a.composer.text()[at..sel.start]);
         try out.appendSlice(a.gpa, sel.link);
         at = sel.end;
@@ -621,18 +790,32 @@ pub fn beforeEdit(a: *App, c: *ui.Context) void {
         const lo = @min(anchor, caret);
         const hi = @max(anchor, caret);
         if (lo == hi) continue;
-        var ix: usize = 0;
-        while (ix < a.completion.selected.items.len) {
-            const ref = a.completion.selected.items[ix];
-            if (lo < ref.end and hi > ref.start) a.completion.drop(a.gpa, ix) else ix += 1;
-        }
+        a.completion.dropOverlapping(a.gpa, lo, hi);
     }
 }
 
-pub fn afterEdit(a: *App, c: *ui.Context, changed: bool) void {
-    const e = c.edits.get(a.view.composer_id) orelse return;
-    if (changed and e.undo.restored) {
-        for (a.completion.undo_refs.items) |blob| {
+fn captureUndoState(a: *App, text: []const u8) !?[]u8 {
+    const s = &a.completion;
+    const key = try scopeKey(a, a.gpa);
+    defer a.gpa.free(key);
+    if (s.scope == null or !std.mem.eql(u8, s.scope.?, key)) return null;
+    if (std.mem.eql(u8, text, a.composer.text())) try s.sync(a.gpa, text);
+    if (!std.mem.eql(u8, s.snapshot.items, text)) return null;
+    return try std.json.Stringify.valueAlloc(a.gpa, Saved{ .scope = key, .text = text, .references = s.selected.items }, .{});
+}
+
+fn rememberUndoState(a: *App, blob: []u8) void {
+    const refs = &a.completion.undo_refs;
+    if (refs.items.len >= 24) a.gpa.free(refs.orderedRemove(0));
+    refs.append(a.gpa, blob) catch a.gpa.free(blob);
+}
+
+pub fn afterEdit(a: *App, changed: bool, undo_restored: bool) void {
+    if (changed and undo_restored) {
+        var ix = a.completion.undo_refs.items.len;
+        while (ix > 0) {
+            ix -= 1;
+            const blob = a.completion.undo_refs.items[ix];
             var parsed = std.json.parseFromSlice(Saved, a.gpa, blob, .{}) catch continue;
             defer parsed.deinit();
             if (std.mem.eql(u8, parsed.value.text, a.composer.text())) {
@@ -642,6 +825,24 @@ pub fn afterEdit(a: *App, c: *ui.Context, changed: bool) void {
         }
     }
     a.completion.sync(a.gpa, a.composer.text()) catch {};
+}
+
+/// Frame-owned washes for the exact draft, only where explicit selection
+/// provenance still matches its visible source text.
+pub fn rangeWashes(a: *App, allocator: Allocator, text: []const u8) []const ui.TextFieldRangeWash {
+    const s = &a.completion;
+    if (!std.mem.eql(u8, s.snapshot.items, text)) return &.{};
+    var washes: std.ArrayList(ui.TextFieldRangeWash) = .empty;
+    for (s.selected.items) |selected| {
+        if (selected.start >= selected.end or selected.end > text.len) continue;
+        if (!std.mem.eql(u8, text[selected.start..selected.end], selected.display)) continue;
+        washes.append(allocator, .{
+            .start = selected.start,
+            .end = selected.end,
+            .color = @import("theme.zig").colors(a.dark orelse false).accent_wash,
+        }) catch return &.{};
+    }
+    return washes.toOwnedSlice(allocator) catch &.{};
 }
 
 test {

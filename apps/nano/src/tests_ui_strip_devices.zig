@@ -256,7 +256,7 @@ test "split slot computer picker fits its chevron and switches directly while it
     var slot_computer: ?@import("nanoui").ui.Rect = null;
     for (h.t.ctx.nodes.items) |node| switch (node.content) {
         .text => |text| {
-            if (std.mem.eql(u8, text.str, label) and node.rect.y < 42 and node.rect.x > 650) {
+            if (std.mem.eql(u8, text.str, label) and node.rect.y < h.a.view.chrome.y and node.rect.x > 650) {
                 slot_computer = node.rect;
             }
         },
@@ -266,7 +266,7 @@ test "split slot computer picker fits its chevron and switches directly while it
     // The chevron (9px) after `This Mac` must fit inside `slot-device` without clipping.
     var chevron_fits = false;
     for (h.t.ctx.nodes.items) |node| {
-        if (node.rect.y < 42 and node.rect.x <= comp.x and node.rect.x + node.rect.w >= comp.x + comp.w + 9) {
+        if (node.rect.y < h.a.view.chrome.y and node.rect.x <= comp.x and node.rect.x + node.rect.w >= comp.x + comp.w + 9) {
             chevron_fits = true;
         }
     }

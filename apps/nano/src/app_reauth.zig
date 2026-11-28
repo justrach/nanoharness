@@ -269,12 +269,13 @@ fn resumeAfter(a: *App, chat: workspace.Chat, row: rr.Row) void {
     };
     var mb: [36]u8 = undefined;
     const message_id = @import("ids.zig").uuid(a.io, &mb);
+    const tier = @import("app_agent.zig").sendServiceTier(a, chat.harness orelse "graff", chat.model, chat.service_tier);
     const id = a.engine.call("QueueCommand", requests.run(chat.id, message_id, .{
         .prompt = rr.resume_prompt,
         .harness = chat.harness,
         .model = chat.model,
         .reasoning = chat.reasoning,
-        .modelOptions = .{ .orchestrator = chat.orchestrator, .serviceTier = chat.service_tier },
+        .modelOptions = .{ .orchestrator = chat.orchestrator, .serviceTier = tier },
         .cwd = chat.cwd orelse ".",
     }).params, .of(App, a, onResume));
     for (a.reauth.resumes.items) |*x| if (x.call == in_call) {

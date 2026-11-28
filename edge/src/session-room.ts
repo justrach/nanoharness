@@ -52,7 +52,7 @@ import { createBlobStore, getJsonBlob, putJsonBlob, type BlobStore } from "./blo
 import { appendUpdateRow, ensureUpdateLog, readUpdateRows } from "./update-log";
 import { AUTH_USER_HEADER, ROOM_KIND_HEADER, type Env } from "./env";
 import { isPurge, wipeObject } from "./purge";
-import { readJsonCapped } from "./body";
+import { readCapped, readJsonCapped } from "./body";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RETAIN_MS = RETAIN_DAYS * DAY_MS;
@@ -373,7 +373,8 @@ export class SessionRoom implements DurableObject {
         if (!owner) return json({ error: "not_found" }, 404);
         if (owner !== userId) return json({ error: "forbidden" }, 403);
       }
-      const body = new Uint8Array(await request.arrayBuffer());
+      const body = await readCapped(request, 32 * 1024 * 1024);
+      if (!body) return json({ error: "too_large" }, 413);
       const doc = await this.ensureDoc();
       try {
         if (body.length > 0) doc.import(body);

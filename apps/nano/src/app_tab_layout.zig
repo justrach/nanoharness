@@ -26,10 +26,18 @@ const SavedTab = struct {
     chat: ?[]const u8 = null,
     split: ?SavedSplit = null,
 };
+const SavedViewport = struct {
+    chat: []const u8,
+    at_end: bool = true,
+    entry: ?[]const u8 = null,
+    inset: f32 = 0,
+    fallback: f32 = 0,
+};
 const SavedLayout = struct {
     version: u16 = version,
     active: usize = 0,
     tabs: []const SavedTab = &.{},
+    viewports: []const SavedViewport = &.{},
 };
 
 /// Publishes the current top-level tabs and every split under them.
@@ -79,9 +87,23 @@ pub fn rememberInMemory(a: *App) bool {
         };
         saved.appendAssumeCapacity(tab);
     }
+    var viewports: std.ArrayList(SavedViewport) = .empty;
+    var positions = a.view.transcript_positions.valueIterator();
+    while (positions.next()) |position| {
+        if (a.findChat(position.chat) == null or a.tabs.find(position.chat) == null or
+            !std.math.isFinite(position.inset) or !std.math.isFinite(position.fallback)) continue;
+        viewports.append(alloc, .{
+            .chat = position.chat,
+            .at_end = position.at_end,
+            .entry = position.entry,
+            .inset = position.inset,
+            .fallback = @max(0, position.fallback),
+        }) catch return false;
+    }
     const body = std.json.Stringify.valueAlloc(alloc, SavedLayout{
         .active = a.tabs.active,
         .tabs = saved.items,
+        .viewports = viewports.items,
     }, .{}) catch return false;
     return a.settings.updateTabLayout(body);
 }
@@ -123,6 +145,22 @@ pub fn restore(a: *App) bool {
     previous.deinit();
     a.tabs.clearShown();
     a.tabs_ready = true;
+    var restored: std.StringHashMapUnmanaged(void) = .empty;
+    defer restored.deinit(a.gpa);
+    for (saved.viewports) |position| {
+        if (!seen.contains(position.chat) or restored.contains(position.chat) or position.chat.len == 0 or
+            !std.math.isFinite(position.inset) or @abs(position.inset) > 100_000 or
+            !std.math.isFinite(position.fallback) or position.fallback < 0 or
+            (!position.at_end and (position.entry == null or position.entry.?.len == 0))) continue;
+        if (position.entry) |entry| if (entry.len > 1024) continue;
+        a.seedTranscriptPosition(position.chat, position.entry, position.inset, position.fallback, position.at_end, true);
+        restored.put(a.gpa, position.chat, {}) catch {};
+    }
+    var ids = seen.keyIterator();
+    while (ids.next()) |id| if (!restored.contains(id.*)) {
+        // Old layout records had no viewport. Reopen those chats at the end.
+        a.seedTranscriptPosition(id.*, null, 0, 0, true, true);
+    };
     a.select(a.tabs.current(), null);
     return true;
 }

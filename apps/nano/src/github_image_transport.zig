@@ -7,15 +7,20 @@ const image_url = @import("github_image_url.zig");
 const objc = if (builtin.os.tag == .macos) @import("nanoui").objc else struct {};
 
 pub const max_bytes: usize = 4 * 1024 * 1024;
+pub const UrlPolicy = *const fn ([]const u8) bool;
 const timeout_seconds = 15;
 const max_redirects = 3;
 
-fn validateRedirect(url: []const u8, redirects: usize) !void {
+fn validateRedirectWith(url: []const u8, redirects: usize, allowed: UrlPolicy) !void {
     if (redirects >= max_redirects) return error.TooManyImageRedirects;
-    if (!image_url.allowed(url)) return error.ImageRedirectRejected;
+    if (!allowed(url)) return error.ImageRedirectRejected;
 }
 
-fn resolveRedirect(gpa: std.mem.Allocator, base: []const u8, location: []const u8, redirects: usize) ![]u8 {
+fn validateRedirect(url: []const u8, redirects: usize) !void {
+    return validateRedirectWith(url, redirects, image_url.allowed);
+}
+
+pub fn resolveRedirectWith(gpa: std.mem.Allocator, base: []const u8, location: []const u8, redirects: usize, allowed: UrlPolicy) ![]u8 {
     if (location.len == 0 or location.len > 8192) return error.ImageRedirectRejected;
     // Reject ambiguous/control-bearing Location values before URI resolution.
     for (location) |ch| if (ch <= 0x20 or ch == 0x7f or ch == '\\') return error.ImageRedirectRejected;
@@ -25,17 +30,27 @@ fn resolveRedirect(gpa: std.mem.Allocator, base: []const u8, location: []const u
     const resolved = std.Uri.resolveInPlace(try std.Uri.parse(base), location.len, &remaining) catch return error.ImageRedirectRejected;
     const url = try std.fmt.allocPrint(gpa, "{f}", .{resolved});
     errdefer gpa.free(url);
-    try validateRedirect(url, redirects);
+    try validateRedirectWith(url, redirects, allowed);
     return url;
+}
+
+fn resolveRedirect(gpa: std.mem.Allocator, base: []const u8, location: []const u8, redirects: usize) ![]u8 {
+    return resolveRedirectWith(gpa, base, location, redirects, image_url.allowed);
 }
 
 /// Returns bytes owned by `gpa`. Both `gpa` and `io` must support concurrent
 /// background use. Consent and raster sniffing belong to the caller.
 pub fn fetch(gpa: std.mem.Allocator, io: std.Io, url: []const u8) ![]u8 {
-    if (!image_url.allowed(url)) return error.DisallowedImageUrl;
-    if (builtin.os.tag == .macos) return Mac.fetch(gpa, url);
+    return fetchWithPolicy(gpa, io, url, image_url.allowed);
+}
+
+/// Like `fetch`, enforcing a caller-supplied URL policy on the initial request
+/// and on every redirect hop.
+pub fn fetchWithPolicy(gpa: std.mem.Allocator, io: std.Io, url: []const u8, allowed: UrlPolicy) ![]u8 {
+    if (!allowed(url)) return error.DisallowedImageUrl;
+    if (builtin.os.tag == .macos) return Mac.fetch(gpa, url, allowed);
     if (builtin.os.tag == .linux or builtin.os.tag == .windows)
-        return portableFetch(gpa, io, url);
+        return portableFetch(gpa, io, url, allowed);
     return error.UnsupportedPlatform;
 }
 
@@ -62,7 +77,7 @@ const PortableResult = struct {
     failure: anyerror = error.FetchFailed,
 };
 
-fn portableFetch(gpa: std.mem.Allocator, io: std.Io, url: []const u8) ![]u8 {
+fn portableFetch(gpa: std.mem.Allocator, io: std.Io, url: []const u8, allowed: UrlPolicy) ![]u8 {
     var result: PortableResult = .{};
     var buffer: [2]Outcome = undefined;
     var race: std.Io.Select(Outcome) = .init(io, &buffer);
@@ -73,7 +88,7 @@ fn portableFetch(gpa: std.mem.Allocator, io: std.Io, url: []const u8) ![]u8 {
     var joined = false;
     defer if (!joined) race.cancelDiscard();
     race.concurrent(.expired, expire, .{io}) catch return error.ConcurrencyUnavailable;
-    race.concurrent(.done, receivePortable, .{ gpa, io, url, &result }) catch return error.ConcurrencyUnavailable;
+    race.concurrent(.done, receivePortable, .{ gpa, io, url, allowed, &result }) catch return error.ConcurrencyUnavailable;
     const outcome = race.await() catch {
         race.cancelDiscard();
         joined = true;
@@ -93,14 +108,14 @@ fn expire(io: std.Io) void {
     io.sleep(.fromSeconds(timeout_seconds), .awake) catch {};
 }
 
-fn receivePortable(gpa: std.mem.Allocator, io: std.Io, url: []const u8, result: *PortableResult) void {
-    result.body = getPortable(gpa, io, url) catch |err| {
+fn receivePortable(gpa: std.mem.Allocator, io: std.Io, url: []const u8, allowed: UrlPolicy, result: *PortableResult) void {
+    result.body = getPortable(gpa, io, url, allowed) catch |err| {
         result.failure = err;
         return;
     };
 }
 
-fn getPortable(gpa: std.mem.Allocator, io: std.Io, url: []const u8) ![]u8 {
+fn getPortable(gpa: std.mem.Allocator, io: std.Io, url: []const u8, allowed: UrlPolicy) ![]u8 {
     // std verifies hostname + the OS CA bundle on Linux/Windows. This path is
     // not analyzed on macOS, which must use native TLS. No shared client state.
     var client: std.http.Client = .{
@@ -114,7 +129,7 @@ fn getPortable(gpa: std.mem.Allocator, io: std.Io, url: []const u8) ![]u8 {
     defer gpa.free(current);
     var redirects: usize = 0;
     while (true) {
-        const hop = try portableHop(&client, gpa, current, redirects);
+        const hop = try portableHop(&client, gpa, current, redirects, allowed);
         switch (hop) {
             .body => |body| return body,
             .redirect => |next| {
@@ -128,7 +143,7 @@ fn getPortable(gpa: std.mem.Allocator, io: std.Io, url: []const u8) ![]u8 {
 
 const PortableHop = union(enum) { body: []u8, redirect: []u8 };
 
-fn portableHop(client: *std.http.Client, gpa: std.mem.Allocator, url: []const u8, redirects: usize) !PortableHop {
+fn portableHop(client: *std.http.Client, gpa: std.mem.Allocator, url: []const u8, redirects: usize, allowed: UrlPolicy) !PortableHop {
     // A fresh request on every hop: never reuse server-supplied headers or
     // forward Authorization, cookies, Referer, or any other request metadata.
     var request = try client.request(.GET, try std.Uri.parse(url), .{
@@ -147,7 +162,7 @@ fn portableHop(client: *std.http.Client, gpa: std.mem.Allocator, url: []const u8
     switch (status) {
         301, 302, 303, 307, 308 => {
             const location = response.head.location orelse return error.ImageRedirectRejected;
-            return .{ .redirect = try resolveRedirect(gpa, url, location, redirects) };
+            return .{ .redirect = try resolveRedirectWith(gpa, url, location, redirects, allowed) };
         },
         else => {},
     }
@@ -178,6 +193,7 @@ const Mac = if (builtin.os.tag != .macos) struct {} else struct {
         finished: bool = false, // serial NSURLSession delegate queue only
         accepted: bool = false,
         redirects: usize = 0,
+        allowed: UrlPolicy = image_url.allowed,
         failure: ?anyerror = error.FetchFailed, // published by semaphore
 
         fn release(s: *State) void {
@@ -278,7 +294,7 @@ const Mac = if (builtin.os.tag != .macos) struct {} else struct {
             return invoke(block, null);
         };
         const absolute = objc.msg(?objc.Object, url, "absoluteString", .{});
-        validateRedirect(objc.fromNSString(absolute), s.redirects) catch |err| {
+        validateRedirectWith(objc.fromNSString(absolute), s.redirects, s.allowed) catch |err| {
             s.finish(err);
             return invoke(block, null);
         };
@@ -337,11 +353,11 @@ const Mac = if (builtin.os.tag != .macos) struct {} else struct {
 
     extern "c" fn dispatch_time(when: u64, delta: i64) u64;
 
-    fn fetch(gpa: std.mem.Allocator, url_text: []const u8) ![]u8 {
+    fn fetch(gpa: std.mem.Allocator, url_text: []const u8, allowed: UrlPolicy) ![]u8 {
         const pool = objc.Pool.push();
         defer pool.pop();
         const s = try std.heap.page_allocator.create(State);
-        s.* = .{ .sem = objc.dispatch_semaphore_create(0) };
+        s.* = .{ .sem = objc.dispatch_semaphore_create(0), .allowed = allowed };
         defer s.release();
         const delegate = objc.msg(objc.Object, objc.msg(objc.Object, delegateClass(), "alloc", .{}), "init", .{});
         _ = s.refs.fetchAdd(1, .monotonic);

@@ -1,4 +1,4 @@
-# Native visuals — interactive output in Harness desktop
+# Native visuals — interactive output in Harness
 
 ## Product direction
 
@@ -12,17 +12,17 @@ This is complementary to building real products. Project previews, browser inspe
 
 ## Scope
 
-This implementation is deliberately small and independently implemented, inspired by [Zeron's native visuals](https://github.com/zeronsh/zeron/pull/900), not a wholesale port of its renderer or GPU stack.
+This implementation is deliberately small, inspired by [Zeron's native visuals](https://github.com/zeronsh/zeron/pull/900). The desktop sandbox is `apps/nano/src/visual_luau.zig`, drawn by `view_visual.zig` with its cache in `app_visuals.zig`; the iOS app runs the same scripts in `apps/ios/Harness/Visual/`.
 
 - An agent publishes a titled Luau script with `show_visual` in an active Harness turn, including Graff turns using Harness MCP.
 - The script produces themed native rows, columns, text, statistics, bar charts, buttons, toggles, sliders, and rules.
-- Scripts have no filesystem, process, network, module-loading, or application API access. Both initial rendering and interactions run away from the UI thread with memory, time, tree, and payload limits.
+- Scripts have no filesystem, process, network, module-loading, or application API access. Both initial rendering and interactions run under memory, time, tree, and payload limits.
 - The title and bounded source are explicit conversation content and synchronize with the transcript. Do not embed secrets or private context that should not be part of the conversation.
 - Interaction state is local and temporary. Reopening a conversation, eviction from the bounded resident cache, or restarting the app resets it to the script's initial state. Changing a control does not send a model request or run a shell command.
 
-Not included: arbitrary HTML/CSS, asset loading, 3D, shaders, animation loops, persistent/shared control state, automatic screenshot feedback to the model, or mobile visual rendering. Current mobile decoders show a title-only notice to open the visual in Harness desktop; older mobile versions skip the part while retaining the rest of the conversation.
+Not included: arbitrary HTML/CSS, asset loading, 3D, shaders, animation loops, persistent/shared control state, or automatic screenshot feedback to the model.
 
-Use matching desktop UI and engine versions, as shipped together by Harness. Older desktops reading synced documents safely skip visuals, but an older UI attached directly to a newer engine can reject the new typed RPC part. Mixed-version desktop UI/engine connections are not compatibility-negotiated. The isolated development demo below does not affect installed-app data.
+Use matching desktop app and engine versions, as shipped together by Harness. Mixed-version app/engine connections are not compatibility-negotiated.
 
 ## Agent authoring
 
@@ -50,21 +50,8 @@ The host owns colors, fonts, spacing, and control appearance. Unknown nodes and 
 
 Initial validation checks setup and the first render, not every possible event path. An interaction that errors or exceeds a limit becomes a visible unavailable state rather than an app capability escalation. Scripts must keep both rendering and handlers small and deterministic. A successful publication acknowledges durable conversation publication, not proof that every handler works or that every client can render the visual.
 
-## Run the isolated preview
+## Tests
 
-On macOS:
+From `apps/nano`, `zig build test-visual` runs the sandbox's own tests (`visual_luau.zig`: rendering, typed control values, the capability lockdown and the deadlines). The engine side is `cargo test -p harness-engine --test show_visual`, and iOS has `VisualRuntimeTests`.
 
-```sh
-bash scripts/run-native-visuals-dev.sh
-```
-
-This builds and opens `target/visuals-dev/Harness Visuals Dev.app` with its own bundle identity and local data. The production shell displays a synthetic capacity-planning conversation. It does not replace the installed app, use its engine port, or send a model request. Try **Capacity**, **Efficiency mode**, **Save scenario**, and **Reset**.
-
-For a reproducible capture with assertions on the same interaction dispatch used by the controls:
-
-```sh
-cargo run -p harness-ui --example visuals-fixture --features appshots-fixture -- \
-  --capture target/visuals-dev/captures
-```
-
-The fixture checks that the slider changes chart data, the toggle changes estimated cost, and the button changes the saved-state label, then saves native-window before/after images and exits. Add `--light` to exercise the light theme. The dev renderer uses a fixed-height, internally scrolling card so interactive changes do not invalidate transcript row measurements. Only eight sandboxes remain resident per transcript; evicted visuals restart when viewed again. Charts show at most twelve directly labeled values at once and explicitly disclose truncation.
+Up to eight visuals stay resident per transcript (`max_cached` in `app_visuals.zig`); an evicted visual restarts from its initial state when viewed again.

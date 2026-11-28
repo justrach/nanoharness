@@ -35,7 +35,7 @@ pub const Field = struct {
     /// A multiline field: ↑ and ↓ move between its lines.
     multi: bool,
     style: types.TextStyle,
-    wrap_w: f32,
+    wrap_w: ?f32,
     /// The keymap (Emacs, Vim) took this event's text or key already.
     text_taken: bool = false,
     key_taken: bool = false,

@@ -4,6 +4,6 @@
 converted from the existing `../macos/icon-1024.png` artwork with Lanczos
 resampling. It preserves the artwork's transparency.
 
-`apps/harness/build.rs` compiles `harness.rc` into the Windows executable for
-both debug and release builds. Resource ID 1 is required by GPUI's Windows
-icon loader. No installer or adjacent image file is needed at runtime.
+`harness.rc` declares it as icon resource 1. The Windows build
+(`apps/nano/build.zig`, `scripts/package-windows.ps1`) does not compile
+`harness.rc` into `harness.exe` or `harness-nano.exe`.

@@ -40,11 +40,17 @@ pub const State = struct {
     /// Composer project picker shares search state, but uses desktop's
     /// wider card and New project → No project action ordering.
     footer_folder: bool = false,
+    /// A narrow draft's footer has two project chips: the second row's
+    /// opened this one, so that is the one it stays above.
+    footer_second: bool = false,
     anchor: ?ui.Rect = null,
     /// Active pane's top-strip folder control and tab rect from the previous frame,
     /// so keyboard project-picker invocation stays anchored to the active tab.
     active_folder_anchor: ?ui.Rect = null,
     active_tab_anchor: ?ui.Rect = null,
+    /// Full screen has no tab slots: the focused chat's project chip in its
+    /// pane header, from the previous frame, or the header without one.
+    pane_header_anchor: ?ui.Rect = null,
     /// The computer chip's own anchor, so a folder menu or the footer cannot
     /// move the device popover while it is open.
     device_anchor: ?ui.Rect = null,
@@ -102,6 +108,11 @@ pub fn active(a: *const App) Panel {
         .host => if (hasHost(a)) .host else .{ .chat = 0 },
         .files => if (hasFiles(a)) .files else .{ .chat = 0 },
     };
+}
+/// The pane whose project the picker changes: the focused chat's, also while
+/// a host or Files tab beside it has the workspace's focus (#15).
+pub fn pickerPanel(a: *const App) Panel {
+    return .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
 }
 pub fn focus(a: *App, panel: Panel) void {
     const expanded = a.view.strip.expanded != null;
@@ -197,20 +208,21 @@ pub fn settle(a: *App) void {
             panels.showTab(a, ix);
         },
         .close_host_tab => |ix| panels.closeTab(a, ix),
-        .folder => |pick| {
-            focus(a, pick.panel);
+        .folder => |pick| folder: {
             const space = if (pick.index) |ix| (if (ix < a.spaces.items.len) a.spaces.items[ix].id else return) else null;
+            focus(a, pick.panel);
             if (a.selected) |sel| {
                 const cur_space = if (a.findChat(sel)) |ch| ch.space_id else null;
                 const same_space = if (cur_space) |cs| (if (space) |sp| std.mem.eql(u8, cs, sp) else false) else space == null;
-                if (!same_space) {
-                    a.tabs.setCurrent(null);
-                    a.select(null, space);
-                }
-            } else {
-                if (space == null) a.pickDraftDevice(a.draftDevice());
-                a.select(null, space);
+                if (same_space) break :folder;
+                // A project pick on an established chat creates a fresh tab,
+                // just like Cmd+T. Only a draft can change projects in place.
+                const tab_count = a.tabs.items.items.len;
+                a.newTab();
+                if (a.tabs.items.items.len == tab_count) break :folder;
             }
+            if (space == null) a.pickDraftDevice(a.draftDevice());
+            a.select(null, space);
             a.new_no_project = space == null;
             if (space == null) {
                 if (a.space) |old| a.gpa.free(old);
@@ -326,17 +338,19 @@ pub fn toggleProjectPicker(a: *App) void {
     a.view.checkout_menu = false;
     a.view.ref_menu = false;
     a.view.star_menu = false;
+    const target = pickerPanel(a);
     if (state.active_folder_anchor) |anchor| {
-        open(a, .folder, active(a), anchor);
+        open(a, .folder, target, anchor);
         state.footer_folder = false;
         return;
     }
     if (a.view.space_anchor) |anchor| {
-        open(a, .folder, active(a), anchor);
+        open(a, .folder, target, anchor);
         state.footer_folder = true;
+        state.footer_second = false;
         return;
     }
-    open(a, .folder, active(a), state.active_tab_anchor);
+    open(a, .folder, target, state.pane_header_anchor orelse state.active_tab_anchor);
     state.footer_folder = false;
 }
 
@@ -355,12 +369,10 @@ pub fn navigationKeys(c: *ui.Context, a: *App) bool {
         a.stepPane(true);
         state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
     } else if (c.shortcut(.{ .key = '[', .cmd = true, .shift = true })) {
-        const n = a.tabs.items.items.len;
-        if (n > 1) a.showTab((a.tabs.active + n - 1) % n);
+        cycleFlatTab(a, false);
         state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
     } else if (c.shortcut(.{ .key = ']', .cmd = true, .shift = true })) {
-        const n = a.tabs.items.items.len;
-        if (n > 1) a.showTab((a.tabs.active + 1) % n);
+        cycleFlatTab(a, true);
         state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
     } else if (c.shortcut(.{ .key = 'l', .cmd = true })) {
         state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
@@ -392,6 +404,30 @@ pub fn navigationKeys(c: *ui.Context, a: *App) bool {
     if (!handled) return false;
     finishNavigation(c, a);
     return true;
+}
+
+/// Unified flat tab cycling (`Nano.TabNavModel.stepFlatTab`): steps across
+/// all visible flat tabs when unsplit, or workspace tabs in a split view.
+fn cycleFlatTab(a: *App, forward: bool) void {
+    const ux_tab = @import("ux_rules.zig").TabNavModel;
+    const render = @import("view_tab_strip_render.zig");
+    const is_split = if (a.tabs.layout()) |s| s.panes.items.len > 1 else false;
+    if (!is_split) {
+        const spec = render.singleSpec(a);
+        if (spec.n > 1) {
+            const next = ux_tab.stepFlatTab(@intCast(spec.n), @intCast(spec.selected), forward);
+            switch (spec.itemAt(next)) {
+                .global => |ws| queue(a, .{ .global_tab = ws }),
+                .panel => |pt| queue(a, .{ .panel_tab = .{ .pane = pt.pane, .tab = pt.tab } }),
+            }
+            return;
+        }
+    }
+    const n = a.tabs.items.items.len;
+    if (n > 1) {
+        const next = ux_tab.stepFlatTab(@intCast(n), @intCast(a.tabs.active), forward);
+        a.showTab(next);
+    }
 }
 
 /// A menu's field must release keyboard ownership before another workspace
@@ -519,7 +555,7 @@ pub fn title(a: *const App, panel: Panel) []const u8 {
     };
 }
 pub fn hostTitle(a: *const App, tab: panels.Tab) []const u8 {
-    return if (tab.kind == .git) "Git history" else if (tab.kind == .github) "GitHub" else if (tab.kind == .tool_access) "Tool access" else if (tab.agent) |agent| agent.title else if (tab.browser) |browser| browser.title.text() else if (tab.kind == .diffs) a.panels.scope.label() else std.fs.path.basename(tab.path);
+    return if (tab.kind == .git) "Git history" else if (tab.kind == .github) "GitHub" else if (tab.kind == .design_canvas) "Design Canvas" else if (tab.kind == .tool_access) "Tool access" else if (tab.agent) |agent| agent.title else if (tab.browser) |browser| browser.title.text() else if (tab.kind == .diffs) a.panels.scope.label() else std.fs.path.basename(tab.path);
 }
 pub fn glyph(a: *const App, panel: Panel) icons.Name {
     return switch (panel) {
@@ -532,6 +568,7 @@ pub fn glyph(a: *const App, panel: Panel) icons.Name {
             .git => .@"git-branch",
             .github => .@"pull-request",
             .subagent => .bot,
+            .design_canvas => .@"palette-search",
             .tool_access => .widget,
         } else .plus,
     };

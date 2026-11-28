@@ -138,6 +138,11 @@ pub fn activityText(c: *ui.Context, k: theme.Colors, text: []const u8, st: ui.Te
 }
 
 pub fn toggleSwitch(c: *ui.Context, k: theme.Colors, on: bool) bool {
+    return toggleSwitchTrack(c, k, on).clicked();
+}
+
+/// Paint the switch without taking clicks from a larger hit target.
+pub fn toggleSwitchTrack(c: *ui.Context, k: theme.Colors, on: bool) ui.Div {
     const track = ui.div(c).row().w(32).h(18).roundedFull()
         .bg(if (on) k.solid else k.ink(if (k.dark) 0.18 else 0.13))
         .border(if (on) k.solid else k.ink(0.10)).borderW(1)
@@ -149,7 +154,7 @@ pub fn toggleSwitch(c: *ui.Context, k: theme.Colors, on: bool) bool {
         .radius = 7,
         .background = if (on) k.on_solid else (if (k.dark) ui.Color.white.alpha(0.88) else ui.Color.white),
     }, .none, null);
-    return track.clicked();
+    return track;
 }
 
 /// Largest UTF-8 codepoint boundary in `s` whose shaped prefix width does not
@@ -349,10 +354,21 @@ pub fn glyphText(c: *ui.Context, s: []const u8, st: ui.TextStyle) void {
 /// `s` in one line at most `max_w` wide, cut with an ellipsis (the tab
 /// list's titles).
 pub fn ellipsisText(c: *ui.Context, s: []const u8, st: ui.TextStyle, max_w: f32) void {
+    if (max_w <= 0) return;
     if (c.text.width(s, st) <= max_w) return ui.text(c, s, st);
     // `truncate_line`: the cut's trailing blanks and ASCII punctuation go.
-    const kept = std.mem.trimEnd(u8, s[0..truncateAt(c, s, st, max_w)], " \t\n\r!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~");
-    ui.text(c, c.print("{s}…", .{kept}), st);
+    var end = truncateAt(c, s, st, max_w);
+    // Ensure the shaped "{kept}…" fits `max_w` even when full-run shaping
+    // differs from summed per-codepoint widths (e.g. DirectWrite kerning or
+    // when `@floor(width) <= max_w` returned `s.len`).
+    while (end > 0) {
+        const kept = std.mem.trimEnd(u8, s[0..end], " \t\n\r!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~");
+        const candidate = c.print("{s}…", .{kept});
+        if (c.text.width(candidate, st) <= max_w) return ui.text(c, candidate, st);
+        end -= 1;
+        while (end > 0 and (s[end] & 0xC0) == 0x80) end -= 1;
+    }
+    ui.text(c, "…", st);
 }
 
 /// Where GPUI cuts `s` for an ellipsis (`LineWrapper::should_truncate_line`):

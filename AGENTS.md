@@ -15,11 +15,20 @@ rustfmt --edition 2024 --config skip_children=true --check <touched .rs files>
 `crates/harness/src/acp/mod.rs` has existing formatting differences. Leave
 unrelated formatting unchanged and distinguish those differences from new ones.
 
-Adding a composer slash command (a `WorkspaceCommand` variant) changes the row
-counts asserted in `workspace_commands_preserve_native_commands_and_avoid_collisions`
-(`crates/ui/src/composer.rs`): with a chat, and without one if the command is
-offered in drafts. Update them in the same change and run
-`cargo test -p harness-ui --lib workspace_commands`.
+Gates for the desktop client, run from `apps/nano`:
+
+```bash
+../../scripts/heavy-build.sh zig build test -Dtest-filter="<part of a test name>"
+../../scripts/heavy-build.sh zig build test   # the whole suite, as windows.yml runs it
+python3 ../../scripts/check-nano-proofs.py    # Lean proofs and witness vectors (Lean 4.36, as lean-proofs.yml)
+```
+
+A composer slash command is an entry in `native`, an `Action` variant and a
+case in its handler, all in `apps/nano/src/composer_completion.zig`; a command
+the send path handles itself (`/resume`, `/zen`) is also matched in
+`apps/nano/src/app.zig`. Update the tests in
+`apps/nano/src/tests_composer_completion.zig` that list or name commands in the
+same change and run `zig build test -Dtest-filter="completion"`.
 
 ## Tests every change carries
 
@@ -40,11 +49,20 @@ offered in drafts. Update them in the same change and run
     edge server each run it (see `protocol/README.md`). Change a wire rule by
     changing the vector and every runner in the same PR. A new implementation,
     a Zig port for example, adds its own runner against the same file.
-  - iOS and Android rules and copy: `apps/parity/` (see its README).
+  - app rules and copy the iOS app shares with the desktop client and the
+    engine: `apps/parity/` (see its README); what the desktop client and the
+    engine must agree on: `protocol/desktop/` (see its README).
 - **Performance bugs get a test of the shape**, not just the outcome: compare
   the slow path with the fixed one using a generous ratio. For example,
   `ConcurrentImportCostTests` asserts that a batched import is at least 5×
   faster than importing row by row.
+
+### A change that adds or alters a control
+
+- Check it against "What every control and surface owes the user" in
+  `DESIGN.md`, one rule at a time, and say in the PR how each applies.
+- Its Before and After screenshots show it in a normal window and in
+  fullscreen, in Codegraff Light and Dark.
 
 ### iOS tests
 
@@ -60,13 +78,25 @@ offered in drafts. Update them in the same change and run
   and delete the setting afterwards.
 - UI tests that aren't about the phone split pass `-phoneSplit off`, because
   `PhoneSplitUITests`' "Try it" saves a split mode that later runs inherit.
-- The iOS UI-test CI job is off, so verify iOS changes locally. `parity.yml`
-  runs `ParityTests` and `Chat2VectorTests` in CI.
+- No CI job runs the iOS UI tests (`HarnessUITests`), so verify iOS changes
+  locally. `parity.yml` runs `ParityTests` and `Chat2VectorTests` in CI.
 - Read results with `xcrun xcresulttool get test-results summary --path X.xcresult`.
   `xcrun xcresulttool export attachments` saves the failure screenshots.
 - Device crash and hang reports from TestFlight builds are unsymbolicated, and
   the workflow doesn't keep dSYMs. Rebuild the same commit with the workflow's
   Xcode version and map the offsets with `atos`.
+
+## Agent-driven tests
+
+Every new feature, and every change to behaviour that guards access or stores
+user state, is built by three separate agents in one worktree, one after
+another. A test author writes the test plan and failing tests before any
+implementation; an implementer makes them pass without weakening an
+assertion; a breaker mutates the code and attacks it, and turns each
+surviving mutant or defect into a failing test. The pull request carries the
+plan table and the mutation result. A small fix keeps "Reproduce first" and
+needs one agent.
+The method is in [`docs/agent-driven-tests.md`](docs/agent-driven-tests.md).
 
 ## Commits and pull requests
 
@@ -118,9 +148,9 @@ from a bug that a newer release already fixed.
 
 ```markdown
 **Harness:** 0.2.109 (latest: 0.2.109)
-**graff:** 0.0.302.25, the engine Harness runs
-**App:** desktop | iOS 0.2.109 | Android 0.2.109
-**Platform:** macOS arm64 | Windows x64 | Linux x64 | iOS 27 | Android 16 | ...
+**graff:** 0.0.302.25, the agent engine Harness runs
+**App:** desktop | iOS 0.2.109
+**Platform:** macOS arm64 | Windows x64 | Linux x64 | iOS 27 | ...
 
 ## Symptom
 What went wrong, in generic terms, with the app's own error text verbatim.
@@ -143,11 +173,9 @@ The expected behavior, or the proposed change.
 - **Harness:** About Harness on macOS, or Settings → Devices. From a shell on
   macOS, run
   `plutil -extract CFBundleShortVersionString raw /Applications/Harness.app/Contents/Info.plist`.
-  For the latest release, run `gh release view --repo justrach/harness --json tagName`.
+  For the latest release, run `gh release view --repo justrach/nanoharness --json tagName`.
 - **graff:** Harness runs its managed copy, not the `graff` on `PATH`:
   `~/.harness/bin/graff --version` (macOS and Linux).
-- **Engine bugs go to `justrach/codegraff`.** That covers tools, compaction,
-  sessions, and model replies, and its issues use the same header.
 - **If either version is older than the latest release**, check whether the
   release notes or a closed issue already cover the bug. Reproduce it on the
   latest release before filing, or say plainly in the header that it wasn't
@@ -156,6 +184,34 @@ The expected behavior, or the proposed change.
   Comment on an existing issue only when you have a new repro or diagnostic.
 - **What the header must not contain:** account details, private repository
   names, local paths, session ids, or transcript excerpts.
+
+### Where an issue goes
+
+"Engine" means two things here: `graff`, the agent engine in
+`justrach/codegraff`, and `harness-engine`, this repository's local engine in
+`crates/engine`. Say which one you mean.
+
+- File in `justrach/codegraff` when graff misbehaves on its own (`graff acp`,
+  `graff -p`, the terminal): the agent loop, tools, compaction, model and
+  provider routing, graff's session store, graff worktrees, peers, and what
+  graff puts on the ACP wire. Its issues use the same header.
+- File in `justrach/nanoharness` when it is the app: rendering, the composer
+  and prompt queue, chat and session records, sync, devices, the iOS app,
+  installers and updaters, the picker UI, and how the app launches an agent or
+  maps its output.
+- The app speaks ACP only to graff, Grok, Devin, Hermes, Antigravity and Exo
+  (`crates/harness/src/acp/`). Claude, Codex, Cursor, OpenCode and Pi use
+  native drivers in `crates/harness/src/`, so file their problems here unless
+  the upstream tool misbehaves by itself.
+- For an ACP problem, look at the wire. If graff didn't send the update,
+  method or `_meta`, it's codegraff. If graff sent the right frame and the app
+  shows the wrong thing, it's here. If you can't tell, file here.
+- When both sides must change, file the primary issue where the wrong
+  behaviour starts and link a counterpart in the other repository.
+- Move an issue filed in the wrong repository with `gh issue transfer`; don't
+  file it again, so its author and history stay with it.
+- `justrach/harness` holds the previous desktop client. New issues don't go
+  there.
 
 ### Every issue carries an image
 
@@ -184,9 +240,10 @@ right after:
 
 - **Capture from synthetic data, never the user's real app.** Run an isolated
   build (`scripts/run-macos-dev.sh`, or any build with its own
-  `HARNESS_IPC_PORT` and `DATA_DIR`) or a fixture (for example
-  `harness-ui --example browser-fixture`), with made-up chat titles,
-  projects and prompts. On macOS, `screencapture -o -l <window id>` captures
+  `HARNESS_IPC_PORT` and `HARNESS_DATA_DIR`) or an offscreen scene
+  (`cd apps/nano && zig build snap -- scenes/<scene>.json <out-dir>`; the
+  format is at the top of `apps/nano/src/snap.zig`), with made-up chat
+  titles, projects and prompts. On macOS, `screencapture -o -l <window id>` captures
   one window; on the iOS simulator, `xcrun simctl io booted screenshot`.
 - **Crop to the part that's wrong**, and look at the image before posting.
   The same rules as the text apply: no real chat titles, prompts, file names,
@@ -195,8 +252,9 @@ right after:
   It uploads to the repository's `issue-media` branch and prints Markdown to
   paste into the issue, PR or comment. An uploaded image stays in that
   branch's history, so check it first.
-- **Text rendering:** the GPUI fixtures in `crates/ui/examples` render synthetic
-  content and save their own screenshots (for example `markdown-math-fixture`).
+- **Text rendering:** a scene in `apps/nano/scenes/` renders synthetic content
+  through `zig build snap` and saves its own screenshots; math has its own tests
+  in `apps/nano/src/tests_native_math.zig` (`-Dtest-filter="native math"`).
   Add a probe line that isolates the case (precomposed and combining forms side by
   side, for example) instead of reasoning from a description.
 - **Showing a picture in a Harness chat:** save it inside the chat's folder and
@@ -220,13 +278,22 @@ it into a file, log or issue.
 
 One compile at a time; watch `ps -o rss=` on long builds and stop anything
 growing past ~40 GB. Never use Zig's self-hosted backend for large builds
-(system-level rule, applies to zigrepper/codedb work in this tree).
+(`apps/nano/build.zig` sets `use_llvm` on its large artifacts for this reason).
 
 When several agents work in parallel worktrees on one machine, wrap every
 `cargo`, `xcodebuild` and `zig build` in `scripts/heavy-build.sh <command>`,
-which runs them one at a time across processes. Each worktree builds into its
-own `CARGO_TARGET_DIR`. A shared target directory reuses crates built from
-another checkout's sources.
+which queues them first come, first served across processes. Each worktree
+builds into its own `CARGO_TARGET_DIR`. A shared target directory reuses crates
+built from another checkout's sources.
+
+Put one build in each call; a script that runs several builds inside one call
+holds the queue for all of them. Separate repositories or toolchains may use
+their own lane (`HARNESS_HEAVY_BUILD_LANE=zig`), and a lane may run n builds at
+once (`HARNESS_HEAVY_BUILD_SLOTS=n`) only while memory allows, under the ~40 GB
+rule above. `scripts/heavy-build.sh --status` shows who holds and who waits in
+each lane. If the queue (`<lock>.queue`) cannot be created or written, the
+build still runs, one at a time in no particular order, with one warning on
+stderr.
 
 ## Imported conversations continue in graff
 

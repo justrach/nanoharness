@@ -87,6 +87,46 @@ pub fn commonPrefix(a: []const u8, b: []const u8) usize {
     return p;
 }
 
+/// Inline markdown delimiter bytes that streaming balancing may add or drop
+/// in place as a block settles (`*`, `_`, `~`, `` ` ``, `[`, `]`, `\`).
+fn isMdSyntax(b: u8) bool {
+    return b == '*' or b == '_' or b == '~' or b == '`' or b == '[' or b == ']' or b == '\\';
+}
+
+/// When `new` diverges from `old` before `old.len` only because inline
+/// markdown delimiters appeared or vanished in place as a streaming block
+/// settled, returns the byte index in `new` up to which `old` was already
+/// visible so already-shown text never replays its dissolve veil.
+pub fn syntaxCovered(old: []const u8, new: []const u8, p: usize) ?usize {
+    var i: usize = p;
+    var j: usize = p;
+    while (i < old.len and j < new.len) {
+        if (old[i] == new[j]) {
+            i += 1;
+            j += 1;
+        } else {
+            var skipped: usize = 0;
+            while (skipped < 4 and j + skipped < new.len and isMdSyntax(new[j + skipped])) : (skipped += 1) {}
+            if (skipped > 0 and (j + skipped == new.len or old[i] == new[j + skipped])) {
+                j += skipped;
+            } else {
+                var removed: usize = 0;
+                while (removed < 4 and i + removed < old.len and isMdSyntax(old[i + removed])) : (removed += 1) {}
+                if (removed > 0 and (i + removed == old.len or old[i + removed] == new[j])) {
+                    i += removed;
+                } else {
+                    return null;
+                }
+            }
+        }
+    }
+    while (i < old.len and isMdSyntax(old[i])) : (i += 1) {}
+    if (i < old.len) return null;
+    var covered = j;
+    while (covered > 0 and covered < new.len and (new[covered] & 0xC0) == 0x80) : (covered -= 1) {}
+    return covered;
+}
+
 /// Splits `text[start..end]` at word boundaries (each word + its trailing spaces)
 /// into up to `buf.len` contiguous `Range`s covering `start..end` without gaps.
 pub fn wordSubranges(buf: *[16]Range, text: []const u8, start: usize, end: usize) []const Range {
@@ -135,7 +175,11 @@ pub const ElemVeil = struct {
 
     pub fn advance(self: *ElemVeil, gpa: Allocator, arena: Allocator, text: []const u8, now_ms: f64) []const VeilSpan {
         if (!std.mem.eql(u8, text, self.prev.items)) {
-            const p = commonPrefix(self.prev.items, text);
+            const raw_p = commonPrefix(self.prev.items, text);
+            const p = if (raw_p < self.prev.items.len)
+                syntaxCovered(self.prev.items, text, raw_p) orelse raw_p
+            else
+                raw_p;
             var write_ix: usize = 0;
             for (self.chunks.items) |c| {
                 const clamped_end = @min(c.end, p);
@@ -679,4 +723,19 @@ test "balanceStreamingMarkdown keeps parsed inline text monotonic without raw ma
     try testing.expectEqualStrings("Markdown output under wiki/", code_mid_blocks[0].paragraph.text);
     try testing.expectEqual(@as(usize, 1), code_mid_blocks[0].paragraph.spans.len);
     try testing.expect(code_mid_blocks[0].paragraph.spans[0].mono);
+}
+
+test "in-place markdown syntax settlement never replays fades on already-shown text" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var elem: ElemVeil = .{};
+    defer elem.deinit(testing.allocator);
+
+    // Seed initial text that already finished fading.
+    elem.seed(testing.allocator, "Compute 2**3 and check [INFO ready");
+    // In-place syntax settlement drops raw markdown delimiters while appending " now".
+    const spans = elem.advance(testing.allocator, arena.allocator(), "Compute 23 and check INFO ready now", 1000);
+    try testing.expect(spans.len >= 1);
+    // Only the newly appended suffix (" now") fades; already-shown prefix stays opaque.
+    try testing.expect(spans[0].start >= "Compute 23 and check INFO ready".len);
 }

@@ -88,7 +88,7 @@ for 15 a second, or 6 on a metered (cellular) or Low Data Mode network.
 
 ## Limits
 
-- iOS Simulators on macOS only. Android emulators are not wired yet.
+- iOS Simulators on macOS only.
 - Text input is US-keyboard ASCII; other characters are refused by name.
 - Frames are JPEG over the relay; there is no video codec yet.
 - The helper is pre-1.0 and changes quickly upstream; the host script uses its

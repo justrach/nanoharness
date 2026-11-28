@@ -24,7 +24,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run the engine without a UI (local-only unless a saved session enables sync).
-    Headless,
+    Headless {
+        /// Off-by-default agents to offer, kebab-case (`antigravity`, `cursor`).
+        /// Repeatable. Also read from `HARNESS_OPTED_IN` (comma-separated).
+        #[arg(long = "opt-in", value_name = "HARNESS")]
+        opt_in: Vec<String>,
+    },
     /// Serve Exo over ACP on stdin/stdout, bridging to Exo's agent-cli socket.
     #[command(name = "exo-acp")]
     ExoAcp,
@@ -78,12 +83,24 @@ fn attach_parent_console() {
 }
 
 fn data_dir() -> PathBuf {
-    resolve_data_dir(|name| std::env::var_os(name))
+    match resolve_data_dir(|name| std::env::var_os(name)) {
+        Ok(dir) => dir,
+        Err(err) => {
+            eprintln!("harness-engine: {err}");
+            std::process::exit(2);
+        }
+    }
 }
 
-fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> PathBuf {
+fn resolve_data_dir(
+    mut env: impl FnMut(&str) -> Option<OsString>,
+) -> Result<PathBuf, &'static str> {
     if let Some(dir) = env("HARNESS_DATA_DIR").filter(|value| !value.is_empty()) {
-        return PathBuf::from(dir);
+        return Ok(PathBuf::from(dir));
+    }
+    // Match the Zig CLI (`engine_cli.zig`): `DATA_DIR` is the older override.
+    if let Some(dir) = env("DATA_DIR").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(dir));
     }
     #[cfg(windows)]
     {
@@ -95,13 +112,21 @@ fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> PathBuf {
                     .filter(|value| !value.is_empty())
                     .map(|home| PathBuf::from(home).join("AppData").join("Local"))
             })
-            .expect("LOCALAPPDATA and USERPROFILE not set; set HARNESS_DATA_DIR");
-        first_existing([local.join("Harness"), local.join("Harnesser")])
+            .ok_or("LOCALAPPDATA and USERPROFILE not set; set HARNESS_DATA_DIR")?;
+        return Ok(first_existing([
+            local.join("Harness"),
+            local.join("Harnesser"),
+        ]));
     }
     #[cfg(not(windows))]
     {
-        let home = PathBuf::from(env("HOME").expect("HOME not set"));
-        first_existing([home.join(".harness"), home.join(".harnesser")])
+        let home = env("HOME")
+            .filter(|value| !value.is_empty())
+            .ok_or("HOME is not set; set HARNESS_DATA_DIR")?;
+        return Ok(first_existing([
+            PathBuf::from(&home).join(".harness"),
+            PathBuf::from(home).join(".harnesser"),
+        ]));
     }
 }
 
@@ -135,8 +160,34 @@ fn codegraff_client_id_from_env(edge_token: &Option<String>) -> Option<String> {
     }
 }
 
+/// Merge `--opt-in` values into `HARNESS_OPTED_IN` before the engine loads
+/// prefs. Empty extra is a no-op so we never wipe an existing env list.
+fn merge_cli_opt_ins(existing: Option<&str>, extra: &[String]) -> Option<String> {
+    if extra.is_empty() {
+        return None;
+    }
+    let extra = extra.join(",");
+    Some(match existing {
+        Some(existing) if !existing.trim().is_empty() => format!("{existing},{extra}"),
+        _ => extra,
+    })
+}
+
+fn apply_cli_opt_ins(opt_in: &[String]) {
+    let Some(merged) = merge_cli_opt_ins(std::env::var("HARNESS_OPTED_IN").ok().as_deref(), opt_in)
+    else {
+        return;
+    };
+    // SAFETY: still on the main thread before Engine::new spawns work.
+    unsafe { std::env::set_var("HARNESS_OPTED_IN", merged) };
+}
+
 fn harness_from_env() -> HarnessId {
-    match std::env::var("HARNESS_PROVIDER").ok().as_deref().map(str::trim) {
+    match std::env::var("HARNESS_PROVIDER")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
         Some("mock") => HarnessId::Mock,
         Some("codex") => HarnessId::Codex,
         Some("cursor") => HarnessId::Cursor,
@@ -244,7 +295,7 @@ fn main() -> anyhow::Result<()> {
     attach_parent_console();
     let cli = Cli::parse();
 
-    let is_headless = matches!(cli.command, Command::Headless);
+    let is_headless = matches!(cli.command, Command::Headless { .. });
     let default_filter = if is_headless {
         "info,loro_internal=warn,loro=warn"
     } else {
@@ -302,7 +353,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Command::Headless => {
+        Command::Headless { opt_in } => {
+            apply_cli_opt_ins(&opt_in);
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
                 tokio::spawn(harness_adapters::codedb_bundle::keep_current());
@@ -318,6 +370,84 @@ fn main() -> anyhow::Result<()> {
         Command::ExoAcp => {
             let runtime = tokio::runtime::Runtime::new()?;
             Ok(runtime.block_on(harness_adapters::serve_exo_acp())?)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn data_dir_prefers_harness_data_dir_then_data_dir_then_home() {
+        let dir = resolve_data_dir(|name| match name {
+            "HARNESS_DATA_DIR" => Some("/tmp/harness-data".into()),
+            "DATA_DIR" => Some("/tmp/old-data".into()),
+            "HOME" => Some("/home/carsten".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(dir, PathBuf::from("/tmp/harness-data"));
+
+        let dir = resolve_data_dir(|name| match name {
+            "DATA_DIR" => Some("/tmp/old-data".into()),
+            "HOME" => Some("/home/carsten".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(dir, PathBuf::from("/tmp/old-data"));
+
+        let dir = resolve_data_dir(|name| match name {
+            "HOME" => Some("/home/carsten".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(dir, PathBuf::from("/home/carsten/.harness"));
+
+        let err = resolve_data_dir(|_| None).unwrap_err();
+        assert!(
+            err.contains("HOME") && err.contains("HARNESS_DATA_DIR"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn merge_cli_opt_ins_joins_repeatable_flags_onto_existing_env() {
+        assert_eq!(merge_cli_opt_ins(None, &[]), None);
+        assert_eq!(
+            merge_cli_opt_ins(None, &["antigravity".into()]).as_deref(),
+            Some("antigravity")
+        );
+        assert_eq!(
+            merge_cli_opt_ins(Some("cursor"), &["antigravity".into(), "grok".into()]).as_deref(),
+            Some("cursor,antigravity,grok")
+        );
+        assert_eq!(
+            merge_cli_opt_ins(Some("  "), &["antigravity".into()]).as_deref(),
+            Some("antigravity")
+        );
+    }
+
+    #[test]
+    fn headless_opt_in_flag_accepts_repeatable_ids() {
+        let cli = Cli::try_parse_from([
+            "harness-engine",
+            "headless",
+            "--opt-in",
+            "antigravity",
+            "--opt-in",
+            "cursor",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Headless { opt_in } => {
+                assert_eq!(
+                    opt_in,
+                    vec!["antigravity".to_string(), "cursor".to_string()]
+                );
+            }
+            Command::ExoAcp => panic!("expected Headless"),
         }
     }
 }

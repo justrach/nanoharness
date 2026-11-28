@@ -421,4 +421,90 @@ test "native drop distinguishes url resolution, missing, directory, empty, and o
             try testing.expect(!std.mem.eql(u8, drop.failureNotice(prev.kind), notice));
         }
     }
+    try testing.expectEqual(drop.FailureKind.permission_denied, drop.classifyReadError(error.AccessDenied));
+    try testing.expect(!std.mem.eql(u8, drop.failureNotice(.permission_denied), drop.failureNotice(.unreadable_file)));
+}
+
+test "macos transient file drops deleted before next frame attach from eager drop payload (#97)" {
+    if (comptime @import("builtin").os.tag != .macos) return;
+    const objc = @import("nanoui").objc;
+    const pool = objc.Pool.push();
+    defer pool.pop();
+
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const expected_bytes = @embedFile("icons/close.png");
+    const filename = "telegram-transient.png";
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = filename, .data = expected_bytes });
+    const rel = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, filename });
+    defer testing.allocator.free(rel);
+    const native_path = try std.Io.Dir.cwd().realPathFileAlloc(testing.io, rel, testing.allocator);
+    defer testing.allocator.free(native_path);
+
+    const file_url = objc.msg(objc.Object, objc.class("NSURL"), "fileURLWithPath:", .{objc.nsString(native_path)});
+    const pb = objc.msg(objc.Object, objc.class("NSPasteboard"), "pasteboardWithUniqueName", .{});
+    defer objc.msg(void, pb, "releaseGlobally", .{});
+    const objs = objc.msg(objc.Object, objc.class("NSArray"), "arrayWithObject:", .{file_url});
+    try testing.expect(objc.msg(objc.BOOL, pb, "writeObjects:", .{objs}));
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const payload = ui.surface_drop.readPasteboardDrop(arena.allocator(), testing.io, pb);
+    // Simulate a chat app removing or revoking its temporary drag file immediately after drop.
+    try tmp.dir.deleteFile(testing.io, filename);
+
+    h.t.ctx.input.drag_over = .{ .x = 800, .y = 600 };
+    h.t.frame();
+    h.t.ctx.input.drag_over = null;
+    h.t.ctx.input.drop = .{ .point = .{ .x = 800, .y = 600 }, .urls = payload.urls, .files = payload.files };
+    h.t.settle(0.3);
+
+    try testing.expectEqual(@as(usize, 0), h.a.notice_len);
+    try testing.expect(h.a.file_drop.last_failure == null);
+    try testing.expectEqual(@as(usize, 1), attachments.count(&h.a));
+    const item = h.a.attachments.items.items[0];
+    try testing.expectEqualStrings(filename, item.name);
+    try testing.expectEqualSlices(u8, expected_bytes, item.bytes);
+}
+
+test "macos pasteboard PNG and TIFF fallback rescues drops whose local file path is missing (#97)" {
+    if (comptime @import("builtin").os.tag != .macos) return;
+    const objc = @import("nanoui").objc;
+    const pool = objc.Pool.push();
+    defer pool.pop();
+
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+
+    const png_bytes = @embedFile("icons/close.png");
+    const bogus_url = objc.msg(objc.Object, objc.class("NSURL"), "fileURLWithPath:", .{objc.nsString("/nonexistent/telegram/temp-photo.png")});
+    const pb = objc.msg(objc.Object, objc.class("NSPasteboard"), "pasteboardWithUniqueName", .{});
+    defer objc.msg(void, pb, "releaseGlobally", .{});
+    const objs = objc.msg(objc.Object, objc.class("NSArray"), "arrayWithObject:", .{bogus_url});
+    try testing.expect(objc.msg(objc.BOOL, pb, "writeObjects:", .{objs}));
+    const data = objc.msg(?objc.Object, objc.class("NSData"), "dataWithBytes:length:", .{
+        @as(*const anyopaque, png_bytes.ptr), @as(objc.NSUInteger, png_bytes.len),
+    }) orelse return error.MissingNSData;
+    try testing.expect(objc.msg(objc.BOOL, pb, "setData:forType:", .{ data, objc.nsString("public.png") }));
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const payload = ui.surface_drop.readPasteboardDrop(arena.allocator(), testing.io, pb);
+    h.t.ctx.input.drag_over = .{ .x = 800, .y = 600 };
+    h.t.frame();
+    h.t.ctx.input.drag_over = null;
+    h.t.ctx.input.drop = .{ .point = .{ .x = 800, .y = 600 }, .urls = payload.urls, .files = payload.files };
+    h.t.settle(0.3);
+
+    try testing.expectEqual(@as(usize, 0), h.a.notice_len);
+    try testing.expect(h.a.file_drop.last_failure == null);
+    try testing.expectEqual(@as(usize, 1), attachments.count(&h.a));
+    const item = h.a.attachments.items.items[0];
+    try testing.expectEqualStrings("temp-photo.png", item.name);
+    try testing.expectEqualSlices(u8, png_bytes, item.bytes);
 }

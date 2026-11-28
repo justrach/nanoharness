@@ -47,7 +47,7 @@ fn view(a: *App, c: *ui.Context) void {
     const root = ui.div(c).column().wFull().hFull();
     defer root.end();
     _ = @import("view_transcript.zig").entries(c, a, @import("theme.zig").colors(true), &a.transcript, 620, false, 0);
-    @import("view_image_preview.zig").draw(c, a, @import("theme.zig").colors(true), .{ .x = 0, .y = 0, .w = c.size.w, .h = c.size.h });
+    @import("view_image_preview.zig").draw(c, a, @import("theme.zig").colors(true));
 }
 
 fn initTester(a: *App, tester: *ui.Tester) !void {
@@ -307,7 +307,7 @@ test "reply images dialog contains keyboard focus and restores its trigger" {
     }
     try clickPicture(&tester);
     try t.expectEqual(try controlId(&tester, "Close preview"), tester.ctx.focus);
-    const order = [_][]const u8{ "Zoom out", "Zoom in", "Fit", "Close preview", "Zoom out", "Zoom in" };
+    const order = [_][]const u8{ "Zoom out", "Zoom in", "Fit", "Copy image", "Close preview", "Zoom out", "Zoom in" };
     for (order) |label| {
         tester.key(.tab);
         try t.expectEqual(try controlId(&tester, label), tester.ctx.focus);
@@ -402,13 +402,17 @@ test "reply images wheel zoom is smooth cursor anchored and isolated from the pa
     try t.expectEqual(@as(f32, 1), cache.inspection.inverse);
 }
 
-test "reply images production pane opens and closes assistant and sent pictures" {
+test "reply images production pane opens and closes window previews for assistant and sent pictures" {
     for (0..3) |kind| {
         var a: App = undefined;
         try setup(&a, false);
         defer a.deinit();
         a.openChat("reply-owner", null);
         a.view.sidebar_open = false;
+        if (kind == 0) {
+            for (0..3) |_| a.splitPane(.horizontal);
+            a.focusPane(0);
+        }
         if (kind < 2) {
             try reset(&a, kind == 1);
         } else {
@@ -432,6 +436,19 @@ test "reply images production pane opens and closes assistant and sent pictures"
         tester.click(picture.x + picture.w / 2, picture.y + picture.h / 2);
         tester.settle(3);
         try t.expect(tester.hasText("Image preview"));
+        if (kind == 0) {
+            const s = a.tabs.layout().?;
+            const chrome = @import("panel_chrome.zig");
+            const pane_w = chrome.paneSpanIn(a.view.chrome.chat_width, s.shares.items[0], s.panes.items.len, true, chrome.zen_gutter);
+            const expanded = for (tester.ctx.nodes.items) |node| {
+                if (node.content == .image and node.rect.w > pane_w) break node.rect;
+            } else return error.PreviewTrappedInPane;
+            try t.expect(expanded.x >= 0 and expanded.x + expanded.w <= tester.size.w);
+            try tester.clickText("Zoom in");
+            tester.settle(0.2);
+            try t.expect(a.attachments.images.zoom > 1);
+            try t.expectEqual(@as(usize, 4), a.tabs.layout().?.panes.items.len);
+        }
         if (kind == 0) if (std.c.getenv("NANO_SNAP_DIR")) |dir| {
             var buffer: [1024]u8 = undefined;
             try tester.screenshot(try std.fmt.bufPrint(&buffer, "{s}/chat-image-preview.png", .{std.mem.span(dir)}));
@@ -641,4 +658,48 @@ test "image preview Annotate full production desktop handoff works at narrow wid
         var buffer: [1024]u8 = undefined;
         try tester.screenshot(try std.fmt.bufPrint(&buffer, "{s}/composer-after-annotate.png", .{std.mem.span(dir)}));
     }
+}
+
+test "reply images Escape peels pin note focus then annotate mode before closing preview" {
+    var a: App = undefined;
+    try setup(&a, false);
+    defer a.deinit();
+    try reset(&a, false);
+    var tester: ui.Tester = undefined;
+    try initTester(&a, &tester);
+    defer tester.deinit();
+    _ = a.engine.pump();
+    tester.settle(3);
+    try clickPicture(&tester);
+    try tester.clickText("Annotate");
+    tester.settle(2);
+    var picture: ui.Rect = undefined;
+    for (tester.ctx.nodes.items) |n| {
+        if (n.content == .image and n.rect.w > 100 and n.rect.h > 100) picture = n.rect;
+    }
+    tester.click(picture.x + picture.w * 0.40, picture.y + picture.h * 0.45);
+    tester.settle(2);
+    const cache = &a.attachments.images;
+    try t.expectEqual(@as(usize, 1), cache.annotate.count);
+    try t.expect(cache.annotate.hasFocus(tester.ctx.focus));
+
+    // 1st Escape leaves the note field while keeping annotate mode and its pin intact.
+    _ = tester.shortcut(.{ .key = ui.Shortcut.escape });
+    tester.settle(1);
+    try t.expect(!cache.annotate.hasFocus(tester.ctx.focus));
+    try t.expect(cache.annotate.active);
+    try t.expect(cache.preview != null);
+    try t.expectEqual(@as(usize, 1), cache.annotate.count);
+
+    // 2nd Escape leaves annotate mode without destroying the open preview or pins.
+    _ = tester.shortcut(.{ .key = ui.Shortcut.escape });
+    tester.settle(1);
+    try t.expect(!cache.annotate.active);
+    try t.expect(cache.preview != null);
+    try t.expectEqual(@as(usize, 1), cache.annotate.count);
+
+    // 3rd Escape closes the preview itself.
+    _ = tester.shortcut(.{ .key = ui.Shortcut.escape });
+    tester.settle(1);
+    try t.expect(cache.preview == null);
 }

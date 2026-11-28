@@ -85,6 +85,50 @@ test "composer selection held double click selects the whole word" {
     try testing.expectEqualStrings("paragraph", h.t.clipboard.items);
 }
 
+test "composer selection double click on a gap copies both words in composer and Write" {
+    for ([_]bool{ false, true }) |expanded| {
+        var h: Harness = undefined;
+        try h.init("Try café  maple today.");
+        defer h.deinit();
+        if (expanded) {
+            @import("view_write.zig").open(&h.a);
+            h.t.settle(1);
+        }
+        _ = try h.press("  maple", 2);
+        h.t.advance(0.2);
+        try h.snap(if (expanded) "write-double-click-gap" else "composer-double-click-gap");
+        try h.expectSelected("café  maple");
+        h.t.up();
+        h.t.textOps(&.{.{ .command = .copy }});
+        try testing.expectEqualStrings("café  maple", h.t.clipboard.items);
+    }
+}
+
+test "composer selection double click at a visible line edge keeps the last word" {
+    for ([_][]const u8{ "\n", "\n\n", " " }) |separator| {
+        var h: Harness = undefined;
+        // A long word forces a wrap in the space-only case without making
+        // the test depend on the exact measured width of the field.
+        const long_word = "maplemaplemaplemaplemaplemaplemaplemaplemaplemaple";
+        const text = try std.fmt.allocPrint(testing.allocator, "Try amber{s}" ++ long_word ++ long_word ++ long_word, .{separator});
+        defer testing.allocator.free(text);
+        try h.init(text);
+        defer h.deinit();
+        h.t.resize(540, 1000);
+        h.t.settle(0.2);
+        const left = try h.point("amber");
+        const right = try h.point("maple");
+        try testing.expect(right.y > left.y);
+        const width = h.t.ctx.text.width("amber", .{ .size = 14, .line_height = 22.75 });
+        h.t.moveTo(left.x - 2 + width + 1, left.y);
+        h.t.ctx.input.click_count = 2;
+        h.t.ctx.pointerDown();
+        h.t.frame();
+        h.t.up();
+        try h.expectSelected("amber");
+    }
+}
+
 test "composer selection double click owns both edges of Unicode words and graphemes" {
     for ([_][]const u8{ "café", "a\u{301}", "👩‍💻", "👍🏽" }) |token| {
         var h: Harness = undefined;

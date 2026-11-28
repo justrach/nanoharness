@@ -46,7 +46,10 @@ test "settings navigation finds GitHub links and toggles the saved preference fr
         try h.t.clickText("Open GitHub links in Harness");
         h.t.settle(0.1);
         try testing.expect(h.a.settings.get(.open_github_links_in_harness));
-        try h.t.clickText("Find a setting");
+        // ⌘F is the way back to the search field from a page.
+        h.t.ctx.focus = 0;
+        _ = h.t.shortcut(.{ .key = 'f', .cmd = true });
+        h.t.settle(0.1);
         h.t.typeText("privacy telemetry");
         h.t.settle(0.1);
         try testing.expect(h.t.hasText("Sounds, alerts and anonymous performance sharing"));
@@ -54,6 +57,63 @@ test "settings navigation finds GitHub links and toggles the saved preference fr
         h.t.settle(0.2);
         try testing.expectEqual(Section.notifications, h.a.settings.section);
     }
+}
+
+test "settings audit clicks the visible GitHub switch and its padded target" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.settings.setSection(.browsing);
+    view.open(&h.a);
+    h.t.settle(0.2);
+    const row = for (h.t.ctx.nodes.items) |node| {
+        const text = switch (node.content) {
+            .text => |v| v.str,
+            else => continue,
+        };
+        if (!std.mem.eql(u8, text, "Open GitHub links in Harness")) continue;
+        break h.t.ctx.nodes.items[h.t.ctx.nodes.items[node.parent].parent].rect;
+    } else return error.MissingGitHubLinksRow;
+    const x = row.x + row.w - 40;
+    const y = row.y + row.h / 2;
+    try testing.expect(h.a.settings.get(.open_github_links_in_harness));
+    h.t.click(x, y);
+    try testing.expect(!h.a.settings.get(.open_github_links_in_harness));
+    h.t.click(x, y - 14);
+    try testing.expect(h.a.settings.get(.open_github_links_in_harness));
+}
+
+test "settings audit fixed workspace mode keys reject capture and override stale custom bindings" {
+    const shortcuts = @import("shortcuts.zig");
+    const ui = @import("nanoui").ui;
+    const sidebar = for (shortcuts.all, 0..) |sc, ix| {
+        if (std.mem.eql(u8, sc.key, "toggleSidebar")) break ix;
+    } else return error.MissingToggleSidebarShortcut;
+
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    h.a.settings.setSection(.shortcuts);
+    view.open(&h.a);
+    h.t.settle(0.2);
+    const cycle: ui.Shortcut = .{ .key = 'm', .cmd = true, .shift = true };
+    const design: ui.Shortcut = .{ .key = 'd', .cmd = true, .alt = true };
+    for ([_]ui.Shortcut{ cycle, design }) |chord| {
+        h.a.view.recording = sidebar;
+        _ = h.t.shortcut(chord);
+        try testing.expectEqualStrings(shortcuts.all[sidebar].default, h.a.settings.combo(shortcuts.all[sidebar]));
+        try testing.expect(std.mem.indexOf(u8, h.a.view.shortcut_notice.items, "fixed window shortcut") != null);
+    }
+
+    // A profile saved by the previous build can already have the bad binding.
+    h.a.settings.setCombo(shortcuts.all[sidebar], "mod-shift-m");
+    view.close(&h.a);
+    h.t.settle(0.2);
+    const was_open = h.a.view.sidebar_open;
+    _ = h.t.shortcut(cycle);
+    try testing.expectEqual(was_open, h.a.view.sidebar_open);
+    try testing.expectEqual(.developer, h.a.settings.uiMode());
 }
 
 test "settings navigation keeps search and Back reachable on short windows and recovers from no matches" {
@@ -82,12 +142,26 @@ test "settings navigation keeps search and Back reachable on short windows and r
     h.t.settle(0.1);
     try testing.expectEqual(Section.devices, h.a.settings.section);
     try testing.expect(h.t.hasText("Settings / Devices and data"));
+    try testing.expect(h.t.hasText("Allow remote control"));
+    try snap(&h, "devices-remote-control");
+    @import("view_settings_devices.zig").addPending(
+        &h.a.view.devices,
+        h.a.gpa,
+        "pending-1",
+        "phone",
+        "Run from phone: list the files",
+        true,
+    );
+    h.t.settle(0.1);
+    try testing.expect(h.t.hasText("Approve remote action"));
+    try testing.expect(h.t.hasText("Allow once"));
+    try snap(&h, "devices-remote-approval");
     try h.t.clickText("Back");
     h.t.settle(0.1);
     try testing.expect(!h.a.view.settings_open);
 }
 
-test "zen settings shows esc hints and closes on Escape or Close pill" {
+test "zen settings shows esc hints and closes on Escape or Back to chats" {
     const ui = @import("nanoui").ui;
     var h: Harness = undefined;
     try h.init(true);
@@ -97,7 +171,7 @@ test "zen settings shows esc hints and closes on Escape or Close pill" {
     h.t.settle(0.2);
 
     try testing.expect(h.t.hasText("Back to chats"));
-    try testing.expect(h.t.hasText("Close"));
+    try testing.expect(!h.t.hasText("Close"));
     try testing.expect(h.t.hasText("esc"));
 
     // Escape closes Settings even while Search settings has focus.
@@ -105,11 +179,11 @@ test "zen settings shows esc hints and closes on Escape or Close pill" {
     h.t.settle(0.2);
     try testing.expect(!h.a.view.settings_open);
 
-    // Reopen and verify clicking the page-header Close [esc] pill also exits Settings.
+    // Reopen and verify clicking Back to chats [esc] also exits Settings.
     view.open(&h.a);
     h.t.settle(0.2);
     try testing.expect(h.a.view.settings_open);
-    try h.t.clickText("Close");
+    try h.t.clickText("Back to chats");
     h.t.settle(0.2);
     try testing.expect(!h.a.view.settings_open);
 }

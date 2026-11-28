@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { readCapped, readJsonCapped, withoutToken } from "./body";
+import { handleAuthRoute, MAX_AUTH_BODY_BYTES } from "./auth-routes";
+import { crashReportRoute, MAX_CRASH_UPLOAD_BYTES } from "./crash-reports";
+import type { Env } from "./env";
 
 /** A body sent in `chunk`-byte pieces with no declared length, counting what was read. */
 const chunked = (total: number, chunk: number) => {
@@ -65,5 +68,42 @@ describe("bounded request bodies", () => {
     expect(withoutToken("?token=synthetic-bearer&after=12&device=synthetic")).toBe("?after=12&device=synthetic");
     expect(withoutToken("?token=synthetic-bearer")).toBe("");
     expect(withoutToken("")).toBe("");
+  });
+
+  it("caps chunked bodies on unauthenticated /auth/* routes and /diagnostics/crash-reports", async () => {
+    const fakeEnv = {
+      CODEGRAFF_OAUTH_CLIENT_ID: "synthetic-client",
+      HARNESS_AUTH_SIGNING_KEY: "synthetic-signing-key"
+    } as unknown as Env;
+
+    for (const path of ["/auth/exchange", "/auth/refresh", "/auth/sandbox"]) {
+      const { request, pulled } = chunked(MAX_AUTH_BODY_BYTES * 8, 16 * 1024);
+      const url = new URL(`https://edge.test${path}`);
+      const res = await handleAuthRoute(
+        new Request(url, { method: "POST", body: request.body, duplex: "half" } as RequestInit),
+        fakeEnv,
+        url
+      );
+      expect(res?.status, path).toBe(413);
+      expect(await res?.json()).toEqual({ error: "too_large" });
+      expect(pulled.bytes).toBeLessThan(MAX_AUTH_BODY_BYTES * 3);
+      expect(pulled.cancelled).toBe(true);
+    }
+
+    const { request, pulled } = chunked(MAX_CRASH_UPLOAD_BYTES * 4, 64 * 1024);
+    const crashRes = await crashReportRoute(
+      new Request("https://edge.test/diagnostics/crash-reports", {
+        method: "POST",
+        body: request.body,
+        duplex: "half"
+      } as RequestInit),
+      {},
+      ["diagnostics", "crash-reports"],
+      "user-1"
+    );
+    expect(crashRes?.status).toBe(413);
+    expect(await crashRes?.json()).toEqual({ error: "too_large" });
+    expect(pulled.bytes).toBeLessThan(MAX_CRASH_UPLOAD_BYTES * 2);
+    expect(pulled.cancelled).toBe(true);
   });
 });

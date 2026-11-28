@@ -1,0 +1,58 @@
+name: lean-proofs
+
+on:
+  pull_request:
+    paths:
+      - "apps/nano/lean-proofs/**"
+      - "apps/nano/src/telemetry_policy_vectors.csv"
+      - "apps/nano/src/ux_proof_vectors.csv"
+      - "apps/nano/src/performance_policy.zig"
+      - "apps/nano/src/ux_rules.zig"
+      - "apps/nano/src/motion_rules.zig"
+      - "apps/nano/src/tests_performance.zig"
+      - "apps/nano/src/tests_ux_proofs.zig"
+      - "scripts/check-nano-*.py"
+      - ".github/workflows/lean-proofs.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/nano/lean-proofs/**"
+      - "apps/nano/src/telemetry_policy_vectors.csv"
+      - "apps/nano/src/ux_proof_vectors.csv"
+      - "apps/nano/src/performance_policy.zig"
+      - "apps/nano/src/ux_rules.zig"
+      - "apps/nano/src/motion_rules.zig"
+      - "apps/nano/src/tests_performance.zig"
+      - "apps/nano/src/tests_ux_proofs.zig"
+      - "scripts/check-nano-*.py"
+      - ".github/workflows/lean-proofs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lean-proofs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lean-ux-proofs:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Lean 4.36.0 & Zig 0.17
+        run: |
+          if ! command -v lean >/dev/null 2>&1; then
+            curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y --default-toolchain leanprover/lean4:v4.36.0
+            echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          fi
+          if ! command -v zig >/dev/null 2>&1; then
+            brew install zig
+          fi
+      - name: Verify Lean 4 kernels, witness vectors, and Zig UX conformance
+        run: |
+          python3 scripts/check-nano-telemetry-proof.py
+          python3 scripts/check-nano-proofs.py
+          cd apps/nano && ../../scripts/heavy-build.sh zig build test -Dtest-filter="ux e2e"
+          ../../scripts/heavy-build.sh zig build test -Dtest-filter="browse Connected Apps"

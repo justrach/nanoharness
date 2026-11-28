@@ -11,6 +11,14 @@ fn apply(a: *App, text: []const u8) !void {
     try a.transcript.apply(parsed.value);
 }
 
+fn jumpButton(t: *ui.Tester) ?ui.Rect {
+    for (t.ctx.a11y_items.items) |item| {
+        if (item.role == .button and item.enabled and std.mem.eql(u8, item.label, "Scroll to bottom"))
+            return t.ctx.node(item.node_index).rect;
+    }
+    return null;
+}
+
 fn visible(t: *ui.Tester, text: []const u8) !void {
     const rect = t.findText(text) orelse return error.MissingLiveText;
     if (!(rect.h > 0 and rect.y >= 38 and rect.y + rect.h < t.size.h - 80)) {
@@ -174,7 +182,7 @@ test "a short chat has no rail dash, and scrolling away offers jump to bottom" {
     try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1100, .height = 800, .dark = true });
     defer t.deinit();
     t.frame();
-    try testing.expect(!t.hasText("Scroll to bottom"));
+    try testing.expect(jumpButton(&t) == null);
     // The rail's tick is a 12-point dash. A chat that fits must not draw one
     // in the empty band above the prompt.
     for (t.ctx.nodes.items) |n| if (n.content == .none and n.rect.h <= 2 and n.rect.w >= 12 and n.rect.w <= 20 and n.rect.x < 80) {
@@ -194,15 +202,57 @@ test "a short chat has no rail dash, and scrolling away offers jump to bottom" {
     const box = for (t.ctx.nodes.items) |n| {
         if (n.style.scroll and n.rect.h > 200) break n.id;
     } else return error.NoTranscriptScroll;
-    try t.ctx.scroll.put(t.ctx.gpa, box, 0);
+    const end = t.ctx.scroll_max.get(box) orelse return error.NoTranscriptScroll;
+    try testing.expect(end > 40);
+    // A small scroll away from the end should be enough to show the action.
+    try t.ctx.scroll.put(t.ctx.gpa, box, end - 40);
     try t.ctx.scroll_follow.put(t.ctx.gpa, box, false);
     t.frame();
     t.frame();
-    const pill = t.findText("Scroll to bottom") orelse return error.NoJumpPill;
-    t.click(pill.x + 8, pill.y + 8);
+    const pill = jumpButton(&t) orelse return error.NoJumpPill;
+    t.click(pill.x + pill.w / 2, pill.y + pill.h / 2);
     t.frame();
-    try testing.expect(!t.hasText("Scroll to bottom"));
+    try testing.expect(jumpButton(&t) == null);
     try testing.expect(t.ctx.scroll_follow.get(box) orelse false);
+}
+
+test "transcript scrollbar thumb drags to either end without selecting chat text" {
+    @import("theme.zig").registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.view.sidebar_open = false;
+    a.openChat("synthetic", null);
+    var history: std.ArrayList(u8) = .empty;
+    defer history.deinit(testing.allocator);
+    try history.appendSlice(testing.allocator, "{\"reset\":[");
+    for (0..40) |i| {
+        if (i > 0) try history.appendSlice(testing.allocator, ",");
+        try history.print(testing.allocator, "{{\"id\":\"a{d}\",\"role\":\"assistant\",\"parts\":[{{\"id\":\"p\",\"kind\":\"text\",\"text\":\"Synthetic reply {d}\"}}]}}", .{ i, i });
+    }
+    try history.appendSlice(testing.allocator, "]}");
+    try apply(&a, history.items);
+
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 900, .height = 500 });
+    defer t.deinit();
+    t.settle(0.5);
+    const box = a.view.jump_box;
+    const view = t.ctx.rects.get(box) orelse return error.NoTranscriptScroll;
+    const end = t.ctx.scroll_max.get(box) orelse return error.NoTranscriptScroll;
+    try testing.expect(end > 300);
+    const center_x = view.x + view.w / 2;
+    t.scroll(center_x, view.y + view.h / 2, 150);
+    const thumb = (t.ctx.scrollbars.get(box) orelse return error.NoTranscriptThumb).thumb_hit orelse return error.NoTranscriptThumb;
+    t.down(thumb.x + thumb.w / 2, thumb.y + thumb.h / 2);
+    t.move(center_x, view.y + 1);
+    try testing.expectApproxEqAbs(@as(f32, 0), t.ctx.scroll.get(box).?, 0.01);
+    try testing.expect(!(t.ctx.scroll_follow.get(box) orelse true));
+    t.move(center_x, view.y + view.h - 1);
+    t.up();
+    try testing.expectApproxEqAbs(t.ctx.scroll_max.get(box).?, t.ctx.scroll.get(box).?, 0.01);
+    try testing.expect(t.ctx.scroll_follow.get(box) orelse false);
+    try testing.expect(!t.ctx.selection.dragging and t.ctx.selection.text.items.len == 0);
 }
 
 test "live streaming reply dissolves incoming words with a 120Hz veil and balances unclosed markdown" {
@@ -287,8 +337,8 @@ test "current reply stays near the top instead of following growing work to the 
         }
         // The reader can still explicitly request bottom-follow.
         t.frame();
-        const pill = t.findText("Scroll to bottom") orelse return error.MissingBottomChoice;
-        t.click(pill.x + 8, pill.y + 8);
+        const pill = jumpButton(&t) orelse return error.MissingBottomChoice;
+        t.click(pill.x + pill.w / 2, pill.y + pill.h / 2);
         t.settle(1);
         try testing.expect(t.ctx.scroll_follow.get(box) orelse false);
         t.scroll(450, 300, 100);

@@ -30,6 +30,7 @@ pub fn cases(gpa: std.mem.Allocator) ![]Case {
         try case(gpa, "create a project", r.createSpace(space, device, dir, false), false),
         try case(gpa, "create a chat", r.createChat(chat, space, .{ .harness = "mock" }), false),
         try case(gpa, "engine info", r.none("EngineInfo"), false),
+        try case(gpa, "local token usage", r.localTokenUsage(), false),
         try case(gpa, "engine ready", r.none("EngineReady"), false),
         try case(gpa, "list agents", r.none("ListHarnesses"), false),
         try case(gpa, "list models", r.listModels("mock"), false),

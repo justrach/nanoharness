@@ -134,29 +134,53 @@ fn onRefs(a: *App, _: u64, reply: @import("rpc.zig").Reply) void {
 fn refMenu(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
     const v = &a.view;
     const w: f32 = 240;
-    const count: usize = 1 + @min(v.refs.items.len, 8);
-    const h: f32 = @as(f32, @floatFromInt(count)) * 32 + 12;
+    const row_h: f32 = 32;
+    const total: usize = 1 + v.refs.items.len;
+    const list_h: f32 = @min(@as(f32, @floatFromInt(total)) * row_h, 256);
+    const h: f32 = list_h + 12;
     const x = rules.snapToWindow(r.x, w, c.size.w, 8);
     const y = upwardOrBelow(r, h, c.size.h);
     ui.key(c, "branch-popover");
     const m = panel(c, k, x, y, w);
     defer m.end();
-    if (item(c, k, .@"git-branch", "Default branch", a.new_ref == null)) {
-        if (a.new_ref) |old| a.gpa.free(old);
-        a.new_ref = null;
-        v.ref_menu = false;
-        a.redraw();
-    }
-    for (v.refs.items[0..@min(v.refs.items.len, 8)]) |branch| {
-        const selected = if (a.new_ref) |cur| std.mem.eql(u8, cur, branch) else false;
-        if (item(c, k, .@"git-branch", branch, selected)) {
-            const copy = a.gpa.dupe(u8, branch) catch return;
-            if (a.new_ref) |old| a.gpa.free(old);
-            a.new_ref = copy;
-            v.ref_menu = false;
-            a.redraw();
+
+    // Windowed scroll list so repos with 1,500+ branches build only the rows in view.
+    var list_style: ui.Style = .{ .width = .fill, .height = .{ .px = list_h }, .direction = .column };
+    if (@hasField(ui.Style, "scrollbar")) list_style.scrollbar = .{ .overlay = k.faint.alpha(0.5) };
+    ui.key(c, "branch-popover-list");
+    const scroll_at = c.nodes.items.len;
+    ui.scroll(c, list_style);
+    defer ui.end(c);
+    const scroll_id = c.node(@intCast(scroll_at)).id;
+    const max_scroll = @max(0, @as(f32, @floatFromInt(total)) * row_h - list_h);
+    const offset = std.math.clamp(c.scroll.get(scroll_id) orelse 0, 0, max_scroll);
+    const first = @min(total, @as(usize, @intFromFloat(@floor(@max(0, offset - row_h) / row_h))));
+    const visible_count = @as(usize, @intFromFloat(@ceil(list_h / row_h))) + 3;
+    const last = @min(total, first + visible_count);
+    if (first > 0) _ = c.leaf(.{ .width = .fill, .height = .{ .px = @as(f32, @floatFromInt(first)) * row_h } }, .none, null);
+    for (first..last) |idx| {
+        if (idx == 0) {
+            ui.key(c, "branch-opt-default");
+            if (item(c, k, .@"git-branch", "Default branch", a.new_ref == null)) {
+                if (a.new_ref) |old| a.gpa.free(old);
+                a.new_ref = null;
+                v.ref_menu = false;
+                a.redraw();
+            }
+        } else {
+            const branch = v.refs.items[idx - 1];
+            ui.key(c, c.print("branch-opt-{d}", .{idx - 1}));
+            const selected = if (a.new_ref) |cur| std.mem.eql(u8, cur, branch) else false;
+            if (item(c, k, .@"git-branch", branch, selected)) {
+                const copy = a.gpa.dupe(u8, branch) catch return;
+                if (a.new_ref) |old| a.gpa.free(old);
+                a.new_ref = copy;
+                v.ref_menu = false;
+                a.redraw();
+            }
         }
     }
+    if (last < total) _ = c.leaf(.{ .width = .fill, .height = .{ .px = @as(f32, @floatFromInt(total - last)) * row_h } }, .none, null);
 }
 
 /// The account badge's menu (`render_user_menu`): who this is, the

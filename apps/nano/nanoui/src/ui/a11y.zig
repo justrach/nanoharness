@@ -125,8 +125,9 @@ fn elementClass() objc.Class {
 /// What the system asks of the view, before a frame.
 pub fn beforeFrame(s: *Surface) void {
     const c = &s.ctx;
-    c.reduce_motion = s.reduce_motion;
-    c.reduced_motion = s.reduce_motion;
+    c.system_reduce_motion = s.reduce_motion;
+    c.reduce_motion = c.reduce_motion_override orelse s.reduce_motion;
+    c.reduced_motion = c.reduce_motion;
     const ws = objc.msg(objc.Object, objc.class("NSWorkspace"), "sharedWorkspace", .{});
     c.access.increase_contrast = objc.msg(objc.BOOL, ws, "accessibilityDisplayShouldIncreaseContrast", .{});
     c.access.screen_reader = objc.msg(objc.BOOL, ws, "isVoiceOverEnabled", .{});

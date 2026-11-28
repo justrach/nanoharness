@@ -41,9 +41,37 @@ pub const SplitReveal = struct {
     started: ?f64 = null,
 };
 
+/// A transcript's stable first-visible row, or its end-follow state.
+pub const TranscriptPosition = struct {
+    chat: []u8,
+    entry: ?[]u8 = null,
+    inset: f32 = 0,
+    fallback: f32 = 0,
+    at_end: bool = true,
+    pending: bool = false,
+    restored: bool = false,
+    alignment_frame: ?u64 = null,
+    alignment_frames: u8 = 0,
+    aligned_frames: u8 = 0,
+};
+
+pub fn transcriptScrollBox(chat: []const u8) u64 {
+    return std.hash.Wyhash.hash(0x5452_414e_5343_5250, chat);
+}
+
 /// The window's own state, apart from the engine's.
 pub const View = struct {
     sidebar_open: bool = true,
+    full_screen: bool = false,
+    full_screen_native: bool = false,
+    full_screen_restore_sidebar: bool = true,
+    fs_top_peek: bool = false,
+    fs_left_peek: bool = false,
+    fs_left_peek_w: f32 = 0,
+    fs_left_peek_tween: ?SidebarTween = null,
+    fs_left_edge_at: ?f64 = null,
+    fs_left_leave_at: ?f64 = null,
+    fs_left_need_exit: bool = false,
     /// A prompt was just sent: position the new turn near the top, even
     /// when the reader was browsing older work.
     stick_end: bool = false,
@@ -51,6 +79,8 @@ pub const View = struct {
     steer: @import("steer_order.zig").Store = .{},
     /// Each transcript owns its current-turn anchor, including split peers.
     reply_anchors: std.AutoHashMapUnmanaged(u64, @import("view_transcript.zig").TurnAnchor) = .empty,
+    /// Captured and pending durable viewport state, keyed by the chat's scroll box.
+    transcript_positions: std.AutoHashMapUnmanaged(u64, TranscriptPosition) = .empty,
     /// The jump pill is up. It stays until the reader is near the end.
     jump_shown: bool = false,
     jump_box: u64 = 0,
@@ -126,9 +156,9 @@ pub const View = struct {
     /// Settings › Shortcuts: the shortcut whose chip waits for keys, and
     /// why the last combination was refused.
     recording: ?usize = null,
-    /// Settings › Appshots asked for Screen Recording or Accessibility once.
-    capture_asked: bool = false,
-    text_asked: bool = false,
+    /// Settings › Appearance forced reduced motion on or off last frame
+    /// (view_settings_appearance.zig `applyReduceMotion`).
+    motion_forced: bool = false,
     /// A session row being dragged toward a split target (view_drag.zig).
     drag: @import("view_drag.zig").Drag = .{},
     /// A session row's menu and the dialogs it leads to.
@@ -146,6 +176,8 @@ pub const View = struct {
     subagent_steer: nanoui.ui.TextBuffer = .{},
     /// The composer footer's account-usage ring and switcher popover (view_account_usage.zig).
     account_usage: @import("view_account_usage.zig").State = .{},
+    /// Settings › Usage: local input/output records, grouped by runtime.
+    usage: @import("view_settings_usage.zig").Page = .{},
     composer_anchor: ?nanoui.ui.Rect = null,
     /// A press in a peer, including its message/control descendants.
     pane_press: ?struct { tab: usize, pane: usize } = null,
@@ -196,6 +228,9 @@ pub const View = struct {
     /// Top-right unified updates popover state & anchor (`view_updates.zig`).
     before_after: @import("view_before_after.zig").State = .{},
     gallery: @import("view_image_gallery.zig").State = .{},
+    design: @import("design_canvas.zig").State = .{},
+    tab_overview: @import("view_tab_overview.zig").State = .{},
+    tab_cycle: @import("view_tab_cycle.zig").State = .{},
     updates_popover: bool = false,
     updates_anchor: ?nanoui.ui.Rect = null,
     /// Sidebar `#star-banner` context menu state & last opened external URL.
@@ -255,6 +290,8 @@ pub const View = struct {
         @import("text_buffer.zig").deinit(&v.subagent_steer);
         v.project_setup.deinit();
         v.open_chooser.deinit();
+        v.design.deinit();
+        v.tab_overview.deinit();
         @import("text_buffer.zig").deinit(&v.custom_theme_prompt);
         if (v.custom_theme_req_id) |id| gpa.free(id);
         v.custom_theme_error.deinit(gpa);
@@ -262,12 +299,19 @@ pub const View = struct {
         @import("text_buffer.zig").deinit(&v.strip.query);
         v.tool_ui.deinit(gpa);
         v.reply_anchors.deinit(gpa);
+        var viewport_it = v.transcript_positions.valueIterator();
+        while (viewport_it.next()) |position| {
+            gpa.free(position.chat);
+            if (position.entry) |id| gpa.free(id);
+        }
+        v.transcript_positions.deinit(gpa);
         v.github_ci.deinit(gpa);
         v.palette.deinit(gpa);
         v.model_picker.deinit(gpa);
         v.agents.deinit(gpa);
         v.accounts.deinit(gpa);
         v.account_usage.deinit(gpa);
+        v.usage.deinit(gpa);
         v.profile_card.deinit(gpa);
         if (v.last_opened_url) |u| gpa.free(u);
         v.archived.deinit(gpa);
@@ -420,6 +464,8 @@ pub const App = struct {
     /// ↑/↓ through the open chat's earlier prompts.
     prompt_nav: @import("prompt_history.zig").Nav = .{},
     attachments: @import("app_attachments.zig").State = .{},
+    /// The passages "Add to chat" put on each chat's draft.
+    quotes: @import("app_quotes.zig").State = .{},
     artifacts: @import("artifact_links.zig").State = .{},
     file_drop: @import("view_attachment_drop.zig").State = .{},
     /// The last error the engine gave, shown under the composer.
@@ -515,6 +561,10 @@ pub const App = struct {
     account: account.Account = .{},
     /// The account's Codegraff cloud sandboxes (app_sandboxes.zig).
     cloud_sandboxes: @import("app_sandboxes.zig").State = .{},
+    /// Hosted CodeGraff artifacts (`artifact.codegraff.com`) cache & auto-open state.
+    hosted_artifacts: @import("app_artifacts.zig").State = .{},
+    /// Dedicated Node D Cloud Computer offer/live state (app_computer.zig).
+    cloud_computer: @import("app_computer.zig").State = .{},
     /// What the window shows that isn't the engine's: the sidebar, its
     /// project filter and search, open sections and tool groups.
     view: View = .{},
@@ -537,6 +587,10 @@ pub const App = struct {
     nav_index: usize = 0,
     nav_initialized: bool = false,
     nav_restoring: bool = false,
+    /// `justrach/browse` Connected Apps (`v1-p256-sig`) client, lazily created.
+    browse_conn: ?*@import("browse_connect.zig").Client = null,
+    /// codegraff #941: tells graff when a preview's last browser tab closed.
+    preview_consumers: @import("preview_consumers_file.zig").Sink = .{},
 
     pub fn init(gpa: Allocator, io: std.Io, port: u16) App {
         return .{
@@ -566,6 +620,8 @@ pub const App = struct {
 
     /// Starts the connection; `a` must stay where it is from now on.
     pub fn start(a: *App) !void {
+        const env_tok = if (a.env) |env| env.get("HARNESS_IPC_TOKEN") else null;
+        try a.engine.setAuth(a.settings.dataDir(), env_tok);
         a.engine.events = .{ .ctx = a, .state = stateChanged };
         try a.engine.start();
     }
@@ -581,10 +637,12 @@ pub const App = struct {
         a.artifacts.deinit(a);
         // An engine started from here stays up: others may be on it now.
         a.engine.deinit();
+        a.hosted_artifacts.deinit(a.gpa);
         a.completion.deinit(a.gpa);
         a.external_navigation.deinit(a.gpa);
         a.reap();
         a.attachments.deinit(a.gpa);
+        a.quotes.deinit(a.gpa);
         a.file_drop.deinit(a.gpa);
         @import("app_send_feedback.zig").deinit(a);
         var blobs = a.tool_blobs.valueIterator();
@@ -595,6 +653,7 @@ pub const App = struct {
             a.gpa.destroy(b);
         }
         a.tool_blobs.deinit(a.gpa);
+        a.flushRememberedTabs();
         a.spaces.deinit();
         a.chats.deinit();
         a.sessions.deinit();
@@ -604,11 +663,6 @@ pub const App = struct {
             a.sound_seen.deinit(a.gpa);
         }
         a.devices.deinit();
-        a.rememberTabs();
-        if (a.tabs_dirty) {
-            a.tabs_dirty = false;
-            a.settings.flushOpenTabsAndLayout();
-        }
         a.tabs.deinit();
         for (a.peers.items) |*p| {
             p.transcript.deinit();
@@ -619,6 +673,7 @@ pub const App = struct {
         a.prompt_nav.reset(a.gpa);
         a.account.deinit(a.gpa);
         a.cloud_sandboxes.deinit();
+        a.cloud_computer.deinit();
         a.settings.deinit();
         a.mcp.deinit(a.gpa);
         a.extensions.deinit(a.gpa);
@@ -627,6 +682,14 @@ pub const App = struct {
         question.deinit(a);
         queue_mod.deinit(a);
         a.panels.deinit();
+        // Its tabs are gone with it: graff may stop what only they showed.
+        a.preview_consumers.leave(a.gpa, a.io);
+        a.preview_consumers.deinit(a.gpa);
+        if (a.browse_conn) |bc| {
+            bc.deinit();
+            a.gpa.destroy(bc);
+            a.browse_conn = null;
+        }
         a.actions.deinit();
         a.transcript.deinit();
         for (a.retired.items) |*t| t.deinit();
@@ -673,6 +736,15 @@ pub const App = struct {
     pub const applyLiveServiceTier = agent.applyLiveServiceTier;
     pub const ensureModels = agent.ensureModels;
     pub const newChatSpace = agent.newChatSpace;
+    pub fn ensureBrowseClient(a: *App) *@import("browse_connect.zig").Client {
+        if (a.browse_conn) |bc| return bc;
+        const bc = a.gpa.create(@import("browse_connect.zig").Client) catch @panic("OOM");
+        bc.* = @import("browse_connect.zig").Client.init(a.gpa, a.io);
+        bc.setSession(a.selected);
+        a.browse_conn = bc;
+        return bc;
+    }
+
     pub fn setArchived(a: *App, id: []const u8, archived: bool) void {
         // Explicit archival is not an undoable side effect of closing a tab.
         if (archived) a.tabs.clearAutoArchived(id);
@@ -736,6 +808,7 @@ pub const App = struct {
                 // A cloud sandbox left running keeps costing credit: show it
                 // from the start.
                 @import("app_sandboxes.zig").refresh(a);
+                @import("app_computer.zig").refresh(a);
                 if (a.selected != null) {
                     a.watchDoc(true);
                     queue_mod.watch(a);
@@ -825,9 +898,29 @@ pub const App = struct {
         if (account.tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("app_reauth.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("app_sandboxes.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
+        if (@import("app_computer.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (change_requests.tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("agent_updates.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("app_subagents.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
+        if (@import("app_panels.zig").tickFiles(a, now)) |t| next = if (next) |n| @min(n, t) else t;
+        if (a.window != null and !a.offscreen) if (a.browse_conn) |bc| {
+            const ux_bc = @import("ux_rules.zig").BrowseConnect;
+            const browser_vis = a.panels.host_open and if (a.panels.activeTab()) |tb|
+                (tb.kind == .browser and if (tb.browser) |br| ux_bc.routeUrl(br.url) == .external_browse and br.belongsTo(a.selected) else false) or
+                    (tb.kind == .design_canvas and a.view.design.source == .browse_snapshot)
+            else
+                false;
+            const now_ms = std.Io.Clock.Timestamp.now(a.io, .real).raw.toMilliseconds();
+            const last_ms = bc.lastFrameMs();
+            const elapsed_u: u32 = if (now_ms > last_ms) @intCast(@min(now_ms - last_ms, 60_000)) else 0;
+            if (ux_bc.shouldPollFrame(bc.status(), browser_vis, elapsed_u, bc.inFlight())) {
+                bc.spawnOp(.refresh, "", 0, 0);
+            }
+            if (browser_vis and bc.status() == .connected) {
+                const deadline = now + 0.8;
+                next = if (next) |n| @min(n, deadline) else deadline;
+            }
+        };
         if (a.w_queue.retry_at) |t| if (now >= t) {
             a.w_queue = .{};
             queue_mod.watch(a);
@@ -959,6 +1052,7 @@ pub const App = struct {
             _ = a.findChat(only) orelse return;
             a.tabs.setCurrent(only);
             a.tabs.clearShown();
+            a.seedTranscriptPosition(only, null, 0, 0, true, true);
             a.select(only, null);
             return;
         }
@@ -979,7 +1073,71 @@ pub const App = struct {
         if (wanted == 0) return;
         a.tabs.active = active_ix orelse 0;
         a.tabs.clearShown();
+        for (a.tabs.items.items) |id| if (id) |chat| a.seedTranscriptPosition(chat, null, 0, 0, true, true);
         a.select(a.tabs.current(), null);
+    }
+
+    pub fn transcriptPosition(a: *App, chat: []const u8) ?*TranscriptPosition {
+        const position = a.view.transcript_positions.getPtr(transcriptScrollBox(chat)) orelse return null;
+        return if (std.mem.eql(u8, position.chat, chat)) position else null;
+    }
+
+    pub fn seedTranscriptPosition(
+        a: *App,
+        chat: []const u8,
+        entry: ?[]const u8,
+        inset: f32,
+        fallback: f32,
+        at_end: bool,
+        restored: bool,
+    ) void {
+        const box = transcriptScrollBox(chat);
+        const slot = a.view.transcript_positions.getOrPut(a.gpa, box) catch return;
+        const owned_chat = a.gpa.dupe(u8, chat) catch {
+            if (!slot.found_existing) _ = a.view.transcript_positions.remove(box);
+            return;
+        };
+        const owned_entry = if (entry) |id| a.gpa.dupe(u8, id) catch {
+            a.gpa.free(owned_chat);
+            if (!slot.found_existing) _ = a.view.transcript_positions.remove(box);
+            return;
+        } else null;
+        if (slot.found_existing) {
+            a.gpa.free(slot.value_ptr.chat);
+            if (slot.value_ptr.entry) |old| a.gpa.free(old);
+        }
+        slot.value_ptr.* = .{
+            .chat = owned_chat,
+            .entry = owned_entry,
+            .inset = inset,
+            .fallback = fallback,
+            .at_end = at_end,
+            .pending = restored,
+            .restored = restored,
+        };
+    }
+
+    pub fn captureTranscriptPosition(
+        a: *App,
+        chat: []const u8,
+        entry: []const u8,
+        inset: f32,
+        offset: f32,
+        max_offset: f32,
+        follow: bool,
+    ) void {
+        var position = a.transcriptPosition(chat) orelse blk: {
+            a.seedTranscriptPosition(chat, null, 0, offset, follow, false);
+            break :blk a.transcriptPosition(chat) orelse return;
+        };
+        if (position.pending) return;
+        position.fallback = @max(0, offset);
+        position.at_end = follow or max_offset - offset <= 1;
+        position.inset = inset;
+        if (position.entry == null or !std.mem.eql(u8, position.entry.?, entry)) {
+            if (position.entry) |old| a.gpa.free(old);
+            position.entry = a.gpa.dupe(u8, entry) catch null;
+        }
     }
 
     /// Publishes every open chat tab, and the active one, into the GPUI
@@ -1003,6 +1161,13 @@ pub const App = struct {
         } else {
             a.settings.flushOpenTabsAndLayout();
         }
+    }
+
+    pub fn flushRememberedTabs(a: *App) void {
+        a.rememberTabs();
+        if (!a.tabs_dirty) return;
+        a.tabs_dirty = false;
+        a.settings.flushOpenTabsAndLayout();
     }
 
     fn addTabId(a: *App, ids: *std.ArrayList([]const u8), id: ?[]const u8) void {
@@ -1030,29 +1195,37 @@ pub const App = struct {
         if (a.findChat(chat_id) == null) return;
         a.view.settings_open = false;
         if (a.selected) |s| if (std.mem.eql(u8, s, chat_id)) {
-            a.view.focus_composer = true;
-            return a.redraw();
+            return a.revealSelectedChat();
         };
         if (a.tabs.find(chat_id)) |at| {
             if (at.tab != a.tabs.active) a.showTab(at.tab);
             if (at.pane) |ix| a.focusPane(ix);
             if (at.panel_tab) |ix| a.showPaneTab(ix);
+            if (a.selected) |s| if (std.mem.eql(u8, s, chat_id)) a.revealSelectedChat();
             return;
         }
         const chat = a.findChat(chat_id).?;
         const project = chat.space_id;
-        // Reading history is not a project-pane replacement. Keep the live
-        // workspace (including its split and drafts) visible in its own tab.
+        // Browse history separately, even when the live workspace has an
+        // empty split pane that an unopened live conversation could reuse.
         if (chat.archived) {
             a.newWorkspaceSession();
             a.tabs.setCurrent(chat_id);
             a.select(chat_id, project);
             return;
         }
+        // A blank "New tab" (single tab or split pane with no unsent draft)
+        // opens the chosen live conversation in place instead of abandoning
+        // the empty tab and opening a new tab/workspace elsewhere.
+        if (a.isBlankNewTab()) {
+            a.tabs.setCurrent(chat_id);
+            a.select(chat_id, project);
+            return;
+        }
         const destination: ?usize = if (project != null) blk: {
-            if (sameProject(a.workspaceProject(a.tabs.active), project)) break :blk a.tabs.active;
+            if (a.canGroupLiveSession(a.tabs.active, project)) break :blk a.tabs.active;
             for (0..a.tabs.items.items.len) |ix| {
-                if (sameProject(a.workspaceProject(ix), project)) break :blk ix;
+                if (a.canGroupLiveSession(ix, project)) break :blk ix;
             }
             break :blk null;
         } else if ((if (a.tabs.layout()) |s| s.panes.items.len > 1 else false) and a.workspaceProject(a.tabs.active) == null)
@@ -1071,11 +1244,48 @@ pub const App = struct {
         a.select(chat_id, project);
     }
 
+    /// Selection can stay on the chat while another surface owns input.
+    /// A reveal returns to the chat without reselecting it or resetting its draft.
+    fn revealSelectedChat(a: *App) void {
+        const pane: @import("view_tab_strip.zig").Panel = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
+        a.view.write_open = false;
+        a.bots.page = .none;
+        a.view.strip.focused = pane;
+        if (a.view.strip.expanded != null) a.view.strip.expanded = pane;
+        a.view.focus_composer = true;
+        a.redraw();
+    }
+
+    fn isBlankNewTab(a: *const App) bool {
+        if (a.selected != null or a.tabs.current() != null) return false;
+        if (std.mem.trim(u8, a.composer.text(), " \t\r\n").len > 0) return false;
+        if (@import("app_attachments.zig").count(a) > 0) return false;
+        for (a.panels.tabs.items) |tab| {
+            if (tab.editor) |e| if (e.matchesCurrent(a) and e.dirty()) return false;
+        }
+        return true;
+    }
+
+    fn canGroupLiveSession(a: *const App, ix: usize, project: ?[]const u8) bool {
+        // A standalone archive view is for reading, not a live project workspace.
+        const standalone = if (a.tabs.splits.items[ix]) |s|
+            s.panes.items.len == 1 and s.groups[0].count() == 1
+        else
+            true;
+        if (standalone) {
+            if (a.tabs.items.items[ix]) |id| if (a.findChat(id)) |chat| {
+                if (chat.archived) return false;
+            };
+        }
+        return sameProject(a.workspaceProject(ix), project);
+    }
+
     /// The workspace's selected conversation or parked draft owns its project.
     /// Never use the currently focused workspace's draft for an inactive one.
     pub fn workspaceProject(a: *const App, ix: usize) ?[]const u8 {
         if (ix >= a.tabs.items.items.len) return null;
         if (a.tabs.items.items[ix]) |id| if (a.findChat(id)) |chat| return chat.space_id;
+        if (a.tabs.splits.items[ix]) |s| if (s.drafts.items[s.focus]) |d| return if (d.no_project) null else d.space;
         if (a.tabs.drafts.items[ix]) |d| return if (d.no_project) null else d.space;
         if (ix == a.tabs.active) if (a.newChatSpace()) |space| return space.id;
         return null;
@@ -1096,12 +1306,6 @@ pub const App = struct {
         a.view.settings_open = false;
         a.tabs.setCurrent(chat_id);
         a.select(chat_id, null);
-    }
-
-    /// The active tab's new-chat draft, parked with it.
-    fn park(a: *App) void {
-        const d = drafts.canvas(a) catch return;
-        a.tabs.park(a.tabs.active, null, d);
     }
 
     fn freshPanelDraft(a: *App, draft: tabs_mod.Draft) !tabs_mod.Draft {
@@ -1126,9 +1330,13 @@ pub const App = struct {
     pub fn newTab(a: *App) void {
         var d = drafts.canvas(a) catch return;
         const fresh = a.freshPanelDraft(d) catch return d.deinit(a.gpa);
-        const focus_pane = if (a.tabs.layout()) |s| s.focus else null;
-        a.tabs.park(a.tabs.active, focus_pane, d);
+        @import("app_navigation.zig").parkActiveDraft(a, d);
+        const count = a.tabs.items.items.len;
         a.tabs.newTab();
+        if (a.tabs.items.items.len == count) {
+            var unused = fresh;
+            return unused.deinit(a.gpa);
+        }
         a.view.strip.focused = .{ .chat = 0 };
         a.view.strip.expanded = null;
         a.view.strip.menu = null;
@@ -1165,7 +1373,7 @@ pub const App = struct {
         a.tabs.isolateWorkspace() catch return;
         var d = drafts.canvas(a) catch return;
         const fresh = a.freshPanelDraft(d) catch return d.deinit(a.gpa);
-        a.tabs.park(a.tabs.active, null, d);
+        @import("app_navigation.zig").parkActiveDraft(a, d);
         if (at_end) a.tabs.appendTab() else a.tabs.newTab();
         a.view.strip.focused = .{ .chat = 0 };
         a.view.strip.expanded = null;
@@ -1197,28 +1405,23 @@ pub const App = struct {
     /// draft back as it was left (`load_chat_tab`).
     pub fn showTab(a: *App, i: usize) void {
         if (i >= a.tabs.items.items.len or i == a.tabs.active) return;
-        a.park();
+        const outgoing = drafts.canvas(a) catch return;
+        @import("app_navigation.zig").parkActiveDraft(a, outgoing);
         a.tabs.active = i;
         a.tabs.noteShown();
         @import("app_navigation.zig").validateCurrent(a);
         a.view.split_reveal = null;
         a.view.strip.expanded = null;
+        a.view.fs_top_peek = false;
+        @import("view_fullscreen_chrome.zig").clearLeftPeek(a);
         a.view.strip.menu = null;
         a.view.strip.pending_folder = null;
         const focus_pane = if (a.tabs.layout()) |s| s.focus else null;
         a.view.strip.focused = .{ .chat = focus_pane orelse 0 };
         a.select(a.tabs.current(), null);
-        if (a.tabs.unpark(i, focus_pane)) |d| {
-            if (a.selected == null) drafts.adopt(a, d) else {
-                var unused = d;
-                unused.deinit(a.gpa);
-            }
-        } else if (a.tabs.unpark(i, null)) |d| {
-            if (a.selected == null) drafts.adopt(a, d) else {
-                var unused = d;
-                unused.deinit(a.gpa);
-            }
-        }
+        // A populated chat has its own prompt. The pane still owns its canvas
+        // picks, which adopt restores without touching that chat's prompt.
+        if (a.tabs.unpark(i, focus_pane) orelse a.tabs.unpark(i, null)) |d| drafts.adopt(a, d);
     }
 
     pub fn isOnlyNewChat(a: *const App) bool {
@@ -1311,14 +1514,13 @@ pub const App = struct {
         const from = s.focus;
         const d = drafts.canvas(a) catch return;
         a.tabs.focusPane(ix);
+        // Programmatic pane switches must hand input to the selected chat too.
+        a.view.strip.focused = .{ .chat = ix };
         a.tabs.park(a.tabs.active, from, d);
         @import("app_navigation.zig").validateCurrent(a);
         const back = a.tabs.unpark(a.tabs.active, ix);
         a.select(a.tabs.current(), null);
-        if (back) |b| {
-            var x = b;
-            if (a.selected == null) drafts.adopt(a, b) else x.deinit(a.gpa);
-        }
+        if (back) |incoming| drafts.adopt(a, incoming);
     }
 
     /// ⌘] / ⌘[: the next pane in a split, else the next tab.
@@ -1401,20 +1603,20 @@ pub const App = struct {
     /// made, then closes, archiving per Settings › Archived.
     pub fn closeByShortcut(a: *App) void {
         const strip = @import("view_tab_strip.zig");
-        const rules = @import("motion_rules.zig");
-        const active_surface: rules.CloseSurface = switch (strip.active(a)) {
+        const focus_close = @import("ux_rules.zig").FocusAndClose;
+        const active_surface: focus_close.SurfaceFocus = switch (strip.active(a)) {
             .chat => .chat,
-            .host => .host,
+            .host => if (a.panels.activeTab()) |t| (if (t.kind == .design_canvas) .design_canvas else .host) else .host,
             .files => .files,
         };
-        const split_panes = strip.chatCount(a);
-        const group_tabs = if (a.tabs.layout()) |s| s.groups[s.focus].count() else 1;
+        const split_panes: u32 = @intCast(strip.chatCount(a));
+        const group_tabs: u32 = @intCast(if (a.tabs.layout()) |s| s.groups[s.focus].count() else 1);
         const zoomed = if (a.tabs.layout()) |s| s.zoomed else false;
         const host_bg_open = strip.hasHost(a) and a.panels.activeTab() != null;
         const expanded = a.view.strip.expanded != null or zoomed;
         const ac = @import("archive_close.zig");
         const needs_ask = ac.asks(a.settings.get(.archive_on_close_chosen), a.settings.get(.archive_sessions_on_close), a.selected != null);
-        switch (rules.decideCloseTarget(
+        switch (focus_close.decideClose(
             active_surface,
             a.view.close_choice,
             group_tabs,
@@ -1424,8 +1626,8 @@ pub const App = struct {
             a.isOnlyNewChat(),
             needs_ask,
         )) {
-            .confirm_choice => return a.chooseCloseArchiving(false),
-            .close_host => {
+            .confirm_archive_choice => return a.chooseCloseArchiving(false),
+            .close_host_tab, .close_design_canvas => {
                 a.view.close_choice = false;
                 if (a.panels.active < a.panels.tabs.items.len) @import("app_panels.zig").closeTab(a, a.panels.active) else a.panels.host_open = false;
                 a.view.strip.menu = null;
@@ -1437,11 +1639,11 @@ pub const App = struct {
                 return a.redraw();
             },
             .noop => return a.redraw(),
-            .ask_choice => {
+            .ask_archive_choice => {
                 a.view.close_choice = true;
                 return a.redraw();
             },
-            .close_pane_tab, .close_split_pane, .close_tab => {
+            .close_pane_tab, .close_split_pane, .close_workspace_tab => {
                 a.closeArchiving(a.settings.get(.archive_sessions_on_close));
             },
         }
@@ -1661,11 +1863,16 @@ pub const App = struct {
     fn onDoc(a: *App, id: u64, r: rpc.Reply) void {
         if (a.w_doc.id != id) return onPeerDoc(a, id, r);
         switch (r) {
-            .item => |v| a.transcript.apply(v) catch {
-                // Out of step: start over from a fresh reset.
-                a.engine.cancel(id);
-                a.w_doc = .{};
-                a.watchDoc(false);
+            .item => |v| {
+                const was_reset = v == .object and v.object.get("reset") != null;
+                if (a.transcript.apply(v)) |_| {
+                    @import("app_artifacts.zig").onTranscriptFrame(a, was_reset);
+                } else |_| {
+                    // Out of step: start over from a fresh reset.
+                    a.engine.cancel(id);
+                    a.w_doc = .{};
+                    a.watchDoc(false);
+                }
             },
             .done, .err => a.ended(&a.w_doc),
             .ok => {},
@@ -1797,13 +2004,19 @@ pub const App = struct {
         if (!same) {
             a.view.agent_work = .{};
             a.view.subagent_steer.clear();
+            a.view.model_picker.chip_width = null;
         }
         if (!same and !a.nav_restoring) a.recordNav(a.selected, chat_id);
         if (!same) if (a.selected) |s| a.retireSlice(s);
         if (!same) a.selected = if (chat_id) |c| a.gpa.dupe(u8, c) catch null else null;
         // Focusing an already-visible peer preserves its scroll offset and
         // retires any stale bottom-follow request left by an empty pane.
-        if (!same) a.view.stick_end = !promoted_peer;
+        // A restored viewport owns the initial position until it is applied.
+        const restoring_viewport = if (chat_id) |id|
+            (if (a.transcriptPosition(id)) |position| position.pending else false)
+        else
+            false;
+        if (!same) a.view.stick_end = !promoted_peer and !restoring_viewport;
         if (space_id) |s| {
             if (a.space) |old| a.retireSlice(old);
             a.space = a.gpa.dupe(u8, s) catch null;
@@ -1928,6 +2141,7 @@ pub const App = struct {
     pub fn reap(a: *App) void {
         a.panels.github_repository.images.reap();
         @import("app_attachments.zig").reap(a);
+        @import("app_quotes.zig").reap(a);
         @import("app_send_feedback.zig").reap(a);
         a.spaces.reap();
         a.chats.reap();
@@ -1980,6 +2194,9 @@ pub const App = struct {
     /// asked for it (`choose_follow_up`) rather than Settings' choice.
     pub fn sendFollowUp(a: *App, explicit: ?queue_mod.FollowUp) void {
         if (a.queue_edit != null) return queue_mod.finishEdit(a, .commit);
+        // A bare `/name` is the agent's command once its catalog confirms it;
+        // until the catalog answers, the send waits rather than going as text.
+        if (@import("composer_completion.zig").sendGate(a, explicit) == .held) return a.redraw();
         const attachments = @import("app_attachments.zig");
         const completed = @import("composer_completion.zig").prompt(a) catch {
             a.setNotice("Could not prepare selected command or skill. Your draft is preserved.");
@@ -1987,25 +2204,36 @@ pub const App = struct {
         };
         defer if (completed) |p| a.gpa.free(p);
         const text = std.mem.trim(u8, completed orelse a.composer.text(), " \n\t");
-        const attached = attachments.prompt(a, text) catch {
+        const quotes = @import("app_quotes.zig");
+        const quoted = quotes.prompt(a, text) catch {
+            a.setNotice("Couldn't prepare the quoted passages. Your draft is preserved.");
+            return a.redraw();
+        };
+        defer if (quoted) |p| a.gpa.free(p);
+        const message = quoted orelse text;
+        const attached = attachments.prompt(a, message) catch {
             a.setNotice("Wait for the attachments to finish, or remove/retry the failed file.");
             return a.redraw();
         };
         defer if (attached) |p| a.gpa.free(p);
-        const prompt = attached orelse text;
+        const prompt = attached orelse message;
+        // The workspace's own commands are not messages: quotes wait for one.
+        const command = if (attached == null) text else prompt;
         // `/resume` is the workspace's, not the agent's: the palette that
         // puts a chat in this tab (`WorkspaceCommand::Resume`).
-        if (std.mem.eql(u8, prompt, "/resume")) {
+        if (std.mem.eql(u8, command, "/resume")) {
             a.composer.clear();
             return @import("view_palette.zig").toggle(a, .replace_current);
         }
-        if (std.mem.eql(u8, prompt, "/zen")) {
+        if (std.mem.eql(u8, command, "/zen")) {
             a.composer.clear();
+            const was_design = a.settings.uiMode() == .design;
             a.settings.toggleUiMode();
+            if (was_design and a.settings.uiMode() != .design) @import("app_panels.zig").closeDesignCanvas(a);
             return a.redraw();
         }
-        if (std.mem.eql(u8, prompt, "/custom-theme") or std.mem.startsWith(u8, prompt, "/custom-theme ")) {
-            const raw_arg = if (prompt.len > "/custom-theme".len) std.mem.trim(u8, prompt["/custom-theme".len..], " \t\r\n") else "";
+        if (std.mem.eql(u8, command, "/custom-theme") or std.mem.startsWith(u8, command, "/custom-theme ")) {
+            const raw_arg = if (command.len > "/custom-theme".len) std.mem.trim(u8, command["/custom-theme".len..], " \t\r\n") else "";
             var arg_buf: [512]u8 = undefined;
             const n = @min(raw_arg.len, arg_buf.len);
             if (n > 0) @memcpy(arg_buf[0..n], raw_arg[0..n]);
@@ -2013,7 +2241,12 @@ pub const App = struct {
             const studio = @import("view_custom_theme_studio.zig");
             if (n > 0) return studio.openWithPrompt(a, arg_buf[0..n]) else return studio.open(a);
         }
-        if (prompt.len == 0 or a.engine.state != .connected) return;
+        if (prompt.len == 0) return;
+        if (a.engine.state != .connected) {
+            // The Send button is dimmed for this; a click or Return says why.
+            a.setNotice("The engine isn't connected yet, so nothing was sent. Your message is kept; send it once Harness reconnects.");
+            return a.redraw();
+        }
         if (a.selected == null and !a.new_chat_mode and !a.new_no_project and
             a.space != null and a.newChatSpace() == null)
         {
@@ -2023,20 +2256,19 @@ pub const App = struct {
         // A plain chat with no Auto tier would fall to graff's own default.
         if (@import("app_agent.zig").chatSendBlocked(a)) return;
         if (a.queues()) {
-            // Enter falls back to the queue when a steer can't go now; a
-            // shortcut asking for one says why instead.
-            const blocker = queue_mod.steerBlocker(a, text.len > 0, attachments.count(a) > 0);
-            if (explicit == .steer) if (blocker) |why| {
-                a.setNotice(why);
-                return a.redraw();
-            };
-            const action = explicit orelse queue_mod.followUpAction(queue_mod.followUpBehavior(a), blocker);
+            const blocker = queue_mod.steerBlocker(a, message.len > 0, attachments.count(a) > 0);
+            const action = explicit orelse queue_mod.followUpBehavior(a);
             if (action == .steer) {
+                if (blocker) |why| {
+                    a.setNotice(why);
+                    return a.redraw();
+                }
                 queue_mod.steer(a, prompt);
                 // It lands in the transcript, as a prompt does: show it.
                 a.view.stick_end = true;
             } else queue_mod.queueMessage(a, prompt);
             attachments.clear(a);
+            quotes.clear(a);
             a.composer.clear();
             return a.redraw();
         }
@@ -2057,7 +2289,7 @@ pub const App = struct {
                 model = c.model;
                 reasoning = agent_mod.sendReasoning(a, harness orelse "graff", model, c.reasoning);
                 orchestrator = c.orchestrator;
-                service_tier = c.service_tier;
+                service_tier = agent_mod.sendServiceTier(a, harness orelse "graff", model, c.service_tier);
                 if (c.cwd) |d| cwd = d;
             }
             break :blk id;
@@ -2108,6 +2340,7 @@ pub const App = struct {
         }), .of(feedback.Pending, pending, feedback.Pending.onReply));
         // Sent: the prompt is no one's draft any more.
         attachments.clear(a);
+        quotes.clear(a);
         a.composer.clear();
         a.view.stick_end = true;
         if (a.selected == null) {
@@ -2121,5 +2354,37 @@ pub const App = struct {
     pub fn interrupt(a: *App) void {
         const chat = a.selected orelse return;
         a.request(requests.interrupt(chat), .of(App, a, onNotice));
+    }
+
+    /// Updates UI layout state for macOS/desktop minimal fullscreen mode.
+    pub fn applyFullScreenState(a: *App, on: bool) void {
+        if (a.view.full_screen == on) return;
+        a.view.full_screen = on;
+        a.view.fs_top_peek = false;
+        @import("view_fullscreen_chrome.zig").clearLeftPeek(a);
+        if (on) {
+            a.view.full_screen_restore_sidebar = a.view.sidebar_open;
+            a.view.sidebar_open = false;
+            @import("view_sidebar_search.zig").close(a);
+            a.view.updates_popover = false;
+            a.view.strip.menu = null;
+            a.view.more_menu = false;
+            a.view.filter_menu = false;
+        } else {
+            a.view.sidebar_open = a.view.full_screen_restore_sidebar;
+        }
+        a.redraw();
+    }
+
+    pub fn setFullScreen(a: *App, on: bool) void {
+        a.applyFullScreenState(on);
+        if (a.window) |w| {
+            w.setFullScreen(on);
+            a.view.full_screen_native = w.isFullScreen();
+        }
+    }
+
+    pub fn toggleFullScreen(a: *App) void {
+        a.setFullScreen(!a.view.full_screen);
     }
 };

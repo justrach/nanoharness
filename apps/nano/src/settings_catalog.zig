@@ -16,7 +16,7 @@ pub fn description(section: Section) []const u8 {
         .extensions => "Trusted native plugin panels and actions",
         .github_ci => "Repositories, CI runners and checks",
         .devices => "Connected computers and app updates",
-        .appshots => "Capture app screenshots",
+        .usage => "Local model usage, token counts by Harness, Codex and Antigravity",
         .archived => "Find and restore archived conversations",
     };
 }
@@ -34,8 +34,8 @@ fn keywords(section: Section) []const u8 {
         .mcp => "integration tools protocol server",
         .extensions => "plugins extensions native panels controls callbacks github runners workers",
         .github_ci => "continuous integration build test runner repository GitHub",
-        .devices => "update release version hourly install automatic background download restart computer host remote desktop",
-        .appshots => "screenshot capture permission",
+        .devices => "update release version hourly install automatic background download restart computer host remote desktop control relay approve approval chip",
+        .usage => "tokens model usage token counts local usage codex",
         .archived => "archive restore recover sessions chats history",
     };
 }
@@ -62,6 +62,7 @@ test "settings discovery searches task words across section metadata" {
     try t.expect(matches(.notifications, "privacy telemetry"));
     try t.expect(matches(.devices, "hourly updates"));
     try t.expect(matches(.devices, "automatic updates"));
+    try t.expect(matches(.devices, "remote control"));
     try t.expect(matches(.appearance, "font motion"));
     try t.expect(matches(.appearance, "before after design"));
     try t.expect(!matches(.files, "GitHub links"));

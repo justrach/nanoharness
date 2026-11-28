@@ -248,7 +248,8 @@ pub const Surface = struct {
         const now = cf.CACurrentMediaTime();
         const dt: f32 = if (self.last_frame_time > 0) @floatCast(@min(now - self.last_frame_time, 0.1)) else 1.0 / 60.0;
         self.last_frame_time = now;
-        c.reduced_motion = UIAccessibilityIsReduceMotionEnabled();
+        c.system_reduce_motion = UIAccessibilityIsReduceMotionEnabled();
+        c.reduced_motion = c.reduce_motion_override orelse c.system_reduce_motion;
         ios_access.beforeFrame(self);
         c.safe_area = self.safeArea();
         const root: ui.View = if (self.full_bleed) self.view else .init(self, insideSafeArea);

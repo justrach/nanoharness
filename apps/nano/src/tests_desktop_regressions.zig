@@ -336,24 +336,12 @@ test "desktop issues project picker, model picker, reopenClosedTab shortcuts and
     try h.init();
     defer h.deinit();
 
-    // #794: Search trigger and bottom new-workspace button have distinct tooltips.
+    // #794: the Search trigger has its own tooltip. The footer has no second
+    // "+": the title row's "New session" is the one new-session button.
     const search_btn = h.a.view.search_anchor orelse return error.MissingSearchButton;
     h.t.moveTo(search_btn.x + search_btn.w / 2, search_btn.y + search_btn.h / 2);
     h.t.advance(0.4);
     try testing.expectEqualStrings("Search sessions", h.t.tooltipText() orelse return error.MissingSearchTooltip);
-    h.t.moveTo(600, 400);
-    h.t.advance(0.1);
-
-    const sidebar_w = @import("view_sidebar.zig").widthOf(&h.a);
-    var new_ws_rect: ?ui.Rect = null;
-    for (h.t.ctx.nodes.items) |node| {
-        const r = node.rect;
-        if (r.w == 26 and r.h == 26 and r.y >= 736 and r.x < sidebar_w) new_ws_rect = r;
-    }
-    const create_btn = new_ws_rect orelse return error.MissingCreateButton;
-    h.t.moveTo(create_btn.x + 13, create_btn.y + 13);
-    h.t.advance(0.4);
-    try testing.expectEqualStrings("New workspace", h.t.tooltipText() orelse return error.MissingCreateTooltip);
     h.t.moveTo(600, 400);
     h.t.advance(0.1);
 

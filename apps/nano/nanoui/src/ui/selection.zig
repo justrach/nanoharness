@@ -40,6 +40,7 @@ pub const Selection = struct {
     /// The selected text as last painted, for Copy.
     text: std.ArrayList(u8) = .empty,
     last_id: u64 = 0,
+    last_end: usize = 0,
     /// Where selectable lines were painted, for the pointer's cursor
     /// between frames.
     lines: std.ArrayList(types.Rect) = .empty,
@@ -124,8 +125,13 @@ pub fn line(c: anytype, out: *std.ArrayList(gpu.Instance), id: u64, index: u32, 
         // and character dragging must not scan paragraph boundaries.
         const prose = c.nodes.items[index].content.text.style.prose_selection;
         if (c.input.click_count == 2) {
-            const word_at = start + text_selection.glyphClusterAt(lay.glyphs, lay.width, m.x - x);
-            s.hit_word = text_selection.proseRange(str, word_at, c.input.click_count);
+            const local_x = m.x - x;
+            const word_at = start + text_selection.glyphClusterAt(lay.glyphs, lay.width, local_x);
+            const visual_line: ?[2]usize = if (prose and s.pressed and !s.touch and local_x >= 0 and local_x < lay.width)
+                .{ start, end }
+            else
+                null;
+            s.hit_word = text_selection.proseWordRange(str, word_at, visual_line);
         }
         s.hit_line = if (prose and c.input.click_count >= 3) text_selection.proseRange(str, at, c.input.click_count) else .{ start, end };
         s.hit_str = str;
@@ -154,18 +160,25 @@ pub fn line(c: anytype, out: *std.ArrayList(gpu.Instance), id: u64, index: u32, 
         .color = gpu.color4(c.theme.accent.alpha(0.28)),
         .clip = clip4,
     }) catch {};
-    if (s.text.items.len > 0 and s.last_id != 0) s.text.append(c.gpa, '\n') catch {};
+    if (s.text.items.len > 0 and s.last_id != 0) {
+        if (s.last_id == id and c.nodes.items[index].content.text.positioned_lines.len > 0) {
+            // A visual wrap isn't a source newline. Preserve any actual
+            // bytes between these positioned runs instead.
+            if (s.last_end < a) s.text.appendSlice(c.gpa, str[s.last_end..a]) catch {};
+        } else s.text.append(c.gpa, '\n') catch {};
+    }
     s.text.appendSlice(c.gpa, str[a..b]) catch {};
     s.last_id = id;
+    s.last_end = b;
 }
 
-fn xAt(lay: text_mod.Layout, at: usize) f32 {
+pub fn xAt(lay: text_mod.Layout, at: usize) f32 {
     for (lay.glyphs) |g| if (g.index >= at) return g.x;
     return lay.width;
 }
 
 /// The byte nearest `x` in the line.
-fn indexAt(lay: text_mod.Layout, x: f32, len: usize) usize {
+pub fn indexAt(lay: text_mod.Layout, x: f32, len: usize) usize {
     var best: usize = 0;
     var best_d: f32 = @abs(x);
     for (lay.glyphs, 0..) |g, i| {
@@ -185,6 +198,7 @@ fn indexAt(lay: text_mod.Layout, x: f32, len: usize) usize {
 pub fn beginPaint(c: anytype) void {
     const s = &c.selection;
     s.text.clearRetainingCapacity();
+    s.last_id = 0;
     s.lines.clearRetainingCapacity();
     s.next_order.clearRetainingCapacity();
     s.hit = null;

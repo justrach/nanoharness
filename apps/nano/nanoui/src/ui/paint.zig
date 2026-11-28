@@ -16,6 +16,8 @@ pub fn paint(c: *Context, out: *std.ArrayList(metal.Instance)) void {
     out.clearRetainingCapacity();
     if (out.capacity < 4096) out.ensureTotalCapacity(c.gpa, 4096) catch {};
     c.scrollbars.clearRetainingCapacity();
+    c.overlay_strips.clearRetainingCapacity();
+    c.over_overlay_strip = false;
     c.text.images.beginPaint();
     c.layers.clearRetainingCapacity();
     paintNode(c, out, 0, types.Rect.infinite, 1, false, 0);
@@ -236,7 +238,7 @@ fn paintNode(c: *Context, out: *std.ArrayList(metal.Instance), index: u32, clip_
         push(c, out, .{ .rect = .{ visible.x, visible.y, visible.w, visible.h }, .color = .{ 1, 1, 1, 1 }, .kind = metal.Kind.layer_begin, .clip = metal.clip4(child_clip) });
     }
     while (child != none) : (child = c.node(child).next) paintNode(c, out, child, child_clip, if (masked) 1 else opacity, selectable, inner_scrolled);
-    if ((st.clip or st.scroll or st.scroll_x) and st.radius > 0) roundClip(out.items[first..], r, visible, st.radius, st.clip_corners);
+    if ((st.clip or st.scroll or st.scroll_x) and st.radius > 0) roundClip(out.items[first..], r, visible, rad, st.clip_corners);
     if (masked) {
         c.painting_group = was_group;
         push(c, out, .{
@@ -341,6 +343,19 @@ fn paintText(c: *Context, out: *std.ArrayList(metal.Instance), index: u32, n: *c
     const sel: ?Sel = if (selectable) .{ .id = n.id, .index = index, .x0 = n.rect.x, .x1 = n.rect.x + n.rect.w } else null;
     const inner = n.rect.inset(n.style.padding);
     const inner_right = n.rect.x + n.rect.w;
+    if (t.positioned_lines.len > 0) {
+        const s = sel orelse return;
+        for (t.positioned_lines) |row| {
+            const y = inner.y + row.y;
+            if (y > clip4[3]) break;
+            if (y + row.height < clip4[1]) {
+                if (y + row.height <= c.input.mouse.y) c.selection.below = .{ .id = s.id, .at = row.end };
+                continue;
+            }
+            @import("selection.zig").line(c, out, s.id, s.index, t.str, row.start, row.end, row.layout, inner.x, y, row.height, s.x0, s.x1, clip4);
+        }
+        return;
+    }
     const f = c.text.font(t.style);
     const lh = c.text.lineHeight(t.style);
     if (t.style.wrap) {
@@ -539,26 +554,49 @@ const overlay_fade: f64 = 0.26;
 
 fn paintOverlayBar(c: *Context, out: *std.ArrayList(metal.Instance), n: ctx_mod.Node, visible: types.Rect, opacity: f32, offset: f32, view_h: f32, content_h: f32, t: f32) void {
     const color = n.style.scrollbar.overlay;
+    if (color.a <= 0 or opacity <= 0) return;
     const gop = c.overlay_bars.getOrPut(c.gpa, n.id) catch return;
     // First seen: nothing has scrolled yet.
     if (!gop.found_existing) gop.value_ptr.* = .{ .offset = offset, .moved_at = -1e9 };
     if (gop.value_ptr.offset != offset) gop.value_ptr.* = .{ .offset = offset, .moved_at = c.time };
     const strip: types.Rect = .{ .x = n.rect.x + n.rect.w - 10, .y = n.rect.y, .w = 10, .h = n.rect.h };
-    const held = strip.contains(c.input.mouse);
+    const strip_vis = strip.intersect(visible);
+    if (strip_vis.w > 0 and strip_vis.h > 0) c.overlay_strips.append(c.gpa, strip_vis) catch {};
+    const dragging = if (c.scrollbar_drag) |drag| drag.id == n.id else false;
+    const over_bar = dragging or strip_vis.contains(c.input.mouse);
+    if (over_bar) c.over_overlay_strip = true;
+    if (dragging) c.wants_moves = true;
     const since = c.time - gop.value_ptr.moved_at;
-    const fade: f32 = if (held) 1 else @floatCast(std.math.clamp(1 - (since - overlay_linger) / overlay_fade, 0, 1));
-    if (!held and since < overlay_linger + overlay_fade) {
-        // Wake for the fade's start, then step through it.
-        c.frameIn(@floatCast(if (since < overlay_linger) overlay_linger - since else 1.0 / 60.0));
+    const fade: f32 = if (over_bar) 1 else @floatCast(std.math.clamp(1 - (since - overlay_linger) / overlay_fade, 0, 1));
+    if (!over_bar and since < overlay_linger + overlay_fade) {
+        // Wake for the fade's start, then animate smoothly at display refresh.
+        if (since < overlay_linger) {
+            c.frameIn(@floatCast(overlay_linger - since));
+        } else {
+            c.animationFrame();
+        }
     }
     if (fade <= 0) return;
     const inset: f32 = 4;
     const track = view_h - 2 * inset;
     const bar_h = @max(24, track * view_h / content_h);
-    const w: f32 = if (held) 5 else 3;
+    const w: f32 = if (over_bar) 5 else 3;
+    const thumb: types.Rect = .{ .x = n.rect.x + n.rect.w - 2 - w, .y = n.rect.y + inset + (track - bar_h) * std.math.clamp(t, 0, 1), .w = w, .h = bar_h };
+    const hit = thumb.intersect(visible);
+    if (track > bar_h and hit.w > 0 and hit.h > 0) {
+        c.scrollbars.put(c.gpa, n.id, .{
+            .track_x = strip.x,
+            .track_y = n.rect.y + inset,
+            .track_h = track,
+            .thumb_y = thumb.y,
+            .thumb_h = thumb.h,
+            .max_scroll = content_h - view_h,
+            .thumb_hit = hit,
+        }) catch {};
+    }
     push(c, out, .{
-        .rect = .{ n.rect.x + n.rect.w - 2 - w, n.rect.y + inset + (track - bar_h) * std.math.clamp(t, 0, 1), w, bar_h },
-        .color = metal.color4(color.alpha(color.a * @as(f32, if (held) 0.68 / 0.5 else 1) * fade * opacity)),
+        .rect = .{ thumb.x, thumb.y, thumb.w, thumb.h },
+        .color = metal.color4(color.alpha(color.a * @as(f32, if (over_bar) 0.68 / 0.5 else 1) * fade * opacity)),
         .radius = w / 2,
         .clip = metal.clip4(visible),
     });

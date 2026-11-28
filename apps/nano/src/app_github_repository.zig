@@ -7,7 +7,17 @@ const requests = @import("requests.zig");
 pub const Kind = requests.GitHubKind;
 pub const Filter = requests.GitHubFilter;
 pub const Repository = struct { key: []const u8, host: []const u8, owner: []const u8, name: []const u8, url: []const u8 };
-pub const Item = struct { number: u64, title: []const u8, url: []const u8, state: []const u8, isDraft: bool = false, author: []const u8, updatedAt: []const u8 };
+pub const Item = struct {
+    number: u64,
+    title: []const u8,
+    url: []const u8,
+    state: []const u8,
+    isDraft: bool = false,
+    author: []const u8,
+    updatedAt: []const u8,
+    createdAt: []const u8 = "",
+    labels: []const []const u8 = &.{},
+};
 pub const Detail = struct {
     number: u64,
     title: []const u8,
@@ -23,6 +33,7 @@ pub const Detail = struct {
     additions: ?u64 = null,
     deletions: ?u64 = null,
     changedFiles: ?u64 = null,
+    labels: []const []const u8 = &.{},
 };
 pub const File = struct {
     filename: []const u8,
@@ -78,6 +89,8 @@ fn validPart(part: []const u8) bool {
 }
 const Target = struct { arena: std.heap.ArenaAllocator, chat: []const u8, cwd: []const u8, device: []const u8, branch: []const u8 };
 const Linked = struct { arena: std.heap.ArenaAllocator, repository: Repository };
+pub const StateChip = enum { all, open, closed, merged, draft };
+
 pub const State = struct {
     images: @import("github_images.zig").Cache = .{},
     /// Surface identity is the opening chat, never whichever split has focus.
@@ -94,6 +107,9 @@ pub const State = struct {
     list_kind: Kind = .pulls,
     selected_kind: Kind = .pull,
     filter: Filter = .open,
+    state_chip: StateChip = .all,
+    author_filter: ?[]const u8 = null,
+    label_filter: ?[]const u8 = null,
     number: ?u64 = null,
     requested_page: usize = 1,
     expanded_file: ?usize = null,
@@ -131,8 +147,84 @@ fn fail(a: *App, text: []const u8) void {
     a.panels.github_repository.error_text = a.gpa.dupe(u8, text) catch null;
     a.redraw();
 }
+fn clearClientFiltersRaw(s: *State) void {
+    s.state_chip = .all;
+    s.author_filter = null;
+    s.label_filter = null;
+}
+
+fn findAuthorSlice(s: *const State, author: []const u8) ?[]const u8 {
+    const l = s.list orelse return null;
+    for (l.page.items) |item| if (std.mem.eql(u8, item.author, author)) return item.author;
+    return null;
+}
+
+fn findLabelSlice(s: *const State, label: []const u8) ?[]const u8 {
+    const l = s.list orelse return null;
+    for (l.page.items) |item| {
+        for (item.labels) |lbl| if (std.mem.eql(u8, lbl, label)) return lbl;
+    }
+    return null;
+}
+
+pub fn toggleStateChip(a: *App, chip: StateChip) void {
+    const s = &a.panels.github_repository;
+    s.state_chip = if (s.state_chip == chip) .all else chip;
+    a.redraw();
+}
+
+pub fn toggleAuthorFilter(a: *App, author: []const u8) void {
+    const s = &a.panels.github_repository;
+    if (s.author_filter) |cur| if (std.mem.eql(u8, cur, author)) {
+        s.author_filter = null;
+        return a.redraw();
+    };
+    s.author_filter = findAuthorSlice(s, author);
+    a.redraw();
+}
+
+pub fn toggleLabelFilter(a: *App, label: []const u8) void {
+    const s = &a.panels.github_repository;
+    if (s.label_filter) |cur| if (std.mem.eql(u8, cur, label)) {
+        s.label_filter = null;
+        return a.redraw();
+    };
+    s.label_filter = findLabelSlice(s, label);
+    a.redraw();
+}
+
+pub fn clearClientFilters(a: *App) void {
+    clearClientFiltersRaw(&a.panels.github_repository);
+    a.redraw();
+}
+
+pub fn hasClientFilter(s: *const State) bool {
+    return s.state_chip != .all or s.author_filter != null or s.label_filter != null;
+}
+
+pub fn itemMatchesFilter(s: *const State, item: Item) bool {
+    switch (s.state_chip) {
+        .all => {},
+        .open => if (!(std.mem.eql(u8, item.state, "open") and !item.isDraft)) return false,
+        .draft => if (!(std.mem.eql(u8, item.state, "open") and item.isDraft)) return false,
+        .merged => if (!std.mem.eql(u8, item.state, "merged")) return false,
+        .closed => if (!std.mem.eql(u8, item.state, "closed")) return false,
+    }
+    if (s.author_filter) |af| {
+        if (!std.mem.eql(u8, item.author, af)) return false;
+    }
+    if (s.label_filter) |lf| {
+        const matched = for (item.labels) |lbl| {
+            if (std.mem.eql(u8, lbl, lf)) break true;
+        } else false;
+        if (!matched) return false;
+    }
+    return true;
+}
+
 fn clearSnapshots(a: *App) void {
     const s = &a.panels.github_repository;
+    clearClientFiltersRaw(s);
     s.images.reset();
     if (s.list) |p| a.retireArena(p.arena);
     if (s.details) |p| a.retireArena(p.arena);
@@ -393,6 +485,7 @@ fn onReply(a: *App, id: u64, reply: rpc.Reply) void {
             }
             switch (s.kind) {
                 .pulls, .issues => {
+                    clearClientFiltersRaw(s);
                     if (s.list) |old| a.retireArena(old.arena);
                     s.list = next;
                 },

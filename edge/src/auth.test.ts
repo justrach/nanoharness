@@ -1,11 +1,23 @@
 import { SignJWT } from "jose";
 import { describe, expect, it } from "vitest";
-import { issueRefreshCredential, verifyRefreshCredential } from "./auth";
+import { issueRefreshCredential, issueToken, verifyRefreshCredential, verifyToken } from "./auth";
 import type { Env } from "./env";
 
 const env = { HARNESS_AUTH_SIGNING_KEY: "k".repeat(48) } as Env;
 const other = { HARNESS_AUTH_SIGNING_KEY: "z".repeat(48) } as Env;
 const CG = "cg_rt_secret-refresh-token";
+
+describe("access token", () => {
+  it("lasts fifteen minutes", async () => {
+    const token = await issueToken(env, "42");
+    const payload = JSON.parse(
+      atob(token.split(".")[1]!.replace(/-/g, "+").replace(/_/g, "/"))
+    ) as { iat: number; exp: number };
+    expect(payload.exp - payload.iat).toBe(15 * 60);
+    const verified = await verifyToken(env, token);
+    expect(verified?.userId).toBe("42");
+  });
+});
 
 describe("refresh credential", () => {
   it("is encrypted and keeps the prefix shipped engines accept", async () => {

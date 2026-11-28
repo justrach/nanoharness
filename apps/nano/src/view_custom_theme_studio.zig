@@ -51,10 +51,14 @@ pub fn open(a: *App) void {
 }
 
 pub fn openWithPrompt(a: *App, initial_prompt: []const u8) void {
-    const trimmed = std.mem.trim(u8, initial_prompt, " \t\r\n");
-    a.view.custom_theme_prompt.set(trimmed);
     open(a);
-    if (trimmed.len > 0) submitPrompt(a);
+    usePrompt(a, initial_prompt);
+}
+
+/// The prompt set to `prompt` and generated, where the studio is drawn now.
+pub fn usePrompt(a: *App, prompt: []const u8) void {
+    a.view.custom_theme_prompt.set(std.mem.trim(u8, prompt, " \t\r\n"));
+    if (a.view.custom_theme_prompt.text().len > 0) submitPrompt(a);
 }
 
 pub fn close(a: *App) void {
@@ -248,7 +252,7 @@ pub fn studioBody(c: *ui.Context, a: *App, k: theme.Colors, inner_w: f32, modal:
         }
 
         // Quick idea chips
-        renderQuickPromptChips(c, a, k, @max(160, inner_w - 8));
+        renderQuickPromptChips(c, a, k, @max(160, inner_w - 8), modal);
     }
 
     // 2. Backdrop motion, opacity & scene override
@@ -325,7 +329,10 @@ pub fn studioBody(c: *ui.Context, a: *App, k: theme.Colors, inner_w: f32, modal:
     }
 }
 
-fn renderQuickPromptChips(c: *ui.Context, a: *App, k: theme.Colors, max_w: f32) void {
+/// An idea chip fills the prompt and generates. Inline in Settings ›
+/// Appearance it stays inline: the studio is already on screen, so it
+/// doesn't open a second copy of it over the page.
+fn renderQuickPromptChips(c: *ui.Context, a: *App, k: theme.Colors, max_w: f32, modal: bool) void {
     var i: usize = 0;
     while (i < quick_prompts.len) {
         const row = ui.div(c).row().gap(6);
@@ -339,7 +346,9 @@ fn renderQuickPromptChips(c: *ui.Context, a: *App, k: theme.Colors, max_w: f32) 
             const chip = ui.div(c).row().px(9).py(4).roundedFull().border(k.border).borderW(1).bg(k.ink(0.03)).hover(k.ink(0.08)).control();
             defer chip.end();
             ui.text(c, label, .{ .size = 11, .color = k.muted });
-            if (chip.clicked()) openWithPrompt(a, label);
+            if (chip.clicked()) {
+                if (modal) openWithPrompt(a, label) else usePrompt(a, label);
+            }
             i += 1;
         }
     }

@@ -54,7 +54,7 @@ const Harness = struct {
             try l[1].replace(parsed.value);
         }
         var sessions = try std.json.parseFromSlice(std.json.Value, testing.allocator,
-            \\[{"chatId":"c-triage","status":"errored","updatedAt":"2027-01-15T08:06:00Z"},{"chatId":"c-deps","status":"awaitingInput","updatedAt":"2027-01-15T08:06:00Z"}]
+            \\[{"chatId":"c-triage","status":"errored","updatedAt":"2027-01-15T08:06:00Z"},{"chatId":"c-notes","status":"idle","lastCompletedTurn":"notes-result","updatedAt":"2027-01-15T07:10:00Z"},{"chatId":"c-deps","status":"awaitingInput","updatedAt":"2027-01-15T08:06:00Z"}]
         , .{});
         defer sessions.deinit();
         try h.a.sessions.replace(sessions.value);
@@ -380,7 +380,11 @@ test "the main bot: what it started in any project, under it, on its page and in
     var h: Harness = undefined;
     try h.init("{\"BotsState\":" ++ work_state ++ ",\"BotDetail\":{\"memory\":\"\",\"log\":\"\"},\"Mutate\":{\"ok\":true}}");
     defer h.deinit();
-    inline for (.{ .{ work_chats, &h.a.chats }, .{ "[{\"chatId\":\"w-fix\",\"status\":\"working\",\"updatedAt\":\"2027-01-15T08:06:00Z\"}]", &h.a.sessions } }) |l| {
+    const work_sessions =
+        \\[{"chatId":"w-fix","status":"working","updatedAt":"2027-01-15T08:06:00Z"},
+        \\ {"chatId":"w-bump","status":"idle","lastCompletedTurn":"deps-result","updatedAt":"2027-01-15T06:50:00Z"}]
+    ;
+    inline for (.{ .{ work_chats, &h.a.chats }, .{ work_sessions, &h.a.sessions } }) |l| {
         var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, l[0], .{});
         defer parsed.deinit();
         try l[1].replace(parsed.value);

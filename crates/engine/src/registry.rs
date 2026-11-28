@@ -7,7 +7,7 @@
 //! Per-device because CLI installs are — a viewer retargets the settings page at
 //! another device and edits THAT device's set over the forwarded RPCs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex, MutexGuard, PoisonError,
@@ -117,7 +117,10 @@ struct HarnessPrefsFile {
     /// The user's explicit opt-INS for agents that are off by default (see
     /// [`default_on`]). Still gated on detection: an opted-in agent whose CLI
     /// goes missing drops out until it is found again.
-    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "known_harnesses")]
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "known_harnesses"
+    )]
     opted_in: Vec<HarnessId>,
     titles: TitleSettings,
     /// The default autonomy stamped onto every run on this device. `None`
@@ -125,9 +128,26 @@ struct HarnessPrefsFile {
     /// full access, so existing users see no change until they pick one.
     #[serde(skip_serializing_if = "Option::is_none")]
     autonomy: Option<Autonomy>,
+    /// True when `autonomy` is the new-install Workspace default, not a
+    /// person's SetAutonomy. Existing files omit it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    autonomy_is_default: bool,
+    /// Devices the person has allowed to execute / write / open terminals
+    /// without another chip, while remote control is on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    approved_remote_devices: Vec<String>,
+    /// Seal chat2 rows and ControlRpc payloads. Off until the user opts in
+    /// (or `HARNESS_E2EE=1`); existing plaintext rows stay readable.
+    #[serde(default)]
+    e2ee: bool,
     graff_draft_subagents: bool,
     /// Hold off idle sleep while an agent works (see `keep_awake`).
     keep_awake: bool,
+    /// Serve ControlRpc on this computer's device-room host relay. Off until
+    /// the user enables Settings → Devices → Allow remote control. Missing
+    /// from older prefs files is off, so existing synced installs are not a
+    /// remotely driven host until they opt in.
+    remote_control: bool,
     /// graff's automatic compaction point, percent of the context window.
     #[serde(skip_serializing_if = "Option::is_none")]
     graff_compact_at: Option<u8>,
@@ -146,15 +166,103 @@ struct HarnessPrefsFile {
 /// Agent ids this build knows, skipping the rest: a prefs file written by a
 /// newer build (an agent added since) must not fail as a whole, which reset
 /// every opt-out and opt-in to the defaults.
+///
+/// Headless installs often hand-edit this field. A JSON string, a
+/// comma-separated string, or a non-array value must not discard the rest of
+/// `harness-prefs.json` (including `remoteControl`).
 fn known_harnesses<'de, D>(deserializer: D) -> Result<Vec<HarnessId>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
-    Ok(raw
-        .into_iter()
-        .filter_map(|value| serde_json::from_value(value).ok())
-        .collect())
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    Ok(harness_ids_from_json(&raw))
+}
+
+/// Parse agent ids from a prefs `optedIn` / `disabled` JSON value.
+pub fn harness_ids_from_json(value: &serde_json::Value) -> Vec<HarnessId> {
+    match value {
+        serde_json::Value::String(raw) => parse_opted_in_list(raw),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|item| match item {
+                serde_json::Value::String(raw) => parse_harness_id(raw),
+                _ => None,
+            })
+            .collect(),
+        // Headless edits sometimes write `{"antigravity": true}` instead of
+        // an array. Truthy entries opt in; the rest of the file still loads.
+        serde_json::Value::Object(map) => map
+            .iter()
+            .filter(|(key, value)| json_truthy(value) && parse_harness_id(key).is_some())
+            .filter_map(|(key, _)| parse_harness_id(key))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn json_truthy(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Bool(on) => *on,
+        serde_json::Value::Number(n) => n.as_i64() == Some(1) || n.as_u64() == Some(1),
+        serde_json::Value::String(raw) => {
+            let raw = raw.trim();
+            raw == "1" || raw.eq_ignore_ascii_case("true") || raw.eq_ignore_ascii_case("on")
+        }
+        _ => false,
+    }
+}
+
+/// Parse kebab-case (or case-insensitive) agent ids from a comma/whitespace
+/// list. Unknown names are skipped.
+pub fn parse_opted_in_list(raw: &str) -> Vec<HarnessId> {
+    raw.split(|c: char| c == ',' || c.is_ascii_whitespace())
+        .filter_map(parse_harness_id)
+        .collect()
+}
+
+/// One agent id, accepting the wire kebab-case name and a case-insensitive
+/// spelling (`Antigravity` → `antigravity`).
+pub fn parse_harness_id(raw: &str) -> Option<HarnessId> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    serde_json::from_value(serde_json::Value::String(trimmed.to_string()))
+        .ok()
+        .or_else(|| {
+            serde_json::from_value(serde_json::Value::String(trimmed.to_ascii_lowercase())).ok()
+        })
+}
+
+/// Extra opt-ins from the process environment. `HARNESS_OPTED_IN` is the
+/// explicit list; `HARNESS_PROVIDER` also opts in an off-by-default agent so
+/// `HARNESS_PROVIDER=antigravity` can actually run on a headless host.
+pub fn env_opted_in() -> Vec<HarnessId> {
+    env_opted_in_from(|key| std::env::var(key).ok())
+}
+
+fn env_opted_in_from(mut env: impl FnMut(&str) -> Option<String>) -> Vec<HarnessId> {
+    let mut ids = env("HARNESS_OPTED_IN")
+        .map(|raw| parse_opted_in_list(&raw))
+        .unwrap_or_default();
+    if let Some(raw) = env("HARNESS_PROVIDER")
+        && let Some(id) = parse_harness_id(raw.trim())
+        && auto_enabled(id)
+        && !default_on(id)
+        && !ids.contains(&id)
+    {
+        ids.push(id);
+    }
+    ids
+}
+
+fn merge_opted_in_lists(mut existing: Vec<HarnessId>, extra: Vec<HarnessId>) -> Vec<HarnessId> {
+    for id in extra {
+        if auto_enabled(id) && !existing.contains(&id) {
+            existing.push(id);
+        }
+    }
+    existing
 }
 
 fn known_harnesses_opt<'de, D>(deserializer: D) -> Result<Option<Vec<HarnessId>>, D::Error>
@@ -211,6 +319,19 @@ pub struct HarnessRegistry {
     graff_native_flint: Arc<std::sync::RwLock<Option<harness_adapters::NativeFlintEnv>>>,
     /// Live view of `keep_awake` for the engine's power-assertion task.
     keep_awake: tokio::sync::watch::Sender<bool>,
+    /// Parked remote actions (chat2 drain + first ControlRpc).
+    pending_remote: Mutex<Vec<harness_rpc::RemoteApproval>>,
+    remote_approvals: tokio::sync::watch::Sender<Vec<harness_rpc::RemoteApproval>>,
+    /// Command ids the user approved once (not persisted).
+    one_shot_commands: Mutex<HashSet<String>>,
+    /// "Allow once" on parked relayed RPCs: each admits one retry of that
+    /// request from that device (not persisted, spent on use, short-lived).
+    relay_once_grants: Mutex<Vec<harness_rpc::RelayOnceGrant>>,
+    /// Per-device Ed25519 + X25519, loaded from `{data_dir}/device-keys.json`.
+    device_keys: Mutex<Option<harness_sync::DeviceKeypair>>,
+    /// Whether this engine runs inside a headless cloud sandbox
+    /// (`HARNESS_SANDBOX_TOKEN_FILE`), never persisted to `harness-prefs.json`.
+    sandbox_host: AtomicBool,
     /// Where the prefs persist; `None` (tests, bare registries) skips writes.
     prefs_path: Mutex<Option<PathBuf>>,
 }
@@ -232,6 +353,12 @@ impl HarnessRegistry {
             graff_compact_at: Arc::new(AtomicU8::new(0)),
             graff_native_flint: Arc::new(std::sync::RwLock::new(None)),
             keep_awake: tokio::sync::watch::Sender::new(false),
+            pending_remote: Mutex::new(Vec::new()),
+            remote_approvals: tokio::sync::watch::Sender::new(Vec::new()),
+            one_shot_commands: Mutex::new(HashSet::new()),
+            relay_once_grants: Mutex::new(Vec::new()),
+            device_keys: Mutex::new(None),
+            sandbox_host: AtomicBool::new(false),
             prefs_path: Mutex::new(None),
         }
     }
@@ -250,12 +377,59 @@ impl HarnessRegistry {
 
     /// Load `harness-prefs.json` from the engine data dir and remember the
     /// path for writes. Corrupt/missing files fall back to the default set.
+    /// Call [`Self::apply_env_opt_ins`] afterwards on a real engine so
+    /// `HARNESS_OPTED_IN` / `HARNESS_PROVIDER` overlay the file in memory
+    /// without rewriting it.
     pub fn load_prefs(&self, data_dir: &Path) {
+        self.load_prefs_with_opt_ins(data_dir, Vec::new());
+    }
+
+    /// Overlay `HARNESS_OPTED_IN` and an off-by-default `HARNESS_PROVIDER`
+    /// onto the loaded prefs. Not persisted.
+    pub fn apply_env_opt_ins(&self) {
+        self.merge_opted_in(env_opted_in());
+    }
+
+    fn merge_opted_in(&self, extra: Vec<HarnessId>) {
+        if extra.is_empty() {
+            return;
+        }
+        let mut prefs = self.prefs();
+        prefs.opted_in = merge_opted_in_lists(prefs.opted_in.clone(), extra);
+    }
+
+    fn load_prefs_with_opt_ins(&self, data_dir: &Path, extra_opt_ins: Vec<HarnessId>) {
         let path = data_dir.join("harness-prefs.json");
-        let loaded = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<HarnessPrefsFile>(&text).ok())
-            .unwrap_or_default();
+        let existed = path.is_file();
+        let mut loaded = match std::fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str::<HarnessPrefsFile>(&text) {
+                Ok(file) => file,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        path = %path.display(),
+                        "harness-prefs parse failed; using defaults"
+                    );
+                    HarnessPrefsFile::default()
+                }
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => HarnessPrefsFile::default(),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %path.display(),
+                    "harness-prefs read failed; using defaults"
+                );
+                HarnessPrefsFile::default()
+            }
+        };
+        if !existed && loaded.autonomy.is_none() {
+            // Brand-new data dir: Workspace, not FullAccess. Existing files
+            // without the key keep FullAccess via `autonomy()`.
+            loaded.autonomy = Some(Autonomy::Workspace);
+            loaded.autonomy_is_default = true;
+        }
+        loaded.opted_in = merge_opted_in_lists(loaded.opted_in, extra_opt_ins);
         self.graff_draft_subagents
             .store(loaded.graff_draft_subagents, Ordering::Relaxed);
         let compact_at = loaded.graff_compact_at.filter(|pct| valid_compact_at(*pct));
@@ -266,7 +440,13 @@ impl HarnessRegistry {
         *self
             .prefs_path
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(path);
+            .unwrap_or_else(PoisonError::into_inner) = Some(path.clone());
+        if let Ok(keys) = harness_sync::load_or_create_device_keys(data_dir) {
+            *self
+                .device_keys
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(keys);
+        }
         self.migrate_legacy_prefs();
     }
 
@@ -275,15 +455,22 @@ impl HarnessRegistry {
     /// off; an off-by-default harness listed in it was a deliberate "yes", so
     /// it becomes an opt-in. Rewrites the file once, which is what lets later
     /// installs of default-on agents auto-enable.
+    ///
+    /// A hand-edited `optedIn` that coexists with the leftover `enabled` key
+    /// is kept: overwriting it is why adding `optedIn` on a Linux host with
+    /// an older prefs file appeared to do nothing.
     fn migrate_legacy_prefs(&self) {
-        let legacy = { self.prefs().enabled.take() };
+        let (legacy, existing_opted_in) = {
+            let mut prefs = self.prefs();
+            (prefs.enabled.take(), prefs.opted_in.clone())
+        };
         let Some(legacy) = legacy else { return };
         let registered: Vec<HarnessId> = self.order().iter().copied().collect();
         let disabled: Vec<HarnessId> = registered
             .into_iter()
             .filter(|id| default_on(*id) && !legacy.contains(id))
             .collect();
-        let mut opted_in: Vec<HarnessId> = Vec::new();
+        let mut opted_in = existing_opted_in;
         for id in legacy {
             if auto_enabled(id) && !default_on(id) && !opted_in.contains(&id) {
                 opted_in.push(id);
@@ -403,22 +590,28 @@ impl HarnessRegistry {
         self.prefs().titles.clone()
     }
 
-    /// This device's default autonomy (full access until the user picks).
+    /// This device's default autonomy. New installs use Workspace; prefs
+    /// files written before that setting existed stay FullAccess until the
+    /// user picks.
     pub fn autonomy(&self) -> Autonomy {
-        self.prefs().autonomy.unwrap_or_default()
+        self.prefs().autonomy.unwrap_or(Autonomy::FullAccess)
     }
 
     /// Whether the user ever picked an autonomy level (onboarding or
     /// Settings); clients use it to tell a fresh choice from the fallback.
     pub fn autonomy_chosen(&self) -> bool {
-        self.prefs().autonomy.is_some()
+        let prefs = self.prefs();
+        prefs.autonomy.is_some() && !prefs.autonomy_is_default
     }
 
     /// Persist the default autonomy. Applies to runs dispatched after the
     /// change; a live runtime is replaced on its next send because its
     /// baked sandbox no longer matches.
     pub fn set_autonomy(&self, autonomy: Autonomy) {
-        self.prefs().autonomy = Some(autonomy);
+        let mut prefs = self.prefs();
+        prefs.autonomy = Some(autonomy);
+        prefs.autonomy_is_default = false;
+        drop(prefs);
         self.persist_prefs();
     }
 
@@ -440,6 +633,269 @@ impl HarnessRegistry {
         self.prefs().keep_awake = enabled;
         self.keep_awake.send_replace(enabled);
         self.persist_prefs();
+    }
+
+    /// Mark this engine as a headless cloud sandbox (`HARNESS_SANDBOX_TOKEN_FILE`).
+    /// Cloud sandboxes have no local desktop UI and exist solely to serve the
+    /// owner's remote devices; remote control is enabled in memory without
+    /// persisting to `harness-prefs.json`, while `LocalOnly` RPCs stay blocked.
+    pub fn set_sandbox_host(&self, enabled: bool) {
+        self.sandbox_host.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn is_sandbox_host(&self) -> bool {
+        self.sandbox_host.load(Ordering::Relaxed)
+    }
+
+    /// Whether this computer serves ControlRpc over its device-room host
+    /// relay. Off until the user opts in (always on for cloud sandboxes).
+    pub fn remote_control(&self) -> bool {
+        self.is_sandbox_host() || self.prefs().remote_control
+    }
+
+    /// Persist the host-relay opt-in. Live host sockets pick this up on the
+    /// next RPC; turning it off does not drop the socket (nudges and the
+    /// peer-link probe still need it).
+    pub fn set_remote_control(&self, enabled: bool) {
+        self.prefs().remote_control = enabled;
+        self.persist_prefs();
+        if !enabled {
+            // Turning remote control off withdraws every unspent "Allow
+            // once": turning it back on later must not revive them.
+            self.relay_once_grants().clear();
+        }
+    }
+
+    pub fn e2ee(&self) -> bool {
+        self.prefs().e2ee || harness_sync::e2ee_from_env()
+    }
+
+    /// This computer's device keypair, minting one into the data dir if needed.
+    pub fn ensure_device_keys(&self) -> harness_sync::DeviceKeypair {
+        {
+            let slot = self
+                .device_keys
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(keys) = slot.clone() {
+                return keys;
+            }
+        }
+        let dir = self
+            .prefs_path
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| std::env::temp_dir());
+        let keys = harness_sync::load_or_create_device_keys(&dir)
+            .unwrap_or_else(|_| harness_sync::DeviceKeypair::generate());
+        *self
+            .device_keys
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(keys.clone());
+        keys
+    }
+
+    pub fn set_e2ee(&self, enabled: bool) {
+        self.prefs().e2ee = enabled;
+        self.persist_prefs();
+    }
+
+    pub fn remote_device_approved(&self, device_id: &str) -> bool {
+        self.prefs()
+            .approved_remote_devices
+            .iter()
+            .any(|id| id == device_id)
+    }
+
+    pub fn approve_remote_device(&self, device_id: &str) {
+        if !harness_rpc::relay_caller_identified(device_id) {
+            return;
+        }
+        {
+            let mut prefs = self.prefs();
+            if !prefs
+                .approved_remote_devices
+                .iter()
+                .any(|id| id == device_id)
+            {
+                prefs.approved_remote_devices.push(device_id.to_string());
+            }
+        }
+        self.persist_prefs();
+    }
+
+    pub fn revoke_remote_device(&self, device_id: &str) {
+        self.prefs()
+            .approved_remote_devices
+            .retain(|id| id != device_id);
+        self.persist_prefs();
+        self.relay_once_grants()
+            .retain(|grant| grant.device_id != device_id);
+    }
+
+    fn relay_once_grants(&self) -> MutexGuard<'_, Vec<harness_rpc::RelayOnceGrant>> {
+        self.relay_once_grants
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Spend the "Allow once" grant that admits this exact request from this
+    /// device at `now`, if there is one. Expired grants are dropped on the
+    /// way. Check and removal happen under one lock, so concurrent retries
+    /// cannot both be admitted.
+    pub fn take_relay_once_grant(
+        &self,
+        device_id: &str,
+        method: &str,
+        request_digest: &str,
+        now: std::time::Instant,
+    ) -> bool {
+        let mut grants = self.relay_once_grants();
+        grants.retain(|grant| !grant.expired(now));
+        let Some(ix) = grants
+            .iter()
+            .position(|grant| grant.admits(device_id, method, request_digest, now))
+        else {
+            return false;
+        };
+        grants.swap_remove(ix);
+        true
+    }
+
+    pub fn pending_remote_approvals(&self) -> Vec<harness_rpc::RemoteApproval> {
+        self.pending_remote
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn watch_remote_approvals(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Vec<harness_rpc::RemoteApproval>> {
+        self.remote_approvals.subscribe()
+    }
+
+    pub fn park_remote_approval(&self, item: harness_rpc::RemoteApproval) {
+        let mut pending = self
+            .pending_remote
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if pending.iter().any(|p| {
+            p.command_id == item.command_id
+                && p.method == item.method
+                && p.device_id == item.device_id
+        }) {
+            return;
+        }
+        pending.push(item);
+        let snapshot = pending.clone();
+        drop(pending);
+        self.remote_approvals.send_replace(snapshot);
+    }
+
+    pub fn resolve_remote_approval(&self, id: &str, allow: bool, always: bool) -> bool {
+        self.resolve_remote_approval_at(id, allow, always, std::time::Instant::now())
+    }
+
+    /// [`Self::resolve_remote_approval`] with the clock a new "Allow once"
+    /// grant starts from.
+    pub fn resolve_remote_approval_at(
+        &self,
+        id: &str,
+        allow: bool,
+        always: bool,
+        now: std::time::Instant,
+    ) -> bool {
+        let mut pending = self
+            .pending_remote
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(idx) = pending.iter().position(|p| p.id == id) else {
+            return false;
+        };
+        let item = pending.remove(idx);
+        let snapshot = pending.clone();
+        drop(pending);
+        self.remote_approvals.send_replace(snapshot);
+        if allow {
+            if always {
+                self.approve_remote_device(&item.device_id);
+            } else if item.kind == "rpc"
+                && item.allow_once
+                && let (Some(method), Some(request_digest)) = (&item.method, &item.request_digest)
+                && harness_rpc::relay_allow_once_method(method)
+                && harness_rpc::relay_caller_identified(&item.device_id)
+            {
+                self.relay_once_grants().push(harness_rpc::RelayOnceGrant {
+                    device_id: item.device_id.clone(),
+                    method: method.clone(),
+                    request_digest: request_digest.clone(),
+                    granted_at: now,
+                });
+            }
+            if let Some(command_id) = item.command_id {
+                self.one_shot_commands
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(command_id);
+            }
+        }
+        allow
+    }
+
+    pub fn command_approved(&self, command_id: &str) -> bool {
+        self.one_shot_commands
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(command_id)
+    }
+
+    /// One-shot allow for a parked command id (does not persist the device).
+    pub fn allow_command_once(&self, command_id: &str) {
+        let mut pending = self
+            .pending_remote
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        pending.retain(|p| p.command_id.as_deref() != Some(command_id));
+        let snapshot = pending.clone();
+        drop(pending);
+        self.remote_approvals.send_replace(snapshot);
+        self.one_shot_commands
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(command_id.to_string());
+    }
+
+    /// Drain parked `kind == "command"` approvals once remote control is
+    /// enabled, returning deduplicated `chat_id`s to re-drain.
+    pub fn take_parked_command_chats(&self) -> Vec<String> {
+        let mut pending = self
+            .pending_remote
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut chats = Vec::new();
+        let mut removed = false;
+        pending.retain(|item| {
+            if item.kind == "command" {
+                removed = true;
+                if let Some(chat_id) = &item.chat_id
+                    && !chats.contains(chat_id)
+                {
+                    chats.push(chat_id.clone());
+                }
+                false
+            } else {
+                true
+            }
+        });
+        let snapshot = removed.then(|| pending.clone());
+        drop(pending);
+        if let Some(snapshot) = snapshot {
+            self.remote_approvals.send_replace(snapshot);
+        }
+        chats
     }
 
     /// The setting's live value, for the task that holds the assertion.
@@ -1190,6 +1646,170 @@ mod tests {
         assert!(empty.disabled.is_empty() && empty.enabled.is_none());
     }
 
+    /// A hand-edited prefs file is the headless Settings → Agents equivalent.
+    /// This is the shape a Linux host writes; it must enable Antigravity when
+    /// the CLI is present. Fails on main if load_prefs ignores `optedIn`.
+    #[test]
+    fn hand_edited_opted_in_enables_installed_antigravity() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("harness-prefs.json"),
+            r#"{"optedIn":["antigravity"]}"#,
+        )
+        .unwrap();
+        let registry = HarnessRegistry::new();
+        test_slot(&registry, HarnessId::ClaudeCode, true);
+        test_slot(&registry, HarnessId::Antigravity, true);
+        registry.load_prefs_with_opt_ins(dir.path(), Vec::new());
+        assert!(
+            registry.enabled_set().contains(&HarnessId::Antigravity),
+            "{:?}",
+            registry.enabled_set()
+        );
+    }
+
+    /// `"optedIn": "antigravity"` (a string, not an array) used to fail the
+    /// whole file as invalid JSON-for-this-schema, so a headless host's edit
+    /// silently fell back to defaults. Keep the rest of the file, including
+    /// `remoteControl`.
+    #[test]
+    fn string_opted_in_and_boolean_opted_in_do_not_discard_the_prefs_file() {
+        let string: HarnessPrefsFile =
+            serde_json::from_str(r#"{"optedIn":"antigravity","remoteControl":true}"#).unwrap();
+        assert_eq!(string.opted_in, vec![HarnessId::Antigravity]);
+        assert!(string.remote_control);
+
+        let mixed: HarnessPrefsFile =
+            serde_json::from_str(r#"{"optedIn":"Antigravity, cursor","remoteControl":true}"#)
+                .unwrap();
+        assert_eq!(
+            mixed.opted_in,
+            vec![HarnessId::Antigravity, HarnessId::Cursor]
+        );
+        assert!(mixed.remote_control);
+
+        let boolean: HarnessPrefsFile =
+            serde_json::from_str(r#"{"optedIn":true,"remoteControl":true,"disabled":["codex"]}"#)
+                .unwrap();
+        assert!(boolean.opted_in.is_empty());
+        assert!(boolean.remote_control);
+        assert_eq!(boolean.disabled, vec![HarnessId::Codex]);
+
+        let map: HarnessPrefsFile = serde_json::from_str(
+            r#"{"optedIn":{"antigravity":true,"cursor":false,"grok":"on"},"remoteControl":true}"#,
+        )
+        .unwrap();
+        assert_eq!(map.opted_in, vec![HarnessId::Antigravity, HarnessId::Grok]);
+        assert!(map.remote_control);
+    }
+
+    #[test]
+    fn parse_opted_in_list_accepts_commas_whitespace_and_case() {
+        assert_eq!(
+            parse_opted_in_list("antigravity, Cursor  grok"),
+            vec![HarnessId::Antigravity, HarnessId::Cursor, HarnessId::Grok]
+        );
+        assert_eq!(
+            parse_harness_id("Antigravity"),
+            Some(HarnessId::Antigravity)
+        );
+        assert_eq!(parse_harness_id("not-an-agent"), None);
+        assert_eq!(
+            env_opted_in_from(|key| match key {
+                "HARNESS_OPTED_IN" => Some("cursor".into()),
+                "HARNESS_PROVIDER" => Some("antigravity".into()),
+                _ => None,
+            }),
+            vec![HarnessId::Cursor, HarnessId::Antigravity]
+        );
+        // A default-on provider is already offered; it is not an opt-in.
+        assert!(
+            env_opted_in_from(|key| (key == "HARNESS_PROVIDER").then(|| "graff".into())).is_empty()
+        );
+    }
+
+    /// `HARNESS_OPTED_IN` / `HARNESS_PROVIDER` overlay the file without
+    /// rewriting it, so a headless host can enable Antigravity without the GUI.
+    #[test]
+    fn env_opted_in_overlays_the_prefs_file_without_rewriting_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("harness-prefs.json"), r#"{"disabled":[]}"#).unwrap();
+        let registry = HarnessRegistry::new();
+        test_slot(&registry, HarnessId::ClaudeCode, true);
+        test_slot(&registry, HarnessId::Antigravity, true);
+        registry.load_prefs_with_opt_ins(dir.path(), vec![HarnessId::Antigravity]);
+        assert!(registry.enabled_set().contains(&HarnessId::Antigravity));
+        let text = std::fs::read_to_string(dir.path().join("harness-prefs.json")).unwrap();
+        assert!(
+            !text.contains("antigravity"),
+            "env/CLI opt-ins must not rewrite the file: {text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_env_opt_ins_reads_harness_opted_in() {
+        if std::env::var_os("HARNESS_TEST_APPLY_ENV_OPTED_IN").is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "registry::tests::apply_env_opt_ins_reads_harness_opted_in",
+                    "--nocapture",
+                ])
+                .env("HARNESS_TEST_APPLY_ENV_OPTED_IN", "1")
+                .env("HARNESS_OPTED_IN", "antigravity")
+                .env_remove("HARNESS_PROVIDER")
+                .env("HARNESS_DATA_DIR", dir.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "stdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        test_slot(&registry, HarnessId::ClaudeCode, true);
+        test_slot(&registry, HarnessId::Antigravity, true);
+        registry.load_prefs(dir.path());
+        assert!(
+            !registry.enabled_set().contains(&HarnessId::Antigravity),
+            "file defaults must leave Antigravity off"
+        );
+        registry.apply_env_opt_ins();
+        assert!(
+            registry.enabled_set().contains(&HarnessId::Antigravity),
+            "{:?}",
+            registry.enabled_set()
+        );
+    }
+
+    #[test]
+    fn hand_edited_remote_control_stays_off_until_the_file_says_on() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("harness-prefs.json"),
+            r#"{"optedIn":["antigravity"],"remoteControl":true}"#,
+        )
+        .unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs_with_opt_ins(dir.path(), Vec::new());
+        assert!(registry.remote_control());
+        let off = tempfile::tempdir().unwrap();
+        std::fs::write(
+            off.path().join("harness-prefs.json"),
+            r#"{"optedIn":["antigravity"]}"#,
+        )
+        .unwrap();
+        let fresh = HarnessRegistry::new();
+        fresh.load_prefs_with_opt_ins(off.path(), Vec::new());
+        assert!(!fresh.remote_control());
+    }
+
     /// `descriptors()` stamps the per-device enabled flag; `set_enabled`
     /// guards the gate (no enabling missing CLIs, no disabling the last one)
     /// and persists across a reload.
@@ -1531,6 +2151,33 @@ mod tests {
         );
     }
 
+    /// A leftover `enabled` key must not wipe a hand-edited `optedIn`.
+    #[test]
+    fn legacy_enabled_key_merges_existing_opted_in_instead_of_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("harness-prefs.json"),
+            r#"{"enabled":["claude-code"],"optedIn":["antigravity"]}"#,
+        )
+        .unwrap();
+        let registry = HarnessRegistry::new();
+        test_slot(&registry, HarnessId::ClaudeCode, true);
+        test_slot(&registry, HarnessId::Codex, true);
+        test_slot(&registry, HarnessId::Antigravity, true);
+        registry.load_prefs(dir.path());
+        assert!(
+            registry.enabled_set().contains(&HarnessId::Antigravity),
+            "{:?}",
+            registry.enabled_set()
+        );
+        let file: HarnessPrefsFile = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("harness-prefs.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(file.opted_in.contains(&HarnessId::Antigravity));
+        assert!(!file.enabled.as_ref().is_some_and(|ids| !ids.is_empty()));
+    }
+
     /// The fresh-machine shape (#128): no CLIs installed at all. Enablement is
     /// gated on detection, so nothing is enabled to begin with — no
     /// dimmed default toggles to dismiss — and switching an uninstalled
@@ -1630,6 +2277,7 @@ mod title_tests {
         let prefs: HarnessPrefsFile = serde_json::from_str(r#"{"disabled":[]}"#).unwrap();
         assert_eq!(prefs.autonomy, None);
         let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("harness-prefs.json"), r#"{"disabled":[]}"#).unwrap();
         let registry = HarnessRegistry::new();
         registry.load_prefs(dir.path());
         assert_eq!(registry.autonomy(), Autonomy::FullAccess);
@@ -1639,6 +2287,38 @@ mod title_tests {
         reloaded.load_prefs(dir.path());
         assert_eq!(reloaded.autonomy(), Autonomy::Workspace);
         assert!(reloaded.autonomy_chosen());
+    }
+
+    #[test]
+    fn new_install_defaults_autonomy_to_workspace_without_marking_it_chosen() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        assert_eq!(registry.autonomy(), Autonomy::Workspace);
+        assert!(!registry.autonomy_chosen());
+        registry.set_keep_awake(false);
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        assert_eq!(reloaded.autonomy(), Autonomy::Workspace);
+        assert!(!reloaded.autonomy_chosen());
+    }
+
+    #[test]
+    fn remote_control_is_off_by_default_and_persists() {
+        let prefs: HarnessPrefsFile = serde_json::from_str(r#"{"disabled":[]}"#).unwrap();
+        assert!(!prefs.remote_control);
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        assert!(!registry.remote_control());
+        registry.set_remote_control(true);
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        assert!(reloaded.remote_control());
+        registry.set_remote_control(false);
+        let again = HarnessRegistry::new();
+        again.load_prefs(dir.path());
+        assert!(!again.remote_control());
     }
 
     #[test]
@@ -1662,5 +2342,71 @@ mod title_tests {
         let prefs: HarnessPrefsFile = serde_json::from_str(r#"{"disabled":["codex"]}"#).unwrap();
         assert_eq!(prefs.titles, TitleSettings::default());
         assert_eq!(prefs.disabled, vec![HarnessId::Codex]);
+    }
+
+    #[test]
+    fn sandbox_host_enables_remote_control_in_memory_only() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("harness-prefs.json"),
+            r#"{"remoteControl":false}"#,
+        )
+        .unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        assert!(!registry.remote_control());
+
+        registry.set_sandbox_host(true);
+        assert!(registry.is_sandbox_host());
+        assert!(registry.remote_control());
+
+        registry.set_keep_awake(false);
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        assert!(!reloaded.remote_control());
+    }
+
+    #[test]
+    fn take_parked_command_chats_only_clears_command_items_and_dedups() {
+        let registry = HarnessRegistry::new();
+        registry.park_remote_approval(harness_rpc::RemoteApproval {
+            id: "a1".into(),
+            kind: "command".into(),
+            device_id: "phone".into(),
+            chat_id: Some("chat-1".into()),
+            command_id: Some("cmd-1".into()),
+            method: None,
+            summary: "run 1".into(),
+            allow_once: true,
+            request_digest: None,
+        });
+        registry.park_remote_approval(harness_rpc::RemoteApproval {
+            id: "a2".into(),
+            kind: "command".into(),
+            device_id: "phone".into(),
+            chat_id: Some("chat-1".into()),
+            command_id: Some("cmd-2".into()),
+            method: None,
+            summary: "run 2".into(),
+            allow_once: true,
+            request_digest: None,
+        });
+        registry.park_remote_approval(harness_rpc::RemoteApproval {
+            id: "a3".into(),
+            kind: "rpc".into(),
+            device_id: "phone".into(),
+            chat_id: Some("chat-2".into()),
+            command_id: None,
+            method: Some("OpenTerminal".into()),
+            summary: "rpc".into(),
+            allow_once: false,
+            request_digest: None,
+        });
+
+        let chats = registry.take_parked_command_chats();
+        assert_eq!(chats, vec!["chat-1".to_string()]);
+        let remaining = registry.pending_remote_approvals();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "a3");
     }
 }

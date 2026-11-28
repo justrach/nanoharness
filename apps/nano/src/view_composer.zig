@@ -13,9 +13,17 @@ const kit = @import("view_kit.zig");
 const rules = @import("rules.zig");
 const attachments = @import("app_attachments.zig");
 const attachmentStrip = @import("view_composer_attachments.zig").strip;
+const quotes = @import("app_quotes.zig");
 const transcript_view = @import("view_transcript.zig");
 const footer_view = @import("view_session_footer.zig");
 const App = @import("app.zig").App;
+
+fn completionWashes(ctx: ?*anyopaque, allocator: std.mem.Allocator, text: []const u8, changed: bool, undo_restored: bool) []const ui.TextFieldRangeWash {
+    const a: *App = @ptrCast(@alignCast(ctx orelse return &.{}));
+    const completion = @import("composer_completion.zig");
+    completion.afterEdit(a, changed, undo_restored);
+    return completion.rangeWashes(a, allocator, text);
+}
 
 test {
     _ = @import("tests_composer_completion.zig");
@@ -37,19 +45,17 @@ pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
     const queued = a.queue.items.len > 0;
     // Queue and input are separate flow surfaces. Never lift the input over
     // the queue's scroll viewport or use decorative padding as scroll content.
-    const outer = ui.div(c).column().wFull().px(16).pb(40).gap(if (queued) queue_view.gap else 0).itemsCenter();
+    const outer = ui.div(c).column().wFull().px(16).pb(if (a.selected == null and @import("view_newchat.zig").needsTargetRow(c, a, w)) @as(f32, 64) else 40).gap(if (queued) queue_view.gap else 0).itemsCenter();
     defer outer.end();
-    // Above-dock affordances anchor to the whole stack, not just the input:
-    // queued rows and attachments must not grow underneath the jump button.
+    // Anchor the work cue to the whole dock so it clears queued rows.
     {
-        ui.key(c, "dock-overlays");
-        const top = ui.div(c).column().w(w).h(0);
-        defer top.end();
-        jumpToBottom(c, a, k, w);
         const work = @import("view_turn_work.zig");
         if (work.changes(c, a)) |t| {
+            ui.key(c, "dock-overlays");
+            const top = ui.div(c).column().w(w).h(0);
+            defer top.end();
             ui.key(c, "turn-work-cue");
-            const cue = ui.div(c).row().absolute().offset(-8, -(work.cardHeight(c, a, t, w + 16) + work.gap + (if (a.view.jump_shown) @as(f32, 36) else 0)));
+            const cue = ui.div(c).row().absolute().offset(-8, -(work.cardHeight(c, a, t, w + 16) + work.gap));
             defer cue.end();
             work.card(c, a, k, t, w + 16);
         }
@@ -73,11 +79,11 @@ pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
         c.node(pane).layout_dependent = true;
         const pane_h = if (c.rects.get(c.node(pane).id)) |r| r.h else c.size.h;
         return @import("view_question.zig").panel(c, a, k, w, .{
-            .height = pane_h - actions.toolbarHeight(a) - actions.dockHeight(a),
+            .height = pane_h - @import("view_chat_header.zig").height(a) - actions.toolbarHeight(a) - actions.dockHeight(a),
             .dock = outer.index,
         });
     }
-    const expanded = attachments.count(a) > 0 or composerFlip(
+    const expanded = attachments.count(a) > 0 or quotes.count(a) > 0 or composerFlip(
         a.view.composer_expanded,
         c.text.width(a.composer.text(), .{ .size = 14, .line_height = 22.75 }),
         compactCapacity(w, dictate.shown(a)),
@@ -154,6 +160,42 @@ pub const radius: f32 = 16;
 pub const textarea_min: f32 = 60;
 pub const expanded_min: f32 = textarea_min + 42 + 2;
 
+pub const ExpandedActionsLayout = struct {
+    px: f32,
+    send_pl: f32,
+    show_mic: bool,
+    show_write: bool,
+};
+
+/// Keep the primary Attach and Send/Stop controls strictly inside the composer
+/// pill in narrow split panes by tightening padding before dropping optional
+/// secondary controls (expand-editor, then dictation).
+pub fn expandedActionsLayout(w: f32, has_mic: bool) ExpandedActionsLayout {
+    const inner = @max(0, w - 2);
+    const mic_w: f32 = if (has_mic) 30 else 0;
+    // Normal: px(12)*2 + attach(28) + mic(30?) + write(30) + send(pl 8 + 28).
+    if (inner >= 24 + 28 + mic_w + 30 + 36) return .{ .px = 12, .send_pl = 8, .show_mic = has_mic, .show_write = true };
+    // Tight padding keeps every control down to ~134pt composer width.
+    if (inner >= 12 + 28 + mic_w + 30 + 32) return .{ .px = 6, .send_pl = 4, .show_mic = has_mic, .show_write = true };
+    // Drop expand-editor (still reachable via ⌘⇧E / Ctrl+Alt+E) before mic.
+    if (inner >= 12 + 28 + mic_w + 32) return .{ .px = 6, .send_pl = 4, .show_mic = has_mic, .show_write = false };
+    return .{ .px = 6, .send_pl = 4, .show_mic = false, .show_write = false };
+}
+
+test "expandedActionsLayout keeps primary controls inside narrow split composers" {
+    const wide = expandedActionsLayout(300, true);
+    try std.testing.expectEqual(@as(f32, 12), wide.px);
+    try std.testing.expect(wide.show_mic and wide.show_write);
+    const tight = expandedActionsLayout(140, true);
+    try std.testing.expectEqual(@as(f32, 6), tight.px);
+    try std.testing.expect(tight.show_mic and tight.show_write);
+    const narrow = expandedActionsLayout(128, true);
+    try std.testing.expectEqual(@as(f32, 6), narrow.px);
+    try std.testing.expect(narrow.show_mic and !narrow.show_write);
+    const minimal = expandedActionsLayout(96, true);
+    try std.testing.expect(!minimal.show_mic and !minimal.show_write);
+}
+
 pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, corner: f32) void {
     @import("view_composer_completion.zig").menu(c, a, k, w);
     // `border_1` takes its point from inside the box in GPUI: the pill is
@@ -178,7 +220,10 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, corn
         c.selection.clear();
     }
     if (c.rects.get(c.node(box.index).id)) |r| a.view.composer_anchor = r else if (a.window == null) c.animationFrame();
-    if (shape == .expanded) attachmentStrip(c, a, k, w);
+    if (shape == .expanded) {
+        attachmentStrip(c, a, k, w);
+        @import("view_quotes.zig").strip(c, a, k, w);
+    }
     {
         // Keep the field's keyed ancestry in both shapes. Only styles and
         // neighboring controls change: focus, selection, undo and caret do
@@ -190,41 +235,45 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, corn
             ui.div(c).row().wFull();
         if (shape == .expanded) c.node(area.index).style.min_height = textarea_min;
         defer area.end();
-        if (shape == .compact) attachButtons(c, a, k);
+        if (shape == .compact) attachButtons(c, a, k, dictate.shown(a));
         {
             ui.key(c, "composer-text-inner");
             const base = ui.div(c).column().grow().w(0);
             // Preserve GPUI's expanded baseline and bare-field padding.
-            const inner = if (shape == .compact) base else base.px(16).pt(16 - 1.5).pb(4 + 1.5 - 4);
+            const text_gutter: f32 = if (w < 160) 10 else 16;
+            const inner = if (shape == .compact) base else base.px(text_gutter - ui.TextFieldRangeWash.side_padding).pt(16 - 1.5).pb(4 + 1.5 - 4);
             defer inner.end();
             input(c, a, k, shape);
         }
-        if (shape == .compact) send(c, a, k);
+        if (shape == .compact) send(c, a, k, 8);
     }
     if (shape == .compact) return;
     // Expanded: attach (and the mic) at the start, Send at the end.
-    const actions = ui.div(c).row().wFull().h(42).px(12).pt(2).pb(8).itemsCenter();
+    const act = expandedActionsLayout(w, dictate.shown(a));
+    const actions = ui.div(c).row().wFull().h(42).px(act.px).pt(2).pb(8).itemsCenter();
     defer actions.end();
-    attachButtons(c, a, k);
-    // Keep the expand button mounted whenever the composer is expanded
+    attachButtons(c, a, k, act.show_mic);
+    // Keep the expand button mounted whenever the composer is wide enough
     // (`fixed_write_button_survives_focus_blur` in `Nano/FrameSchedule.lean`),
     // so `ui.textField` blurring `c.focus` on `mouseDown` never unmounts
     // `composer-write` before `mouseUp` completes `clicked()`.
-    _ = c.leaf(.{ .width = .{ .px = 2 } }, .none, null);
-    @import("view_write.zig").button(c, a, k);
+    if (act.show_write) {
+        _ = c.leaf(.{ .width = .{ .px = 2 } }, .none, null);
+        @import("view_write.zig").button(c, a, k);
+    }
     if (a.view.write_open) a.view.focus_composer = false;
     ui.spacer(c);
-    send(c, a, k);
+    send(c, a, k, act.send_pl);
 }
 
 const dictate = @import("app_dictation.zig");
 
-fn attachButtons(c: *ui.Context, a: *App, k: theme.Colors) void {
-    if (kit.iconButton(c, k, .paperclip, .{ .size = 28, .radius = 14, .icon = 18 }))
+fn attachButtons(c: *ui.Context, a: *App, k: theme.Colors, show_mic: bool) void {
+    if (kit.iconButton(c, k, .paperclip, .{ .size = 28, .radius = 14, .icon = 18, .tip = .{ .text = "Attach files" } }))
         attachments.pick(a);
     // The mic shows where the device's Codex voice was found, and while a
     // session is live.
-    if (!dictate.shown(a)) return;
+    if (!show_mic) return;
     _ = c.leaf(.{ .width = .{ .px = 2 } }, .none, null);
     if (micButton(c, a, k)) dictate.toggle(a);
 }
@@ -237,7 +286,9 @@ fn micButton(c: *ui.Context, a: *App, k: theme.Colors) bool {
     const busy = s.running != null and !listening;
     const level = std.math.clamp(s.level, 0, 1);
     ui.key(c, "composer-dictate");
-    const base = ui.div(c).row().size(28, 28).center().roundedFull().circular();
+    // What a click does now (`dictate.toggle`): start, finish, or cancel.
+    const label: []const u8 = if (listening) "Stop dictation" else if (busy) "Cancel dictation" else "Dictate";
+    const base = @import("view_tooltip.zig").on(ui.div(c).row().size(28, 28).center().roundedFull().circular(), k, .{ .text = label });
     const b = if (listening) base.bg(k.danger.alpha(0.10 + 0.30 * level)) else kit.listenerHover(&a.view.hovers, base, k.ink(0.10)).div;
     defer b.end();
     icons.icon(c, .microphone, 17, if (listening) k.danger else if (busy) k.faint else k.muted, 0);
@@ -310,7 +361,7 @@ fn noticeBanner(c: *ui.Context, a: *App, k: theme.Colors, w: f32, has_gap: bool)
 
 fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
     // Compact, GPUI's line sits half a point lower than nano's centred one.
-    const box = if (shape == .compact) ui.div(c).row().wFull().px(8).pt(1).itemsCenter() else ui.div(c).column().wFull();
+    const box = if (shape == .compact) ui.div(c).row().wFull().px(8 - ui.TextFieldRangeWash.side_padding).pt(1).itemsCenter() else ui.div(c).column().wFull();
     defer box.end();
     const placeholder = if (a.engine.state != .connected)
         @import("engine_start.zig").waiting(a)
@@ -344,6 +395,8 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
         .max_lines = if (shape == .compact) 1 else max_lines,
         .caret = message_caret,
         .caret_color = k.accent,
+        .range_wash_context = a,
+        .range_wash_provider = completionWashes,
     });
     c.node(field_index).style.scroll_bar = false;
     _ = c.scrollbars.remove(field_id);
@@ -364,7 +417,6 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
     // "Send messages with" (Settings › Shortcuts): Enter sends, or starts a
     // new line and ⌘↩ sends (`composerSendBehavior`).
     a.view.composer_caret = r.caret;
-    @import("composer_completion.zig").afterEdit(a, c, r.changed);
     const on_enter = @import("view_settings_shortcuts.zig").sendsOnEnter(a);
     if (r.submitted) {
         // Shift-Return is always a newline. The field owns this translation,
@@ -381,7 +433,7 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
     // takes the other follow-up, as ⌘⌥↩ always does (`on_modified_submit`,
     // `on_follow_up_shortcut`).
     const queue_mod = @import("app_queue.zig");
-    const has_content = std.mem.trim(u8, a.composer.text(), " \n\t").len > 0 or attachments.count(a) > 0;
+    const has_content = std.mem.trim(u8, a.composer.text(), " \n\t").len > 0 or attachments.count(a) > 0 or quotes.count(a) > 0;
     const other = queue_mod.opposite(queue_mod.followUpBehavior(a));
     if (has_content and c.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true })) {
         if (on_enter and a.queues() and a.queue_edit == null) a.sendFollowUp(other) else a.send();
@@ -397,12 +449,7 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
     if (a.queue_edit != null and c.shortcut(.{ .key = ui.Shortcut.escape })) a.queueFinishEdit(.cancel);
 }
 
-/// The message caret (composer.rs, the input's paint: "a rounded accent
-/// bar, inset from the line box"): 3 points wide, 2 short of the line box
-/// top and bottom, 1.5 round, in the primary accent (the user's accent
-/// override included). It blinks at 500 ms and is solid after an edit or
-/// a caret move, as nanoui's caret already does.
-/// GPUI's insertion caret: a hairline on the glyph, not a 3-point block.
+/// Keep the accent caret thin so it doesn't cover adjacent punctuation.
 pub const message_caret: ui.TextFieldCaret = .{ .width = 1.5, .inset = 1, .radius = 0.75 };
 
 /// ↑ at the text's start or ↓ at its end steps through the chat's earlier
@@ -446,38 +493,88 @@ fn keepFocus(c: *ui.Context, a: *App, id: u64) void {
 /// The model chip: what the next message runs on, 24 tall at the footer's
 /// leading edge (`PickerKind::HarnessModel`'s trigger). Returns the width
 /// it takes this frame, for the footer to share out the rest.
-pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) f32 {
-    const mp = @import("model_picker.zig");
+const chip_measure_style: ui.TextStyle = .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight };
+
+const ChipMeasure = struct {
+    t: @import("app_agent.zig").Target,
+    chat_harness: bool,
+    max_chip_w: f32,
+    unresolved: bool,
+    label_loading: bool,
+    failed: bool,
+    label_text: []const u8,
+    suffix_text: ?[]const u8,
+    icon_only: bool,
+    wanted_w: f32,
+    target_w: f32,
+    glyph_w: f32,
+    idle_drawn_w: f32,
+};
+
+fn measureChip(c: *ui.Context, a: *const App, max_w_override: ?f32) ChipMeasure {
     const t = a.target();
-    const room = @max(80, transcript_view.paneWidth(c, a) - 32 - 100);
-    const max_chip_w = @min(248, room);
+    const room = @max(28, transcript_view.paneWidth(c, a) - 32 - 100);
+    const max_chip_w = if (max_w_override) |m| @max(28, @min(248, m)) else @min(248, room);
     const chat_harness = if (a.selected) |id| (if (a.findChat(id)) |ch| ch.harness != null else false) else false;
     const unresolved = a.harnesses.items.len == 0 and !chat_harness and a.harnesses_failed;
     const label_loading = !unresolved and a.models.items.len == 0 and t.model == null;
     const failed = if (label_loading) (if (a.view.model_picker.catalogs.get(t.harness)) |cat| cat.failed else false) else false;
     const label_text = if (!unresolved and !label_loading) a.modelLabel(t.model) else "";
     const suffix_text: ?[]const u8 = if (!unresolved and !label_loading) (if (t.reasoning) |level| rules.reasoningLabel(level) else null) else null;
-    const st_measure: ui.TextStyle = .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight };
+    const icon_only = max_chip_w < 52;
     var wanted_w: f32 = 12 + 16;
-    if (!unresolved) {
+    if (!unresolved and !icon_only) {
         if (label_loading) {
             if (!failed) wanted_w += 6 + 56;
         } else {
-            wanted_w += 6 + @ceil(c.text.width(label_text, st_measure));
-            if (suffix_text) |sfx| wanted_w += 6 + @ceil(c.text.width(sfx, st_measure));
+            wanted_w += 6 + @ceil(c.text.width(label_text, chip_measure_style));
+            if (suffix_text) |sfx| wanted_w += 6 + @ceil(c.text.width(sfx, chip_measure_style));
         }
     }
-    const target_w = @min(wanted_w, max_chip_w);
-    const width_sample = mp.ScalarTransition.sample(&a.view.model_picker.chip_width, target_w, c.time, c.reduced_motion);
+    const glyph_w: f32 = if (!unresolved and a.harnesses.items.len == 0 and !chat_harness) 5 else 16;
+    return .{
+        .t = t,
+        .chat_harness = chat_harness,
+        .max_chip_w = max_chip_w,
+        .unresolved = unresolved,
+        .label_loading = label_loading,
+        .failed = failed,
+        .label_text = label_text,
+        .suffix_text = suffix_text,
+        .icon_only = icon_only,
+        .wanted_w = wanted_w,
+        .target_w = @min(wanted_w, max_chip_w),
+        .glyph_w = glyph_w,
+        .idle_drawn_w = @min(@max(wanted_w - 16, 12 + (if (icon_only) @as(f32, 0) else 6)) + glyph_w, max_chip_w),
+    };
+}
+
+/// Non-mutating chip width estimate for layout probes before the footer draws.
+pub fn chipWidth(c: *ui.Context, a: *const App) f32 {
+    return measureChip(c, a, null).idle_drawn_w;
+}
+
+pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) f32 {
+    return chipWithMax(c, a, k, null);
+}
+
+pub fn chipWithMax(c: *ui.Context, a: *App, k: theme.Colors, max_w_override: ?f32) f32 {
+    const mp = @import("model_picker.zig");
+    const m = measureChip(c, a, max_w_override);
+    const width_sample = mp.ScalarTransition.sample(&a.view.model_picker.chip_width, m.target_w, c.time, c.reduced_motion);
     if (width_sample.moving) c.frameIn(1.0 / 120.0);
 
-    var base = ui.div(c).row().h(24).maxW(max_chip_w).px(6).gap(6).itemsCenter().rounded(8).clip();
+    var base = ui.div(c).row().h(24).maxW(m.max_chip_w).px(6).gap(if (m.icon_only) 0 else 6).itemsCenter().rounded(8).clip();
     if (width_sample.moving) base = base.w(width_sample.value);
+    const full_hint: ?[]const u8 = if (!m.unresolved and !m.label_loading and (m.icon_only or m.wanted_w > m.max_chip_w))
+        (if (m.suffix_text) |sfx| c.print("{s} · {s}", .{ m.label_text, sfx }) else m.label_text)
+    else
+        null;
+    if (full_hint) |hint| base = @import("view_tooltip.zig").on(base, k, .{ .text = hint });
     // At rest it is its content: the glyph (the 5-point loader until an
     // agent is known) in its insets, the label's gap (kept even for no
     // label), and the words.
-    const glyph_w: f32 = if (!unresolved and a.harnesses.items.len == 0 and !chat_harness) 5 else 16;
-    const drawn_w = if (width_sample.moving) @min(width_sample.value, max_chip_w) else @min(@max(wanted_w - 16, 12 + 6) + glyph_w, max_chip_w);
+    const drawn_w = if (width_sample.moving) @min(width_sample.value, m.max_chip_w) else m.idle_drawn_w;
     // GPUI's trigger uses on_hover: closing by keyboard doesn't move the
     // pointer and must not clear the wash until the pointer actually moves.
     const b = kit.listenerHover(&a.view.hovers, if (a.picker != .none) base.bg(k.hover) else base, k.hover).div;
@@ -490,12 +587,12 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) f32 {
     // The list failed and nothing names an agent: GPUI's `effective_harness`
     // is none, so a muted terminal and no label, not a loader.
     // Its label is always a child, empty or not, so its gap stays.
-    if (unresolved) {
+    if (m.unresolved) {
         icons.icon(c, .terminal, 16, k.muted, 0);
-        _ = c.leaf(.{ .width = .{ .px = 0 } }, .none, null);
+        if (!m.icon_only) _ = c.leaf(.{ .width = .{ .px = 0 } }, .none, null);
         return drawn_w;
     }
-    if (a.harnesses.items.len == 0 and !chat_harness) {
+    if (a.harnesses.items.len == 0 and !m.chat_harness) {
         kit.snake(c, k);
     } else if (chipMaker(a)) |maker| {
         // With the two-step picker, the model's maker names it, untinted
@@ -503,21 +600,31 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) f32 {
         // `model_maker`/`maker_icon` over `model_chip_icon`).
         icons.icon(c, maker, 16, k.muted, 0);
     } else {
-        const mark = icons.harnessMark(t.harness);
+        const mark = icons.harnessMark(m.t.harness);
         icons.icon(c, mark.name, 16, mark.brand orelse k.muted, 0);
     }
-    if (label_loading) {
+    if (m.icon_only) return drawn_w;
+    if (m.label_loading) {
         // A failed catalog has nothing to name: no label, no ghost bar.
-        if (failed) _ = c.leaf(.{ .width = .{ .px = 0 } }, .none, null) else skeleton(c);
+        if (m.failed) _ = c.leaf(.{ .width = .{ .px = 0 } }, .none, null) else skeleton(c);
         return drawn_w;
     }
     // `hover_blend`: the label brightens under the pointer, rolling Scritto-style when changed.
     // Re-read after `togglePickerCompact` in case opening the picker synced `a.models`.
     const live_t = a.target();
-    const live_label = if (!unresolved and !label_loading) a.modelLabel(live_t.model) else label_text;
-    const live_suffix: ?[]const u8 = if (!unresolved and !label_loading) (if (live_t.reasoning) |level| rules.reasoningLabel(level) else null) else suffix_text;
-    kit.rollText(c, "composer-model-label", live_label, .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = if (b.hovered()) k.text else k.text.alpha(0.9) });
-    if (live_suffix) |sfx| kit.rollText(c, "composer-effort-suffix", sfx, .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = k.muted.alpha(0.7) });
+    const live_label = if (!m.unresolved and !m.label_loading) a.modelLabel(live_t.model) else m.label_text;
+    const live_suffix: ?[]const u8 = if (!m.unresolved and !m.label_loading) (if (live_t.reasoning) |level| rules.reasoningLabel(level) else null) else m.suffix_text;
+    const label_st: ui.TextStyle = .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = if (b.hovered()) k.text else k.text.alpha(0.9) };
+    const suffix_st: ui.TextStyle = .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = k.muted.alpha(0.7) };
+    const text_room = @max(0, m.max_chip_w - (12 + m.glyph_w + 6));
+    const live_label_w = @ceil(c.text.width(live_label, chip_measure_style));
+    const live_suffix_w: f32 = if (live_suffix) |sfx| 6 + @ceil(c.text.width(sfx, chip_measure_style)) else 0;
+    if (live_label_w + live_suffix_w <= text_room) {
+        kit.rollText(c, "composer-model-label", live_label, label_st);
+        if (live_suffix) |sfx| kit.rollText(c, "composer-effort-suffix", sfx, suffix_st);
+    } else {
+        kit.ellipsisText(c, live_label, label_st, text_room);
+    }
     return drawn_w;
 }
 
@@ -544,7 +651,7 @@ pub fn followUpChip(c: *ui.Context, a: *App, k: theme.Colors, glyph_only: bool) 
     else
         "Follow-ups wait in the queue until the turn finishes. Click to steer immediately";
     ui.key(c, "composer-follow-up-chip");
-    var b = ui.div(c).row().h(20).px(8).gap(5).itemsCenter().rounded(6).hover(k.hover);
+    var b = ui.div(c).row().h(20).px(if (glyph_only) 4 else 8).gap(if (glyph_only) 0 else 5).itemsCenter().rounded(6).hover(k.hover);
     b = @import("view_tooltip.zig").on(b, k, .{ .text = hint });
     defer b.end();
     const hot = b.hovered();
@@ -575,75 +682,70 @@ fn chipMaker(a: *App) ?icons.Name {
 fn skeleton(c: *ui.Context) void {
     const phase = @sin(@as(f32, @floatCast(c.time)) * std.math.tau / 2.4) * 0.5 + 0.5;
     kit.loaderFrame(c, 1.0 / 30.0);
-    _ = c.leaf(.{ .width = .{ .px = 56 }, .height = .{ .px = 11 }, .radius = 5.5, .background = .{ .r = 1, .g = 1, .b = 1, .a = 0.08 * (0.35 + 0.4 * phase) } }, .none, null);
+    _ = c.leaf(.{ .width = .{ .px = 56 }, .height = .{ .px = 11 }, .radius = 5.5, .background = c.theme.text.alpha(0.08 * (0.35 + 0.4 * phase)) }, .none, null);
+}
+
+pub const SendFacts = struct {
+    empty: bool,
+    running: bool,
+    chat_blocked: bool = false,
+    uploads_ready: bool = true,
+    connected: bool = true,
+};
+
+pub const SendButton = struct {
+    stop: bool,
+    /// Drawn faint: a click would not send now.
+    dimmed: bool,
+    /// A click does something: sends, stops, or says why it can't send.
+    acts: bool,
+};
+
+/// The Send/Stop button's state. It is dimmed whenever a click can't send
+/// (nothing typed, the engine down, a plain chat with no Auto tier,
+/// uploads still going). With the engine down a click still reaches
+/// `App.send`, which says so instead of failing silently.
+pub fn sendButton(f: SendFacts) SendButton {
+    const stop = f.running and f.empty;
+    if (stop) return .{ .stop = true, .dimmed = false, .acts = true };
+    const sendable = !f.empty and !f.chat_blocked and f.uploads_ready;
+    return .{ .stop = false, .dimmed = !sendable or !f.connected, .acts = sendable };
+}
+
+test "send button dims when it can't send and still explains a disconnected send" {
+    const t = std.testing;
+    try t.expectEqual(SendButton{ .stop = false, .dimmed = true, .acts = false }, sendButton(.{ .empty = true, .running = false }));
+    try t.expectEqual(SendButton{ .stop = false, .dimmed = false, .acts = true }, sendButton(.{ .empty = false, .running = false }));
+    try t.expectEqual(SendButton{ .stop = false, .dimmed = true, .acts = true }, sendButton(.{ .empty = false, .running = false, .connected = false }));
+    try t.expectEqual(SendButton{ .stop = false, .dimmed = true, .acts = false }, sendButton(.{ .empty = false, .running = false, .uploads_ready = false }));
+    try t.expectEqual(SendButton{ .stop = true, .dimmed = false, .acts = true }, sendButton(.{ .empty = true, .running = true }));
 }
 
 /// Send (or queue, while a run goes); Stop with nothing typed mid-run.
-fn send(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const empty = std.mem.trim(u8, a.composer.text(), " \n\t").len == 0 and attachments.count(a) == 0;
-    const running = a.selectedStatus() == .working;
-    const stop = running and empty;
-    // Dimmed only when it can't send at all; an empty box just does nothing.
-    const blocked = !stop and (a.engine.state != .connected or !attachments.ready(a));
-    const pad = ui.div(c).row().pl(8);
+fn send(c: *ui.Context, a: *App, k: theme.Colors, pad_left: f32) void {
+    const empty = std.mem.trim(u8, a.composer.text(), " \n\t").len == 0 and attachments.count(a) == 0 and quotes.count(a) == 0;
+    const state = sendButton(.{
+        .empty = empty,
+        .running = a.selectedStatus() == .working,
+        .chat_blocked = @import("app_agent.zig").chatSendBlocked(a),
+        .uploads_ready = attachments.ready(a),
+        .connected = a.engine.state == .connected,
+    });
+    const stop = state.stop;
+    const pad = ui.div(c).row().pl(pad_left);
     defer pad.end();
     // Filled with the primary accent, its glyph contrast-checked on it
     // (`render_send_button`, `on_primary_accent`). `.circular()` renders a
     // true analytical Euclidean circle rather than a squircle polygon.
     var b = ui.div(c).row().size(28, 28).center().roundedFull().circular().bg(k.accent);
-    b = b.opacity(if (blocked) 0.35 else if (b.hovered()) 0.85 else 1);
+    b = b.opacity(if (state.dimmed) 0.35 else if (b.hovered()) 0.85 else 1);
     defer b.end();
-    if (b.clicked() and !blocked and (stop or !empty)) {
+    if (b.clicked() and state.acts) {
         if (stop) a.interrupt() else a.send();
     }
     if (stop) {
         _ = c.leaf(.{ .width = .{ .px = 11 }, .height = .{ .px = 11 }, .radius = 3, .background = k.onAccent() }, .none, null);
     } else {
         icons.icon(c, .@"arrow-up", 14, k.onAccent(), 0);
-    }
-}
-
-const jump_show: f32 = 320;
-const jump_hide: f32 = 70;
-
-// Horizontal padding (11 + 13), arrow (13), and its gap (6).
-const jump_chrome: f32 = 43;
-
-fn jumpChipWidth(available: f32, label_width: f32) f32 {
-    return @max(0, @min(available, @ceil(label_width) + jump_chrome));
-}
-
-/// GPUI's labeled pill, six pixels above the entire dock. Narrow panes wrap
-/// the label and grow upward, keeping the same clearance above the queue.
-/// Shown once the reader is 320 points off the end, and kept until within 70.
-fn jumpToBottom(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
-    const box = a.view.jump_box;
-    if (box == 0) return;
-    const show = if (a.view.jump_shown) a.view.jump_distance > jump_hide else a.view.jump_distance > jump_show;
-    a.view.jump_shown = show;
-    if (!show) return;
-    const label = "Scroll to bottom";
-    const st = kit.style(c, 13, 18, .{ .color = k.text, .wrap = true });
-    const chip_w = jumpChipWidth(w, c.text.width(label, st));
-    const label_w = @max(0, chip_w - jump_chrome);
-    const lines = c.text.wrap(label, st, label_w);
-    const chip_h = @max(30, c.text.lineHeight(st) * @as(f32, @floatFromInt(lines.len)) + 12);
-    ui.key(c, "jump-to-bottom");
-    const row = ui.div(c).row().absolute().offset(0, -chip_h - 6).w(w).justifyCenter();
-    defer row.end();
-    const jump_chip = kit.shadowLg(ui.div(c).row().size(chip_w, chip_h).pl(11).pr(13).gap(6).itemsCenter().rounded(15).bg(k.composer).border(k.border).borderW(1));
-    defer jump_chip.end();
-    icons.icon(c, .@"alt-arrow-down", 13, k.muted, 0);
-    {
-        const words = ui.div(c).column().w(label_w);
-        defer words.end();
-        ui.text(c, label, st);
-    }
-    if (jump_chip.clicked()) {
-        c.scroll.put(c.gpa, box, std.math.floatMax(f32)) catch {};
-        c.scroll_follow.put(c.gpa, box, true) catch {};
-        a.view.jump_shown = false;
-        a.view.jump_distance = 0;
-        c.changed = true;
     }
 }

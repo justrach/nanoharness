@@ -130,13 +130,18 @@ pub const Parser = struct {
             // Display math (`$$ ... $$` or `\[ ... \]`), once its closing delimiter has arrived.
             if ((std.mem.startsWith(u8, t, "$$") and (t.len == 2 or t[2] != '$')) or std.mem.startsWith(u8, t, "\\[")) {
                 const close_delim = if (t[0] == '$') "$$" else "\\]";
-                if (t.len >= 4 and std.mem.endsWith(u8, t, close_delim)) {
-                    const inner = std.mem.trim(u8, t[2 .. t.len - 2], " \t");
-                    if (inner.len > 0) {
-                        try p.flush();
-                        try p.blocks.append(p.arena, .{ .math = try p.mathInline(inner, t) });
-                        continue;
+                if (mathClose(t, 2, close_delim)) |close| {
+                    if (close + close_delim.len == t.len) {
+                        const inner = std.mem.trim(u8, t[2..close], " \t");
+                        if (inner.len > 0) {
+                            try p.flush();
+                            try p.blocks.append(p.arena, .{ .math = try p.mathInline(inner, t) });
+                            continue;
+                        }
                     }
+                    // Otherwise the line closes its first display span before EOL
+                    // (e.g. `\[a^2\] and \[b^2\]`), so let paragraph inline parsing
+                    // emit each display span and intervening prose separately.
                 } else {
                     var close_line: ?usize = null;
                     var j = i + 1;
@@ -331,6 +336,11 @@ pub const Parser = struct {
                             plain = i;
                             continue;
                         }
+                    } else if (hasLaterClosedMath(src, i + 2)) {
+                        // Keep the unmatched explicit opener literal without letting the
+                        // escape pass strip its backslash, so later math and Markdown recover.
+                        i += 2;
+                        continue;
                     } else {
                         // A streaming/incomplete explicit delimiter is literal,
                         // including its backslash and any script markers.
@@ -380,6 +390,11 @@ pub const Parser = struct {
                                 plain = i;
                                 continue;
                             }
+                        } else if (hasLaterClosedMath(src, i + 2)) {
+                            // Keep the unmatched `$$` opener literal without letting its
+                            // second `$` pair with a later inline equation.
+                            i += 2;
+                            continue;
                         } else {
                             try b.emit(src[plain..], f);
                             return;
@@ -390,7 +405,7 @@ pub const Parser = struct {
                         i = close + 1;
                         plain = i;
                         continue;
-                    } else if (rest.len > 1 and !std.ascii.isWhitespace(rest[1]) and std.mem.indexOfAny(u8, rest, "\\_^") != null and std.mem.indexOfScalar(u8, rest[1..], '$') == null) {
+                    } else if (rest.len > 1 and !std.ascii.isWhitespace(rest[1]) and std.mem.indexOfAny(u8, rest, "\\_^") != null and std.mem.indexOfScalar(u8, rest[1..], '$') == null and !hasLaterClosedMath(src, i + 1)) {
                         // An unfinished equation is not Markdown emphasis.
                         // Preserve script/group markers while it streams.
                         try b.emit(src[plain..], f);
@@ -467,6 +482,27 @@ pub const Parser = struct {
 /// Currency-safe closing `$` index for an inline `$ ... $` span starting at `open`.
 /// Returns `null` for `$5 and $10`, `$ 5`, unclosed streaming `$`, or `$` followed by digits.
 pub fn inlineMathEnd(src: []const u8, open: usize) ?usize {
+    return inlineMathEndDepth(src, open, true);
+}
+
+fn isPriceBoundaryPrefix(s: []const u8) bool {
+    if (s.len == 0) return false;
+    return std.ascii.isWhitespace(s[0]) or
+        std.mem.indexOfScalar(u8, ",;:)]", s[0]) != null or
+        std.mem.startsWith(u8, s, "—") or
+        std.mem.startsWith(u8, s, "–");
+}
+
+fn endsWithMathOpenerPrefix(s: []const u8) bool {
+    if (s.len == 0) return false;
+    return std.mem.indexOfScalar(u8, "([{\"'`,;:/=", s[s.len - 1]) != null or
+        std.mem.endsWith(u8, s, "“") or
+        std.mem.endsWith(u8, s, "‘") or
+        std.mem.endsWith(u8, s, "—") or
+        std.mem.endsWith(u8, s, "–");
+}
+
+fn inlineMathEndDepth(src: []const u8, open: usize, allow_steal_check: bool) ?usize {
     if (open + 2 > src.len or src[open] != '$' or escapedMath(src, open)) return null;
     if (src[open + 1] == '$' or std.ascii.isWhitespace(src[open + 1])) return null;
     if (open > 0 and src[open - 1] == '$') return null;
@@ -478,24 +514,110 @@ pub fn inlineMathEnd(src: []const u8, open: usize) ?usize {
         if (j == open + 1 or std.ascii.isWhitespace(src[j - 1])) return null;
         if (j + 1 < src.len and (src[j + 1] == '$' or std.ascii.isDigit(src[j + 1]))) return null;
         if (j + 2 < src.len and src[j + 1] == '.' and std.ascii.isDigit(src[j + 2])) return null;
-        // In `pay $5 ($x^2$)`, the price must not steal the opening
-        // delimiter of the following equation. Bare `$5$` remains math.
+        // In `pay $5 ($x^2$)` or `Pay $9, then ($x^2$).`, the price must not steal the
+        // opening delimiter of the following equation. Bare `$5$` remains math.
         const body = src[open + 1 .. j];
         if (std.ascii.isDigit(body[0]) or (body[0] == '.' and body.len > 1 and std.ascii.isDigit(body[1]))) {
             var n: usize = 0;
-            while (n < body.len and (std.ascii.isDigit(body[n]) or body[n] == '.' or body[n] == ',')) n += 1;
+            while (n < body.len) {
+                const b = body[n];
+                if (std.ascii.isDigit(b)) {
+                    n += 1;
+                } else if ((b == '.' or b == ',') and n + 1 < body.len and std.ascii.isDigit(body[n + 1])) {
+                    n += 1;
+                } else break;
+            }
             if (n < body.len) {
-                var price = true;
-                for (body[n..]) |b| if (!std.ascii.isWhitespace(b) and b != '(' and b != '[' and b != '{') {
-                    price = false;
-                    break;
-                };
-                if (price) return null;
+                const tail = body[n..];
+                const t0: usize = if (tail.len > 1 and std.mem.indexOfScalar(u8, "kKmMbB", tail[0]) != null and isPriceBoundaryPrefix(tail[1..])) 1 else 0;
+                const after_num = tail[t0..];
+                var only_brackets = true;
+                var saw_bracket = false;
+                for (after_num) |b| {
+                    if (b == '(' or b == '[' or b == '{') {
+                        saw_bracket = true;
+                    } else if (!std.ascii.isWhitespace(b) and b != ',' and b != ';' and b != ':') {
+                        only_brackets = false;
+                        break;
+                    }
+                }
+                if (only_brackets and saw_bracket) return null;
+
+                const starts_price_boundary = isPriceBoundaryPrefix(after_num);
+                const ends_with_open_bracket = body[body.len - 1] == '(' or body[body.len - 1] == '[' or body[body.len - 1] == '{';
+                const next_is_math_start = j + 1 < src.len and !std.ascii.isWhitespace(src[j + 1]) and std.mem.indexOfScalar(u8, ".,;:!?)]}\"'", src[j + 1]) == null;
+                if (starts_price_boundary and endsWithMathOpenerPrefix(body) and next_is_math_start) {
+                    if (ends_with_open_bracket or (allow_steal_check and inlineMathEndDepth(src, j, false) != null)) {
+                        return null;
+                    }
+                }
             }
         }
         return j;
     }
     return null;
+}
+
+fn hasLaterClosedMath(src: []const u8, from: usize) bool {
+    var k = from;
+    while (k < src.len) {
+        const ch = src[k];
+        if (ch == '\\' and k + 1 < src.len) {
+            if (src[k + 1] == '(' or src[k + 1] == '[') {
+                const close_delim = if (src[k + 1] == '(') "\\)" else "\\]";
+                if (mathClose(src, k + 2, close_delim)) |close| {
+                    if (close > k + 2) return true;
+                }
+                k += 2;
+                continue;
+            }
+            if (std.mem.indexOfScalar(u8, "\\`$*_{}[]()#+-.!~|<>", src[k + 1]) != null) {
+                k += 2;
+                continue;
+            }
+        }
+        if (ch == '`') {
+            var n: usize = 0;
+            while (k + n < src.len and src[k + n] == '`') n += 1;
+            if (std.mem.indexOf(u8, src[k + n ..], src[k .. k + n])) |close| {
+                k += n + close + n;
+                continue;
+            }
+            k += n;
+            continue;
+        }
+        if (ch == '[' or (ch == '!' and k + 1 < src.len and src[k + 1] == '[')) {
+            const open = if (ch == '!') k + 1 else k;
+            if (std.mem.indexOfScalarPos(u8, src, open, ']')) |close| {
+                if (close + 1 < src.len and src[close + 1] == '(') {
+                    if (std.mem.indexOfScalarPos(u8, src, close + 2, ')')) |end| {
+                        k = end + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        if (ch == '$') {
+            const rest = src[k..];
+            if (rest.len >= 3 and rest[1] == '$' and rest[2] == '$') {
+                while (k < src.len and src[k] == '$') k += 1;
+                continue;
+            }
+            if (rest.len >= 4 and rest[1] == '$') {
+                if (mathClose(src, k + 2, "$$")) |close| {
+                    const inner = std.mem.trim(u8, src[k + 2 .. close], " \t");
+                    if (inner.len > 0) return true;
+                    k = close + 2;
+                    continue;
+                }
+                k += 2;
+                continue;
+            }
+            if (inlineMathEnd(src, k) != null) return true;
+        }
+        k += 1;
+    }
+    return false;
 }
 
 fn escapedMath(src: []const u8, at: usize) bool {

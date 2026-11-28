@@ -55,7 +55,12 @@ pub enum SteerOutcome {
     NotSteerable,
 }
 
-type PendingInputs = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserInputAnswer>>>>>;
+struct PendingInput {
+    tx: oneshot::Sender<Vec<UserInputAnswer>>,
+    requires_human_ui: bool,
+}
+
+type PendingInputs = Arc<Mutex<HashMap<String, PendingInput>>>;
 
 /// A harness-native session id plus the cwd it was created under. Harness
 /// session stores are cwd-scoped (claude keys conversations by project
@@ -136,6 +141,8 @@ struct RunHandle {
     image_tx: mpsc::Sender<ShowImageRequest>,
     /// Bounded native-visual intake; shares the normal sequential publish pipeline.
     visual_tx: mpsc::Sender<ShowVisualRequest>,
+    /// Bounded hosted-artifact intake; shares the normal sequential publish pipeline.
+    artifact_tx: mpsc::Sender<ShowArtifactRequest>,
     /// The run's harness, for turn-only interrupts
     /// ([`harness_adapters::Harness::interrupt_turn`]).
     harness: Arc<dyn Harness>,
@@ -188,6 +195,26 @@ struct PendingShowVisual {
     request_id: String,
     title: String,
     script: String,
+    reply: oneshot::Sender<Result<(), EngineError>>,
+}
+
+struct ShowArtifactRequest {
+    id: String,
+    artifact_id: String,
+    title: String,
+    format: String,
+    visibility: String,
+    url: String,
+    reply: oneshot::Sender<Result<(), EngineError>>,
+}
+
+struct PendingShowArtifact {
+    request_id: String,
+    artifact_id: String,
+    title: String,
+    format: String,
+    visibility: String,
+    url: String,
     reply: oneshot::Sender<Result<(), EngineError>>,
 }
 
@@ -325,6 +352,9 @@ struct Inner {
     /// browse Connected apps: gives runs a `browse` MCP server while browse
     /// is paired and running (wired at engine assembly; absent in bare tests).
     browse_link: OnceLock<Arc<crate::browse_link::BrowseLink>>,
+    /// Scoped MCP IPC bearer passed only to Harness's own MCP server process,
+    /// never to agent environments.
+    ipc_mcp_token: OnceLock<String>,
     /// The version this boot updated Harness to, when the last boot recorded
     /// an older one (`RunJournal::note_boot_version`). Names the update in
     /// the note on a run the restart cut short.
@@ -361,6 +391,10 @@ pub struct SessionsEngine {
 }
 
 impl SessionsEngine {
+    pub fn registry(&self) -> &Arc<HarnessRegistry> {
+        &self.inner.registry
+    }
+
     pub fn new(
         device_id: String,
         journal: Arc<RunJournal>,
@@ -386,9 +420,16 @@ impl SessionsEngine {
                 generated_images: OnceLock::new(),
                 turn_listener: OnceLock::new(),
                 browse_link: OnceLock::new(),
+                ipc_mcp_token: OnceLock::new(),
                 boot_update: OnceLock::new(),
             }),
         }
+    }
+
+    /// Bind the scoped MCP IPC bearer token passed to Harness's own MCP server
+    /// child processes (`RunOrigin::ipc_token`).
+    pub fn set_ipc_mcp_token(&self, token: String) {
+        let _ = self.inner.ipc_mcp_token.set(token);
     }
 
     /// Wire the doc host (called once at engine assembly; the two services are mutually
@@ -793,6 +834,7 @@ impl SessionsEngine {
         let (engine_tx, engine_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let (image_tx, image_rx) = mpsc::channel::<ShowImageRequest>(8);
         let (visual_tx, visual_rx) = mpsc::channel::<ShowVisualRequest>(8);
+        let (artifact_tx, artifact_rx) = mpsc::channel::<ShowArtifactRequest>(8);
         let pending_inputs: PendingInputs = Arc::new(Mutex::new(HashMap::new()));
 
         // Input bridge: the harness asks questions; we mint the request id, park the
@@ -804,7 +846,16 @@ impl SessionsEngine {
                 let (mut tx, rx) = oneshot::channel();
                 let (answer_tx, answer_rx) = oneshot::channel();
                 let request_id = new_id();
-                lock(&pending).insert(request_id.clone(), answer_tx);
+                let requires_human_ui = questions
+                    .iter()
+                    .any(harness_proto::is_human_approval_question);
+                lock(&pending).insert(
+                    request_id.clone(),
+                    PendingInput {
+                        tx: answer_tx,
+                        requires_human_ui,
+                    },
+                );
                 let _ = engine_tx.send(AgentEvent::InputRequested {
                     request_id: request_id.clone(),
                     questions,
@@ -834,6 +885,7 @@ impl SessionsEngine {
         let controls = RunControls {
             origin: Some(harness_adapters::RunOrigin {
                 chat_id: chat_id.to_string(),
+                ipc_token: self.inner.ipc_mcp_token.get().cloned(),
                 ..Default::default()
             }),
             request_input,
@@ -857,6 +909,7 @@ impl SessionsEngine {
                 routed_steers: Arc::new(Mutex::new(Some(std::collections::VecDeque::new()))),
                 image_tx,
                 visual_tx,
+                artifact_tx,
                 harness: harness.clone(),
                 turn_interrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 stop_reason: Arc::new(Mutex::new(None)),
@@ -887,6 +940,7 @@ impl SessionsEngine {
             engine_rx,
             image_rx,
             visual_rx,
+            artifact_rx,
             cancel_rx,
             RunResumeState {
                 user_message_id: user_id,
@@ -1056,7 +1110,7 @@ impl SessionsEngine {
         // classified as an error instead of an interrupted turn.
         let _ = cancel.send(true);
         // Unpark questions before harness teardown, which can await them.
-        let parked: Vec<_> = lock(&pending).drain().map(|(_, tx)| tx).collect();
+        let parked: Vec<_> = lock(&pending).drain().map(|(_, entry)| entry.tx).collect();
         for tx in parked {
             let _ = tx.send(Vec::new());
         }
@@ -1126,6 +1180,7 @@ impl SessionsEngine {
         chat_id: &str,
         request_id: &str,
         answers: Vec<UserInputAnswer>,
+        from_agent: bool,
     ) -> Result<bool, EngineError> {
         let target = lock(&self.inner.runs)
             .get(chat_id)
@@ -1133,8 +1188,21 @@ impl SessionsEngine {
         let Some((pending, engine_tx)) = target else {
             return Ok(false);
         };
-        let Some(resolver) = lock(&pending).remove(request_id) else {
-            return Ok(false);
+        let resolver = {
+            let mut guard = lock(&pending);
+            if from_agent
+                && guard
+                    .get(request_id)
+                    .is_some_and(|entry| entry.requires_human_ui)
+            {
+                return Err(EngineError::Other(
+                    "this prompt requires human approval in the Harness UI".into(),
+                ));
+            }
+            let Some(resolver) = guard.remove(request_id) else {
+                return Ok(false);
+            };
+            resolver.tx
         };
         let _ = resolver.send(answers);
         let _ = engine_tx.send(AgentEvent::InputResolved {
@@ -1159,7 +1227,7 @@ impl SessionsEngine {
         // Publish cancellation before waking the adapter, as in interrupt().
         // Dropping the resolver communicates cancellation, not an empty answer.
         let _ = run.cancel.send(true);
-        drop(resolver);
+        drop(resolver.tx);
         pending.clear();
         run.interrupt_token.cancel();
         true
@@ -1258,6 +1326,67 @@ impl SessionsEngine {
         .map_err(|_| EngineError::Other("Run no longer accepts visual requests".into()))?;
         rx.await.map_err(|_| {
             EngineError::Other("Run ended before the visual request completed".into())
+        })?
+    }
+
+    pub fn ensure_active_artifact_run(&self, chat_id: &str) -> Result<(), EngineError> {
+        let active = lock(&self.inner.runs).get(chat_id).is_some_and(|run| {
+            !*run.cancel.borrow()
+                && !run.interrupt_token.is_cancelled()
+                && !run
+                    .turn_interrupted
+                    .load(std::sync::atomic::Ordering::Acquire)
+        });
+        if active {
+            Ok(())
+        } else {
+            Err(EngineError::Other(
+                "No active run accepts artifacts for this chat".into(),
+            ))
+        }
+    }
+
+    /// Publish CodeGraff artifact metadata through the live run, ACKing only after journal+doc sync.
+    pub async fn show_artifact(
+        &self,
+        chat_id: &str,
+        id: &str,
+        artifact_id: &str,
+        title: &str,
+        format: &str,
+        visibility: &str,
+        url: &str,
+    ) -> Result<(), EngineError> {
+        if id.is_empty()
+            || id.len() > 128
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(EngineError::Other("show_artifact id is invalid".into()));
+        }
+        harness_proto::artifact::validate_artifact(artifact_id, title, format, visibility, url)
+            .map_err(|error| EngineError::Other(error.into()))?;
+        let tx = lock(&self.inner.runs)
+            .get(chat_id)
+            .map(|h| h.artifact_tx.clone())
+            .ok_or_else(|| {
+                EngineError::Other("No active run accepts artifacts for this chat".into())
+            })?;
+        let (reply, rx) = oneshot::channel();
+        tx.send(ShowArtifactRequest {
+            id: id.into(),
+            artifact_id: artifact_id.into(),
+            title: title.trim().into(),
+            format: format.into(),
+            visibility: visibility.into(),
+            url: url.into(),
+            reply,
+        })
+        .await
+        .map_err(|_| EngineError::Other("Run no longer accepts artifact requests".into()))?;
+        rx.await.map_err(|_| {
+            EngineError::Other("Run ended before the artifact request completed".into())
         })?
     }
 
@@ -1633,6 +1762,27 @@ impl Inner {
         if let AgentEvent::GeneratedVisual { title, script, .. } = &leaf {
             if harness_proto::visual::validate_visual(title, script).is_err()
                 || check_visual_script(script.clone()).await.is_err()
+            {
+                return vec![];
+            }
+        }
+        if let AgentEvent::GeneratedArtifact {
+            artifact_id,
+            title,
+            format,
+            visibility,
+            url,
+            ..
+        } = &leaf
+        {
+            if harness_proto::artifact::validate_artifact(
+                artifact_id,
+                title,
+                format,
+                visibility,
+                url,
+            )
+            .is_err()
             {
                 return vec![];
             }
@@ -2293,6 +2443,7 @@ struct SubagentSink {
     doc: crate::doc_host::DocWriter,
     entry_id: String,
     started_at: i64,
+    started_instant: std::time::Instant,
     entry_index: Option<usize>,
     written: Vec<MessagePart>,
     folded: Vec<MessagePart>,
@@ -2346,12 +2497,13 @@ impl SubagentSink {
     /// reads like any steered chat.
     fn push_user(&mut self, device_id: &str, text: &str) {
         let rendered = render_parts(&self.folded);
+        let elapsed_ms = self.started_instant.elapsed().as_millis().min(i64::MAX as u128) as i64;
         let closed = match self.entry_index.take() {
             Some(ix) => SegmentWriter::resume(&self.doc, ix, std::mem::take(&mut self.written))
-                .finish_cows(&rendered, MessageStatus::Complete),
+                .finish_cows_with_duration(&rendered, MessageStatus::Complete, Some(elapsed_ms)),
             None if !self.folded.is_empty() => {
                 match SegmentWriter::begin(&self.doc, &self.entry_id, device_id, self.started_at) {
-                    Ok(w) => w.finish_cows(&rendered, MessageStatus::Complete),
+                    Ok(w) => w.finish_cows_with_duration(&rendered, MessageStatus::Complete, Some(elapsed_ms)),
                     Err(e) => Err(e),
                 }
             }
@@ -2378,6 +2530,7 @@ impl SubagentSink {
         }
         self.entry_id = new_id();
         self.started_at = now_ms();
+        self.started_instant = std::time::Instant::now();
         self.written = Vec::new();
         self.folded = Vec::new();
         self.dirty = false;
@@ -2387,12 +2540,13 @@ impl SubagentSink {
     /// frozen blob (entries as the client renders them).
     fn finish(mut self, device_id: &str, status: MessageStatus) -> Option<String> {
         let rendered = render_parts(&self.folded);
+        let elapsed_ms = self.started_instant.elapsed().as_millis().min(i64::MAX as u128) as i64;
         let finished = match self.entry_index {
             Some(ix) => SegmentWriter::resume(&self.doc, ix, std::mem::take(&mut self.written))
-                .finish_cows(&rendered, status),
+                .finish_cows_with_duration(&rendered, status, Some(elapsed_ms)),
             None if !self.folded.is_empty() => {
                 match SegmentWriter::begin(&self.doc, &self.entry_id, device_id, self.started_at) {
-                    Ok(w) => w.finish_cows(&rendered, status),
+                    Ok(w) => w.finish_cows_with_duration(&rendered, status, Some(elapsed_ms)),
                     Err(e) => Err(e),
                 }
             }
@@ -2403,6 +2557,20 @@ impl SubagentSink {
         }
         let entries = harness_doc::join_continuation_entries(self.doc.read_entries().ok()?);
         serde_json::to_string(&entries).ok()
+    }
+}
+
+/// How a subagent's transcript entry is frozen when it settles. Only a
+/// child that finished its task is complete; one that failed, was stopped
+/// or lost its connection ended without finishing it (the Done's error,
+/// when it has one, folds in as the entry's error part).
+fn subagent_entry_status(status: DoneStatus) -> MessageStatus {
+    match status {
+        DoneStatus::Completed => MessageStatus::Complete,
+        DoneStatus::Errored
+        | DoneStatus::Interrupted
+        | DoneStatus::Cancelled
+        | DoneStatus::Disconnected => MessageStatus::Aborted,
     }
 }
 
@@ -2517,14 +2685,16 @@ fn finish_segment<'a>(
     entry_id: &str,
     device_id: &str,
     started_at: i64,
+    duration_ms: i64,
     folded: &[MessagePart],
     status: MessageStatus,
 ) -> Result<(), DocError> {
     let rendered = render_parts(folded);
     match writer {
-        Some(w) => w.finish_cows(&rendered, status),
+        Some(w) => w.finish_cows_with_duration(&rendered, status, Some(duration_ms)),
         None if !folded.is_empty() => {
-            SegmentWriter::begin(doc, entry_id, device_id, started_at)?.finish_cows(&rendered, status)
+            SegmentWriter::begin(doc, entry_id, device_id, started_at)?
+                .finish_cows_with_duration(&rendered, status, Some(duration_ms))
         }
         None => Ok(()),
     }
@@ -2739,6 +2909,68 @@ fn stopped_after_answer(reason: Option<&str>) -> Option<String> {
     ))
 }
 
+/// Tracks a chain of self-continued turns since the last Done, steer, or
+/// settled background task (#341, #517). Counts only ACTIVE working time while
+/// a self-continued turn is running — sitting parked idle between wakes (e.g.
+/// waiting on a long CI job) pauses the clock so it never trips the cap.
+#[derive(Default)]
+struct SelfContinueChain {
+    resumes: u32,
+    active: std::time::Duration,
+    turn_started: Option<tokio::time::Instant>,
+}
+
+impl SelfContinueChain {
+    fn reset(&mut self) {
+        self.resumes = 0;
+        self.active = std::time::Duration::ZERO;
+        self.turn_started = None;
+    }
+
+    fn pause(&mut self, now: tokio::time::Instant) {
+        if let Some(started) = self.turn_started.take() {
+            self.active += now.saturating_duration_since(started);
+        }
+    }
+
+    fn elapsed(&self, now: tokio::time::Instant) -> std::time::Duration {
+        self.active
+            + self
+                .turn_started
+                .map_or(std::time::Duration::ZERO, |started| {
+                    now.saturating_duration_since(started)
+                })
+    }
+
+    fn resumes(&self) -> u32 {
+        self.resumes
+    }
+
+    fn try_resume(
+        &mut self,
+        now: tokio::time::Instant,
+        resume_cap: Option<u32>,
+        active_cap: Option<std::time::Duration>,
+    ) -> bool {
+        if resume_cap.is_some_and(|cap| self.resumes >= cap)
+            || active_cap.is_some_and(|cap| self.elapsed(now) >= cap)
+        {
+            return false;
+        }
+        self.resumes += 1;
+        self.turn_started = Some(now);
+        true
+    }
+
+    fn exceeded_active_cap(
+        &self,
+        now: tokio::time::Instant,
+        active_cap: Option<std::time::Duration>,
+    ) -> bool {
+        self.turn_started.is_some() && active_cap.is_some_and(|cap| self.elapsed(now) >= cap)
+    }
+}
+
 /// The terminal Done that ends a self-continued chain past its cap (#341).
 fn runaway_chain_done(resumes: u32, elapsed: std::time::Duration) -> AgentEvent {
     let minutes = elapsed.as_secs().div_ceil(60).max(1);
@@ -2767,6 +2999,7 @@ async fn drive_run(
     mut engine_rx: mpsc::UnboundedReceiver<AgentEvent>,
     mut image_rx: mpsc::Receiver<ShowImageRequest>,
     mut visual_rx: mpsc::Receiver<ShowVisualRequest>,
+    mut artifact_rx: mpsc::Receiver<ShowArtifactRequest>,
     mut cancel_rx: watch::Receiver<bool>,
     resume_state: RunResumeState,
 ) {
@@ -2885,18 +3118,40 @@ async fn drive_run(
     // Entries drop with the run, so a retiring run never strands a caller.
     let mut pending_show_images: HashMap<String, PendingShowImage> = HashMap::new();
     let mut seen_show_visuals: HashMap<String, (String, String)> = HashMap::new();
+    let mut seen_show_artifacts: HashMap<String, (String, String, String, String, String)> =
+        HashMap::new();
     for entry in doc_ref.read_entries().unwrap_or_default() {
         for part in entry.parts {
-            if let MessagePart::Visual { id, title, script } = part
-                && let Some(request_id) = id.strip_prefix("show-visual:")
-            {
-                seen_show_visuals.insert(request_id.into(), (title, script));
+            match part {
+                MessagePart::Visual { id, title, script } => {
+                    if let Some(request_id) = id.strip_prefix("show-visual:") {
+                        seen_show_visuals.insert(request_id.into(), (title, script));
+                    }
+                }
+                MessagePart::Artifact {
+                    id,
+                    artifact_id,
+                    title,
+                    format,
+                    visibility,
+                    url,
+                } => {
+                    if let Some(request_id) = id.strip_prefix("show-artifact:") {
+                        seen_show_artifacts.insert(
+                            request_id.into(),
+                            (artifact_id, title, format, visibility, url),
+                        );
+                    }
+                }
+                _ => {}
             }
         }
     }
     let mut pending_show_visuals: HashMap<String, PendingShowVisual> = HashMap::new();
+    let mut pending_show_artifacts: HashMap<String, PendingShowArtifact> = HashMap::new();
     let mut entry_id = new_id();
     let mut segment_started = now_ms();
+    let mut segment_started_instant = std::time::Instant::now();
     let mut writer: Option<SegmentWriter<'_>> = None;
     let mut dirty = false;
     let mut flush_at = tokio::time::Instant::now();
@@ -3039,8 +3294,7 @@ async fn drive_run(
             Some(ms) => Some(std::time::Duration::from_millis(ms)),
             None => Some(std::time::Duration::from_secs(30 * 60)),
         };
-    let mut self_resumes: u32 = 0;
-    let mut self_chain_started: Option<tokio::time::Instant> = None;
+    let mut self_chain = SelfContinueChain::default();
     // Journal-side delta coalescing (see `DeltaCoalescer`).
     let mut deltas = DeltaCoalescer::default();
     // Spawn chips that have SETTLED (tagged Done seen). Content events for a
@@ -3297,6 +3551,70 @@ async fn drive_run(
                     });
                     continue;
                 }
+                Some(req) = artifact_rx.recv() => {
+                    if interrupted || *cancel_rx.borrow() || !inner.visual_run_active(&chat_id, &run_id) {
+                        let _ = req.reply.send(Err(EngineError::Other(
+                            "Run was interrupted; no artifact can be published".into(),
+                        )));
+                        continue;
+                    }
+                    if idle_since.is_some() {
+                        let _ = req.reply.send(Err(EngineError::Other(
+                            "Run is parked idle; no artifact can be published".into(),
+                        )));
+                        continue;
+                    }
+                    if let Err(why) = harness_proto::artifact::validate_artifact(
+                        &req.artifact_id,
+                        &req.title,
+                        &req.format,
+                        &req.visibility,
+                        &req.url,
+                    ) {
+                        let _ = req.reply.send(Err(EngineError::Other(why.into())));
+                        continue;
+                    }
+                    if let Some((art_id, title, format, visibility, url)) =
+                        seen_show_artifacts.get(&req.id)
+                    {
+                        if art_id != &req.artifact_id {
+                            let _ = req.reply.send(Err(EngineError::Other(
+                                "show_artifact id already used for a different artifact".into(),
+                            )));
+                            continue;
+                        }
+                        if title == &req.title
+                            && format == &req.format
+                            && visibility == &req.visibility
+                            && url == &req.url
+                        {
+                            let _ = req.reply.send(Ok(()));
+                            continue;
+                        }
+                    }
+                    let part_id = format!("show-artifact:{}", req.id);
+                    prepared_events.push_back(AgentEvent::GeneratedArtifact {
+                        id: part_id.clone(),
+                        artifact_id: req.artifact_id.clone(),
+                        title: req.title.clone(),
+                        format: req.format.clone(),
+                        visibility: req.visibility.clone(),
+                        url: req.url.clone(),
+                    });
+                    pending_show_artifacts.insert(
+                        part_id,
+                        PendingShowArtifact {
+                            request_id: req.id,
+                            artifact_id: req.artifact_id,
+                            title: req.title,
+                            format: req.format,
+                            visibility: req.visibility,
+                            url: req.url,
+                            reply: req.reply,
+                        },
+                    );
+                    continue;
+                }
                 Some(event) = engine_rx.recv() => event,
                 next = stream.next() => match next {
                     Some(Ok(event)) => event,
@@ -3419,6 +3737,7 @@ async fn drive_run(
                             &entry_id,
                             &device_id,
                             segment_started,
+                            segment_started_instant.elapsed().as_millis().min(i64::MAX as u128) as i64,
                             &folded,
                             MessageStatus::Complete,
                         ) {
@@ -3430,7 +3749,10 @@ async fn drive_run(
                     dirty = false;
                     entry_id = new_id();
                     segment_started = now_ms();
-                    idle_since = Some(tokio::time::Instant::now());
+                    segment_started_instant = std::time::Instant::now();
+                    let parked_at = tokio::time::Instant::now();
+                    idle_since = Some(parked_at);
+                    self_chain.pause(parked_at);
                     self_continued_turn = false;
                     inner.set_status_with_completion(
                         &chat_id, SessionStatus::Idle, false, completed_turn,
@@ -3476,6 +3798,16 @@ async fn drive_run(
         {
             let _ = pending.reply.send(Err(EngineError::Other(
                 "Run was interrupted; no visual can be published".into(),
+            )));
+            continue;
+        }
+
+        if let AgentEvent::GeneratedArtifact { id, .. } = &event
+            && (interrupted || *cancel_rx.borrow() || !inner.visual_run_active(&chat_id, &run_id))
+            && let Some(pending) = pending_show_artifacts.remove(id)
+        {
+            let _ = pending.reply.send(Err(EngineError::Other(
+                "Run was interrupted; no artifact can be published".into(),
             )));
             continue;
         }
@@ -3654,6 +3986,7 @@ async fn drive_run(
                             doc: sub_doc,
                             entry_id: new_id(),
                             started_at: now_ms(),
+                            started_instant: std::time::Instant::now(),
                             entry_index: None,
                             written: Vec::new(),
                             folded: Vec::new(),
@@ -3673,6 +4006,17 @@ async fn drive_run(
             let done = matches!(sub_event.as_ref(), AgentEvent::Done { .. });
             if done {
                 settled_subagents.insert(parent_tool_use_id.clone());
+            }
+            // A chip-only Done (no transcript doc: graff's default progress
+            // rows, whose detached child outlives its finished spawn call)
+            // stamps the chip's lifecycle in place, as a sink's Done does.
+            if done_only && !chip_streaming && !nested {
+                let _ = doc_ref.update_subagent_chip(
+                    parent_tool_use_id,
+                    None,
+                    subagent_chip_update(sub_event),
+                    None,
+                );
             }
             if let Some(sink) = subagents.get_mut(parent_tool_use_id) {
                 if let AgentEvent::UserMessage { text } = sub_event.as_ref() {
@@ -3705,18 +4049,7 @@ async fn drive_run(
                 }
                 if done {
                     let status = match sub_event.as_ref() {
-                        AgentEvent::Done {
-                            status: DoneStatus::Errored,
-                            ..
-                        } => MessageStatus::Complete,
-                        AgentEvent::Done {
-                            status: DoneStatus::Interrupted,
-                            ..
-                        } => MessageStatus::Aborted,
-                        AgentEvent::Done {
-                            status: DoneStatus::Cancelled | DoneStatus::Disconnected,
-                            ..
-                        } => MessageStatus::Aborted,
+                        AgentEvent::Done { status, .. } => subagent_entry_status(*status),
                         _ => MessageStatus::Complete,
                     };
                     let sink = subagents.remove(parent_tool_use_id).expect("checked");
@@ -3865,17 +4198,15 @@ async fn drive_run(
                 // with nothing settling is runaway (#517, #341).
                 task_woken_turn = std::mem::take(&mut task_wake);
                 if task_woken_turn {
-                    self_resumes = 0;
-                    self_chain_started = None;
+                    self_chain.reset();
                 }
-                let chain_started =
-                    *self_chain_started.get_or_insert_with(tokio::time::Instant::now);
-                if self_resume_cap.is_some_and(|cap| self_resumes >= cap)
-                    || self_chain_cap.is_some_and(|cap| chain_started.elapsed() >= cap)
-                {
+                if !self_chain.try_resume(
+                    tokio::time::Instant::now(),
+                    self_resume_cap,
+                    self_chain_cap,
+                ) {
                     chain_capped = true;
                 } else {
-                    self_resumes += 1;
                     tracing::info!(
                         chat = %chat_id,
                         "parked session resumed by self-continued agent output"
@@ -3890,6 +4221,7 @@ async fn drive_run(
                     // fall through — this event is the new segment's first part.
                     entry_id = new_id();
                     segment_started = now_ms();
+                    segment_started_instant = std::time::Instant::now();
                     inner.clear_tool_progress(&chat_id, Some(harness_proto::GRAFF_WAITING_TOOL_ID));
                     inner.set_status(&chat_id, SessionStatus::Working, true);
                 }
@@ -3935,8 +4267,8 @@ async fn drive_run(
                         let resolver = lock(&inner.runs)
                             .get(&chat_id)
                             .and_then(|h| lock(&h.pending_inputs).remove(request_id));
-                        if let Some(tx) = resolver {
-                            let _ = tx.send(Vec::new());
+                        if let Some(entry) = resolver {
+                            let _ = entry.tx.send(Vec::new());
                         }
                         tracing::debug!(chat = %chat_id, "parked session: post-turn input request auto-declined");
                         continue;
@@ -3949,14 +4281,12 @@ async fn drive_run(
             }
         }
         // A resumed turn that keeps streaming never parks, so it never meets
-        // the resume check above: its chain's wall-clock cap holds here too.
+        // the resume check above: its chain's active-time cap holds here too.
         if self_continued_turn
             && !task_woken_turn
             && idle_since.is_none()
             && !matches!(&event, AgentEvent::Done { .. })
-            && self_chain_cap
-                .zip(self_chain_started)
-                .is_some_and(|(cap, started)| started.elapsed() >= cap)
+            && self_chain.exceeded_active_cap(tokio::time::Instant::now(), self_chain_cap)
         {
             chain_capped = true;
         }
@@ -3964,10 +4294,11 @@ async fn drive_run(
         // run ends with an errored Done that says why, so the transcript and
         // the session status show it instead of output silently vanishing.
         if chain_capped {
-            let elapsed = self_chain_started.map(|s| s.elapsed()).unwrap_or_default();
+            let elapsed = self_chain.elapsed(tokio::time::Instant::now());
+            let resumes = self_chain.resumes();
             tracing::warn!(
                 chat = %chat_id,
-                resumes = self_resumes,
+                resumes,
                 chain_secs = elapsed.as_secs(),
                 "self-continued turn chain capped; stopping the agent"
             );
@@ -3989,7 +4320,7 @@ async fn drive_run(
             self_continued_turn = false;
             // Not a startup crash: never retried.
             retry_request = None;
-            event = runaway_chain_done(self_resumes, elapsed);
+            event = runaway_chain_done(resumes, elapsed);
         }
         // A queued background command must not mask real concurrent model
         // work. Positive model output owns the status until a request/tool
@@ -4143,14 +4474,14 @@ async fn drive_run(
             // A steer boundary means a real prompt owns the turn again — its
             // Done will come; the short self-continued window stands down.
             self_continued_turn = false;
-            self_resumes = 0;
-            self_chain_started = None;
+            self_chain.reset();
             if let Err(err) = finish_segment(
                 doc_ref,
                 writer.take(),
                 &entry_id,
                 &device_id,
                 segment_started,
+                segment_started_instant.elapsed().as_millis().min(i64::MAX as u128) as i64,
                 &folded,
                 MessageStatus::Complete,
             ) {
@@ -4161,6 +4492,7 @@ async fn drive_run(
             dirty = false;
             entry_id = next_assistant_message_id.clone().unwrap_or_else(new_id);
             segment_started = now_ms();
+            segment_started_instant = std::time::Instant::now();
             // The elapsed timer is per user message, not per child process: a
             // steer boundary restarts it (matches the parked-resume path and
             // the composer's optimistic overlay, which already reads 0:00).
@@ -4306,6 +4638,40 @@ async fn drive_run(
             let _ = pending.reply.send(result);
         }
 
+        if let AgentEvent::GeneratedArtifact { id, .. } = &event
+            && let Some(pending) = pending_show_artifacts.remove(id)
+        {
+            let synced = publish_seq != 0
+                && sync_segment(
+                    doc_ref,
+                    &mut writer,
+                    &entry_id,
+                    &device_id,
+                    segment_started,
+                    &folded,
+                )
+                .is_ok();
+            let result = if synced {
+                dirty = false;
+                seen_show_artifacts.insert(
+                    pending.request_id,
+                    (
+                        pending.artifact_id,
+                        pending.title,
+                        pending.format,
+                        pending.visibility,
+                        pending.url,
+                    ),
+                );
+                Ok(())
+            } else {
+                Err(EngineError::Other(
+                    "show_artifact could not sync the artifact into the chat".into(),
+                ))
+            };
+            let _ = pending.reply.send(result);
+        }
+
         if let AgentEvent::Done { status, .. } = &event {
             // A question still pending at turn end can never be legitimately
             // answered (its turn is over): drain the resolvers NOW, or a late
@@ -4318,8 +4684,8 @@ async fn drive_run(
                 .filter(|h| h.run_id == run_id)
                 .map(|h| h.pending_inputs.clone());
             if let Some(pending) = pending {
-                for (_, tx) in lock(&pending).drain() {
-                    let _ = tx.send(Vec::new());
+                for (_, entry) in lock(&pending).drain() {
+                    let _ = entry.tx.send(Vec::new());
                 }
             }
             let message_status = match status {
@@ -4373,6 +4739,7 @@ async fn drive_run(
                     &entry_id,
                     &device_id,
                     segment_started,
+                    segment_started_instant.elapsed().as_millis().min(i64::MAX as u128) as i64,
                     &folded,
                     message_status,
                 ) {
@@ -4423,12 +4790,12 @@ async fn drive_run(
                 dirty = false;
                 entry_id = new_id();
                 segment_started = now_ms();
+                segment_started_instant = std::time::Instant::now();
                 // Resume-retry is strictly a first-turn concern.
                 saw_session_started = true;
                 idle_since = Some(tokio::time::Instant::now());
                 self_continued_turn = false;
-                self_resumes = 0;
-                self_chain_started = None;
+                self_chain.reset();
                 inner.set_status_with_completion(
                     &chat_id,
                     SessionStatus::Idle,
@@ -5081,6 +5448,184 @@ mod tests {
         core.shutdown().await;
     }
 
+    // A child that failed was frozen as a plain "complete" entry: its
+    // transcript read like a finished task. It must end aborted, with the
+    // failure text it was given as an error part.
+    #[tokio::test]
+    async fn failed_subagent_transcript_is_not_recorded_complete() {
+        use super::{AgentEvent, DoneStatus, MessagePart, MessageStatus, subagent_doc_id};
+        use std::time::Duration;
+
+        let (feed, rx) = tokio::sync::mpsc::unbounded_channel();
+        let registry = crate::registry::HarnessRegistry::new();
+        registry.register(std::sync::Arc::new(FeedHarness {
+            steerable: false,
+            feed: std::sync::Mutex::new(Some(rx)),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(
+            dir.path(),
+            std::sync::Arc::new(registry),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let chat = "chat-sub-failed";
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+        let child = |event: AgentEvent| AgentEvent::Subagent {
+            parent_tool_use_id: "spawn-1".into(),
+            event: Box::new(event),
+        };
+        feed.send(AgentEvent::ToolCall {
+            id: "spawn-1".into(),
+            call: harness_proto::ToolCall::Unknown {
+                name: "Agent: Audit the synthetic parser".into(),
+                input: None,
+            },
+        })
+        .unwrap();
+        feed.send(child(AgentEvent::TextDelta {
+            text: "Reading the synthetic parser.".into(),
+        }))
+        .unwrap();
+        let reason = "subagent sa-001 failed before producing a report: synthetic 503";
+        feed.send(child(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            result: None,
+            error: Some(reason.into()),
+            session_id: None,
+        }))
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let entries = core
+            .doc_host
+            .open(&subagent_doc_id(chat, "spawn-1"))
+            .unwrap()
+            .doc_arc()
+            .read_entries()
+            .unwrap();
+        let reply = entries.last().expect("the child's transcript entry");
+        assert_eq!(reply.status, Some(MessageStatus::Aborted), "{entries:?}");
+        assert!(
+            reply.parts.iter().any(|p| matches!(p,
+                MessagePart::Error { message, .. } if message == reason)),
+            "{entries:?}"
+        );
+
+        feed.send(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: None,
+        })
+        .unwrap();
+        core.shutdown().await;
+    }
+
+    // graff's default progress rows give a detached child no transcript doc;
+    // its spawn call resolved as success long before it failed. The child's
+    // terminal state and reason (as the adapter maps graff's last row) must
+    // land on the chip, or the chip reverts to that success once the live
+    // row is gone.
+    #[tokio::test]
+    async fn detached_child_failure_settles_its_finished_spawn_chip() {
+        use super::{AgentEvent, DoneStatus, MessagePart};
+        use harness_doc::SubagentStatus;
+        use std::time::Duration;
+
+        let (feed, rx) = tokio::sync::mpsc::unbounded_channel();
+        let registry = crate::registry::HarnessRegistry::new();
+        registry.register(std::sync::Arc::new(FeedHarness {
+            steerable: true,
+            feed: std::sync::Mutex::new(Some(rx)),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(
+            dir.path(),
+            std::sync::Arc::new(registry),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let chat = "chat-detached-failed";
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+        feed.send(AgentEvent::ToolCall {
+            id: "spawn-1".into(),
+            call: harness_proto::ToolCall::Unknown {
+                name: "Agent: Inspect example".into(),
+                input: None,
+            },
+        })
+        .unwrap();
+        feed.send(AgentEvent::ToolResult {
+            id: "spawn-1".into(),
+            is_error: false,
+            output: Some("Started background agent sa-001.".into()),
+            diff: None,
+        })
+        .unwrap();
+        feed.send(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: Some("ses-1".into()),
+        })
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let reason = "synthetic bad argument [invalid-arguments failure, 1 attempt]";
+        let tagged = |event: AgentEvent| AgentEvent::Subagent {
+            parent_tool_use_id: "spawn-1".into(),
+            event: Box::new(event),
+        };
+        feed.send(tagged(AgentEvent::SubagentProgress {
+            summary: reason.into(),
+        }))
+        .unwrap();
+        feed.send(tagged(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            result: None,
+            error: Some(reason.into()),
+            session_id: None,
+        }))
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let entries = core
+            .doc_host
+            .open(chat)
+            .unwrap()
+            .doc_arc()
+            .read_entries()
+            .unwrap();
+        let chip = entries
+            .iter()
+            .flat_map(|e| e.parts.iter())
+            .find(|p| matches!(p, MessagePart::Tool { id, .. } if id == "spawn-1"))
+            .expect("the spawn chip");
+        let MessagePart::Tool {
+            subagent_status,
+            subagent_tail,
+            subagent_ref,
+            ..
+        } = chip
+        else {
+            unreachable!()
+        };
+        assert_eq!(*subagent_status, Some(SubagentStatus::Failed), "{chip:?}");
+        assert_eq!(subagent_tail.as_deref(), Some(reason), "{chip:?}");
+        // No transcript doc exists for it, so the chip never links to one.
+        assert_eq!(*subagent_ref, None, "{chip:?}");
+        core.shutdown().await;
+    }
+
     #[tokio::test]
     async fn parked_session_streams_cross_turn_tool_progress_without_unparking() {
         use super::{AgentEvent, DoneStatus, SessionStatus};
@@ -5186,5 +5731,69 @@ mod tests {
         );
 
         core.shutdown().await;
+    }
+
+    #[test]
+    fn self_continue_chain_pauses_clock_while_parked_idle() {
+        let mut chain = super::SelfContinueChain::default();
+        let t0 = tokio::time::Instant::now();
+        let cap = Some(std::time::Duration::from_secs(30));
+        let max = Some(5);
+
+        assert!(chain.try_resume(t0, max, cap));
+        // Worked 10s, then parked idle.
+        chain.pause(t0 + std::time::Duration::from_secs(10));
+        // Sat parked idle for 2 hours — elapsed active time is still 10s.
+        let t_after_idle = t0 + std::time::Duration::from_secs(2 * 3600);
+        assert_eq!(
+            chain.elapsed(t_after_idle),
+            std::time::Duration::from_secs(10)
+        );
+        assert!(chain.try_resume(t_after_idle, max, cap));
+        assert!(!chain.exceeded_active_cap(t_after_idle + std::time::Duration::from_secs(19), cap));
+        assert!(chain.exceeded_active_cap(t_after_idle + std::time::Duration::from_secs(20), cap));
+
+        // Reset clears both resumes and active time.
+        chain.reset();
+        assert_eq!(chain.resumes(), 0);
+        assert_eq!(chain.elapsed(t_after_idle), std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn finish_segment_records_awake_duration_even_with_skewed_started_at() {
+        let doc = harness_doc::SessionDoc::init("finish-segment-awake-duration").unwrap();
+        let skewed_started_at = super::now_ms() - 54 * 60 * 1000;
+        let writer = harness_doc::SegmentWriter::begin(&doc, "e-skew", "dev-1", skewed_started_at).unwrap();
+        let folded = vec![harness_doc::MessagePart::Text {
+            id: "t0".into(),
+            text: "finished".into(),
+        }];
+        super::finish_segment(
+            &doc,
+            Some(writer),
+            "e-skew",
+            "dev-1",
+            skewed_started_at,
+            12_345,
+            &folded,
+            harness_doc::MessageStatus::Complete,
+        )
+        .unwrap();
+        let entries = doc.read_entries().unwrap();
+        assert_eq!(entries[0].duration_ms, Some(12_345));
+
+        super::finish_segment(
+            &doc,
+            None,
+            "e-direct",
+            "dev-1",
+            skewed_started_at,
+            4_567,
+            &folded,
+            harness_doc::MessageStatus::Complete,
+        )
+        .unwrap();
+        let entries = doc.read_entries().unwrap();
+        assert_eq!(entries[1].duration_ms, Some(4_567));
     }
 }

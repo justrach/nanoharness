@@ -123,6 +123,7 @@ const capabilities = [_][]const u8{ "Read files and run searches", "Edit files i
 
 pub const Setup = struct {
     step: usize = 0,
+    engine_seeded: bool = false,
     /// The extras switched on, and as the engine last had them.
     extras_on: [2]bool = .{ false, false },
     extras_was: [2]bool = .{ false, false },
@@ -184,16 +185,20 @@ fn check(a: *App) void {
     if (std.mem.indexOf(u8, body, "pending") != null) open(a, 0);
 }
 
+fn syncEngine(a: *App, s: *Setup) void {
+    if (s.engine_seeded or !a.engine.up()) return;
+    s.engine_seeded = true;
+    if (a.engine.call("GetAutonomy", .{}, .of(App, a, onAutonomy))) |id| s.autonomy_call = id;
+    agent.ensureModels(a, "graff");
+    a.redraw();
+}
+
 /// Opens it at `step` (Replay setup: 0), over Settings too.
 pub fn open(a: *App, step: usize) void {
     a.view.setup = .{ .step = @min(step, questions) };
     if (a.view.settings_open) set.close(a);
     seed(a, &a.view.setup.?);
-    if (a.engine.up()) {
-        const s = &a.view.setup.?;
-        if (a.engine.call("GetAutonomy", .{}, .of(App, a, onAutonomy))) |id| s.autonomy_call = id;
-        agent.ensureModels(a, "graff");
-    }
+    syncEngine(a, &a.view.setup.?);
     a.redraw();
 }
 
@@ -436,6 +441,11 @@ fn onSaved(a: *App, _: u64, r: rpc.Reply) void {
 
 pub fn next(a: *App) void {
     const s = if (a.view.setup) |*x| x else return;
+    if (s.step == 0 and s.installing != null) {
+        s.err = "Wait for the CLI install to finish, or click Cancel first.";
+        a.redraw();
+        return;
+    }
     s.err = null;
     switch (s.step) {
         0 => for (extra_list, 0..) |ex, i| if (s.extras_on[i] != s.extras_was[i]) {
@@ -456,7 +466,7 @@ fn back(a: *App) void {
     a.redraw();
 }
 
-/// ←/→: the effort's rung or the autonomy's stop.
+/// ←/→: adjust effort, autonomy, notification choice, or starter chip.
 fn nudge(a: *App, by: i32) void {
     const s = if (a.view.setup) |*x| x else return;
     switch (s.step) {
@@ -468,6 +478,14 @@ fn nudge(a: *App, by: i32) void {
             const at: i32 = @backingInt(s.autonomy);
             s.autonomy = @fromBackingInt(@intCast(@as(u2, @intCast(std.math.clamp(at + by, 0, 2)))));
         },
+        3 => s.notify = by < 0,
+        4 => {
+            if (by > 0) {
+                s.starter = if (s.starter) |idx| (if (idx + 1 < starters.len) idx + 1 else null) else 0;
+            } else {
+                s.starter = if (s.starter) |idx| (if (idx > 0) idx - 1 else null) else starters.len - 1;
+            }
+        },
         else => {},
     }
     a.redraw();
@@ -477,6 +495,7 @@ fn nudge(a: *App, by: i32) void {
 /// on the picked model and level, notifications as answered, the starter
 /// in the composer.
 pub fn finish(a: *App, skipped: bool) void {
+    if (skipped) if (a.view.setup) |*cur| if (cur.installing != null) cancelInstall(a);
     const s = a.view.setup orelse return;
     writeGate(a, true);
     if (!skipped) {
@@ -502,14 +521,14 @@ pub fn finish(a: *App, skipped: bool) void {
     a.redraw();
 }
 
-/// Open, it has every key: Return goes on, Escape back, ←/→ adjust.
+/// Open, it has every key: Return goes on, Escape cancels active install or steps back, ←/→ adjust.
 pub fn keys(c: *ui.Context, a: *App) bool {
-    if (a.view.setup == null) return false;
+    const s = if (a.view.setup) |*x| x else return false;
     const S = ui.Shortcut;
     if (c.shortcut(.{ .key = S.enter })) {
         next(a);
     } else if (c.shortcut(.{ .key = S.escape })) {
-        back(a);
+        if (s.step == 0 and s.installing != null) cancelInstall(a) else back(a);
     } else if (c.shortcut(.{ .key = S.left })) {
         nudge(a, -1);
     } else if (c.shortcut(.{ .key = S.right })) nudge(a, 1);
@@ -518,30 +537,85 @@ pub fn keys(c: *ui.Context, a: *App) bool {
 
 // Drawing.
 
-const left_w: f32 = 420;
-const text_w: f32 = left_w - 2 * 40;
-const right_w: f32 = 500;
+pub const LayoutMetrics = struct {
+    stacked: bool,
+    left_w: f32,
+    right_w: f32,
+};
 
-pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
+pub fn layoutMetrics(win_w: f32) LayoutMetrics {
+    if (win_w < 860) {
+        const w = @max(260, win_w - 48);
+        return .{ .stacked = true, .left_w = w, .right_w = @min(500, w) };
+    }
+    const left_w = @min(420, @max(320, win_w * 0.38));
+    const right_w = @min(500, @max(320, win_w - left_w - 65));
+    return .{ .stacked = false, .left_w = left_w, .right_w = right_w };
+}
+
+pub fn ensureChecked(a: *App) void {
     if (!a.view.setup_checked) {
         a.view.setup_checked = true;
         check(a);
     }
+}
+
+pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
+    ensureChecked(a);
     const s = if (a.view.setup) |*x| x else return;
     seed(a, s);
+    syncEngine(a, s);
     ui.key(c, "setup-overlay");
-    const root = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(9).row().bg(k.shell);
-    defer root.end();
-    questionPane(c, a, k, s);
-    _ = c.leaf(.{ .width = .{ .px = 1 }, .height = .fill, .background = k.border }, .none, null);
-    const right = ui.div(c).column().grow().w(0).hFull().center().bg(k.composer);
-    defer right.end();
-    switch (s.step) {
-        0 => agentsPane(c, a, k, s),
-        1 => effortPane(c, a, k, s),
-        2 => autonomyPane(c, k, s),
-        3 => notifyPane(c, k, s),
-        else => readyPane(c, a, k, s),
+    const m = layoutMetrics(c.size.w);
+    const root_base = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(9).bg(k.shell.alpha(1)).clip();
+    if (m.stacked) {
+        const root = root_base.column();
+        defer root.end();
+        ui.scroll(c, .{
+            .width = .fill,
+            .height = .fill,
+            .grow = 1,
+            .align_items = .center,
+            .scrollbar = .{ .overlay = k.faint.alpha(0.5) },
+        });
+        defer ui.end(c);
+        const col = ui.div(c).column().w(m.left_w).py(24).gap(16).itemsCenter();
+        defer col.end();
+        questionPane(c, a, k, s, m.left_w, true);
+        _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
+        const right_wrap = ui.div(c).column().w(m.right_w).pt(8).pb(16);
+        defer right_wrap.end();
+        switch (s.step) {
+            0 => agentsPane(c, a, k, s, m.right_w),
+            1 => effortPane(c, a, k, s, m.right_w),
+            2 => autonomyPane(c, k, s, m.right_w),
+            3 => notifyPane(c, k, s, m.right_w),
+            else => readyPane(c, a, k, s, m.right_w),
+        }
+    } else {
+        const root = root_base.row();
+        defer root.end();
+        questionPane(c, a, k, s, m.left_w, false);
+        _ = c.leaf(.{ .width = .{ .px = 1 }, .height = .fill, .background = k.border }, .none, null);
+        const right_bg = ui.div(c).column().grow().w(0).hFull().bg(k.composer.alpha(1)).clip();
+        defer right_bg.end();
+        ui.scroll(c, .{
+            .width = .fill,
+            .height = .fill,
+            .align_items = .center,
+            .justify = if (c.size.h >= 680) .center else .start,
+            .scrollbar = .{ .overlay = k.faint.alpha(0.5) },
+        });
+        defer ui.end(c);
+        const pad = ui.div(c).column().w(m.right_w).py(32);
+        defer pad.end();
+        switch (s.step) {
+            0 => agentsPane(c, a, k, s, m.right_w),
+            1 => effortPane(c, a, k, s, m.right_w),
+            2 => autonomyPane(c, k, s, m.right_w),
+            3 => notifyPane(c, k, s, m.right_w),
+            else => readyPane(c, a, k, s, m.right_w),
+        }
     }
 }
 
@@ -558,8 +632,12 @@ fn copy(a: *const App, s: *const Setup) [2][]const u8 {
     };
 }
 
-fn questionPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
-    const col = ui.div(c).column().w(left_w).hFull().px(40).pt(72).pb(32).gap(14);
+fn questionPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup, pane_w: f32, stacked: bool) void {
+    const text_w = if (stacked) pane_w else @max(220, pane_w - 2 * 40);
+    const col = if (stacked)
+        ui.div(c).column().w(pane_w).gap(12)
+    else
+        ui.div(c).column().w(pane_w).hFull().px(40).pt(72).pb(32).gap(14);
     defer col.end();
     if (s.step < questions) {
         const prog = ui.div(c).row().gap(10).itemsCenter();
@@ -569,7 +647,7 @@ fn questionPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
             defer bars.end();
             for (0..questions) |i| ui.div(c).w(28).h(4).roundedFull().bg(if (i <= s.step) k.text else k.ink(0.12)).end();
         }
-        ui.text(c, c.print("{d} of {d}", .{ s.step + 1, questions }), set.st(c, 12, .{ .color = k.muted }));
+        ui.text(c, c.print("{d} of {d}", .{ s.step + 1, questions }), set.st(c, 12, .{ .tabular = true, .color = k.muted }));
     } else {
         const done = ui.div(c).row().gap(6).itemsCenter();
         defer done.end();
@@ -580,7 +658,7 @@ fn questionPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
     {
         const t = ui.div(c).column().w(text_w).gap(8);
         defer t.end();
-        ui.text(c, words[0], set.st(c, 26, .{ .weight = .semibold, .wrap = true, .color = k.text }));
+        ui.text(c, words[0], set.st(c, if (stacked) 22 else 26, .{ .weight = .semibold, .wrap = true, .color = k.text }));
         ui.text(c, words[1], set.st(c, 14, .{ .wrap = true, .color = k.muted }));
     }
     if (s.err) |why| {
@@ -588,8 +666,9 @@ fn questionPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
         defer e.end();
         ui.text(c, why, set.st(c, 12.5, .{ .wrap = true, .color = k.danger_muted }));
     }
-    ui.spacer(c);
+    if (!stacked) ui.spacer(c);
     {
+        const blocked = s.step == 0 and s.installing != null;
         const r = ui.div(c).row().w(text_w).gap(8).itemsCenter();
         defer r.end();
         if (s.step > 0) {
@@ -601,9 +680,10 @@ fn questionPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
         }
         ui.spacer(c);
         ui.key(c, "setup-next");
-        const n = ui.div(c).row().px(18).py(9).rounded(9).bg(k.text).hover(k.text.alpha(0.88));
+        var n = ui.div(c).row().px(18).py(9).rounded(9).bg(if (blocked) k.ink(0.18) else k.text);
+        if (!blocked) n = n.hover(k.text.alpha(0.88));
         defer n.end();
-        ui.text(c, if (s.step >= questions) "Start a session" else "Next", set.st(c, 13, .{ .weight = .medium, .color = k.on_solid }));
+        ui.text(c, if (s.step >= questions) "Start a session" else "Next", set.st(c, 13, .{ .weight = .medium, .color = if (blocked) k.muted else k.on_solid }));
         if (n.clicked()) next(a);
     }
     {
@@ -641,7 +721,7 @@ fn status(c: *ui.Context, k: theme.Colors, good: bool, text: []const u8) void {
     ui.text(c, text, set.st(c, 12, .{ .color = k.muted }));
 }
 
-fn agentsPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
+fn agentsPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup, right_w: f32) void {
     const col = ui.div(c).column().w(right_w).gap(12);
     defer col.end();
     {
@@ -662,8 +742,10 @@ fn agentsPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
             }
             if (a.harnesses.items.len == 0)
                 status(c, k, false, "Checking this computer…")
+            else if (a.account.user != null)
+                status(c, k, true, "Connected with CodeGraff — no extra CLI needed")
             else
-                status(c, k, true, "Connected with CodeGraff — no extra CLI needed");
+                status(c, k, true, "Ready locally — sign in to CodeGraff anytime in Settings");
         }
         checkCircle(c, k, true);
     }
@@ -787,7 +869,7 @@ fn agentsPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
     ui.text(c, "Built-in Graff works without installing anything. Or install either CLI above and click Check again once it finishes.", set.st(c, 12, .{ .wrap = true, .color = k.faint }));
 }
 
-fn effortPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
+fn effortPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup, right_w: f32) void {
     const col = ui.div(c).column().w(right_w).gap(16);
     defer col.end();
     const ms = models(a);
@@ -801,7 +883,7 @@ fn effortPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
             var t = ui.div(c).row().px(12).py(6).rounded(7);
             t = if (on) t.bg(k.card).border(k.border).borderW(1) else t.hover(k.ink(0.05));
             defer t.end();
-            kit.ellipsisText(c, m.label, set.st(c, 12.5, .{ .weight = if (on) .medium else .regular, .color = if (on) k.text else k.muted }), 140);
+            kit.ellipsisText(c, m.label, set.st(c, 12.5, .{ .weight = if (on) .medium else .regular, .color = if (on) k.text else k.muted }), @max(80, (right_w - 36) / @as(f32, @floatFromInt(@max(1, ms.len)))));
             if (t.clicked() and !on) {
                 s.model = i;
                 s.level = null;
@@ -840,12 +922,12 @@ fn effortPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
             ui.key(c, "setup-effort-more");
             if (kit.iconButton(c, k, .@"alt-arrow-right", .{ .size = 30, .radius = 8, .icon = 14 })) nudge(a, 1);
         }
-        ui.text(c, c.print("Level {d} of {d}", .{ at + 1, x.levels.len }), set.st(c, 12, .{ .color = k.faint }));
+        ui.text(c, c.print("Level {d} of {d}", .{ at + 1, x.levels.len }), set.st(c, 12, .{ .tabular = true, .color = k.faint }));
     };
     ui.text(c, "Graff's models from your CodeGraff account", set.st(c, 12, .{ .color = k.faint }));
 }
 
-fn autonomyPane(c: *ui.Context, k: theme.Colors, s: *Setup) void {
+fn autonomyPane(c: *ui.Context, k: theme.Colors, s: *Setup, right_w: f32) void {
     const col = ui.div(c).column().w(right_w).gap(16);
     defer col.end();
     {
@@ -886,7 +968,7 @@ fn autonomyPane(c: *ui.Context, k: theme.Colors, s: *Setup) void {
     }
 }
 
-fn notifyPane(c: *ui.Context, k: theme.Colors, s: *Setup) void {
+fn notifyPane(c: *ui.Context, k: theme.Colors, s: *Setup, right_w: f32) void {
     const col = ui.div(c).column().w(right_w).gap(12);
     defer col.end();
     const choices = [_]struct { on: bool, icon: icons.Name, title: []const u8, body: []const u8, key: []const u8 }{
@@ -913,14 +995,14 @@ fn notifyPane(c: *ui.Context, k: theme.Colors, s: *Setup) void {
     ui.text(c, "Sounds and the background-only rule live in Settings > Notifications.", set.st(c, 12, .{ .wrap = true, .color = k.faint }));
 }
 
-fn summary(c: *ui.Context, k: theme.Colors, key: []const u8, value: []const u8) void {
+fn summary(c: *ui.Context, k: theme.Colors, key: []const u8, value: []const u8, right_w: f32) void {
     const r = ui.div(c).column().grow().w(0).gap(2);
     defer r.end();
     ui.text(c, key, set.st(c, 11, .{ .color = k.muted }));
-    kit.ellipsisText(c, value, set.st(c, 14, .{ .weight = .medium, .color = k.text }), (right_w - 40) / 2 - 8);
+    kit.ellipsisText(c, value, set.st(c, 14, .{ .weight = .medium, .color = k.text }), @max(80, (right_w - 40) / 2 - 8));
 }
 
-fn readyPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
+fn readyPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup, right_w: f32) void {
     const col = ui.div(c).column().w(right_w).gap(18);
     defer col.end();
     var names: std.ArrayList(u8) = .empty;
@@ -943,8 +1025,8 @@ fn readyPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
         for (rows) |row| {
             const r = ui.div(c).row().wFull().gap(16);
             defer r.end();
-            summary(c, k, row[0], row[1]);
-            if (row[2].len > 0) summary(c, k, row[2], row[3]) else ui.spacer(c);
+            summary(c, k, row[0], row[1], right_w);
+            if (row[2].len > 0) summary(c, k, row[2], row[3], right_w) else ui.spacer(c);
         }
     }
     ui.text(c, "Start with a prompt, or open an empty session", set.st(c, 12, .{ .color = k.muted }));

@@ -170,6 +170,7 @@ pub fn load(a: *App, t: accounts.Trigger) void {
     loadJobs(a);
     loadGraffFor(a, accounts.forceUsage(t));
     cloud.refresh(a);
+    @import("app_computer.zig").refresh(a);
     p.snapshot.call = a.engine.call("ListAgentAccounts", .{ .forceUsage = accounts.forceUsage(t), .targetDeviceId = target(a) }, .of(App, a, handler("snapshot", accounts.parseSnapshot)));
 }
 
@@ -612,6 +613,7 @@ fn codegraff(c: *ui.Context, a: *App, k: theme.Colors, now: i64) void {
         ui.spacer(c);
         // Signing out of Codegraff lives here, beside what it pays for.
         if (signed_in) if (rows.ghost(c, k, .{ .label = if (p.signing_out) "Signing out…" else "Sign out", .dim = p.signing_out }) and !p.signing_out) signOutCodegraff(a);
+        if (rows.ghost(c, k, .{ .label = "Add credits" })) _ = nanoui.shell.openUrl("https://codegraff.com/dashboard/billing");
         if (rows.ghost(c, k, .{ .label = "View usage" })) _ = nanoui.shell.openUrl("https://codegraff.com/dashboard/usage");
     }
     {
@@ -624,6 +626,7 @@ fn codegraff(c: *ui.Context, a: *App, k: theme.Colors, now: i64) void {
         }
     }
     jobsCard(c, a, k);
+    @import("view_settings_accounts_computer.zig").card(c, a, k);
     cloud.card(c, a, k);
 }
 

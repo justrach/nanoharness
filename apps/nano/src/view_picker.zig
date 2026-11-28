@@ -32,7 +32,10 @@ pub const compact_single_height: f32 = 46;
 /// Clamps the top edge below the 38pt window titlebar (`header_height + 6`)
 /// so agent tabs are never clipped against the top bar.
 pub fn placement(anchor: ui.Rect, size: ui.Size, new_chat: bool, wanted: f32) struct { x: f32, y: f32, h: f32 } {
-    const top_margin: f32 = @import("panel_chrome.zig").header_height + 6;
+    return placementTop(anchor, size, new_chat, wanted, @import("panel_chrome.zig").header_height + 6);
+}
+
+pub fn placementTop(anchor: ui.Rect, size: ui.Size, new_chat: bool, wanted: f32, top_margin: f32) struct { x: f32, y: f32, h: f32 } {
     const above = @max(0, anchor.y - top_margin - 6);
     const below = @max(0, size.h - anchor.y - anchor.h - 14);
     const down = (new_chat and below >= 180) or (above < 180 and below > above);
@@ -59,7 +62,7 @@ pub fn opened(a: *App) void {
     p.detail = null;
     p.hover_target = null;
     p.detail_rect = null;
-    p.starred = a.selected == null and p.favorites.items.len > 0;
+    p.starred = showsTabs(a) and a.selected == null and p.favorites.items.len > 0;
     p.reveal = true;
     p.height = list_height;
     a.ensureModels(a.target().harness);
@@ -386,7 +389,7 @@ pub fn keys(c: *ui.Context, a: *App) void {
     const next_agent = c.shortcut(.{ .key = S.tab, .ctrl = true });
     const prev_agent = c.shortcut(.{ .key = S.tab, .ctrl = true, .shift = true });
     if (next_agent or prev_agent) {
-        if (a.selected != null) return;
+        if (a.selected != null or !showsTabs(a)) return;
         var agents: std.ArrayList([]const u8) = .empty;
         for (a.harnesses.items) |h| if (h.offered or std.mem.eql(u8, h.id, a.target().harness)) agents.append(c.alloc(), h.id) catch {};
         if (agents.items.len == 0) return;
@@ -460,13 +463,15 @@ pub fn popover(c: *ui.Context, a: *App, k: theme.Colors) void {
     const animate_height = is_compact or p.can_return_compact;
     const wanted_h = if (animate_height) blk: {
         const height_sample = models.ScalarTransition.sample(&p.card_height, p.height, c.time, c.reduced_motion);
-        if (height_sample.moving) c.frameIn(1.0 / 120.0);
+        if (height_sample.moving) c.animationFrame();
         break :blk height_sample.value;
     } else blk: {
         p.card_height = null;
         break :blk p.height;
     };
-    const geometry = placement(anchor, c.size, a.selected == null, wanted_h);
+    const chrome = @import("panel_chrome.zig");
+    const top_margin: f32 = (if (a.view.full_screen) chrome.fs_top_inset else chrome.header_height) + 6;
+    const geometry = placementTop(anchor, c.size, a.selected == null, wanted_h, top_margin);
     const h = geometry.h;
     const x = std.math.clamp(anchor.x, 8, @max(8, c.size.w - w - 8));
     const y = geometry.y;
@@ -504,12 +509,18 @@ pub fn popover(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (p.stage != null) {
             page(c, a, k, w - 2, open);
         } else {
-            tabs(c, a, k, w - 2);
-            // The full-bleed hairline over the search (`crate::theme::hairline(0.08)`).
-            _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.08) }, .none, null);
+            // A plain chat lists only the Auto tiers: no Starred or agent
+            // tabs (the row stays only for the compact card's Back).
+            const with_tabs = showsTabs(a) or p.can_return_compact;
+            if (with_tabs) {
+                tabs(c, a, k, w - 2);
+                // The full-bleed hairline over the search (`crate::theme::hairline(0.08)`).
+                _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.08) }, .none, null);
+            }
             search(c, a, k);
             _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.06) }, .none, null);
-            modelList(c, a, k, w - 2, h - 2 - 39 - 1 - 35 - 1 - 1 - 28, open, motion);
+            const tabs_h: f32 = if (with_tabs) 39 + 1 else 0;
+            modelList(c, a, k, w - 2, h - 2 - tabs_h - 35 - 1 - 1 - 28, open, motion);
             _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.08) }, .none, null);
             pickerFooter(c, a, k, open);
         }
@@ -553,7 +564,10 @@ fn pickerFooter(c: *ui.Context, a: *App, k: theme.Colors, open: bool) void {
 
 /// The models: a 34-point row each, in sections by route while browsing
 /// one agent's catalog, flat for a search or the starred.
-fn modelList(c: *ui.Context, a: *App, k: theme.Colors, w: f32, list_h: f32, open: bool, exit: ui.motion.Frame) void {
+fn modelList(c: *ui.Context, a: *App, k: theme.Colors, w: f32, available_h: f32, open: bool, exit: ui.motion.Frame) void {
+    // When expanding from the compact card, there may not yet be room for
+    // the full list chrome. Use the same viewport height for layout and row bounds.
+    const list_h = @max(30, available_h);
     const p = &a.view.model_picker;
     const rows = models.rows(a, c.alloc()) catch return;
     if (rows.len > 0 and (p.active >= rows.len or rows[p.active].header != null)) p.active = firstModel(rows);
@@ -567,7 +581,7 @@ fn modelList(c: *ui.Context, a: *App, k: theme.Colors, w: f32, list_h: f32, open
     var hovered: ?usize = null;
     var detail_row: ?ui.Rect = null;
     {
-        const style: ui.Style = .{ .width = .fill, .height = .{ .px = @max(30, list_h) }, .padding = .{ .left = 6, .right = 6, .top = 1, .bottom = 6 }, .scrollbar = .{ .overlay = k.faint.alpha(0.5) } };
+        const style: ui.Style = .{ .width = .fill, .height = .{ .px = list_h }, .padding = .{ .left = 6, .right = 6, .top = 1, .bottom = 6 }, .scrollbar = .{ .overlay = k.faint.alpha(0.5) } };
         ui.key(c, "model-picker-list");
         const at = c.nodes.items.len;
         ui.scroll(c, style);
@@ -721,7 +735,8 @@ fn detail(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, row: ui.Rect,
     const left = c.size.w - right < detail_width + 8 and row.x - 10 >= detail_width + 8;
     const x = if (left) row.x - 10 - detail_width else @min(right, @max(8, c.size.w - detail_width - 8));
     const est: f32 = if (p.detail_rect) |d| d.h else 172;
-    const top_margin: f32 = @import("panel_chrome.zig").header_height + 6;
+    const chrome = @import("panel_chrome.zig");
+    const top_margin: f32 = (if (a.view.full_screen) chrome.fs_top_inset else chrome.header_height) + 6;
     const y = std.math.clamp(row.y, top_margin, @max(top_margin, c.size.h - est - 8));
     ui.key(c, "model-detail-card");
     const card = kit.shadowLg(ui.div(c).fixed().offset(x, y).motion(exit).w(detail_width).layer(7).column().p(16 + 1).gap(11)
@@ -1042,8 +1057,8 @@ fn compactPage(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) voi
 
     // 2c. Optional Service Tier / Speed row (`Standard · Fast · Ultra Fast`) when supported.
     if (has_speed) {
-        const raw_tier = st.service_tier orelse a.target().service_tier orelse m.service_tier_default orelse "default";
-        const cur_tier = if (std.mem.eql(u8, raw_tier, "ultrafast") and !m.service_tier_ultrafast) "fast" else raw_tier;
+        const raw_tier = st.service_tier orelse a.target().service_tier orelse m.service_tier_default;
+        const cur_tier = m.compatibleServiceTier(raw_tier) orelse "default";
         ui.key(c, "compact-service-tier-row");
         const tier_row = ui.div(c).row().wFull().h(32).px(8).gap(8).itemsCenter();
         {
@@ -1229,7 +1244,7 @@ fn slider(c: *ui.Context, a: *App, k: theme.Colors, accent: ui.Color, n: usize, 
     const energy_sample = models.ScalarTransition.sample(&p.energy_anim, target_energy, c.time, c.reduced_motion);
     const intensity = energy_sample.value;
     if (effort_sample.moving or press_sample.moving or energy_sample.moving) {
-        c.frameIn(1.0 / 120.0);
+        c.animationFrame();
     }
     var breath: f32 = 0.0;
     if (intensity > 0.001 and !c.reduced_motion) {
@@ -1238,7 +1253,7 @@ fn slider(c: *ui.Context, a: *App, k: theme.Colors, accent: ui.Color, n: usize, 
         p.shimmer_phase = @mod(p.shimmer_phase + dt * (0.32 + 0.22 * intensity), 1.0);
         breath = 0.5 + 0.5 * @sin(std.math.tau * p.shimmer_phase);
         if (!effort_sample.moving and !press_sample.moving and !energy_sample.moving) {
-            c.frameIn(1.0 / 60.0);
+            c.animationFrame();
         }
     } else {
         p.shimmer_last = null;
@@ -1304,6 +1319,13 @@ fn slider(c: *ui.Context, a: *App, k: theme.Colors, accent: ui.Color, n: usize, 
         .bg(ui.Color.hex(0xfffefa)).border(k.border).borderW(1).shadowSm().end();
 }
 
+/// Whether the card draws its Starred and agent tabs: a plain "Chat"
+/// draft or chat offers only the Auto tiers (`model_picker.rows`), which
+/// ignore both, so they would be dead there.
+pub fn showsTabs(a: *const App) bool {
+    return !@import("app_agent.zig").chatMode(a);
+}
+
 fn tabs(c: *ui.Context, a: *App, k: theme.Colors, width: f32) void {
     const p = &a.view.model_picker;
     ui.key(c, "model-picker-tabs");
@@ -1354,6 +1376,7 @@ fn tabs(c: *ui.Context, a: *App, k: theme.Colors, width: f32) void {
             c.changed = true;
         }
     }
+    if (!showsTabs(a)) return;
     if (tab(c, k, .@"star-bold", null, "Starred", p.starred) and a.picker != .none) {
         p.starred = true;
         reset(c, a);
@@ -1407,7 +1430,8 @@ fn search(c: *ui.Context, a: *App, k: theme.Colors) void {
         const f = ui.div(c).row().grow().w(0).itemsCenter();
         defer f.end();
         ui.key(c, "model-picker-search");
-        const placeholder = if (a.selected == null) "Search models… · Ctrl+Tab agents" else "Search models…";
+        // Ctrl+Tab switches agent tabs: none in an existing or plain chat.
+        const placeholder = if (a.selected == null and showsTabs(a)) "Search models… · Ctrl+Tab agents" else "Search models…";
         if (a.picker == .none) {
             const query = p.query.text();
             ui.text(c, if (query.len > 0) query else placeholder, .{ .size = 14, .weight = .medium, .line_height = 22.75, .color = if (query.len > 0) k.text else k.faint });

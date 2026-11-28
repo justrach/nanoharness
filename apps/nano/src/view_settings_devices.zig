@@ -33,6 +33,15 @@ pub const Page = struct {
     confirm_remove: std.ArrayList(u8) = .empty,
     /// The strip under the version; a click clears it.
     failure: std.ArrayList(u8) = .empty,
+    /// Settings → Devices → Allow remote control (`GetRemoteControl`).
+    remote_on: bool = false,
+    remote_known: bool = false,
+    remote_saving: bool = false,
+    remote_call: ?u64 = null,
+    /// Parked remote actions (`GetRemoteApprovals`).
+    pending: std.ArrayList(Pending) = .empty,
+    pending_call: ?u64 = null,
+    pending_known: bool = false,
     /// The expanded host's update controls.
     updates: updates_panel.State = .{},
 
@@ -43,7 +52,19 @@ pub const Page = struct {
         p.copied.deinit(gpa);
         p.confirm_remove.deinit(gpa);
         p.failure.deinit(gpa);
+        clearPending(p, gpa);
+        p.pending.deinit(gpa);
     }
+};
+
+pub const Pending = struct {
+    id: []u8,
+    device_id: []u8,
+    summary: []u8,
+    /// The engine's `allowOnce`: false where one approval can't cover the
+    /// action (a terminal's every keystroke is its own request), so the row
+    /// offers only Always allow and Deny.
+    allow_once: bool = true,
 };
 
 fn setTo(gpa: Allocator, list: *std.ArrayList(u8), s: []const u8) void {
@@ -148,7 +169,122 @@ pub fn shortId(buf: []u8, id: []const u8) []const u8 {
     return std.fmt.bufPrint(buf, "{s}…{s}", .{ id[0..8], id[id.len - 4 ..] }) catch id;
 }
 
+fn clearPending(p: *Page, gpa: Allocator) void {
+    for (p.pending.items) |row| {
+        gpa.free(row.id);
+        gpa.free(row.device_id);
+        gpa.free(row.summary);
+    }
+    p.pending.clearRetainingCapacity();
+}
+
+pub fn addPending(p: *Page, gpa: Allocator, id: []const u8, device_id: []const u8, summary: []const u8, allow_once: bool) void {
+    p.pending.append(gpa, .{
+        .id = gpa.dupe(u8, id) catch return,
+        .device_id = gpa.dupe(u8, device_id) catch return,
+        .summary = gpa.dupe(u8, summary) catch return,
+        .allow_once = allow_once,
+    }) catch {};
+}
+
+/// A `GetRemoteApprovals` item's `allowOnce`; an engine that predates the
+/// field leaves it out, and its rows keep the button they always had.
+pub fn allowOnceOf(item: std.json.ObjectMap) bool {
+    const v = item.get("allowOnce") orelse return true;
+    return v != .bool or v.bool;
+}
+
+fn loadApprovals(a: *App) void {
+    const p = &a.view.devices;
+    if (!a.engine.up() or p.pending_call != null) return;
+    if (a.engine.call("GetRemoteApprovals", rpc.empty, .of(App, a, onApprovals))) |id| p.pending_call = id;
+}
+
+fn onApprovals(a: *App, id: u64, r: rpc.Reply) void {
+    const p = &a.view.devices;
+    if (p.pending_call != null and p.pending_call != id) return;
+    p.pending_call = null;
+    p.pending_known = true;
+    switch (r) {
+        .ok => |v| {
+            clearPending(p, a.gpa);
+            const items = if (v == .object) v.object.get("items") else null;
+            if (items) |arr| if (arr == .array) {
+                for (arr.array.items) |item| {
+                    if (item != .object) continue;
+                    const pid = if (item.object.get("id")) |x| (if (x == .string) x.string else "") else "";
+                    const device = if (item.object.get("deviceId")) |x| (if (x == .string) x.string else "") else "";
+                    const summary = if (item.object.get("summary")) |x| (if (x == .string) x.string else "") else "";
+                    if (pid.len > 0) addPending(p, a.gpa, pid, device, summary, allowOnceOf(item.object));
+                }
+            };
+        },
+        else => {},
+    }
+    a.redraw();
+}
+
+fn resolvePending(a: *App, id: []const u8, allow: bool, always: bool) void {
+    const p = &a.view.devices;
+    if (a.engine.up()) {
+        p.pending_known = false;
+        if (allow) {
+            _ = a.engine.call("ApproveRemoteAction", .{ .id = id, .always = always }, .of(App, a, onApprovals));
+        } else {
+            _ = a.engine.call("DenyRemoteAction", .{ .id = id }, .of(App, a, onApprovals));
+        }
+        return;
+    }
+    var i: usize = 0;
+    while (i < p.pending.items.len) {
+        if (std.mem.eql(u8, p.pending.items[i].id, id)) {
+            const row = p.pending.orderedRemove(i);
+            a.gpa.free(row.id);
+            a.gpa.free(row.device_id);
+            a.gpa.free(row.summary);
+        } else i += 1;
+    }
+    a.redraw();
+}
+
+fn loadRemote(a: *App) void {
+    const p = &a.view.devices;
+    if (!a.engine.up() or p.remote_call != null) return;
+    if (a.engine.call("GetRemoteControl", rpc.empty, .of(App, a, onRemote))) |id| p.remote_call = id;
+}
+
+fn setRemote(a: *App, on: bool) void {
+    const p = &a.view.devices;
+    if (!a.engine.up() or p.remote_saving) return;
+    p.remote_saving = true;
+    p.failure.clearRetainingCapacity();
+    if (a.engine.call("SetRemoteControl", .{ .enabled = on }, .of(App, a, onRemote))) |id| p.remote_call = id;
+}
+
+fn onRemote(a: *App, id: u64, r: rpc.Reply) void {
+    const p = &a.view.devices;
+    if (p.remote_call != null and p.remote_call != id) return;
+    p.remote_call = null;
+    p.remote_saving = false;
+    switch (r) {
+        .ok => |v| {
+            const was_on = p.remote_on;
+            p.remote_known = true;
+            p.remote_on = if (v == .object) (if (v.object.get("enabled")) |e| e == .bool and e.bool else false) else false;
+            if (!was_on and p.remote_on) p.pending_known = false;
+        },
+        .err => |e| {
+            p.remote_known = true;
+            fail(a, "{s}", .{e});
+        },
+        else => {},
+    }
+    a.redraw();
+}
+
 pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
+    if (!a.view.devices.remote_known) loadRemote(a);
+    if (!a.view.devices.pending_known) loadApprovals(a);
     const devices = a.devices.items;
     set.header(c, k, "Devices", if (devices.len > 0) devices.len else null);
     set.subtitle(c, k, subtitle(a.account.scope), false);
@@ -217,7 +353,44 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         set.tile(c, k, .refresh);
         set.words(c, k, c.print("Harness v{s}", .{@import("build_info").version}), c.print("{s}", .{summary.line}), 0);
     }
+    {
+        ui.key(c, "allow-remote-control");
+        const live = a.engine.up();
+        const p = &a.view.devices;
+        const rcard = set.card(c, k);
+        defer rcard.end();
+        const r = set.row(c, k, true, !live);
+        defer r.end();
+        if (live) {
+            _ = r.control();
+            _ = kit.focusRing(c, r, k.accent, 2);
+        }
+        set.tile(c, k, .@"remote-server");
+        set.words(
+            c,
+            k,
+            "Allow remote control",
+            "Let your other signed-in devices run commands, terminals and file writes on this computer through the sync relay. Off by default, so a compromised sync server cannot drive this machine unless you turn it on.",
+            40,
+        );
+        if (set.toggle(c, k, p.remote_on, live) or (live and r.clicked())) setRemote(a, !p.remote_on);
+    }
     const p = &a.view.devices;
+    if (p.pending.items.len > 0) {
+        ui.key(c, "remote-approvals");
+        const acard = set.card(c, k);
+        defer acard.end();
+        for (p.pending.items, 0..) |item, ix| {
+            ui.key(c, item.id);
+            const r = set.row(c, k, ix == 0, false);
+            defer r.end();
+            set.tile(c, k, .@"remote-server");
+            set.words(c, k, "Approve remote action", item.summary, 168);
+            if (item.allow_once and action(c, k, null, "Allow once", false)) resolvePending(a, item.id, true, false);
+            if (action(c, k, null, "Always allow", false)) resolvePending(a, item.id, true, true);
+            if (action(c, k, null, "Deny", false)) resolvePending(a, item.id, false, false);
+        }
+    }
     if (p.failure.items.len > 0) {
         if (@import("view_settings_accounts_rows.zig").errorStrip(c, k, p.failure.items, false)) p.failure.clearRetainingCapacity();
     }
@@ -415,6 +588,37 @@ test "native updater settings describe hourly checks without an inert restart to
     t.settle(0.1);
     try std.testing.expect(a.settings.get(.automatically_install_updates));
     try std.testing.expect(!a.updates.app_downloading);
+}
+
+test "a parked remote action offers Allow once only where the engine says one approval covers it" {
+    theme.registerFonts();
+    var a: App = .init(std.testing.allocator, std.testing.io, 1);
+    defer a.deinit();
+    a.settings.setSection(.devices);
+    set.open(&a);
+    var t: ui.Tester = undefined;
+    try t.init(std.testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1200, .height = 780 });
+    defer t.deinit();
+    // A terminal keystroke from a made-up phone: each keystroke is its own
+    // request, so Allow once would cover a single one.
+    addPending(&a.view.devices, a.gpa, "pending-terminal", "phone-synthetic", "WriteTerminal from Synthetic Phone", false);
+    t.settle(0.1);
+    try testing.expect(t.hasText("Approve remote action"));
+    try testing.expect(t.hasText("Always allow"));
+    try testing.expect(t.hasText("Deny"));
+    try testing.expect(!t.hasText("Allow once"));
+    addPending(&a.view.devices, a.gpa, "pending-git", "phone-synthetic", "ApplyCheckoutGitAction from Synthetic Phone", true);
+    t.settle(0.1);
+    try testing.expect(t.hasText("Allow once"));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"a","allowOnce":false},{"id":"b","allowOnce":true},{"id":"c"}]
+    , .{});
+    defer parsed.deinit();
+    const items = parsed.value.array.items;
+    try testing.expect(!allowOnceOf(items[0].object));
+    try testing.expect(allowOnceOf(items[1].object));
+    try testing.expect(allowOnceOf(items[2].object));
 }
 
 test "presence, last seen, the subtitle and the id chip as the GPUI app's" {

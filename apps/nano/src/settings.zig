@@ -4,11 +4,16 @@
 //! preferences into `nano-ui-settings.json` once, so the two apps can keep
 //! different sidebar and display choices without either rewriting the other.
 const std = @import("std");
+const builtin = @import("builtin");
 const json = std.json;
+const engine_cli = @import("engine_cli.zig");
 const icons = @import("icons.zig");
 const shortcuts = @import("shortcuts.zig");
 const Allocator = std.mem.Allocator;
 
+/// The GPUI app's Appshots section is left out: Nano has no capture path,
+/// so its switches would promise captures nothing takes. A file that saved
+/// it as the open section opens on the default one.
 pub const Section = enum {
     account,
     appearance,
@@ -22,7 +27,7 @@ pub const Section = enum {
     extensions,
     github_ci,
     devices,
-    appshots,
+    usage,
     archived,
 
     /// The sidebar's order (`SettingsSection::ALL`).
@@ -39,7 +44,7 @@ pub const Section = enum {
             .browsing => "Links & browsing",
             .notifications => "Notifications",
             .shortcuts => "Shortcuts",
-            .appshots => "Appshots",
+            .usage => "Usage",
             .archived => "Archived sessions",
             .mcp => "MCP servers",
             .extensions => "Extensions",
@@ -53,14 +58,15 @@ pub const Section = enum {
             .account => "Account",
             .appearance, .notifications, .shortcuts, .files, .browsing => "General",
             .harnesses, .agents, .mcp, .extensions, .github_ci => "Agents",
-            .devices, .appshots, .archived => "Devices and data",
+            .devices, .usage, .archived => "Devices and data",
         };
     }
 
     pub fn icon(s: Section) icons.Name {
         return switch (s) {
             .account => .@"user-rounded",
-            .devices, .appshots => .monitor,
+            .devices => .monitor,
+            .usage => .widget,
             .harnesses => .widget,
             .agents => .@"key-minimalistic",
             .appearance => .tuning,
@@ -123,7 +129,8 @@ pub const Prefs = struct {
     sidebar_show_branch: bool = true,
     sidebar_show_project_label: bool = false,
     sidebar_show_archived: bool = true,
-    // Settings › Appshots.
+    // The GPUI app's Appshots choices. Nano has no capture path and shows no
+    // Appshots page; the file keeps them as they were.
     appshots_enabled: bool = false,
     appshot_sound_enabled: bool = true,
     // Settings › Devices. Installation defaults on, independently of the legacy restart switch.
@@ -167,6 +174,31 @@ pub const Flag = enum {
     automatically_install_updates,
     restart_to_install_updates,
     star_banner_dismissed,
+};
+
+/// Settings › Appearance's "Reduce motion", as saved in `reduceMotion`.
+pub const ReduceMotion = enum {
+    system,
+    on,
+    off,
+
+    pub fn fromKey(k: ?[]const u8) ReduceMotion {
+        return std.meta.stringToEnum(ReduceMotion, k orelse return .system) orelse .system;
+    }
+
+    /// What the choice forces, or null to follow the system.
+    pub fn override(p: ReduceMotion) ?bool {
+        return switch (p) {
+            .system => null,
+            .on => true,
+            .off => false,
+        };
+    }
+
+    /// Whether motion is reduced, given what the system asks for.
+    pub fn resolve(p: ReduceMotion, system_reduces: bool) bool {
+        return p.override() orelse system_reduces;
+    }
 };
 
 pub const sidebar_min: f32 = 224;
@@ -399,6 +431,10 @@ pub const Store = struct {
         return jsonNumber(s.doc.get(key));
     }
 
+    pub fn reduceMotion(s: *const Store) ReduceMotion {
+        return ReduceMotion.fromKey(s.text("reduceMotion"));
+    }
+
     /// The accent preset's name, or null for the theme's own.
     pub fn accent(s: *const Store) ?[]const u8 {
         const v = s.text("accent") orelse return null;
@@ -503,7 +539,9 @@ pub const Store = struct {
     pub fn combo(s: *const Store, sc: shortcuts.Shortcut) []const u8 {
         var buf: [64]u8 = undefined;
         const k = if (sc.slot) |n| std.fmt.bufPrint(&buf, "{s}.{d}", .{ sc.key, n }) catch return sc.default else sc.key;
-        return s.keymap.get(k) orelse sc.default;
+        const saved = s.keymap.get(k) orelse return sc.default;
+        // Older builds allowed overrides to consume these fixed workspace keys.
+        return if (shortcuts.isWorkspaceModeBinding(saved)) sc.default else saved;
     }
 
     /// Rebinds `sc` (null: back to its default), and writes the keymap whole
@@ -651,16 +689,19 @@ pub const Store = struct {
         s.doc.put(a, k, v) catch {};
     }
 
-    /// The file in Harness's data folder: `HARNESS_DATA_DIR`, else
-    /// `~/.harness`.
+    /// The file in Harness's data folder, found the way the engine finds it
+    /// (`engine_cli.resolveDataDir`): `HARNESS_DATA_DIR`, `DATA_DIR`, then
+    /// `%LOCALAPPDATA%\Harness` on Windows or `~/.harness` elsewhere. The
+    /// engine's IPC token and lock live there too, so a different folder
+    /// leaves the app unable to authenticate (#229).
     pub fn open(gpa: Allocator, io: std.Io, env: *const std.process.Environ.Map) Store {
-        if (env.get("HARNESS_DATA_DIR")) |dir| return openIn(gpa, io, dir);
-        if (env.get("HOME")) |home| {
-            const dir = std.fs.path.join(gpa, &.{ home, ".harness" }) catch return .{ .gpa = gpa, .io = io };
-            defer gpa.free(dir);
-            return openIn(gpa, io, dir);
-        }
-        return .{ .gpa = gpa, .io = io };
+        return openFor(gpa, io, env, builtin.os.tag == .windows);
+    }
+
+    fn openFor(gpa: Allocator, io: std.Io, env: *const std.process.Environ.Map, windows: bool) Store {
+        const dir = engine_cli.resolveDataDirFor(gpa, io, env, windows) catch return .{ .gpa = gpa, .io = io };
+        defer gpa.free(dir);
+        return openIn(gpa, io, dir);
     }
 
     /// Opens Nano's own file in `dir`. On first run after the split, adopts
@@ -814,6 +855,7 @@ pub const Store = struct {
         if (s.text("uiMode")) |raw| {
             if (std.mem.eql(u8, raw, "zen")) return .zen;
             if (std.mem.eql(u8, raw, "developer")) return .developer;
+            if (std.mem.eql(u8, raw, "design")) return .design;
         }
         return if (s.path != null) rules.UiState.initial.mode else .developer;
     }
@@ -835,9 +877,11 @@ pub const Store = struct {
     pub fn uiMode(s: *const Store) @import("motion_rules.zig").UiMode {
         const rules = @import("motion_rules.zig");
         const base = s.baseUiMode();
+        if (base == .design) return .design;
         const opposite: rules.UiMode = switch (base) {
             .zen => .developer,
             .developer => .zen,
+            .design => .zen,
         };
         if (std.meta.eql(s.hierarchyProfile(), rules.HierarchyProfile.ofMode(opposite))) return opposite;
         return base;
@@ -848,7 +892,7 @@ pub const Store = struct {
         for (rules.MovingPart.all) |part| s.clearText(part.key());
         s.setText("uiMode", mode.key());
         switch (mode) {
-            .zen => {
+            .zen, .design => {
                 s.setText("sidebarOrganization", Organization.in_one_list.key());
                 s.set(.sidebar_show_harness, true);
                 s.set(.sidebar_show_project_icon, true);
@@ -880,6 +924,10 @@ pub const Store = struct {
         const rules = @import("motion_rules.zig");
         const next = rules.stepUiState(.{ .mode = s.uiMode() }, .toggle_mode).mode;
         s.applyUiMode(next);
+    }
+
+    pub fn cycleUiMode(s: *Store) void {
+        s.applyUiMode(s.uiMode().cycle());
     }
 
     pub fn organization(s: *const Store) Organization {
@@ -1477,4 +1525,32 @@ test "star banner dismissal and skipped updates persist per row version token" {
     try testing.expect(!s.isUpdateSkipped("agent:local:codex", "0.170.0"));
     s.clearSkippedUpdate("agent:local:codex");
     try testing.expect(!s.isUpdateSkipped("agent:local:codex", "0.169.0"));
+}
+
+test "Windows without HOME finds the engine's IPC token in LOCALAPPDATA/Harness (#229)" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // What the engine writes on start: `{data_dir}/ipc-token-{port}`.
+    try tmp.dir.createDirPath(io, "Harness");
+    try tmp.dir.writeFile(io, .{ .sub_path = "Harness/ipc-token-27664", .data = "synthetic-admin-token" });
+    const relative = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(relative);
+    const local = try std.Io.Dir.cwd().realPathFileAlloc(io, relative, gpa);
+    defer gpa.free(local);
+
+    // A Start-menu launch on Windows: LOCALAPPDATA set, HOME and HARNESS_DATA_DIR not.
+    var env = std.process.Environ.Map.init(gpa);
+    defer env.deinit();
+    try env.put("LOCALAPPDATA", local);
+    var s = Store.openFor(gpa, io, &env, true);
+    defer s.deinit();
+
+    const want = try std.fs.path.join(gpa, &.{ local, "Harness" });
+    defer gpa.free(want);
+    try testing.expectEqualStrings(want, s.dataDir() orelse return error.NoDataDir);
+    const tok = @import("ws.zig").resolveIpcToken(gpa, io, null, s.dataDir(), 27664, false) orelse return error.NoIpcToken;
+    defer gpa.free(tok);
+    try testing.expectEqualStrings("synthetic-admin-token", tok);
 }

@@ -76,7 +76,7 @@ fn textRect(h: *Harness, text: []const u8) ?@import("nanoui").ui.Rect {
 
 fn topTextRect(h: *Harness, text: []const u8) ?@import("nanoui").ui.Rect {
     for (h.t.ctx.nodes.items) |node| switch (node.content) {
-        .text => |tx| if (std.mem.eql(u8, tx.str, text) and node.rect.y < 42 and node.rect.x >= h.a.view.sidebar_width) return node.rect,
+        .text => |tx| if (std.mem.eql(u8, tx.str, text) and node.rect.y < h.a.view.chrome.y and node.rect.x >= h.a.view.sidebar_width) return node.rect,
         else => {},
     };
     return null;
@@ -114,7 +114,7 @@ test "github pane keeps a useful width and its tab joins the body with curved sh
         var h: Harness = undefined;
         try setup(&h, dark, &.{pulls});
         defer h.deinit();
-        try h.t.clickText("Repository");
+        try h.t.clickText("Browse repository");
         h.a.splitPane(.horizontal);
         h.a.openChat("b", null);
         h.a.focusPane(0);
@@ -160,7 +160,7 @@ test "github child stays beside its originating split and retains repository on 
     h.a.focusPane(0);
     git.open(&h.a, .github);
     h.t.settle(1);
-    try h.t.clickText("Repository");
+    try h.t.clickText("Browse repository");
     h.t.settle(1);
     try screenshot(&h, "child-placement");
     const github = textRect(&h, "demo/fieldnotes") orelse return error.NoRepositoryTitle;
@@ -190,7 +190,7 @@ test "github child vertical layout bounds the child to its parent row and hides 
         h.a.focusPane(0);
         git.open(&h.a, .github);
         h.t.settle(1);
-        try h.t.clickText("Repository");
+        try h.t.clickText("Browse repository");
         h.t.settle(0.2);
         const parent = topTextRect(&h, "Navigation polish") orelse return error.MissingParentTab;
         const child = topTextRect(&h, "GitHub") orelse return error.MissingChildTab;
@@ -200,7 +200,7 @@ test "github child vertical layout bounds the child to its parent row and hides 
         try testing.expect(title.x > h.a.view.chrome.x + h.a.view.chrome.chat_width);
         var bounded = false;
         for (h.t.ctx.nodes.items) |node| {
-            if (node.style.radius == 10 and node.rect.x > h.a.view.chrome.x + h.a.view.chrome.chat_width and node.rect.y < 50) {
+            if (node.style.radius == @import("panel_chrome.zig").zen_radius and node.rect.x > h.a.view.chrome.x + h.a.view.chrome.chat_width and node.rect.y < 50) {
                 bounded = node.rect.h < h.a.view.chrome.height * 0.6;
                 if (bounded) break;
             }
@@ -236,7 +236,7 @@ test "github child description and activity images open a bounded preview withou
     var h: Harness = undefined;
     try setup(&h, true, &.{ pulls, picture_detail, picture_activity });
     defer h.deinit();
-    try h.t.clickText("Repository");
+    try h.t.clickText("Browse repository");
     try h.t.clickText("Polish repository navigation");
     try h.a.panels.github_repository.images.seed("https://raw.githubusercontent.com/demo/repo/media/image.png", @embedFile("testdata/github-preview.png"));
     for (0..2) |i| {
@@ -253,7 +253,7 @@ test "github child description and activity images open a bounded preview withou
         h.t.settle(0.2);
         try testing.expect(h.t.hasText("GitHub image preview"));
         const origin = h.a.panels.github_repository.images.focus_scope.origin;
-        const focus_order = [_][]const u8{ "Close preview", "Zoom out", "Zoom in", "Fit", "Close preview" };
+        const focus_order = [_][]const u8{ "Close preview", "Zoom out", "Zoom in", "Fit", "Copy image", "Close preview" };
         for (focus_order, 0..) |label, step| {
             if (step > 0) h.t.key(.tab);
             const focused_label = for (h.t.ctx.a11y_items.items) |item| {
@@ -314,7 +314,7 @@ test "github keyboard cards buttons and disclosures activate exactly once" {
     var h: Harness = undefined;
     try setup(&h, true, &.{ pulls, detail, files });
     defer h.deinit();
-    try h.t.clickText("Repository");
+    try h.t.clickText("Browse repository");
     h.t.settle(0.1);
     // Focus the actual card, just as Tab does, without invoking its pointer path.
     const card_id = for (h.t.ctx.nodes.items) |node| {
@@ -345,7 +345,7 @@ test "github keyboard choice arrows move focus without fetching until committed"
     var h: Harness = undefined;
     try setup(&h, true, &.{ pulls, issues });
     defer h.deinit();
-    try h.t.clickText("Repository");
+    try h.t.clickText("Browse repository");
     h.t.settle(0.1);
     h.t.ctx.focus = try labeledControl(&h, "Pull requests");
     const before = try githubCalls(&h);
@@ -393,7 +393,7 @@ test "repository github browser lists all repository PRs pages filters and issue
         try setup(&h, dark, &.{ pulls, pulls2, pulls, closed, issues });
         defer h.deinit();
         try testing.expect(h.a.panels.github_repository.list == null);
-        try h.t.clickText("Repository");
+        try h.t.clickText("Browse repository");
         h.t.settle(0.1);
         try testing.expect(h.t.hasText("demo/fieldnotes"));
         try testing.expect(h.t.hasText("Repository-wide"));
@@ -437,7 +437,7 @@ test "repository github browser inspects PR summary code and activity natively" 
         var h: Harness = undefined;
         try setup(&h, dark, &.{ pulls, detail, files, activity });
         defer h.deinit();
-        try h.t.clickText("Repository");
+        try h.t.clickText("Browse repository");
         try h.t.clickText("Polish repository navigation");
         h.t.settle(0.1);
         try testing.expect(h.t.hasText("feature/navigation → main"));
@@ -473,7 +473,7 @@ test "repository github browser opens issue details with activity but no PR code
     var h: Harness = undefined;
     try setup(&h, true, &.{ pulls, issues, issue_detail, activity });
     defer h.deinit();
-    try h.t.clickText("Repository");
+    try h.t.clickText("Browse repository");
     try h.t.clickText("Issues");
     try h.t.clickText("Track keyboard navigation");
     try testing.expect(h.t.hasText(issue_detail.detail.?.body));
@@ -530,7 +530,7 @@ test "repository github presentation renders descriptions as native Markdown" {
         var h: Harness = undefined;
         try setup(&h, dark, &.{ pulls, rich });
         defer h.deinit();
-        try h.t.clickText("Repository");
+        try h.t.clickText("Browse repository");
         try h.t.clickText("Polish repository navigation");
         h.t.settle(0.1);
         try screenshot(&h, if (dark) "formatted-summary-dark" else "formatted-summary-light");
@@ -555,7 +555,7 @@ test "repository github list rows keep long titles and metadata inside the card"
     var h: Harness = undefined;
     try setup(&h, false, &.{long});
     defer h.deinit();
-    try h.t.clickText("Repository");
+    try h.t.clickText("Browse repository");
     h.t.resize(760, 780);
     h.t.settle(0.2);
     const title = h.t.findText(entries[0].title) orelse return error.MissingLongTitle;
@@ -599,7 +599,7 @@ test "repository github session empty state does not invent an authentication fa
     defer h.deinit();
     try testing.expect(h.t.hasText("No session-linked pull requests"));
     try testing.expect(!h.t.hasText("No session pull request is available. The host needs gh installed and signed in to GitHub."));
-    try h.t.clickText("Repository");
+    try h.t.clickText("Browse repository");
     try testing.expect(h.t.hasText("Polish repository navigation"));
 }
 
@@ -607,7 +607,7 @@ test "repository github browser masks raw errors rejects changed repo replies an
     var h: Harness = undefined;
     try setup(&h, true, &.{pulls});
     defer h.deinit();
-    try h.t.clickText("Repository");
+    try h.t.clickText("Browse repository");
     flow.load(&h.a, .pulls, 2);
     const id = h.a.panels.github_repository.pending.?;
     const err = try std.fmt.allocPrint(testing.allocator, "{{\"id\":{d},\"err\":\"private provider output\"}}", .{id});
@@ -652,7 +652,7 @@ test "github code review uses numbered colored source rows instead of wrapped pa
         var h: Harness = undefined;
         try setup(&h, dark, &.{ pulls, detail, review_files });
         defer h.deinit();
-        try h.t.clickText("Repository");
+        try h.t.clickText("Browse repository");
         try h.t.clickText("Polish repository navigation");
         try h.t.clickText("Code");
         h.a.view.strip.expanded = .host;
@@ -686,5 +686,86 @@ test "github code review uses numbered colored source rows instead of wrapped pa
         try testing.expect(h.t.hasText("Patch incomplete; open on GitHub for the full diff."));
         try testing.expect(h.t.hasText("Patch not supplied by GitHub (binary, large or omitted)."));
         try testing.expectEqual(calls, try githubCalls(&h));
+    }
+}
+
+test "repository github analytics dashboard renders overview charts and filters client side without extra RPCs" {
+    const dashboard_items = [_]flow.Item{
+        .{ .number = 156, .title = "Starred named operators and gathered equations fall back", .url = "https://github.com/demo/fieldnotes/issues/156", .state = "open", .author = "lin", .updatedAt = "2026-11-24", .createdAt = "2026-11-24", .labels = &.{"math"} },
+        .{ .number = 155, .title = "A dollar price steals the opener of a later equation", .url = "https://github.com/demo/fieldnotes/issues/155", .state = "open", .author = "lin", .updatedAt = "2026-11-24", .createdAt = "2026-11-24", .labels = &.{"math"} },
+        .{ .number = 153, .title = "An unmatched math opener disables later complete math", .url = "https://github.com/demo/fieldnotes/issues/153", .state = "open", .author = "lin", .updatedAt = "2026-11-24", .createdAt = "2026-11-24", .labels = &.{"math"} },
+        .{ .number = 150, .title = "Unsaved edits in other panes block blank pane reuse", .url = "https://github.com/demo/fieldnotes/issues/150", .state = "open", .author = "ada", .updatedAt = "2026-11-23", .createdAt = "2026-11-23", .labels = &.{"splits"} },
+        .{ .number = 149, .title = "Returning to a parked split restores wrong model pick", .url = "https://github.com/demo/fieldnotes/issues/149", .state = "open", .author = "ada", .updatedAt = "2026-11-23", .createdAt = "2026-11-23", .labels = &.{"splits"} },
+        .{ .number = 143, .title = "Accepted slash commands have no composer highlight", .url = "https://github.com/demo/fieldnotes/issues/143", .state = "closed", .author = "sam", .updatedAt = "2026-11-22", .createdAt = "2026-11-22", .labels = &.{"composer"} },
+        .{ .number = 138, .title = "Session reveal jumps to a parked duplicate", .url = "https://github.com/demo/fieldnotes/issues/138", .state = "closed", .author = "ada", .updatedAt = "2026-11-22", .createdAt = "2026-11-21", .labels = &.{"splits"} },
+        .{ .number = 128, .title = "Explicit spacing around binary operators falls back", .url = "https://github.com/demo/fieldnotes/issues/128", .state = "closed", .author = "lin", .updatedAt = "2026-11-21", .createdAt = "2026-11-20", .labels = &.{"math"} },
+        .{ .number = 124, .title = "Thin space after boxed math triggers literal fallback", .url = "https://github.com/demo/fieldnotes/issues/124", .state = "closed", .author = "lin", .updatedAt = "2026-11-21", .createdAt = "2026-11-20", .labels = &.{"math"} },
+        .{ .number = 119, .title = "Appearance font controls do nothing in Settings", .url = "https://github.com/demo/fieldnotes/issues/119", .state = "closed", .author = "kai", .updatedAt = "2026-11-20", .createdAt = "2026-11-19", .labels = &.{"settings"} },
+        .{ .number = 116, .title = "Scroll to bottom button hops sideways in narrow panes", .url = "https://github.com/demo/fieldnotes/issues/116", .state = "closed", .author = "sam", .updatedAt = "2026-11-20", .createdAt = "2026-11-19", .labels = &.{"composer"} },
+        .{ .number = 114, .title = "Dragging transcript scrollbar thumb fails to scroll chat", .url = "https://github.com/demo/fieldnotes/issues/114", .state = "closed", .author = "sam", .updatedAt = "2026-11-19", .createdAt = "2026-11-19", .labels = &.{"composer"} },
+    };
+    const dashboard_page: flow.Page = .{
+        .repository = repo,
+        .kind = .issues,
+        .page = 1,
+        .hasNextPage = false,
+        .items = &dashboard_items,
+    };
+
+    for ([_]bool{ false, true }) |dark| {
+        var h: Harness = undefined;
+        try setup(&h, dark, &.{ pulls, dashboard_page });
+        defer h.deinit();
+        try h.t.clickText("Browse repository");
+        try h.t.clickText("Issues");
+        h.t.settle(0.1);
+
+        // Split pane view (~500px host width)
+        h.t.resize(1120, 760);
+        h.t.settle(0.1);
+        try testing.expect(h.t.hasText("On This Page"));
+        try testing.expect(h.t.hasText("State Split"));
+        try testing.expect(h.t.hasText("By Label"));
+        try testing.expect(h.t.hasText("Recent Activity"));
+        if (dark) try screenshot(&h, "dashboard-split-dark");
+
+        // Expanded wide view (~900px host width)
+        h.a.view.strip.expanded = .host;
+        h.t.resize(1120, 760);
+        h.t.settle(0.1);
+        for (h.t.ctx.nodes.items) |node| switch (node.content) {
+            .text => {
+                try testing.expect(node.rect.x >= -0.5);
+                try testing.expect(node.rect.x + node.rect.w <= h.t.size.w + 0.5);
+            },
+            else => {},
+        };
+        try screenshot(&h, if (dark) "dashboard-wide-dark" else "dashboard-wide-light");
+
+        if (dark) {
+            const calls_before = try githubCalls(&h);
+            // Click the "math" label bar in By Label -> filters client-side with 0 extra RPCs.
+            try h.t.clickText("math");
+            h.t.settle(0.1);
+            try testing.expectEqual(calls_before, try githubCalls(&h));
+            try testing.expect(h.t.hasText("Showing 5 of 12 (label: math)"));
+            try testing.expect(h.t.hasText("Starred named operators and gathered equations fall back"));
+            try testing.expect(!h.t.hasText("Unsaved edits in other panes block blank pane reuse"));
+
+            // Click State Split "Open" legend row -> combines with label filter (`open` AND `math`).
+            const open_legend = try labeledControl(&h, "Filter state: Open");
+            h.t.ctx.focus = open_legend;
+            h.t.key(.enter);
+            h.t.settle(0.1);
+            try testing.expectEqual(calls_before, try githubCalls(&h));
+            try testing.expect(h.t.hasText("Showing 3 of 12 (state: open · math)"));
+
+            // Reset filter restores all 12 items without touching RPCs.
+            try h.t.clickText("Clear filter");
+            h.t.settle(0.1);
+            try testing.expectEqual(calls_before, try githubCalls(&h));
+            try testing.expect(!h.t.hasText("Clear filter"));
+            try testing.expect(h.t.hasText("Unsaved edits in other panes block blank pane reuse"));
+        }
     }
 }

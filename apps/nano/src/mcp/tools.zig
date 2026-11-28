@@ -13,6 +13,7 @@ const u = @import("util.zig");
 const link = @import("engine_link.zig");
 const transcript = @import("transcript.zig");
 const peer = @import("peer.zig");
+const peer_delivery = @import("peer_delivery.zig");
 const ids = @import("../ids.zig");
 pub const rooms = @import("rooms.zig");
 pub const bots = @import("bots.zig");
@@ -83,17 +84,24 @@ pub const Tools = struct {
         return self.origin.chat_id != null;
     }
 
-    /// `tools/list`: the catalog, without `show_image`/`show_visual` when
-    /// there is no origin chat to publish into.
+    /// `tools/list`: the catalog, without `show_image`/`show_visual` /
+    /// `create_artifact`/`update_artifact` when there is no origin chat.
     pub fn list(self: *const Tools, a: Allocator) !Value {
         const all = try json.parseFromSliceLeaky(Value, a, catalog_json, .{});
         var out = u.arr(a);
         for (all.array.items) |t| {
             const name = u.str(t, "name").?;
-            if (self.origin.chat_id == null and (std.mem.eql(u8, name, "show_image") or std.mem.eql(u8, name, "show_visual"))) continue;
+            if (self.origin.chat_id == null and isChatOnlyTool(name)) continue;
             try out.append(t);
         }
         return .{ .array = out };
+    }
+
+    fn isChatOnlyTool(name: []const u8) bool {
+        return std.mem.eql(u8, name, "show_image") or
+            std.mem.eql(u8, name, "show_visual") or
+            std.mem.eql(u8, name, "create_artifact") or
+            std.mem.eql(u8, name, "update_artifact");
     }
 
     pub fn has(name: []const u8) bool {
@@ -134,6 +142,8 @@ fn dispatch(c: *Ctx, name: []const u8, args: Value) !Value {
     if (eq(u8, name, "archive_chat")) return archiveChat(c, args);
     if (eq(u8, name, "show_image")) return showImage(c, args);
     if (eq(u8, name, "show_visual")) return showVisual(c, args);
+    if (eq(u8, name, "create_artifact")) return createArtifact(c, args);
+    if (eq(u8, name, "update_artifact")) return updateArtifact(c, args);
     if (rooms.handles(name)) return rooms.call(c, name, args);
     if (bots.handles(name)) return bots.call(c, name, args);
     return c.fail("unknown tool: {s}", .{name});
@@ -502,7 +512,6 @@ pub fn summarizeChat(c: *Ctx, chat: Value, all_spaces: []const Value, all_sessio
     try o.put("createdAt", try timeValue(a, chat, "createdAt"));
     return o;
 }
-
 
 // ---- harness rows ----------------------------------------------------------------------
 
@@ -1099,7 +1108,13 @@ fn sendMessage(c: *Ctx, args: Value) !Value {
     const baseline = sessionFor(sss, chat);
     const mode = given(args, "mode") orelse "auto";
     const sent_at = c.t.nowMs();
-    const body = try attribute(c, chat, text);
+    const fyi = peer_delivery.isFyi(text);
+    const wait = argBool(args, "wait") orelse false;
+    if (fyi and (!std.mem.eql(u8, mode, "auto") or wait))
+        return c.failMsg("FYI mail requires mode 'auto' without waiting for a turn");
+    const message = peer_delivery.body(text);
+    if (message.len == 0) return c.failMsg("FYI text is empty");
+    const body = try attribute(c, chat, message);
     if (c.t.origin.chat_id) |origin| {
         var p = u.obj(c.a);
         try p.put("chatId", u.s(chat_id));
@@ -1115,8 +1130,8 @@ fn sendMessage(c: *Ctx, args: Value) !Value {
     var r = u.obj(c.a);
     try r.put("chatId", u.s(chat_id));
     try r.put("title", u.field(chat, "title"));
-    try r.put("sent", try deliver(c, chat, space, hs, baseline, body, mode));
-    if (argBool(args, "wait") orelse false) {
+    try r.put("sent", if (fyi) try peer_delivery.sendFyi(c, chat, baseline, body) else try deliver(c, chat, space, hs, baseline, body, mode));
+    if (wait) {
         try r.put("turn", try awaitTurn(c, chat, baseline, true, waitLimit(c, argUint(args, "timeout_secs")), sent_at));
     }
     return r.value();
@@ -1218,10 +1233,47 @@ fn dismissInput(c: *Ctx, args: Value) !Value {
     return r.value();
 }
 
+fn isHumanApprovalQuestion(q: Value) bool {
+    if (u.boolean(q, "requiresHumanUi") orelse false) return true;
+    const id = u.str(q, "id") orelse "";
+    if (std.mem.startsWith(u8, id, "permission:")) return true;
+    const hdr = std.mem.trim(u8, u.str(q, "header") orelse "", " \t\r\n");
+    const eq = std.ascii.eqlIgnoreCase;
+    return eq(hdr, "approve tool") or eq(hdr, "approve command") or
+        eq(hdr, "approve file change") or eq(hdr, "permission") or
+        eq(hdr, "approve");
+}
+
+fn findPendingInput(c: *Ctx, chat_id: []const u8, wanted_id: ?[]const u8) !?Value {
+    const rendered = try transcript.render(c.a, try c.transcriptOf(chat_id), .{});
+    if (wanted_id) |want_id| {
+        var k = rendered.len;
+        while (k > 0) {
+            k -= 1;
+            if (rendered[k].pending_input) |p| {
+                if (std.mem.eql(u8, u.str(p, "requestId") orelse "", want_id)) return p;
+            }
+        }
+        return null;
+    }
+    return transcript.lastPendingInput(rendered);
+}
+
 fn respondToInput(c: *Ctx, args: Value) !Value {
     try decode(c, args, "RespondArgs", &respond_fields, false);
     const chat = try c.resolveChat(argStr(args, "chat").?);
-    const request_id = try pendingRequestId(c, chat, args);
+    const chat_id = u.str(chat, "id") orelse "";
+    const given_id = given(args, "request_id");
+    const pending = try findPendingInput(c, chat_id, given_id);
+    const request_id = given_id orelse (if (pending) |p| u.str(p, "requestId") else null) orelse
+        return c.fail("chat {s} has no pending question", .{u.short(chat_id)});
+    if (pending) |p| {
+        for (u.array(p, "questions") orelse u.none) |q| {
+            if (isHumanApprovalQuestion(q)) {
+                return c.failMsg("this prompt requires human approval in the Harness UI");
+            }
+        }
+    }
     const given_answers = u.array(args, "answers") orelse u.none;
     if (given_answers.len == 0) return c.failMsg("answers is empty");
     var answers = u.arr(c.a);
@@ -1235,7 +1287,8 @@ fn respondToInput(c: *Ctx, args: Value) !Value {
     try cmd.put("kind", u.s("respondInput"));
     try cmd.put("requestId", u.s(request_id));
     try cmd.put("answers", .{ .array = answers });
-    const command_id = try c.queueCommand(u.str(chat, "id") orelse "", cmd.value());
+    try cmd.put("fromAgent", u.b(true));
+    const command_id = try c.queueCommand(chat_id, cmd.value());
     var r = u.obj(c.a);
     try r.put("chatId", u.field(chat, "id"));
     try r.put("requestId", u.s(request_id));
@@ -1283,7 +1336,7 @@ pub fn deliver(c: *Ctx, chat: Value, space: ?Value, hs: []const Value, session: 
     const steers = if (info) |h| steersMidTurn(h) else false;
     // A working graff chat here reads its own peer inbox mid-turn.
     const peer_to: ?[]const u8 = if (eq(u8, mode, "auto") and eq(u8, live, "working") and !steers)
-        try graffPeerTarget(c, chat, harness, session)
+        try peer_delivery.target(c, chat, harness, session)
     else
         null;
     var chosen: []const u8 = undefined;
@@ -1300,7 +1353,10 @@ pub fn deliver(c: *Ctx, chat: Value, space: ?Value, hs: []const Value, session: 
     } else {
         return c.fail("unknown mode {s}; expected auto, run, steer, or queue", .{try u.debugQuote(a, mode)});
     }
-    var fallback: ?[]const u8 = null;
+    var fallback: ?[]const u8 = if (eq(u8, mode, "auto") and eq(u8, harness, "graff") and eq(u8, chosen, "queue"))
+        "native graff peer inbox unavailable on this device"
+    else
+        null;
     var id: []const u8 = undefined;
     if (eq(u8, chosen, "run")) {
         const cfg = config(chat);
@@ -1329,29 +1385,9 @@ pub fn deliver(c: *Ctx, chat: Value, space: ?Value, hs: []const Value, session: 
         try cmd.put("messageId", u.s(try newId(c)));
         id = try c.queueCommand(chat_id, cmd.value());
     } else if (eq(u8, chosen, "peer")) {
-        const to = peer_to.?;
-        const origin = c.t.origin.chat_id;
-        const from = if (origin) |o| try std.fmt.allocPrint(a, "harness:{s}", .{u.short(o)}) else "harness";
-        // Record the hop before sending: unrecorded, it would not count.
-        const record_err: ?[]const u8 = if (origin) |o|
-            try c.t.relay.record(a, chat_id, peer.relayDepth(text), o, now)
-        else blk: {
-            c.t.relay.clear(a, chat_id);
-            break :blk null;
-        };
-        const sent: peer.PeerSend.SendResult = if (record_err) |e|
-            .{ .err = try std.fmt.allocPrint(a, "relay depth not recorded: {s}", .{e}) }
-        else
-            try c.t.peer.send(a, from, to, text);
+        const sent = try peer_delivery.send(c, chat_id, peer_to.?, text, false);
         switch (sent) {
-            .ok => |detail| {
-                var r = u.obj(a);
-                try r.put("delivery", u.s("peer"));
-                try r.put("id", u.s(to));
-                try r.put("detail", u.s(detail));
-                try r.put("chatStatusAtSend", u.s(status));
-                return r.value();
-            },
+            .ok => |detail| return peer_delivery.result(a, peer_to.?, detail, status),
             // Explicit fallback: the queue still delivers at turn end.
             .err => |why| {
                 chosen = "queue";
@@ -1368,18 +1404,6 @@ pub fn deliver(c: *Ctx, chat: Value, space: ?Value, hs: []const Value, session: 
     try r.put("chatStatusAtSend", u.s(status));
     if (fallback) |f| try r.put("peerFallback", u.s(f));
     return r.value();
-}
-
-fn graffPeerTarget(c: *Ctx, chat: Value, harness: []const u8, session: ?Value) !?[]const u8 {
-    if (!std.mem.eql(u8, harness, "graff")) return null;
-    const local = c.t.origin.device_id orelse blk: {
-        var probe: Ctx = .{ .t = c.t, .a = c.a };
-        break :blk probe.localDeviceId() catch |err| switch (err) {
-            error.ToolFailed => return null,
-            else => return err,
-        };
-    };
-    return peer.peerTarget(chat, harness, session, local);
 }
 
 fn waitLimit(c: *Ctx, secs: ?u64) i64 {
@@ -1618,4 +1642,83 @@ fn showVisual(c: *Ctx, args: Value) !Value {
     try p.put("title", u.s(title));
     try p.put("script", u.s(script));
     return c.call("ShowVisual", p.value());
+}
+
+pub const artifact_title_max_chars: usize = 200;
+pub const artifact_content_max_bytes: usize = 2 * 1024 * 1024;
+
+fn isValidArtifactFormat(fmt: []const u8) bool {
+    return std.mem.eql(u8, fmt, "html") or std.mem.eql(u8, fmt, "svg") or std.mem.eql(u8, fmt, "markdown");
+}
+
+fn isValidArtifactVisibility(vis: []const u8) bool {
+    return std.mem.eql(u8, vis, "private") or std.mem.eql(u8, vis, "public");
+}
+
+fn createArtifact(c: *Ctx, args: Value) !Value {
+    try decode(c, args, "CreateArtifactArgs", &.{
+        .{ .name = "title", .kind = .string, .required = true },
+        .{ .name = "format", .kind = .string, .required = true },
+        .{ .name = "content", .kind = .string, .required = true },
+        .{ .name = "visibility", .kind = .string },
+    }, true);
+    const chat_id = c.t.origin.chat_id orelse return c.failMsg("create_artifact needs a chat context: this server is not running inside a chat");
+    const title = argStr(args, "title").?;
+    const format = argStr(args, "format").?;
+    const content = argStr(args, "content").?;
+    const visibility = argStr(args, "visibility");
+    if (u.isBlank(title) or u.charCount(std.mem.trim(u8, title, " \t\r\n")) > artifact_title_max_chars) {
+        return c.failMsg("artifact title must be nonblank and at most 200 characters");
+    }
+    if (!isValidArtifactFormat(format)) return c.failMsg("artifact format must be html, svg, or markdown");
+    if (content.len == 0 or content.len > artifact_content_max_bytes) {
+        return c.failMsg("artifact content must be non-empty and at most 2 MiB");
+    }
+    if (visibility) |vis| if (!isValidArtifactVisibility(vis)) return c.failMsg("artifact visibility must be private or public");
+    var p = u.obj(c.a);
+    try p.put("chatId", u.s(chat_id));
+    try p.put("id", u.s(try newId(c)));
+    try p.put("title", u.s(std.mem.trim(u8, title, " \t\r\n")));
+    try p.put("format", u.s(format));
+    try p.put("content", u.s(content));
+    if (visibility) |vis| try p.put("visibility", u.s(vis));
+    return c.call("CreateArtifact", p.value());
+}
+
+fn updateArtifact(c: *Ctx, args: Value) !Value {
+    try decode(c, args, "UpdateArtifactArgs", &.{
+        .{ .name = "artifactId", .kind = .string, .required = true },
+        .{ .name = "title", .kind = .string },
+        .{ .name = "format", .kind = .string },
+        .{ .name = "content", .kind = .string },
+        .{ .name = "visibility", .kind = .string },
+    }, true);
+    const chat_id = c.t.origin.chat_id orelse return c.failMsg("update_artifact needs a chat context: this server is not running inside a chat");
+    const artifact_id = argStr(args, "artifactId").?;
+    if (!@import("../artifact_url.zig").isValidId(artifact_id)) {
+        return c.failMsg("artifactId must be art- followed by 24 lowercase hex characters");
+    }
+    const title = argStr(args, "title");
+    const format = argStr(args, "format");
+    const content = argStr(args, "content");
+    const visibility = argStr(args, "visibility");
+    if (title == null and format == null and content == null and visibility == null) {
+        return c.failMsg("update_artifact needs at least one of title, format, content, or visibility");
+    }
+    if (title) |t| if (u.isBlank(t) or u.charCount(std.mem.trim(u8, t, " \t\r\n")) > artifact_title_max_chars) {
+        return c.failMsg("artifact title must be nonblank and at most 200 characters");
+    };
+    if (format) |f| if (!isValidArtifactFormat(f)) return c.failMsg("artifact format must be html, svg, or markdown");
+    if (content) |body| if (body.len == 0 or body.len > artifact_content_max_bytes) {
+        return c.failMsg("artifact content must be non-empty and at most 2 MiB");
+    };
+    if (visibility) |vis| if (!isValidArtifactVisibility(vis)) return c.failMsg("artifact visibility must be private or public");
+    var p = u.obj(c.a);
+    try p.put("chatId", u.s(chat_id));
+    try p.put("artifactId", u.s(artifact_id));
+    if (title) |t| try p.put("title", u.s(std.mem.trim(u8, t, " \t\r\n")));
+    if (format) |f| try p.put("format", u.s(f));
+    if (content) |body| try p.put("content", u.s(body));
+    if (visibility) |vis| try p.put("visibility", u.s(vis));
+    return c.call("UpdateArtifact", p.value());
 }

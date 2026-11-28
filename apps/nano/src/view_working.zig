@@ -122,12 +122,12 @@ pub fn trailer(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, t
         kit.snake(c, k);
         ui.text(c, wait_label orelse c.print("{s}…", .{word(id, elapsed)}), kit.style(c, 12, 18, .{ .color = k.muted }));
         var buf: [48]u8 = undefined;
-        ui.text(c, c.print("{s}", .{elapsedLabel(&buf, elapsed)}), kit.style(c, 11, 18, .{ .color = k.faint }));
+        ui.text(c, c.print("{s}", .{elapsedLabel(&buf, elapsed)}), kit.style(c, 11, 18, .{ .tabular = true, .color = k.faint }));
         if (quiet) {
             var updated_buf: [48]u8 = undefined;
             const updated = session.?.updated_ms;
             const silent = @divTrunc(@max(now - updated, 0), 1000);
-            ui.text(c, c.print("· Waiting for the model · no update for {s}", .{elapsedLabel(&updated_buf, silent)}), kit.style(c, 11, 18, .{ .color = k.faint }));
+            ui.text(c, c.print("· Waiting for the model · no update for {s}", .{elapsedLabel(&updated_buf, silent)}), kit.style(c, 11, 18, .{ .tabular = true, .color = k.faint }));
         } else if (wait_label == null and live.now == null and live.plan == null and live.thought == null) {
             // Before the turn reports a plan, tool or thought, say that it is
             // still deciding what to do without taking another row.

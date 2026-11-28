@@ -86,13 +86,14 @@ fn fadeFoot(c: *ui.Context, k: theme.Colors, view: u32, content_h: f32) void {
 
 pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32, room: Room) void {
     if (!@import("app_question.zig").ownsActivePane(a)) return;
-    const wz = if (a.wizard) |*x| x else return;
-    keys(c, a, wz.question().options.len, std.mem.trim(u8, a.composer.text(), " \n\t").len == 0);
-    const q = wz.question();
+    const initial_wz = if (a.wizard) |*x| x else return;
     const typed_empty = std.mem.trim(u8, a.composer.text(), " \n\t").len == 0;
-    // Submit and Cancel close the wizard `wz` and `q` point into, so a
-    // button's action waits until the panel is drawn.
-    var act: enum { none, advance, back, dismiss } = .none;
+    const key_act = keys(c, a, initial_wz.question().options.len, typed_empty);
+    const wz = if (a.wizard) |*x| x else return;
+    const q = wz.question();
+    // Submit, Back, and Cancel close or mutate the wizard `wz` and `q` point into,
+    // so actions wait until the panel is drawn.
+    var act: PanelAction = key_act;
     defer switch (act) {
         .none => {},
         .advance => a.wizardAdvance(),
@@ -131,7 +132,7 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32, room: Room) void 
             if (wz.questions.len > 1) {
                 const counter = ui.div(c).row().h(20).px(6).rounded(6).itemsCenter().bg(k.ink(0.06));
                 defer counter.end();
-                ui.text(c, c.print("{d}/{d}", .{ wz.page + 1, wz.questions.len }), .{ .size = 10, .weight = .medium, .color = k.muted.alpha(0.6) });
+                ui.text(c, c.print("{d}/{d}", .{ wz.page + 1, wz.questions.len }), .{ .tabular = true, .size = 10, .weight = .medium, .color = k.muted.alpha(0.6) });
             }
         }
         {
@@ -180,7 +181,7 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32, room: Room) void 
                 if (i < 9) {
                     const n = ui.div(c).row().size(22, 22).center().rounded(6).bg(k.ink(if (on) 0.16 else 0.05));
                     defer n.end();
-                    ui.text(c, c.print("{d}", .{i + 1}), .{ .size = 11, .color = if (on) k.text else k.muted.alpha(0.6) });
+                    ui.text(c, c.print("{d}", .{i + 1}), .{ .tabular = true, .size = 11, .color = if (on) k.text else k.muted.alpha(0.6) });
                 }
                 ui.text(c, opt, kit.style(c, 13.5, 19, .{ .wrap = true, .weight = .medium, .color = if (on) k.text else k.text.alpha(0.9) }));
             }
@@ -245,17 +246,39 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32, room: Room) void 
     if (options_box) |index| c.node(index).style.max_height = share.options;
 }
 
-/// 1–9 pick while the answer box is empty; Escape steps back a page.
-fn keys(c: *ui.Context, a: *App, options: usize, typed_empty: bool) void {
-    if (!@import("app_question.zig").ownsActivePane(a) or c.focus == 0 or c.focus != a.view.composer_id) return;
-    if (@import("view.zig").menuKeepsKeys(a) or a.view.account_menu or a.view.close_choice) return;
+const PanelAction = enum { none, advance, back, dismiss };
+
+/// 1–9 pick while the answer box is empty; Escape cancels pending auto-advance,
+/// steps back/clears picks, or dismisses an untouched first-page question.
+fn keys(c: *ui.Context, a: *App, options: usize, typed_empty: bool) PanelAction {
+    if (!@import("app_question.zig").ownsActivePane(a) or c.focus == 0 or c.focus != a.view.composer_id) return .none;
+    if (@import("view.zig").menuKeepsKeys(a) or a.view.account_menu or a.view.close_choice) return .none;
     if (typed_empty) {
         var i: usize = 0;
         while (i < @min(options, 9)) : (i += 1) {
             if (c.shortcut(.{ .key = @as(u21, '1') + @as(u21, @intCast(i)) })) a.wizardPick(i);
         }
     }
-    if (typed_empty and c.shortcut(.{ .key = ui.Shortcut.escape })) a.wizardBack();
+    if (c.shortcut(.{ .key = ui.Shortcut.escape })) {
+        if (a.wizard) |*w| {
+            if (w.advance_at != null) {
+                w.advance_at = null;
+                w.picks[w.page].clearRetainingCapacity();
+                a.redraw();
+                return .none;
+            }
+            if (typed_empty) {
+                if (w.page > 0) return .back;
+                if (w.picks[0].items.len > 0) {
+                    w.picks[0].clearRetainingCapacity();
+                    a.redraw();
+                    return .none;
+                }
+                return .dismiss;
+            }
+        }
+    }
+    return .none;
 }
 
 /// A header as the desktop sets it: upper case, hair spaces between letters.

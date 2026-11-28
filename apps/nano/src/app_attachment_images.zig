@@ -1,5 +1,6 @@
 //! Host-jailed attachment read-back. Never open a transported local path.
 const std = @import("std");
+const builtin = @import("builtin");
 const App = @import("app.zig").App;
 const rpc = @import("rpc.zig");
 const attachments = @import("app_attachments.zig");
@@ -126,27 +127,43 @@ pub const Image = struct {
     }
 };
 
-fn shrinkWork(image: *Image) void {
-    const gpa = image.app.gpa;
-    const io = image.app.io;
-    const id = @intFromPtr(image);
-    const path = std.fmt.allocPrint(gpa, "/tmp/harness-nano-thumb-{d}.png", .{id}) catch return shrinkDone(image, null);
+fn shrinkImageBytes(gpa: std.mem.Allocator, io: std.Io, bytes: []const u8, scratch_parent: []const u8) ?[]u8 {
+    var rnd: [16]u8 = undefined;
+    io.random(&rnd);
+    const dir_path = std.fmt.allocPrint(gpa, "{s}/harness-nano-thumb-{s}", .{ scratch_parent, &std.fmt.bytesToHex(rnd, .lower) }) catch return null;
+    defer gpa.free(dir_path);
+
+    const cwd = std.Io.Dir.cwd();
+    const dir_perms: std.Io.Dir.Permissions = if (comptime builtin.os.tag == .windows) .default_dir else .fromMode(0o700);
+    cwd.createDir(io, dir_path, dir_perms) catch return null;
+    defer cwd.deleteTree(io, dir_path) catch {};
+
+    const path = std.fmt.allocPrint(gpa, "{s}/in.png", .{dir_path}) catch return null;
     defer gpa.free(path);
-    const out = std.fmt.allocPrint(gpa, "/tmp/harness-nano-thumb-{d}.jpg", .{id}) catch return shrinkDone(image, null);
+    const out = std.fmt.allocPrint(gpa, "{s}/out.jpg", .{dir_path}) catch return null;
     defer gpa.free(out);
+    defer cwd.deleteFile(io, path) catch {};
+    defer cwd.deleteFile(io, out) catch {};
+
+    const file_perms: std.Io.File.Permissions = if (comptime builtin.os.tag == .windows) .default_file else .fromMode(0o600);
     {
-        var file = std.Io.Dir.cwd().createFile(io, path, .{}) catch return shrinkDone(image, null);
+        var file = cwd.createFile(io, path, .{ .exclusive = true, .permissions = file_perms }) catch return null;
         defer file.close(io);
-        file.writeStreamingAll(io, image.bytes.items) catch return shrinkDone(image, null);
+        file.writeStreamingAll(io, bytes) catch return null;
     }
     var child = std.process.spawn(io, .{
-        .argv = &.{ "sips", "-Z", "224", "-s", "format", "jpeg", "-s", "formatOptions", "60", path, "--out", out },
+        .argv = &.{ "/usr/bin/sips", "-Z", "224", "-s", "format", "jpeg", "-s", "formatOptions", "60", path, "--out", out },
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .ignore,
-    }) catch return shrinkDone(image, null);
-    _ = child.wait(io) catch return shrinkDone(image, null);
-    const jpeg = std.Io.Dir.cwd().readFileAlloc(io, out, gpa, .limited(256 * 1024)) catch return shrinkDone(image, null);
+    }) catch return null;
+    const term = child.wait(io) catch return null;
+    if (term != .exited or term.exited != 0) return null;
+    return cwd.readFileAlloc(io, out, gpa, .limited(256 * 1024)) catch null;
+}
+
+fn shrinkWork(image: *Image) void {
+    const jpeg = shrinkImageBytes(image.app.gpa, image.app.io, image.bytes.items, "/tmp");
     shrinkDone(image, jpeg);
 }
 
@@ -233,4 +250,36 @@ test "nano image parity read budget uses existing byte and chunk caps" {
     try t.expect(!withinReadBudget(max_encoded, 1, 0));
     try t.expect(!withinReadBudget(0, 1, 1000));
     try t.expect(!withinReadBudget(std.math.maxInt(usize), 1, 0));
+}
+
+test "shrinkImageBytes removes temporary scratch files on success and failure" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const t = std.testing;
+    const io = t.io;
+    const gpa = t.allocator;
+    const parent = "/tmp/harness-nano-thumb-cleanup-test";
+    const cwd = std.Io.Dir.cwd();
+    cwd.deleteTree(io, parent) catch {};
+    defer cwd.deleteTree(io, parent) catch {};
+    try cwd.createDirPath(io, parent);
+
+    // Invalid bytes fail sips; scratch dir must still be cleaned up.
+    try t.expect(shrinkImageBytes(gpa, io, "not-a-png", parent) == null);
+
+    // Valid 1x1 PNG succeeds and leaves no scratch dir behind.
+    const png_1x1 = [_]u8{
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+        0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00,
+        0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xDD, 0x8D, 0xB0, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
+        0x44, 0xAE, 0x42, 0x60, 0x82,
+    };
+    const jpeg = shrinkImageBytes(gpa, io, &png_1x1, parent) orelse return error.ExpectedThumbnail;
+    defer gpa.free(jpeg);
+    try t.expect(std.mem.startsWith(u8, jpeg, "\xff\xd8\xff"));
+
+    var dir = try cwd.openDir(io, parent, .{ .iterate = true });
+    defer dir.close(io);
+    var it = dir.iterate();
+    try t.expect((try it.next(io)) == null);
 }

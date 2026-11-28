@@ -19,15 +19,14 @@ const row_height: f32 = 36;
 
 pub const RowLayout = struct {
     stacked: bool,
-    drag: bool,
     columns: usize,
     button_width: f32,
     fit_width: f32,
 };
 
 /// Reserve the tray's border/padding and row gutters before allocating
-/// actions. Drop the decorative drag handle before taking space from text
-/// or actions; when those no longer fit, put actions on rows of their own.
+/// actions; when text and actions no longer fit, put actions on rows of
+/// their own. Rows have no drag handle: the queue has no reordering.
 pub fn rowLayout(width: f32, actions: usize) RowLayout {
     const available = @max(0, width - 26);
     const count = @max(1, actions);
@@ -36,24 +35,21 @@ pub fn rowLayout(width: f32, actions: usize) RowLayout {
     const button_width = @min(28, available);
     return .{
         .stacked = available < action_width + 4 + 32,
-        .drag = available >= action_width + 4 + 32 + 18,
         .columns = columns,
         .button_width = button_width,
         .fit_width = @min(@max(0, width), @as(f32, @floatFromInt(columns)) * button_width + @as(f32, @floatFromInt(columns - 1)) * 4 + 26),
     };
 }
 
-test "composer dock queue layout sacrifices drag before wrapping priority actions" {
+test "composer dock queue layout wraps priority actions only when they no longer fit" {
     const narrow = rowLayout(108, 4);
-    try std.testing.expect(narrow.stacked and !narrow.drag);
+    try std.testing.expect(narrow.stacked);
     try std.testing.expectEqual(@as(usize, 2), narrow.columns);
     try std.testing.expectEqual(@as(f32, 86), narrow.fit_width);
     try std.testing.expectEqual(@as(usize, 3), rowLayout(148, 4).columns);
     try std.testing.expectEqual(@as(f32, 118), rowLayout(148, 4).fit_width);
     try std.testing.expectEqual(@as(f32, 86), rowLayout(488, 2).fit_width);
-    const single = rowLayout(188, 4);
-    try std.testing.expect(!single.stacked and !single.drag);
-    try std.testing.expect(rowLayout(208, 4).drag);
+    try std.testing.expect(!rowLayout(188, 4).stacked);
 }
 
 pub fn tray(c: *ui.Context, a: *App, k: theme.Colors, w: f32) bool {
@@ -65,7 +61,7 @@ pub fn tray(c: *ui.Context, a: *App, k: theme.Colors, w: f32) bool {
         const can_steer = @import("app_queue.zig").rowCanSteer(a, r);
         const layout = rowLayout(w, if (editing) 2 else 2 + @as(usize, @intFromBool(!r.agent)) + @as(usize, @intFromBool(can_steer)));
         // The composer width is a ceiling, not a target for an icon grid.
-        width = @max(width, if (compact and (layout.stacked or editing)) layout.fit_width else @max(0, w));
+        width = @max(width, if (compact and layout.stacked) layout.fit_width else @max(0, w));
     }
     const box = ui.div(c).column().w(width).bg(k.composer).border(k.border).borderW(1).rounded(16).pb(8).pt(4).px(4);
     defer box.end();
@@ -86,20 +82,21 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, r: queue.Row, newest: bool, com
     const editing = if (a.queue_edit) |e| std.mem.eql(u8, e.row, r.id) else false;
     const can_steer = @import("app_queue.zig").rowCanSteer(a, r);
     const layout = rowLayout(w, if (editing) 2 else 2 + @as(usize, @intFromBool(!r.agent)) + @as(usize, @intFromBool(can_steer)));
-    const stacked = compact and (layout.stacked or editing);
+    const stacked = compact and layout.stacked;
     var line = ui.div(c).wFull().px(8).gap(if (compact) 4 else 8).rounded(8);
     line = if (stacked) line.column().py(4) else line.row().h(row_height).itemsCenter();
     line = if (editing) line.bg(k.ink(0.06)) else line.hover(k.ink(0.04));
     defer line.end();
     const gated = r.gate != .none;
-    if (!compact or (!stacked and layout.drag))
-        icons.icon(c, .@"queue-drag-handle", 13, k.muted.alpha(if (gated) 0.35 * 0.5 else 0.5), 14);
     if (!stacked) {
         var col = ui.div(c).column().clip().grow().w(0);
         defer col.end();
-        const title: []const u8 = if (editing)
-            (if (a.queue_edit.?.saving) "Saving…" else "Editing in composer")
-        else switch (r.gate) {
+        const title: []const u8 = if (editing) blk: {
+            if (a.queue_edit.?.saving) break :blk "Saving…";
+            const buf = c.alloc().alloc(u8, 400) catch break :blk "Editing in composer";
+            const one = queue.oneLine(buf, r.text);
+            break :blk if (one.len > 0) c.print("Editing · {s}", .{one}) else "Editing in composer";
+        } else switch (r.gate) {
             .editing => |who| c.print("Editing on {s}", .{who}),
             .review => "Needs review",
             .none => blk: {
@@ -117,8 +114,13 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, r: queue.Row, newest: bool, com
         return;
     }
     if (editing) {
-        if (textButton(c, k, .check, "Save to queue", true)) a.queueFinishEdit(.commit);
-        if (textButton(c, k, .close, "Cancel", true)) a.queueFinishEdit(.cancel);
+        if (compact) {
+            if (rowButton(c, k, .check, "Save to queue", true)) a.queueFinishEdit(.commit);
+            if (rowButton(c, k, .close, "Cancel", true)) a.queueFinishEdit(.cancel);
+        } else {
+            if (textButton(c, k, .check, "Save to queue", true)) a.queueFinishEdit(.commit);
+            if (textButton(c, k, .close, "Cancel", true)) a.queueFinishEdit(.cancel);
+        }
         return;
     }
     if (rowButton(c, k, .@"trash-bin-minimalistic", "Remove", !gated)) a.queueRemove(r.id);

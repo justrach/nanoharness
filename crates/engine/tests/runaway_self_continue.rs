@@ -388,3 +388,70 @@ async fn streaming_deltas_are_coalesced_in_the_journal() {
 
     rig.core.sessions.shutdown().await;
 }
+
+/// Sitting parked idle waiting for an external build or CI run between
+/// self-continued wakes must not count as "working on its own": only active
+/// time inside self-continued turns burns `HARNESS_SELF_CHAIN_MAX_MS`.
+#[tokio::test]
+async fn parked_idle_time_between_resumes_does_not_trip_the_chain_cap() {
+    let rig = assemble("watch ci");
+    rig.core
+        .sessions
+        .dispatch(CHAT, HarnessId::Mock, run_request("watch ci"), None)
+        .await
+        .expect("dispatch");
+    rig.feed.send(session_started()).unwrap();
+    rig.feed.send(text("Watching CI.")).unwrap();
+    rig.feed.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || status(&rig.core) == Some(SessionStatus::Idle),
+        "park after Done",
+    )
+    .await;
+
+    // First self-continued wake: short active burst, then parks idle.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    rig.feed.send(text("CI job 1 finished.")).unwrap();
+    wait_for(
+        || status(&rig.core) == Some(SessionStatus::Working),
+        "first self-continued wake resumes",
+    )
+    .await;
+    wait_for(
+        || status(&rig.core) == Some(SessionStatus::Idle),
+        "first wake parks after short quiesce",
+    )
+    .await;
+
+    // Sit completely parked idle for longer than SELF_CHAIN_MAX_MS (1500 ms).
+    tokio::time::sleep(Duration::from_millis(SELF_CHAIN_MAX_MS + 500)).await;
+    assert_eq!(status(&rig.core), Some(SessionStatus::Idle));
+
+    // Second wake: active time so far is only ~300 ms, well below the cap,
+    // so it must resume cleanly instead of erroring out as a runaway loop.
+    rig.feed.send(text("CI job 2 finished; merging.")).unwrap();
+    wait_for(
+        || status(&rig.core) == Some(SessionStatus::Working),
+        "second wake after long idle wait must not trip the chain cap",
+    )
+    .await;
+    wait_for(
+        || status(&rig.core) == Some(SessionStatus::Idle),
+        "second wake parks cleanly",
+    )
+    .await;
+
+    let events = journal(&rig.core);
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Done {
+                status: DoneStatus::Errored,
+                error: Some(err),
+                ..
+            } if err.contains("without ending its turn")
+        )),
+        "long idle pause between wakes must not stop the run: {events:?}"
+    );
+    rig.core.sessions.shutdown().await;
+}

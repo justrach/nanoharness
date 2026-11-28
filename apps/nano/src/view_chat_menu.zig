@@ -39,6 +39,7 @@ pub const Dialogs = struct {
 };
 
 pub fn open(a: *App, chat_id: []const u8, at: ui.Point) void {
+    @import("view.zig").closeTransientPopovers(a);
     const m = &a.view.chat_menu;
     m.id.clearRetainingCapacity();
     m.id.appendSlice(a.gpa, chat_id) catch return;
@@ -242,6 +243,10 @@ fn encode(c: *ui.Context, s: []const u8) []const u8 {
     var w: std.Io.Writer.Allocating = .init(c.alloc());
     encodeTo(&w.writer, s) catch return s;
     return w.written();
+}
+
+pub fn renameChat(a: *App, ch: workspace.Chat) void {
+    startRename(a, ch);
 }
 
 fn startRename(a: *App, ch: workspace.Chat) void {

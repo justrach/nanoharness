@@ -46,9 +46,9 @@ test "Frosted glass changes the shell live but keeps the writing plane opaque" {
     t.theme = t.ctx.theme;
     const p = try t.render(testing.allocator);
     defer p.deinit(testing.allocator);
-    //0.2.172's conversation panel is opaque. Probe the actual shell in
-    // the sidebar's empty left gutter, not the panel over that material.
-    const x: usize = @intFromFloat(6 * t.scale);
+    // Probe the actual shell in the outer left gutter outside the inset
+    // rounded sidebar card, not the card or panel over that material.
+    const x: usize = @intFromFloat(3 * t.scale);
     const y: usize = @intFromFloat(200 * t.scale);
     const alpha = p.bytes[(y * p.width + x) * 4 + 3];
     if (!(alpha > 0 and alpha < 255)) std.debug.print("\nglass: shell alpha={d} at ({d},{d}), tester background={any}, live background={any}\n", .{ alpha, x, y, t.theme.background, t.ctx.theme.background });

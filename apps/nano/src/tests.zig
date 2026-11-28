@@ -1,6 +1,7 @@
 //! Every test: `zig build test`.
 test {
     _ = @import("tests_ui_agent_work.zig");
+    _ = @import("io_deadline.zig");
     _ = @import("ws.zig");
     _ = @import("rpc.zig");
     _ = @import("workspace.zig");
@@ -37,6 +38,7 @@ test {
     _ = @import("tests_sidebar_performance.zig");
     _ = @import("sidebar_groups.zig");
     _ = @import("tests_link_actions.zig");
+    _ = @import("tests_file_references.zig");
     _ = @import("tests_artifact_markdown.zig");
     _ = @import("tests_artifact_links.zig");
     _ = @import("tests_titlebar_clearance.zig");
@@ -47,6 +49,7 @@ test {
     _ = @import("termlog.zig");
     _ = @import("parity.zig");
     _ = @import("app_files.zig");
+    _ = @import("tests_file_editor.zig");
     _ = @import("queue.zig");
     _ = @import("app_queue.zig");
     _ = @import("chat_mode.zig");
@@ -62,6 +65,7 @@ test {
     _ = @import("tests_ui_prompt_history.zig");
     _ = @import("tests_ui_caret.zig");
     _ = @import("app_drafts.zig");
+    _ = @import("app_attachment_images.zig");
     _ = @import("composer_defaults.zig");
     _ = @import("snap.zig");
     _ = @import("app_account.zig");
@@ -69,6 +73,8 @@ test {
     _ = @import("shortcuts.zig");
     _ = @import("view_settings.zig");
     _ = @import("tests_settings_navigation.zig");
+    _ = @import("tests_settings_controls.zig");
+    _ = @import("tests_ui_usage.zig");
     _ = @import("view_settings_devices.zig");
     _ = @import("view_settings_devices_updates.zig");
     _ = @import("view_settings_shortcuts.zig");
@@ -98,6 +104,11 @@ test {
     _ = @import("view_settings_accounts_browse.zig");
     _ = @import("sandboxes.zig");
     _ = @import("app_sandboxes.zig");
+    _ = @import("artifact_url.zig");
+    _ = @import("app_artifacts.zig");
+    _ = @import("app_computer.zig");
+    _ = @import("view_sandbox_strip.zig");
+    _ = @import("tests_ui_computer.zig");
     _ = @import("parity_sandboxes.zig");
     _ = @import("tests_ui_sandboxes.zig");
     _ = @import("run_errors.zig");
@@ -124,6 +135,7 @@ test {
     _ = @import("tests_ui_sidebar_scrollbars.zig");
     _ = @import("markdown.zig");
     _ = @import("markdown_html.zig");
+    _ = @import("view_markdown.zig");
     _ = @import("highlight.zig");
     _ = @import("graff_worktree.zig");
     _ = @import("view_session_footer.zig");
@@ -133,11 +145,22 @@ test {
     _ = @import("view_rail.zig");
     _ = @import("tests_ui_rail.zig");
     _ = @import("tests_ui_tooltips.zig");
+    _ = @import("tests_ui_control_audit.zig");
     _ = @import("change_requests.zig");
     _ = @import("agent_updates.zig");
     _ = @import("tests_ui_change_requests.zig");
     _ = @import("palette.zig");
     _ = @import("tests_ui_palette.zig");
+    _ = @import("view_tab_overview.zig");
+    _ = @import("tests_ui_tab_overview.zig");
+    _ = @import("view_tab_cycle.zig");
+    _ = @import("tests_ui_tab_cycle.zig");
+    _ = @import("tests_ui_fullscreen.zig");
+    _ = @import("app_quotes.zig");
+    _ = @import("tests_ui_quotes.zig");
+    _ = @import("view_fullscreen_chrome.zig");
+    _ = @import("view_chat_header.zig");
+    _ = @import("tests_ui_chat_context.zig");
     _ = @import("tests_ui_setup.zig");
     _ = @import("tests_ui_archived.zig");
     _ = @import("tests_ui_devices.zig");
@@ -163,6 +186,8 @@ test {
     _ = @import("tests_ui_surfaces.zig");
     _ = @import("tests_browser_native.zig");
     _ = @import("tests_browser_ownership_deep.zig");
+    _ = @import("preview_consumers.zig");
+    _ = @import("tests_preview_consumers.zig");
     _ = @import("window_lifecycle.zig");
     _ = @import("theme.zig");
     _ = @import("view_newchat.zig");
@@ -174,6 +199,7 @@ test {
     _ = @import("tests_ui_desktop_sidebar_composer.zig");
     _ = @import("tests_ui_tool_tree.zig");
     _ = @import("tests_ui_actions_toolbar.zig");
+    _ = @import("tests_ui_command_terminal.zig");
     _ = @import("tests_ui_sessions.zig");
     _ = @import("tests_desktop_regressions.zig");
     _ = @import("tests_restore_navigation.zig");
@@ -199,6 +225,11 @@ test {
     _ = @import("member_card.zig");
     _ = @import("view_settings_profile.zig");
     _ = @import("tests_custom_themes.zig");
+    _ = @import("ux_rules.zig");
+    _ = @import("tests_ux_proofs.zig");
+    _ = @import("tests_ux_e2e.zig");
+    _ = @import("design_canvas.zig");
+    _ = @import("browse_connect.zig");
     if (@import("builtin").os.tag != .windows) {
         _ = @import("mcp_server.zig");
         _ = @import("preview/catalog.zig");

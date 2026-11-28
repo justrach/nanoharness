@@ -401,3 +401,43 @@ test "github links click in unfocused split pane keeps native GitHub focused aft
     try testing.expect(h.a.view.strip.focused == .host);
     try testing.expect(h.t.hasText(pull.detail.?.title));
 }
+
+test "github links clicking the GitHub pane body reactivates it while child controls keep working" {
+    var h: Harness = undefined;
+    try setup(&h, &.{ pull, files });
+    defer h.deinit();
+
+    try clickPull(&h, false);
+    h.t.settle(0.2);
+    try testing.expect(h.a.panels.host_open);
+    try testing.expect(h.a.view.strip.focused == .host);
+    try testing.expect(h.t.hasText(pull.detail.?.title));
+
+    // Focus the chat pane via its tab in the title bar.
+    const chat_tab = for (h.t.ctx.nodes.items) |node| {
+        if (node.content == .text and std.mem.eql(u8, node.content.text.str, "Synthetic source") and node.rect.y < @import("panel_chrome.zig").header_height) {
+            break node.rect;
+        }
+    } else return error.MissingChatTab;
+    h.t.click(chat_tab.x + chat_tab.w / 2, chat_tab.y + chat_tab.h / 2);
+    h.t.settle(0.2);
+    try testing.expect(h.a.view.strip.focused == .chat);
+
+    // Click an empty area in the lower body of the visible GitHub pane.
+    const body_x = h.t.size.w - 80;
+    const body_y = h.t.size.h - 120;
+    h.t.click(body_x, body_y);
+    h.t.settle(0.2);
+
+    if (std.c.getenv("NANO_GITHUB_FOCUS_SNAP")) |path| {
+        try h.t.screenshot(std.mem.span(path));
+    }
+
+    try testing.expect(h.a.view.strip.focused == .host);
+
+    // Child controls inside the GitHub pane continue to receive clicks.
+    try h.t.clickText("Code");
+    h.t.settle(0.2);
+    try testing.expectEqual(flow.Kind.files, h.a.panels.github_repository.kind);
+    try testing.expect(h.t.hasText("src/synthetic.zig"));
+}

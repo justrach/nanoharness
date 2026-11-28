@@ -440,7 +440,7 @@ test "sidebar large wheel jumps and resizes retain mixed-height rows and exact s
         var extent: f32 = 0;
         while (rects.next()) |entry| {
             const r = entry.value_ptr.*;
-            if (r.w == @import("view_sidebar.zig").widthOf(&h.a) - 16 and r.h > extent) {
+            if (r.w == @import("view_sidebar.zig").cardInnerW(&h.a) - 16 and r.h > extent) {
                 body = entry.key_ptr.*;
                 extent = r.h;
             }
@@ -1980,23 +1980,23 @@ test "visible chat completion clears Done without reopening the chat" {
     try h.init();
     defer h.deinit();
     const ws = @import("workspace.zig");
-    // A WatchChats update carries a new reply after this chat was opened.
-    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, chats, .{});
+    const state = "[" ++ chats ++ ",[{\"chatId\":\"a\",\"status\":\"idle\",\"lastCompletedTurn\":\"reply\"}]]";
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, state, .{});
     defer parsed.deinit();
-    try h.a.chats.replace(parsed.value);
-    try testing.expectEqual(ws.Mark.completed, ws.markOf(h.a.findChat("a").?, null, h.a.nowMs()));
+    try h.a.chats.replace(parsed.value.array.items[0]);
+    try h.a.sessions.replace(parsed.value.array.items[1]);
+    const settled = ws.sessionOf(h.a.sessions.items, "a").?;
+    try testing.expectEqual(ws.Mark.completed, ws.markOf(h.a.findChat("a").?, settled, h.a.nowMs()));
     h.t.ctx.input.window_active = true;
     h.t.settle(1);
     h.snap("active-chat-done");
     try testing.expect(!ws.unseen(h.a.findChat("a").?));
-    try testing.expectEqual(ws.Mark.idle, ws.markOf(h.a.findChat("a").?, null, h.a.nowMs()));
-    // Other chats keep their unread badge; Cmd+B must not resurrect this one.
+    try testing.expectEqual(ws.Mark.idle, ws.markOf(h.a.findChat("a").?, settled, h.a.nowMs()));
     try testing.expect(ws.unseen(h.a.findChat("b").?));
     h.press(.{ .key = 'b', .cmd = true });
     h.press(.{ .key = 'b', .cmd = true });
     try testing.expect(!ws.unseen(h.a.findChat("a").?));
 }
-
 test "visible chat completion stays unread while inactive or hidden" {
     for (0..5) |hidden| {
         var h: Harness = undefined;
@@ -2289,6 +2289,23 @@ test "bottom-docked checkout and ref popovers open upward above the composer foo
     h.t.settle(1);
     try testing.expectEqualStrings("From feature/popover-upward", if (h.t.findText("From feature/popover-upward")) |_| "From feature/popover-upward" else "");
     try testing.expectEqualStrings("feature/popover-upward", h.a.new_ref.?);
+
+    // Populate 400 synthetic branches and confirm refMenu virtualizes rows in view
+    // instead of capping at 8 or building all 400 rows at once.
+    for (0..400) |bi| {
+        var bbuf: [48]u8 = undefined;
+        const bname = try std.fmt.bufPrint(&bbuf, "feature/branch-{d:0>3}", .{bi});
+        try h.a.view.refs.append(h.a.gpa, try h.a.gpa.dupe(u8, bname));
+    }
+    h.a.view.ref_menu = true;
+    h.t.settle(0.5);
+    var branch_nodes: usize = 0;
+    for (h.t.ctx.nodes.items) |node| {
+        if (node.content == .text and std.mem.startsWith(u8, node.content.text.str, "feature/branch-")) {
+            branch_nodes += 1;
+        }
+    }
+    try testing.expect(branch_nodes > 0 and branch_nodes < 24);
 }
 
 test "Settings Devices and the sidebar footer surface desktop app updates and hourly checks" {

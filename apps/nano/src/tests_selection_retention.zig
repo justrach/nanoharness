@@ -292,6 +292,32 @@ test "retention selection double click selects the word under the pointer" {
     try testing.expectEqualStrings("pointer", h.t.clipboard.items);
 }
 
+test "retention selection double click on a prose gap copies both words" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const text = "Try amber maple today.";
+    try Harness.apply(&h.a.transcript,
+        \\{"reset":[{"id":"gap","role":"assistant","parts":[{"id":"p","kind":"text","text":"Try amber **maple** today."}]}]}
+    );
+    h.t.settle(0.2);
+    const n = textNode(&h.t.ctx, text) orelse return error.TextNodeMissing;
+    const node = h.t.ctx.nodes.items[n];
+    const style = node.content.text.style;
+    const x = node.rect.x + h.t.ctx.text.width("Try amber", style) + h.t.ctx.text.width(" ", style) / 2;
+    const y = node.rect.y + h.t.ctx.text.lineHeight(style) / 2;
+    h.t.moveTo(x, y);
+    h.t.ctx.input.click_count = 2;
+    h.t.ctx.pointerDown();
+    h.t.frame();
+    h.t.advance(0.2);
+    h.t.up();
+    h.t.settle(0.1);
+    try h.snap("output-double-click-gap");
+    copy(&h);
+    try testing.expectEqualStrings("amber maple", h.t.clipboard.items);
+}
+
 test "retention selection triple click selects the complete wrapped sentence" {
     var h: Harness = undefined;
     try h.init();
@@ -306,6 +332,54 @@ test "retention selection four clicks select the complete wrapped paragraph" {
     defer h.deinit();
     try multiClick(&h, 4, false);
     try testing.expectEqualStrings(multi_click_prose, h.t.clipboard.items);
+}
+
+const math_sentence = "The synthetic estimate $x=0.5$ is only a starting point, and the next observation gives us enough evidence to verify whether the estimate remains stable.";
+const math_paragraph = "First sentence. " ++ math_sentence ++ " Last sentence.";
+
+fn multiClickInlineMath(count: u32, expected: []const u8, screenshot: []const u8) !void {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const frame = try std.json.Stringify.valueAlloc(testing.allocator, .{ .reset = &.{.{
+        .id = "math-multi-click",
+        .role = "assistant",
+        .status = "complete",
+        .parts = &.{.{
+            .id = "p",
+            .kind = "text",
+            .text = math_paragraph ++ "\n\nA separate paragraph must stay unselected.",
+        }},
+    }} }, .{});
+    defer testing.allocator.free(frame);
+    try Harness.apply(&h.a.transcript, frame);
+    h.t.resize(760, 780);
+    h.t.settle(0.3);
+    const first = h.t.ctx.nodes.items[textNode(&h.t.ctx, "First ") orelse return error.TextNodeMissing].rect;
+    const word = h.t.ctx.nodes.items[textNode(&h.t.ctx, "verify ") orelse return error.TextNodeMissing].rect;
+    try testing.expect(word.y > first.y);
+    const x = word.x + word.w / 2;
+    const y = word.y + word.h / 2;
+    h.t.moveTo(x, y);
+    h.t.ctx.input.click_count = count;
+    h.t.ctx.pointerDown();
+    h.t.frame();
+    h.t.advance(0.2);
+    h.t.up();
+    h.t.settle(0.1);
+    try h.snap(screenshot);
+    copy(&h);
+    try testing.expectEqualStrings(expected, h.t.clipboard.items);
+    const selection = h.t.ctx.selection;
+    try testing.expect(selection.start_rect.?.y < selection.end_rect.?.y);
+}
+
+test "retention selection inline math triple click selects the complete wrapped sentence" {
+    try multiClickInlineMath(3, math_sentence, "inline-math-triple-click");
+}
+
+test "retention selection inline math four clicks select the complete wrapped paragraph" {
+    try multiClickInlineMath(4, math_paragraph, "inline-math-four-click");
 }
 
 test "retention selection held multi click does not collapse to the pointer" {

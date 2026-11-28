@@ -23,12 +23,33 @@ const before_after = @import("view_before_after.zig");
 const image_gallery = @import("view_image_gallery.zig");
 const reply_images = @import("view_reply_images.zig");
 const sidebar = @import("view_sidebar.zig");
+const quote_view = @import("view_quotes.zig");
 const App = @import("app.zig").App;
 const rows_st = @import("view_settings_accounts_rows.zig").st;
 
 /// The column's width: Settings › Appearance's conversation width
 /// (`transcript_width`, 736 unless set), as of this frame.
 pub var column_w: f32 = 736;
+
+/// The chat area's width at the narrower end of the sidebar's slide, as of
+/// this frame; null while nothing slides.
+pub var slide_chat_width: ?f32 = null;
+
+/// The column of a pane `w` wide, now `raw`, while the sidebar slides: the
+/// one it has at the slide's narrower end. Panes side by side share what
+/// the gaps between them leave.
+fn slideColumn(a: *const App, w: f32, raw: f32) ?f32 {
+    if (a.view.split_reveal != null) return null;
+    const narrow = slide_chat_width orelse return null;
+    const gaps = if (a.tabs.layout()) |s|
+        (if (!s.zoomed and s.axis == .horizontal) @import("panel_chrome.zig").zen_gutter * @as(f32, @floatFromInt(s.panes.items.len -| 1)) else 0)
+    else
+        0;
+    const total = a.view.chrome.chat_width - gaps;
+    if (total <= 1) return null;
+    const pane = (w + a.view.seam_inset) * @max(0, narrow - gaps) / total - a.view.seam_inset;
+    return @import("motion_rules.zig").slideColumnWidth(raw, columnWidth(@max(0, pane)));
+}
 
 /// The column's width in a main area `w` wide, with its gutters.
 pub fn columnWidth(w: f32) f32 {
@@ -59,7 +80,7 @@ pub fn paneWidth(c: *ui.Context, a: *const App) f32 {
     if (s.zoomed or s.axis != .horizontal or s.panes.items.len <= 1) return w;
     const total = a.view.chrome.chat_width;
     const chrome = @import("panel_chrome.zig");
-    const ws_gutter = if (a.settings.uiMode() == .zen) chrome.zen_gutter else chrome.gutter;
+    const ws_gutter = chrome.zen_gutter;
     const target = chrome.paneSpanIn(total, s.shares.items[s.focus], s.panes.items.len, true, ws_gutter);
     const span = if (a.view.split_reveal) |r| blk: {
         if (r.tab != a.tabs.active or r.new_index >= s.panes.items.len) break :blk target;
@@ -88,7 +109,9 @@ pub fn transcript(c: *ui.Context, a: *App, k: theme.Colors) void {
     rail.step(c, &a.view.rail);
     const just_stuck = a.view.stick_end;
     const pane_w = paneWidth(c, a);
-    const drawn = entries(c, a, k, &a.transcript, pane_w, a.w_doc.id != null, 64 - sidebar.titlebar_h);
+    const header_view = @import("view_chat_header.zig");
+    const top_pad: f32 = if (header_view.height(a) > 0) 16 else 64 - @import("view_sidebar.zig").titlebar_h;
+    const drawn = entries(c, a, k, &a.transcript, pane_w, a.w_doc.id != null, top_pad);
     if (a.settings.hierarchyProfile().shows_prompt_rail)
         rail.rail(c, k, &a.view.rail, &a.transcript, drawn.ticks, drawn.box, pane_w + a.view.seam_inset);
     if (!just_stuck and !drawn.turn_anchored) recoverBlank(c, a, drawn);
@@ -152,16 +175,12 @@ pub fn entries(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript
 /// `inset_top(TITLEBAR_HEIGHT)`), here as the column's colour laid over
 /// them a point at a time.
 fn topFade(c: *ui.Context, a: *const App, k: theme.Colors, scroll_box: u64) void {
-    const zen = a.settings.uiMode() == .zen;
-    // A tint overlay can imitate a solid background, not a native backdrop:
-    // on glass it makes an opaque stripe even when there is no text here.
-    if (!zen and k.frosted) return;
-    // In Zen mode, leave unscrolled conversations completely clean at the top
-    // and gently fade scrolled rows into the Zen panel plane instead of the
-    // darker shell background.
-    if (zen and (c.scroll.get(scroll_box) orelse 0) <= 1.0) return;
-    const fade_bg = if (zen) @import("view_panel_chrome.zig").zenPageBg(k) else k.background;
-    const band: f32 = if (zen) 18 else 24;
+    _ = a;
+    // Leave unscrolled conversations completely clean at the top and gently
+    // fade scrolled rows into the inset card plane.
+    if ((c.scroll.get(scroll_box) orelse 0) <= 1.0) return;
+    const fade_bg = @import("view_panel_chrome.zig").zenPageBg(k);
+    const band: f32 = 18;
     var y: f32 = 0;
     while (y < band) : (y += 1) {
         _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = fade_bg.alpha(1 - (y + 0.5) / band), .absolute = true, .offset = .{ .x = 0, .y = y } }, .none, null);
@@ -176,16 +195,18 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     const tweening = a.view.sidebar_tween != null or a.view.split_reveal != null;
     const resizing = c.time < a.view.resize_until;
     const raw_col = columnWidth(w);
-    const col = @import("motion_rules.zig").tweenColumnWidth(tweening, raw_col, column_w);
+    const subagent = for (a.panels.tabs.items) |tab| {
+        if (tab.agent) |s| if (&s.transcript == t) break s;
+    } else null;
+    // A child's tab is in the host panel, which doesn't share the slide.
+    const sliding = if (subagent == null) slideColumn(a, w, raw_col) else null;
+    const col = sliding orelse @import("motion_rules.zig").tweenColumnWidth(tweening, raw_col, column_w);
     // The last row clears the status strip over the composer and the fade
     // band above it (`bottom_clearance + TRANSCRIPT_FADE_BAND + 8`); the
     // composer itself is under the scroll, not over it. Its bar shows
     // while it scrolls, as GPUI's overlay rail.
     var st: ui.Style = .{ .grow = 1, .width = .fill, .padding = .{ .top = top, .bottom = 24 + 24 + 8 }, .align_items = .center, .justify = .end, .follow_end = true };
     if (@hasField(ui.Style, "scrollbar")) st.scrollbar = .{ .overlay = k.faint.alpha(0.5) };
-    const subagent = for (a.panels.tabs.items) |tab| {
-        if (tab.agent) |s| if (&s.transcript == t) break s;
-    } else null;
     if (subagent != null) st.justify = .start;
     st.scroll = true;
     st.selectable = true;
@@ -216,6 +237,15 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     }
     defer ui.end(c);
     var drawn: Drawn = .{ .box = c.node(scroll).id };
+    const viewport_chat = if (subagent == null) chat_id else null;
+    const restored_position = if (viewport_chat) |id| a.transcriptPosition(id) else null;
+    const just_stuck = subagent == null and t == &a.transcript and a.view.stick_end;
+    if (just_stuck) if (restored_position) |position| {
+        // An explicit new send wins over the startup viewport restoration.
+        position.pending = false;
+        position.restored = false;
+    };
+    const restored_viewport = if (restored_position) |position| position.restored else false;
     const entries_ = t.entries.items;
     const streaming = entries_.len > 0 and entries_[entries_.len - 1].status == .streaming;
     // Keep the prompt and current reply near the top, with enough runway
@@ -237,7 +267,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         const session = if (chat_id) |id| @import("workspace.zig").sessionOf(a.sessions.items, id) else null;
         const pending = if (chat_id) |id| @import("app_send_feedback.zig").active(a, id, t) != null else false;
         const live = streaming or (entries_[entries_.len - 1].role == .user and (pending or (session != null and session.?.status == .working)));
-        if (live or (previous != null and previous.?.turn == turn)) {
+        if (!restored_viewport and (live or (previous != null and previous.?.turn == turn))) {
             const slot = a.view.reply_anchors.getOrPut(a.gpa, drawn.box) catch null;
             if (slot) |s| {
                 if (!s.found_existing or s.value_ptr.turn != turn) s.value_ptr.* = .{
@@ -251,7 +281,6 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     }
     // Just sent: past the end, which layout clamps to it, and moving the
     // offset there makes the box follow its end again (`follow_end`).
-    const just_stuck = subagent == null and t == &a.transcript and a.view.stick_end;
     if (just_stuck and anchor != null) {
         a.view.stick_end = false;
         anchor.?.pending = true;
@@ -284,7 +313,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
                 const cap = ui.spring(c, drawn.box, 0x7363_6361, max_s, .{ .response = 0.20, .damping = 1.0 });
                 c.scroll_cap.put(c.gpa, drawn.box, @max(0, cap)) catch {};
                 if (@abs(cap - max_s) > 0.25 or c.time < a.view.stream_glide_until) {
-                    c.frameIn(1.0 / 120.0);
+                    c.animationFrame();
                 }
             } else {
                 ui.jump(c, drawn.box, 0x7363_6361, c.scroll.get(drawn.box) orelse 0);
@@ -308,7 +337,6 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     defer body.end();
     // Loading does not itself imply work; the session row does, even when
     // no assistant part has arrived yet.
-    _ = loading;
     const scroll_rect = c.rects.get(drawn.box);
     const sel_owner_mod = @import("selection_owner.zig");
     const sel_surface = sel_owner_mod.state(c).surface;
@@ -336,13 +364,47 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     };
     const offset = c.scroll.get(drawn.box) orelse 0;
     const previous_offset = c.scroll_seen.get(drawn.box) orelse offset;
-    const cull: Cull = .{ .on = cull_offscreen, .loose = tweening or resizing, .pad = if (tweening or resizing) 220 else 380, .view = scroll_rect, .col = col, .offset_delta = offset - previous_offset };
+    const cull: Cull = .{ .on = cull_offscreen, .loose = tweening or resizing, .sliding = sliding != null, .pad = if (tweening or resizing) 220 else 380, .view = scroll_rect, .col = col, .offset_delta = offset - previous_offset };
+    // One pane at a time, so the panes of a split share a frame.
+    const turn: [2]u64 = if (a.tabs.layout()) |s| (if (s.zoomed) .{ 0, 1 } else for (s.panes.items, 0..) |pane, ix| {
+        const id = pane orelse a.selected orelse continue;
+        if (chat_id != null and std.mem.eql(u8, id, chat_id.?)) break .{ ix, s.panes.items.len };
+    } else .{ 0, 1 }) else .{ 0, 1 };
+    var remeasure: Remeasure = .{ .left = if (c.frame % turn[1] == turn[0]) remeasure_bytes else 0 };
     // A message sent while its turn works is drawn where it arrived, and
     // what the reply gains after it under it (steer_order.zig).
     const steer = &a.view.steer;
     const steer_chat: ?u64 = if (subagent == null) (if (chat_id) |id| steer_order.hash(id) else null) else null;
     if (steer_chat) |chat| steer.observe(chat, entries_);
     const steered = if (steer_chat) |chat| steer.any(chat) else false;
+    // Cold-open bottom-anchor estimation (#1496): when opening a long chat at
+    // its end before rows have been measured, estimate heights from the bottom
+    // up so far-offscreen historical replies stand in as spacers on frame 1.
+    var cold_cutoff: usize = 0;
+    if (cull.on and anchor == null and (c.scroll_follow.get(drawn.box) orelse true)) {
+        if (scroll_rect) |view| {
+            const budget = view.h + cull.pad * 2;
+            var acc: f32 = 0;
+            var idx = entries_.len;
+            while (idx > 0) {
+                idx -= 1;
+                const ent = &entries_[idx];
+                const h_est = if (ent.cached_h > 0) ent.cached_h else estimateEntryHeight(ent, col);
+                acc += h_est + (if (idx > 0) @as(f32, 16) else 0);
+                if (acc > budget) {
+                    cold_cutoff = idx;
+                    break;
+                }
+            }
+        }
+    }
+    // What of the open chat's replies can be quoted into its draft.
+    var quotable: quote_view.Rows = .{};
+    const quote_rows: ?*quote_view.Rows = if (subagent == null and t == &a.transcript) &quotable else null;
+    var restore_entry_exists = false;
+    var restore_entry_rect: ?ui.Rect = null;
+    var captured_visible = false;
+    const capture_ready = viewport_chat != null and !loading and (if (restored_position) |position| !position.pending else true);
     var turn_node: ?u32 = null;
     defer if (turn_node != null) c.end();
     for (entries_, 0..) |*e, i| {
@@ -366,7 +428,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         }
         const tail = if (steered and e.role == .user) steer_order.tailAfter(steer, steer_chat.?, entries_, i) else null;
         // After its message, whether that was drawn or is off screen.
-        defer if (tail) |x| steerTail(c, a, k, x, entries_, i, chat_id, cull, just_stuck, &sel_pin);
+        defer if (tail) |x| steerTail(c, a, k, x, entries_, i, chat_id, cull, &remeasure, just_stuck, &sel_pin, quote_rows);
         const parts_len = e.parts.items.len;
         const head_end = if (steered and e.role == .assistant) steer_order.headEnd(steer, steer_chat.?, entries_, i) else parts_len;
         // Everything it has came after the message: nothing in its place.
@@ -375,21 +437,54 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         if (i > 0) _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
         ui.key(c, c.print("entry-{s}-{s}", .{ chat_id orelse "", e.id }));
         const row_id = c.peekId(null);
+        const restore_target = if (restored_position) |position|
+            position.pending and position.entry != null and std.mem.eql(u8, position.entry.?, e.id)
+        else
+            false;
+        if (restore_target) {
+            restore_entry_exists = true;
+            restore_entry_rect = c.rects.get(row_id);
+        }
         const row_pinned = sel_pin.isPinned(row_id);
-        if (spacer(c, cull, !row_pinned and (!just_stuck or i + 1 < entries_.len) and !(anchor != null and i == turn_start.?) and e.status != .streaming, &e.cached_h, &e.cached_w, &e.measured_w)) |r| {
+        const quoted = quote_rows != null and quote_view.wants(a, e.id);
+        const can_cull = !row_pinned and !quoted and !restore_target and (!just_stuck or i + 1 < entries_.len) and !(anchor != null and i == turn_start.?) and e.status != .streaming;
+        if (can_cull and i < cold_cutoff and e.cached_h == 0 and c.rects.get(row_id) == null) {
+            const est = estimateEntryHeight(e, col);
+            _ = c.leaf(.{ .width = .fill, .height = .{ .px = est } }, .none, null);
             sel_pin.noteCulled();
-            if (e.isHumanPrompt()) {
-                ticks.append(c.alloc(), .{ .entry = i, .top = r.y - (if (i > 0) @as(f32, 16) else 0) }) catch {};
-            }
             continue;
         }
+        const stand = spacer(c, cull, &remeasure, can_cull, e, &e.cached_h, &e.cached_w, &e.measured_w);
+        if (restore_target and restore_entry_rect == null) restore_entry_rect = if (stand) |st_| st_.rect else c.rects.get(row_id);
+        if (!captured_visible and capture_ready) {
+            const rect = if (stand) |st_| st_.rect else c.rects.get(row_id);
+            if (rect) |r| if (scroll_rect) |viewport| {
+                if (r.y + r.h > viewport.y and r.y < viewport.y + viewport.h) {
+                    const visible_offset = c.scroll.get(drawn.box) orelse 0;
+                    const max_offset = c.scroll_max.get(drawn.box) orelse visible_offset;
+                    const follow = c.scroll_follow.get(drawn.box) orelse true;
+                    a.captureTranscriptPosition(viewport_chat.?, e.id, r.y - viewport.y, visible_offset, max_offset, follow);
+                    captured_visible = true;
+                }
+            };
+        }
+        if (stand) |st_| {
+            sel_pin.noteCulled();
+            if (e.isHumanPrompt()) {
+                ticks.append(c.alloc(), .{ .entry = i, .top = st_.rect.y - (if (i > 0) @as(f32, 16) else 0) }) catch {};
+            }
+            if (!st_.probe) continue;
+        }
+        const probing = stand != null;
+        const focusable = if (probing) openProbe(c, row_id, col) else 0;
+        defer if (probing) closeProbe(c, focusable);
         const row_start = c.nodes.items.len;
-        var at: At = .{ .chat_id = chat_id, .entries = entries_, .index = i, .col = col, .scroll = scroll_rect };
+        var at: At = .{ .chat_id = chat_id, .entries = entries_, .index = i, .col = col, .scroll = scroll_rect, .quotes = if (probing) null else quote_rows };
         switch (e.role) {
             .user => {
                 // Its row starts where the turn's gap does (`top_gap_for`).
                 const r = user(c, a, k, e, col, chat_id);
-                if (e.isHumanPrompt()) ticks.append(c.alloc(), .{ .entry = i, .top = if (r) |x| x.y - (if (i > 0) @as(f32, 16) else 0) else null }) catch {};
+                if (e.isHumanPrompt() and !probing) ticks.append(c.alloc(), .{ .entry = i, .top = if (r) |x| x.y - (if (i > 0) @as(f32, 16) else 0) else null }) catch {};
             },
             .assistant => if (head_end == parts_len) assistant(c, a, k, e, at) else {
                 // Under the reply's own id: its rows keep what they
@@ -399,8 +494,54 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
             },
             .system => system(c, a, k, e, at),
         }
-        sel_pin.observe(c, row_id, row_start);
+        if (!probing) sel_pin.observe(c, row_id, row_start);
     }
+    // A frame can rebuild the tree more than once before layout. Its rects
+    // must be combined with the offset from that layout, not a correction
+    // made earlier in the same frame.
+    if (restored_position) |position| if (position.pending and !loading and t.complete and position.alignment_frame != c.frame) {
+        if (c.scroll_max.get(drawn.box)) |max_offset| {
+            var next_offset: ?f32 = null;
+            var follow_end = false;
+            var confirm_alignment = false;
+            const current = c.scroll.get(drawn.box) orelse 0;
+            if (position.at_end) {
+                const sync = @import("motion_rules.zig").stickEndScroll(max_offset);
+                next_offset = sync.scroll;
+                follow_end = sync.follow;
+            } else if (!restore_entry_exists) {
+                // The saved message disappeared from a complete snapshot;
+                // only now use its bounded offset fallback.
+                next_offset = @min(position.fallback, max_offset);
+            } else if (restore_entry_rect) |rect| {
+                if (scroll_rect) |viewport| {
+                    next_offset = @max(0, @min(max_offset, current + rect.y - viewport.y - position.inset));
+                    confirm_alignment = true;
+                }
+            }
+            if (next_offset) |restored_offset| {
+                position.alignment_frame = c.frame;
+                c.scroll.put(c.gpa, drawn.box, restored_offset) catch {};
+                c.scroll_seen.put(c.gpa, drawn.box, restored_offset) catch {};
+                c.scroll_follow.put(c.gpa, drawn.box, follow_end) catch {};
+                _ = c.scroll_cap.remove(drawn.box);
+                a.view.stream_sig = 0;
+                // An initial jump can replace estimated spacers with measured
+                // rows. Confirm against the resulting layout before handing
+                // control back, with a bounded number of frame corrections.
+                position.alignment_frames += 1;
+                position.aligned_frames = if (@abs(current - restored_offset) <= 1) position.aligned_frames + 1 else 0;
+                position.pending = confirm_alignment and position.aligned_frames < 2 and position.alignment_frames < 8;
+                c.changed = true;
+                if (position.pending) c.frameIn(0);
+            } else {
+                c.frameIn(0);
+            }
+        } else {
+            c.frameIn(0);
+        }
+    };
+    remeasure.apply(c, drawn.box);
     const trailer_start = c.nodes.items.len;
     if (subagent == null) {
         var pending_count: usize = 0;
@@ -480,6 +621,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
             };
         }
     }
+    if (quote_rows) |q| quote_view.settle(c, a, k, q, t, drawn.box);
     drawn.ticks = ticks.items;
     return drawn;
 }
@@ -540,6 +682,8 @@ const Cull = struct {
     on: bool,
     /// The column is changing width: a remembered height still stands in.
     loose: bool,
+    /// It is the sidebar's slide that changes it.
+    sliding: bool,
     pad: f32,
     view: ?ui.Rect,
     col: f32,
@@ -548,28 +692,129 @@ const Cull = struct {
     offset_delta: f32 = 0,
 };
 
+/// How much of the history one frame measures again after a slide, in
+/// bytes of text: a fraction of a 120 Hz frame even when none of it is in
+/// the text caches. Always at least a row, however long.
+const remeasure_bytes: usize = 1536;
+
+/// Rows the slide stood in for still have the height of another width.
+/// Mounting them all in the frame it ends in costs the whole history at
+/// once (seconds, in a split of long chats), so they are measured a few a
+/// frame, out of sight, and each spacer then takes its exact height.
+const Remeasure = struct {
+    left: usize,
+    started: bool = false,
+    /// A pane may measure one row beside the viewport whoever's turn it is.
+    near: bool = true,
+    /// Rows still to measure: another frame follows.
+    pending: bool = false,
+    /// What this frame's new heights add over the viewport, and in all.
+    above: f32 = 0,
+    total: f32 = 0,
+
+    /// The reader's place: what grew over the viewport moves the offset by
+    /// as much, before the layout that has the new heights. A box at its
+    /// end follows it there by itself.
+    fn apply(self: *const Remeasure, c: *ui.Context, box: u64) void {
+        if (self.pending) c.animationFrame();
+        if (self.total == 0 and self.above == 0) return;
+        if (c.scroll_max.getPtr(box)) |max| max.* = @max(0, max.* + self.total);
+        if (c.scroll_follow.get(box) orelse true) return;
+        if (c.scroll.getPtr(box)) |at| at.* = @max(0, at.* + self.above);
+        if (c.scroll_seen.getPtr(box)) |seen| seen.* = @max(0, seen.* + self.above);
+    }
+};
+
+/// What stands in for a row: where it is, and whether the row itself is
+/// to be drawn out of sight (`openProbe`) for its height.
+const Stand = struct { rect: ui.Rect, probe: bool = false };
+
+fn probeKey(c: *ui.Context, row_id: u64) []const u8 {
+    return c.print("measure-{x}", .{row_id});
+}
+
+/// Where a row is laid out for its height alone: the column's width, no
+/// place among the rows, and nothing in the viewport. `control`: its text
+/// is nobody's to select, and VoiceOver reads the rows alone. The Tab order
+/// is as it was before it (`closeProbe`, with what this returns).
+fn openProbe(c: *ui.Context, row_id: u64, col: f32) usize {
+    ui.key(c, probeKey(c, row_id));
+    _ = c.open(.{ .direction = .column, .width = .{ .px = col }, .absolute = true, .offset = .{ .x = 0, .y = -1e6 }, .clip = true, .control = true }, null);
+    return c.focusable_ids.items.len;
+}
+
+fn closeProbe(c: *ui.Context, focusable: usize) void {
+    c.end();
+    c.focusable_ids.shrinkRetainingCapacity(focusable);
+}
+
 /// For the row keyed just before: its last rect when it is off screen and
 /// a spacer of its remembered height stands in for it, else null with the
 /// row still to draw. `h`, `w` and `m` are what the row remembers (an
-/// entry's `cached_h`, `cached_w` and `measured_w`).
-fn spacer(c: *ui.Context, cull: Cull, settled: bool, h: *f32, w: *f32, m: *f32) ?ui.Rect {
-    const prev = c.rects.get(c.peekId(null));
+/// entry's `cached_h`, `cached_w` and `measured_w`): its last height, the
+/// column that height is for, and the column it was last drawn in (0 under
+/// a spacer, -1 under one a slide drew, whose height may be old after it).
+fn spacer(c: *ui.Context, cull: Cull, remeasure: *Remeasure, settled: bool, e: *const tr.Entry, h: *f32, w: *f32, m: *f32) ?Stand {
+    const row_id = c.peekId(null);
+    const prev = c.rects.get(row_id);
     if (prev) |r| if (r.h > 0 and m.* > 0) {
         h.* = r.h;
         w.* = m.*;
     };
-    const width_ok = cull.loose or @abs(w.* - cull.col) <= 1.0;
-    if (cull.on and settled and h.* > 0 and width_ok) {
+    const width_ok = @abs(w.* - cull.col) <= 1.0;
+    const old = !width_ok and !cull.loose and m.* < 0;
+    if (cull.on and settled and h.* > 0 and (width_ok or cull.loose or old)) {
         if (cull.view) |view| if (prev) |r| {
-            if (@import("motion_rules.zig").skipOffscreenRow(true, r.y - cull.offset_delta, r.y + r.h - cull.offset_delta, view.y, view.y + view.h, cull.pad)) {
-                m.* = 0;
+            const skip = @import("motion_rules.zig").skipOffscreenRow;
+            const top = r.y - cull.offset_delta;
+            const end = view.y + view.h;
+            if (skip(true, top, top + r.h, view.y, end, if (old) 0 else cull.pad)) {
+                // At the row's place in the tree either way: `peekId` of the
+                // probe is the id `openProbe` gives it.
+                const probe = old and probeRow(c, cull, remeasure, row_id, e, h, w, m, top < view.y, !skip(true, top, top + r.h, view.y, end, cull.pad));
+                if (!old) m.* = if (cull.sliding) -1 else 0;
                 _ = c.leaf(.{ .width = .fill, .height = .{ .px = h.* } }, .none, null);
-                return r;
+                return .{ .rect = r, .probe = probe };
             }
         };
     }
     m.* = cull.col;
     return null;
+}
+
+/// Whether the row is to be drawn out of sight this frame. Once two frames
+/// agree on its height (some content settles in its second) the row takes
+/// it instead. One `near` the viewport doesn't wait for the pane's turn.
+fn probeRow(c: *ui.Context, cull: Cull, remeasure: *Remeasure, row_id: u64, e: *const tr.Entry, h: *f32, w: *f32, m: *f32, above: bool, near: bool) bool {
+    const id = c.peekId(probeKey(c, row_id));
+    const started = c.rects.get(id);
+    if (started) |now| if (c.prev_rects.get(id)) |before| {
+        if (now.h > 0 and now.h == before.h and @abs(now.w - cull.col) <= 1.0) {
+            remeasure.total += now.h - h.*;
+            if (above) remeasure.above += now.h - h.*;
+            h.* = now.h;
+            w.* = cull.col;
+            m.* = 0;
+            return false;
+        }
+    };
+    remeasure.pending = true;
+    if (started != null) return true;
+    if (near and remeasure.near) {
+        remeasure.near = false;
+        return true;
+    }
+    if (remeasure.left == 0) return false;
+    var bytes: usize = 64;
+    for (e.parts.items) |*p| bytes += p.text.items.len;
+    if (bytes > remeasure.left and remeasure.started) {
+        // Nothing after it jumps ahead this frame.
+        remeasure.left = 0;
+        return false;
+    }
+    remeasure.started = true;
+    remeasure.left -|= bytes;
+    return true;
 }
 
 /// A reply's parts `[start, end)` as an entry of this frame's to draw.
@@ -581,7 +826,7 @@ fn steerPiece(c: *ui.Context, e: *const tr.Entry, id: []const u8, start: usize, 
 
 /// Under a message sent while its turn worked: what the reply gained
 /// after it, a row of its own with the gap of one.
-fn steerTail(c: *ui.Context, a: *App, k: theme.Colors, t: steer_order.Tail, entries_: []tr.Entry, user_ix: usize, chat_id: ?[]const u8, cull: Cull, just_stuck: bool, sel_pin: *SelectionPin) void {
+fn steerTail(c: *ui.Context, a: *App, k: theme.Colors, t: steer_order.Tail, entries_: []tr.Entry, user_ix: usize, chat_id: ?[]const u8, cull: Cull, remeasure: *Remeasure, just_stuck: bool, sel_pin: *SelectionPin, quote_rows: ?*quote_view.Rows) void {
     if (t.start >= t.end) return;
     const owner = &entries_[t.owner];
     const message = entries_[user_ix].id;
@@ -590,15 +835,20 @@ fn steerTail(c: *ui.Context, a: *App, k: theme.Colors, t: steer_order.Tail, entr
     const row_id = c.peekId(null);
     const row_pinned = sel_pin.isPinned(row_id);
     const at_end = user_ix + 1 == entries_.len;
-    if (spacer(c, cull, !row_pinned and (!just_stuck or !at_end) and owner.status != .streaming, &t.cut.cached_h, &t.cut.cached_w, &t.cut.measured_w) != null) {
+    const quoted = quote_rows != null and quote_view.wants(a, owner.id);
+    const stand = spacer(c, cull, remeasure, !row_pinned and !quoted and (!just_stuck or !at_end) and owner.status != .streaming, owner, &t.cut.cached_h, &t.cut.cached_w, &t.cut.measured_w);
+    if (stand) |st| {
         sel_pin.noteCulled();
-        return;
+        if (!st.probe) return;
     }
+    const probing = stand != null;
+    const focusable = if (probing) openProbe(c, row_id, cull.col) else 0;
+    defer if (probing) closeProbe(c, focusable);
     const row_start = c.nodes.items.len;
     const piece = steerPiece(c, owner, c.print("{s}~{s}", .{ owner.id, message }), t.start, t.end) orelse return;
     const closes = t.end == owner.parts.items.len;
-    assistant(c, a, k, piece, .{ .chat_id = chat_id, .entries = entries_, .index = t.owner, .col = cull.col, .scroll = cull.view, .closes = closes, .last = closes and at_end });
-    sel_pin.observe(c, row_id, row_start);
+    assistant(c, a, k, piece, .{ .chat_id = chat_id, .entries = entries_, .index = t.owner, .col = cull.col, .scroll = cull.view, .closes = closes, .last = closes and at_end, .quotes = if (probing) null else quote_rows });
+    if (!probing) sel_pin.observe(c, row_id, row_start);
 }
 
 /// A prompt's bubble; where it was last laid out.
@@ -737,10 +987,14 @@ const At = struct {
     closes: bool = true,
     /// The transcript's last row, though its entry isn't the last one.
     last: bool = false,
+    /// Where its replies' text is noted, to be quoted from. Null for a row
+    /// drawn out of sight for its height (`openProbe`): it is nowhere to go.
+    quotes: ?*quote_view.Rows = null,
 };
 
 fn assistant(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at: At) void {
     const last = at.last or at.index + 1 == at.entries.len;
+    if (at.quotes) |q| q.next();
     const col = ui.div(c).column().wFull();
     defer col.end();
     const hovered = col.hovered() or (last and underLastRow(c, a, c.rects.get(c.node(col.index).id), at.scroll));
@@ -842,7 +1096,12 @@ pub fn streamMarkdown(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Ent
         a.view.tool_ui.veils.getOrCreate(a.gpa, part_id, live and p.text.items.len > 64, c.time * 1000.0)
     else
         null;
-    @import("view_markdown.zig").withLinksVeil(c, k, p.text.items, a, chat_id, row_veil, live and !a.offscreen);
+    const markdown = @import("view_markdown.zig");
+    if (e.role == .assistant and e.status == .complete and p.kind == .text) {
+        markdown.withCommandBlocks(c, k, p.text.items, a, chat_id, row_veil);
+    } else {
+        markdown.withLinksVeil(c, k, p.text.items, a, chat_id, row_veil, live and !a.offscreen);
+    }
     if (!live and row_veil != null) {
         a.view.tool_ui.veils.pruneSettled(a.gpa, part_id);
     }
@@ -851,6 +1110,8 @@ pub fn streamMarkdown(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Ent
 fn part(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const tr.Part, at: At, answer: Answer) void {
     switch (p.kind) {
         .text => {
+            const start = c.nodes.items.len;
+            defer if (at.quotes) |q| q.note(c, at.entries[at.index].id, p.id, start);
             if (answer.part == p) {
                 const box = ui.div(c).column().wFull();
                 defer box.end();
@@ -862,8 +1123,12 @@ fn part(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const 
         .@"error" => errorPart(c, a, k, e, p, at),
         .image => @import("view_reply_images.zig").draw(c, a, k, at.chat_id, p.path, p.text.items, null),
         .visual => @import("view_visual.zig").draw(c, a, k, e, p),
+        .artifact => @import("view_artifact.zig").draw(c, a, k, e, p),
         .delegation => attachment(c, k, .widget, "Delegated to a subagent"),
         .input => {
+            // The stored part still records the request for history and sync;
+            // a resolved question is no longer an actionable transcript chip.
+            if (p.resolved) return;
             const q = if (p.questions.len > 0) p.questions[0] else null;
             const label = if (q) |x| (if (x.question.len > 0) x.question else x.header) else "Question";
             @import("view_question.zig").chip(c, k, label, p.resolved, at.col);
@@ -980,7 +1245,11 @@ fn workLine(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: 
     }
     const override = if (live) live_key else settled_key;
     const default_open = compact.defaultWorkOpen(e.parts.items, live);
-    const open = a.view.groups.get(override) orelse if (live) true else (a.view.groups.get(key) orelse a.view.groups.get(legacy) orelse default_open);
+    var open = a.view.groups.get(override) orelse if (live) true else (a.view.groups.get(key) orelse a.view.groups.get(legacy) orelse default_open);
+    if (!open and at.quotes != null and quote_view.opens(a, at.entries[at.index].id, work)) {
+        a.view.toggleGroup(a.gpa, override, open);
+        open = true;
+    }
     const box = ui.div(c).column().wFull();
     defer box.end();
     {
@@ -1004,7 +1273,7 @@ fn workLine(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: 
             const active = e.status == .streaming and for (work) |p| {
                 if ((p.kind == .reasoning and at.closes) or (p.kind == .tool and !p.resolved)) break true;
             } else false;
-            @import("view_tool_rows.zig").title(c, k, workLabel(c, lb, work), active, h.hovered(), max_title_w);
+            @import("view_tool_rows.zig").title(c, k, workLabel(c, lb, work), work, active, h.hovered(), max_title_w);
         }
     }
     const state = @import("tool_ui_state.zig");
@@ -1019,7 +1288,7 @@ fn workLine(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: 
     const body = ui.div(c).column().wFull().pt(8).gap(12);
     defer body.end();
     @import("view_tool_tree.zig").rememberHeight(c, a, fold_id, body.index);
-    if (is_animating) c.frameIn(1.0 / 30.0);
+    if (is_animating) c.animationFrame();
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
     workRows(c, a, k, e, work, at);
 }
@@ -1273,4 +1542,137 @@ fn system(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at: At) 
         .@"error" => errorPart(c, a, k, e, p, at),
         else => {},
     };
+}
+
+/// Content-based height estimate for an unmeasured transcript row (mirroring
+/// Zeron's `ROW_ESTIMATE` in #1496) so cold chat opens at the bottom don't
+/// build and discard dozens of offscreen long replies on frame 1.
+pub fn estimateEntryHeight(e: *const tr.Entry, col_w: f32) f32 {
+    const eff_w = @max(180, @min(col_w, column_w));
+    const chars_per_line = @max(20.0, eff_w / 7.8);
+    switch (e.role) {
+        .user => {
+            var h: f32 = 44;
+            const bubble_cpl = @max(18.0, @min(eff_w * 0.78, 520.0) / 7.8);
+            for (e.parts.items) |*p| switch (p.kind) {
+                .text => h += estimateMarkdownHeight(p.text.items, bubble_cpl, 22.5, false),
+                .image => h += 96,
+                else => {},
+            };
+            return @max(56, h);
+        },
+        .assistant => {
+            var h: f32 = 36;
+            var in_tools = false;
+            for (e.parts.items) |*p| switch (p.kind) {
+                .text => {
+                    in_tools = false;
+                    h += 12 + estimateMarkdownHeight(p.text.items, chars_per_line, 22.5, true);
+                },
+                .tool, .delegation => {
+                    if (!in_tools) {
+                        h += 38;
+                        in_tools = true;
+                    }
+                },
+                .reasoning => {
+                    in_tools = false;
+                    h += 34;
+                },
+                .image, .visual => {
+                    in_tools = false;
+                    h += 240;
+                },
+                .artifact => {
+                    in_tools = false;
+                    h += 88;
+                },
+                .input => {
+                    in_tools = false;
+                    if (!p.resolved) h += 42;
+                },
+                .@"error" => {
+                    in_tools = false;
+                    h += 48;
+                },
+                else => {},
+            };
+            return @max(48, h);
+        },
+        .system => return 40,
+    }
+}
+
+fn estimateMarkdownHeight(text: []const u8, chars_per_line: f32, line_h: f32, rich_md: bool) f32 {
+    if (text.len == 0) return line_h;
+    var h: f32 = 0;
+    var in_code = false;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (rich_md and std.mem.startsWith(u8, line, "```")) {
+            in_code = !in_code;
+            h += if (in_code) 40 else 12;
+            continue;
+        }
+        if (in_code) {
+            h += 18;
+            continue;
+        }
+        if (line.len == 0) {
+            h += 12;
+            continue;
+        }
+        if (rich_md and line[0] == '|') {
+            h += 34;
+            continue;
+        }
+        if (rich_md and line[0] == '#') {
+            h += 30;
+            continue;
+        }
+        const wrapped = @max(1.0, @ceil(@as(f32, @floatFromInt(line.len)) / chars_per_line));
+        h += wrapped * line_h;
+    }
+    return @max(line_h, h);
+}
+
+test "estimateEntryHeight scales with user text, markdown code/tables, and folded tool groups" {
+    const testing = std.testing;
+    var short_user: tr.Entry = .{ .id = @constCast("u1"), .role = .user, .status = .complete };
+    var p1: tr.Part = .{ .id = @constCast("p1"), .kind = .text };
+    try p1.text.appendSlice(testing.allocator, "Hi");
+    defer p1.text.deinit(testing.allocator);
+    try short_user.parts.append(testing.allocator, p1);
+    defer short_user.parts.deinit(testing.allocator);
+
+    var long_assistant: tr.Entry = .{ .id = @constCast("a1"), .role = .assistant, .status = .complete };
+    var p2: tr.Part = .{ .id = @constCast("p2"), .kind = .text };
+    try p2.text.appendSlice(testing.allocator,
+        \\## Summary
+        \\
+        \\Here is a detailed reply with a fenced code block and a markdown table:
+        \\
+        \\```zig
+        \\pub fn example() void {
+        \\    const a = 1;
+        \\    const b = 2;
+        \\    _ = a + b;
+        \\}
+        \\```
+        \\
+        \\| Col A | Col B |
+        \\| --- | --- |
+        \\| Row 1 | Value 1 |
+        \\| Row 2 | Value 2 |
+    );
+    defer p2.text.deinit(testing.allocator);
+    try long_assistant.parts.append(testing.allocator, p2);
+    for (0..4) |_| try long_assistant.parts.append(testing.allocator, .{ .id = @constCast("t"), .kind = .tool });
+    defer long_assistant.parts.deinit(testing.allocator);
+
+    const h_short = estimateEntryHeight(&short_user, 680);
+    const h_long = estimateEntryHeight(&long_assistant, 680);
+    try testing.expect(h_short >= 56 and h_short < 120);
+    try testing.expect(h_long > 320);
 }

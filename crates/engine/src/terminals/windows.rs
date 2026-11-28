@@ -316,6 +316,13 @@ pub(super) fn open(
     for (key, value) in builder.iter_full_env_as_str() {
         environment.insert(env_key(OsStr::new(key)), (key.into(), value.into()));
     }
+    for secret in [
+        "harness_ipc_token",
+        "harness_sandbox_token_file",
+        "harness_edge_token",
+    ] {
+        environment.remove(OsStr::new(secret));
+    }
     for (key, value) in [
         ("TERM", "xterm-256color"),
         ("COLORTERM", "truecolor"),

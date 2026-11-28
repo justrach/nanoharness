@@ -123,6 +123,49 @@ pub fn wordRange(s: []const u8, at: usize) [2]usize {
     unreachable;
 }
 
+/// A prose double-click may select two words only when the hit is in a
+/// drawn gap and both complete words fit on the hit-tested visual line.
+/// Otherwise use ordinary word selection, including for clicks in margins.
+pub fn proseWordRange(s: []const u8, at: usize, visible_line: ?[2]usize) [2]usize {
+    const hit = wordRange(s, at);
+    const line = visible_line orelse return hit;
+    if (hit[0] <= line[0] or at >= line[1] or hit[1] >= line[1] or class(s, hit[0]) != .space) return hit;
+
+    // Some renderers can leave break characters in the measured line.
+    var pos = hit[0];
+    while (pos < hit[1]) {
+        const ch = scalar(s, pos);
+        switch (ch.cp) {
+            0x0a...0x0d, 0x85, 0x2028, 0x2029 => return hit,
+            else => pos = ch.end,
+        }
+    }
+    const left = wordRange(s, hit[0] - 1);
+    const right = wordRange(s, hit[1]);
+    if (left[0] < line[0] or right[1] > line[1] or class(s, left[0]) != .word or class(s, right[0]) != .word) return hit;
+    return .{ left[0], right[1] };
+}
+
+test "selection prose gap only joins complete words on the same visual line" {
+    const text = "Try café\u{a0}  maple today.";
+    const gap = "\u{a0}  ";
+    const at = "Try café".len;
+    for (at..at + gap.len) |offset| {
+        const joined = proseWordRange(text, offset, .{ 0, text.len });
+        try std.testing.expectEqualStrings("café" ++ gap ++ "maple", text[joined[0]..joined[1]]);
+        for ([_]?[2]usize{ null, .{ 0, at + gap.len }, .{ at, text.len }, .{ "Try ca".len, text.len }, .{ 0, "Try café".len + gap.len + "ma".len } }) |line| {
+            const unjoined = proseWordRange(text, offset, line);
+            try std.testing.expectEqualStrings(gap, text[unjoined[0]..unjoined[1]]);
+        }
+    }
+    for ([_][]const u8{ "\n", "\r\n", "\n\n", "\u{85}", "\u{2028}", "\u{2029}" }) |separator| {
+        var buf: [32]u8 = undefined;
+        const broken = try std.fmt.bufPrint(&buf, "amber{s}maple", .{separator});
+        const range = proseWordRange(broken, "amber".len, .{ 0, broken.len });
+        try std.testing.expectEqualStrings(separator, broken[range[0]..range[1]]);
+    }
+}
+
 /// A logical paragraph, independent of its visual wrapping. Markdown
 /// paragraphs already have separate text nodes; literal newlines delimit
 /// paragraphs in text that has not been parsed as Markdown.

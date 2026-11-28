@@ -228,3 +228,81 @@ test "github responsive short list and activity panes reserve clickable paginati
         }
     }
 }
+
+test "github activity hides pagination footer on single-page timelines and keeps it for multi-page timelines" {
+    const single_activity: flow.Page = .{
+        .repository = repo,
+        .kind = .activity,
+        .page = 1,
+        .hasNextPage = false,
+        .events = &.{
+            .{ .id = "synthetic-event-1", .event = "commented", .author = "demo-reviewer", .createdAt = "2026-11-12", .body = "First synthetic timeline note." },
+            .{ .id = "synthetic-event-2", .event = "committed", .author = author, .createdAt = "2026-11-13", .body = "Follow-up synthetic commit event." },
+        },
+    };
+    {
+        var f: Fixture = undefined;
+        try f.init(520, 620, single_activity);
+        defer f.deinit();
+        if (std.c.getenv("NANO_GITHUB_ACTIVITY_SNAP")) |path| {
+            try f.t.screenshot(std.mem.span(path));
+        }
+        try testing.expect(f.t.hasText("First synthetic timeline note."));
+        try testing.expect(!f.t.hasText("Previous"));
+        try testing.expect(!f.t.hasText("Page 1"));
+        try testing.expect(!f.t.hasText("Next"));
+    }
+
+    // Multi-page page 1 keeps pagination visible (Next active, Previous disabled).
+    const multi_first: flow.Page = .{
+        .repository = repo,
+        .kind = .activity,
+        .page = 1,
+        .hasNextPage = true,
+        .events = single_activity.events,
+    };
+    {
+        var f: Fixture = undefined;
+        try f.init(520, 620, multi_first);
+        defer f.deinit();
+        try f.inViewport(try f.text("Previous"));
+        try f.inViewport(try f.text("Page 1"));
+        try f.control("Next");
+    }
+
+    // Multi-page last page keeps pagination so Previous remains clickable.
+    const multi_last: flow.Page = .{
+        .repository = repo,
+        .kind = .activity,
+        .page = 2,
+        .hasNextPage = false,
+        .events = single_activity.events,
+    };
+    {
+        var f: Fixture = undefined;
+        try f.init(520, 620, multi_last);
+        defer f.deinit();
+        f.a.engine.scene.?.deinit();
+        const scene = try std.json.Stringify.valueAlloc(testing.allocator, .{ .BrowseCheckoutGitHub = .{ .@"$seq" = .{multi_first} } }, .{});
+        defer testing.allocator.free(scene);
+        f.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator, scene, .{});
+        try f.control("Previous");
+        try f.inViewport(try f.text("Page 2"));
+        try f.inViewport(try f.text("Next"));
+        try f.t.clickText("Previous");
+        f.t.settle(0.1);
+        try testing.expectEqual(@as(usize, 1), f.a.panels.github_repository.current().?.page);
+    }
+}
+
+test "github showPagination hides only single-page activity and detail pages" {
+    try testing.expect(!github.showPagination(.pull, .{ .repository = repo, .kind = .pull, .page = 1, .hasNextPage = false }));
+    try testing.expect(!github.showPagination(.issue, .{ .repository = repo, .kind = .issue, .page = 1, .hasNextPage = false }));
+    try testing.expect(!github.showPagination(.activity, .{ .repository = repo, .kind = .activity, .page = 1, .hasNextPage = false }));
+    try testing.expect(github.showPagination(.activity, .{ .repository = repo, .kind = .activity, .page = 1, .hasNextPage = true }));
+    try testing.expect(github.showPagination(.activity, .{ .repository = repo, .kind = .activity, .page = 2, .hasNextPage = false }));
+    try testing.expect(github.showPagination(.activity, .{ .repository = repo, .kind = .activity, .page = 2, .hasNextPage = true }));
+    try testing.expect(github.showPagination(.pulls, .{ .repository = repo, .kind = .pulls, .page = 1, .hasNextPage = false }));
+    try testing.expect(github.showPagination(.issues, .{ .repository = repo, .kind = .issues, .page = 1, .hasNextPage = false }));
+    try testing.expect(github.showPagination(.files, .{ .repository = repo, .kind = .files, .page = 1, .hasNextPage = false }));
+}

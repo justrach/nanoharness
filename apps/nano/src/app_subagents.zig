@@ -17,6 +17,10 @@ pub const Agent = struct {
     fetch: ?u64 = null,
     retry_at: ?f64 = null,
     loaded: bool = false,
+    /// The feed's last error, shown in the tab until an item arrives.
+    error_text: ?[]u8 = null,
+    /// Failed watches since the last item, for `retryDelay`.
+    failures: u32 = 0,
 
     fn create(a: *App, parent: []const u8, doc: []const u8, title: []const u8, frozen: bool) !*Agent {
         const s = try a.gpa.create(Agent);
@@ -43,6 +47,7 @@ pub const Agent = struct {
     pub fn destroy(s: *Agent) void {
         const gpa = s.app.gpa;
         s.transcript.deinit();
+        if (s.error_text) |t| gpa.free(t);
         gpa.free(s.parent);
         gpa.free(s.doc);
         gpa.free(s.title);
@@ -107,20 +112,49 @@ pub const Agent = struct {
     fn onDoc(s: *Agent, id: u64, reply: rpc.Reply) void {
         if (s.watch != id) return;
         switch (reply) {
-            .item => |frame| s.transcript.apply(frame) catch {
+            .item => |frame| if (s.transcript.apply(frame)) |_| {
+                s.failures = 0;
+                s.setError(null);
+            } else |_| {
+                // A frame out of step: a fresh watch starts from a reset.
                 s.app.engine.cancel(id);
                 s.watch = null;
-                s.retry_at = s.app.now + 2;
+                s.backOff();
             },
-            .done, .err => {
+            // The engine ended the feed: the transcript is final.
+            .done => {
                 s.watch = null;
-                s.retry_at = s.app.now + 2;
+                s.retry_at = null;
+                s.loaded = true;
+            },
+            .err => |why| {
+                s.watch = null;
+                s.setError(why);
+                s.backOff();
             },
             .ok => {},
         }
         s.app.redraw();
     }
+
+    fn backOff(s: *Agent) void {
+        s.failures +|= 1;
+        s.retry_at = s.app.now + retryDelay(s.failures);
+    }
+
+    fn setError(s: *Agent, why: ?[]const u8) void {
+        if (s.error_text) |t| s.app.gpa.free(t);
+        s.error_text = if (why) |w| s.app.gpa.dupe(u8, w) catch null else null;
+    }
 };
+
+/// Seconds before a failed subagent feed is watched again, after `failures`
+/// failures in a row: 2 s, doubling, at most a minute.
+pub fn retryDelay(failures: u32) f64 {
+    if (failures == 0) return 0;
+    const doublings: u5 = @intCast(@min(failures - 1, 5));
+    return @min(2 * @as(f64, @floatFromInt(@as(u32, 1) << doublings)), 60);
+}
 
 /// Retain targets now, activate at the next frame boundary. A nested
 /// agent click must not free/reallocate the transcript being laid out.

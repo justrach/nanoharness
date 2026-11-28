@@ -3,8 +3,8 @@
 //! are shared with that implementation; nano paints trusted paths/rules via
 //! its native SVG primitive. No browser, scripts, URLs, or input XML.
 use latex_rust::{
-    AtomKind, BoxContent, Dim, EnvRow, EqNumber, MathBox, MathFont, MathNode, MathParams,
-    MathStyle, MatrixStyle, ParseOptions, SpaceKind, SvgOptions, Token,
+    BoxContent, Dim, EnvRow, EqNumber, MathBox, MathFont, MathNode, MathStyle, ParseOptions,
+    SpaceKind, SvgOptions, Token,
 };
 use std::{cell::RefCell, collections::VecDeque, sync::OnceLock};
 const MAX_SOURCE_BYTES: usize = 4096;
@@ -194,23 +194,6 @@ fn preflight(source: &str) -> Result<(), String> {
                     // missing rule/style intent cannot be recovered reliably.
                     return Err(format!("Unsupported equation command: {name}"));
                 }
-                // parse_command consumes style declarations without retaining
-                // them; parse_atom retains limit modifiers only on named text
-                // operators, not Sum/Product/Integral. No downstream geometry
-                // correction can recover this lost scope/intent. Until the AST
-                // can represent it, report the limitation rather than silently
-                // rendering a different equation (including inside groups).
-                if matches!(
-                    name.as_str(),
-                    "displaystyle"
-                        | "textstyle"
-                        | "scriptstyle"
-                        | "scriptscriptstyle"
-                        | "limits"
-                        | "nolimits"
-                ) {
-                    return Err(format!("Unsupported equation command: {name}"));
-                }
             }
             _ => {}
         }
@@ -229,124 +212,11 @@ fn scalar(dim: &Dim) -> Result<f32, String> {
     Ok(value)
 }
 
-// Explicit glue is classless upstream. Track known atom classes so we can
-// restore missing glue without interfering with binary reclassification.
-fn spacing_atom_kind(node: &MathNode) -> Option<AtomKind> {
-    match node {
-        MathNode::Atom(_, kind) | MathNode::SizedDelim(_, _, kind) => Some(*kind),
-        MathNode::Text(_, _) | MathNode::Ref(_) => Some(AtomKind::Ord),
-        MathNode::Operator(_, _)
-        | MathNode::Sum(_, _)
-        | MathNode::Product(_, _)
-        | MathNode::Integral(_, _, _)
-        | MathNode::Limit(_) => Some(AtomKind::Op),
-        MathNode::Fraction(_, _) | MathNode::Radical(_, _) | MathNode::Delimited(_, _, _) => {
-            Some(AtomKind::Inner)
-        }
-        MathNode::Symbol(name) => Some(latex_rust::symbol_atom_kind(name)),
-        MathNode::Row(nodes) if nodes.len() == 1 => spacing_atom_kind(&nodes[0]),
-        MathNode::Row(_) => Some(AtomKind::Ord),
-        MathNode::Superscript(base, _)
-        | MathNode::Subscript(base, _)
-        | MathNode::SubSup(base, _, _)
-        | MathNode::Color(_, base)
-        | MathNode::TextColor(_, base)
-        | MathNode::Phantom(_, base) => spacing_atom_kind(base),
-        _ => None,
-    }
-}
-
-fn zero_implicit_glue(left: Option<AtomKind>, right: Option<AtomKind>) -> bool {
-    use AtomKind::*;
-    // Zero entries in TeX's inter-atom spacing table, excluding Bin because
-    // a classless neighbor also changes binary reclassification. Unknown
-    // compound atom classes conservatively retain their source instead.
-    matches!(
-        (left, right),
-        (Some(Ord | Close), Some(Ord | Open | Close | Punct))
-            | (
-                Some(Open),
-                Some(Ord | Op | Rel | Open | Close | Punct | Inner)
-            )
-            | (Some(Op), Some(Open | Close | Punct))
-            | (Some(Rel), Some(Rel | Close | Punct))
-            | (Some(Inner), Some(Close))
-    )
-}
-
-// Nonzero relation entries in latex-rust's TeX inter-atom spacing table.
-// All but Rel→Open are suppressed in script styles. No Bin touches these gaps.
-fn relation_glue(
-    left: Option<AtomKind>,
-    right: Option<AtomKind>,
-    script: bool,
-) -> Option<SpaceKind> {
-    use AtomKind::*;
-    match (left, right) {
-        (Some(Rel), Some(Open)) => Some(SpaceKind::Thick),
-        (Some(Ord | Op | Close | Inner), Some(Rel)) | (Some(Rel), Some(Ord | Op | Inner))
-            if !script =>
-        {
-            Some(SpaceKind::Thick)
-        }
-        (Some(Punct), Some(Rel)) if !script => Some(SpaceKind::Thin),
-        _ => None,
-    }
-}
-
-// Yield one boundary per run of explicit skips, not one per skip.
-fn spaced_boundaries(
-    nodes: &[MathNode],
-) -> impl Iterator<Item = (usize, Option<AtomKind>, Option<AtomKind>)> + '_ {
-    let mut previous = None;
-    nodes
-        .iter()
-        .enumerate()
-        .filter(|(_, node)| !matches!(node, MathNode::Space(_)))
-        .filter_map(move |(index, right)| {
-            let (left_index, left) = previous.replace((index, right))?;
-            (index - left_index > 1)
-                .then(|| (index, spacing_atom_kind(left), spacing_atom_kind(right)))
-        })
-}
-
-fn validate_row_spacing(nodes: &[MathNode]) -> Result<bool, String> {
-    let mut restore_relation_glue = false;
-    for (_, left, right) in spaced_boundaries(nodes) {
-        if relation_glue(left, right, false).is_some() {
-            restore_relation_glue = true;
-        } else if !zero_implicit_glue(left, right) {
-            return Err("Explicit spacing affecting automatic math glue is unsupported".into());
-        }
-    }
-    Ok(restore_relation_glue)
-}
-
-fn restore_row_relation_glue(nodes: &mut Vec<MathNode>, style: MathStyle) {
-    let script = style.script_level() > 0;
-    let extra: Vec<_> = spaced_boundaries(nodes)
-        .filter_map(|(index, left, right)| Some((index, relation_glue(left, right, script)?)))
-        .collect();
-    if extra.is_empty() {
-        return;
-    }
-    let mut row = Vec::with_capacity(nodes.len() + extra.len());
-    let mut extra = extra.into_iter().peekable();
-    for (index, node) in nodes.drain(..).enumerate() {
-        if let Some((_, glue)) = extra.next_if(|(at, _)| *at == index) {
-            row.push(MathNode::Space(glue));
-        }
-        row.push(node);
-    }
-    *nodes = row;
-}
-
 // Validate the AST before potentially expensive grid/assembly layout. This also
 // catches left-associated script chains which need not nest source braces.
-fn validate_ast(root: &MathNode) -> Result<bool, String> {
+fn validate_ast(root: &MathNode, em_pt: &Dim) -> Result<(), String> {
     let mut pending = vec![(root, 0usize)];
     let mut count = 0;
-    let mut restore_relation_glue = false;
     while let Some((node, depth)) = pending.pop() {
         count += 1;
         if count > MAX_AST_NODES || depth > MAX_DEPTH {
@@ -382,9 +252,6 @@ fn validate_ast(root: &MathNode) -> Result<bool, String> {
             | MathNode::Phantom(_, body)
             | MathNode::Tag { body, .. } => push(body),
             MathNode::Row(nodes) | MathNode::Substack(nodes) => {
-                if matches!(node, MathNode::Row(_)) {
-                    restore_relation_glue |= validate_row_spacing(nodes)?;
-                }
                 for node in nodes {
                     push(node);
                 }
@@ -392,6 +259,14 @@ fn validate_ast(root: &MathNode) -> Result<bool, String> {
             MathNode::Sum(lower, upper)
             | MathNode::Product(lower, upper)
             | MathNode::Integral(_, lower, upper) => {
+                for node in lower.iter().chain(upper) {
+                    push(node);
+                }
+            }
+            MathNode::OperatorWithLimits {
+                base, lower, upper, ..
+            } => {
+                push(base);
                 for node in lower.iter().chain(upper) {
                     push(node);
                 }
@@ -434,6 +309,11 @@ fn validate_ast(root: &MathNode) -> Result<bool, String> {
                     return Err("Equation spacing exceeds limit".into());
                 }
             }
+            MathNode::Space(SpaceKind::HspacePt(value)) => {
+                if scalar(&(value / em_pt))?.abs() > 64.0 {
+                    return Err("Equation spacing exceeds limit".into());
+                }
+            }
             MathNode::Strut(height, depth) => {
                 for value in [height, depth] {
                     if !(0.0..=64.0).contains(&scalar(value)?) {
@@ -444,289 +324,7 @@ fn validate_ast(root: &MathNode) -> Result<bool, String> {
             _ => {}
         }
     }
-    Ok(restore_relation_glue)
-}
-
-// Rewrite only real math commands, never substrings in literal text, comments,
-// or escaped control sequences. The caller parses the original first, so this
-// cannot repair malformed input into an accepted equation. Keep the original
-// source for copying and cache keys; this temporary string is layout-only.
-fn normalize_absolute_hspace(source: &str, size: f32) -> Result<(String, Vec<Dim>), String> {
-    fn trivia(bytes: &[u8], mut i: usize) -> usize {
-        loop {
-            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            if bytes.get(i) != Some(&b'%') {
-                return i;
-            }
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
-        }
-    }
-    fn command_end(bytes: &[u8], mut i: usize) -> usize {
-        if bytes.get(i).is_some_and(u8::is_ascii_alphabetic) {
-            while bytes.get(i).is_some_and(u8::is_ascii_alphabetic) {
-                i += 1;
-            }
-        } else if i < bytes.len() {
-            // Control symbols may be non-ASCII; advance to a UTF-8 boundary.
-            i += 1;
-            while bytes.get(i).is_some_and(|b| b & 0xc0 == 0x80) {
-                i += 1;
-            }
-        }
-        i
-    }
-    fn group_end(bytes: &[u8], start: usize) -> Option<usize> {
-        let (mut i, mut depth) = (start + 1, 1usize);
-        while i < bytes.len() {
-            match bytes[i] {
-                b'%' => {
-                    i = trivia(bytes, i);
-                    continue;
-                }
-                b'\\' => {
-                    i = command_end(bytes, i + 1);
-                    continue;
-                }
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(i);
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-        None
-    }
-    let bytes = source.as_bytes();
-    let (mut i, mut copied) = (0, 0);
-    let mut out = String::new();
-    let mut spaces = Vec::new();
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            i = trivia(bytes, i);
-            continue;
-        }
-        if bytes[i] != b'\\' {
-            i += 1;
-            continue;
-        }
-        let command_start = i;
-        let end = command_end(bytes, i + 1);
-        let name = &source[i + 1..end];
-        i = end;
-        if !matches!(
-            name,
-            "hspace" | "text" | "mbox" | "operatorname" | "intertext" | "label" | "ref"
-        ) {
-            continue;
-        }
-        let start = trivia(bytes, end);
-        if bytes.get(start) != Some(&b'{') {
-            continue;
-        }
-        let Some(close) = group_end(bytes, start) else {
-            continue;
-        };
-        i = close + 1;
-        if name != "hspace" {
-            continue;
-        }
-        let tokens = latex_rust::tokenize(&source[start + 1..close]).map_err(|e| e.to_string())?;
-        let mut spec = String::new();
-        for token in tokens {
-            match token {
-                Token::Char(c) => spec.push(c),
-                Token::Space => spec.push(' '),
-                _ => return Err("Invalid equation spacing".into()),
-            }
-        }
-        let spec = spec.trim();
-        let Some(number) = spec.strip_suffix("pt").or_else(|| spec.strip_suffix("bp")) else {
-            continue;
-        };
-        let points: f64 = number
-            .trim()
-            .parse()
-            .map_err(|_| "Invalid equation spacing")?;
-        let em = points / (f64::from(size) * 0.75);
-        if !em.is_finite() || em.abs() > 64.0 {
-            return Err("Equation spacing exceeds limit".into());
-        }
-        out.push_str(&source[copied..command_start]);
-        // Original AST validation reserves values above 64 for these markers.
-        // Resolve each marker after parsing, using the actual enclosing style.
-        out.push_str(&format!(r"\hspace{{{}em}}", 65 + spaces.len()));
-        spaces.push(Dim::from_ieee32_bits((em as f32).to_bits()));
-        copied = close + 1;
-    }
-    out.push_str(&source[copied..]);
-    Ok((out, spaces))
-}
-
-// Mirror latex-rust's layout style transitions. Cramping does not affect scale,
-// but retaining it here makes nested fractions/scripts follow the engine too.
-fn resolve_layout_spacing(
-    node: &mut MathNode,
-    style: MathStyle,
-    spaces: &[Dim],
-    params: &MathParams,
-) {
-    let visit = |node: &mut MathNode, style| {
-        resolve_layout_spacing(node, style, spaces, params);
-    };
-    match node {
-        MathNode::Space(SpaceKind::Hspace(value)) => {
-            for (index, desired) in spaces.iter().enumerate() {
-                if *value == Dim::from_i64(65 + index as i64) {
-                    *value = desired / &params.scale(style);
-                    break;
-                }
-            }
-        }
-        MathNode::Fraction(num, den) => {
-            visit(num, style.numerator());
-            visit(den, style.denominator());
-        }
-        MathNode::Superscript(base, sup) => {
-            visit(base, style);
-            visit(sup, style.into_script().cramp());
-        }
-        MathNode::Subscript(base, sub) => {
-            visit(base, style);
-            visit(sub, style.into_script());
-        }
-        MathNode::SubSup(base, sub, sup) => {
-            visit(base, style);
-            visit(sub, style.into_script());
-            visit(sup, style.into_script().cramp());
-        }
-        MathNode::Radical(index, body) => {
-            visit(body, style.cramp());
-            if let Some(index) = index {
-                visit(index, MathStyle::ScriptScript);
-            }
-        }
-        MathNode::CancelTo(value, body) => {
-            visit(value, style.into_script());
-            visit(body, style);
-        }
-        MathNode::Sum(lower, upper) | MathNode::Product(lower, upper) => {
-            if let Some(lower) = lower {
-                visit(lower, style.into_script());
-            }
-            if let Some(upper) = upper {
-                visit(
-                    upper,
-                    if style.is_display() {
-                        style.into_script()
-                    } else {
-                        style.into_script().cramp()
-                    },
-                );
-            }
-        }
-        MathNode::Integral(_, lower, upper) => {
-            if let Some(lower) = lower {
-                visit(lower, style.into_script());
-            }
-            if let Some(upper) = upper {
-                visit(upper, style.into_script().cramp());
-            }
-        }
-        MathNode::Limit(lower) => {
-            if let Some(lower) = lower {
-                visit(lower, style.into_script());
-            }
-        }
-        MathNode::OverUnder(body, upper, lower) => {
-            visit(body, style);
-            for node in upper.iter_mut().chain(lower) {
-                visit(node, style.into_script());
-            }
-        }
-        MathNode::Row(nodes) => {
-            restore_row_relation_glue(nodes, style);
-            for node in nodes {
-                visit(node, style);
-            }
-        }
-        MathNode::Substack(nodes) => {
-            for node in nodes {
-                visit(node, MathStyle::Script);
-            }
-        }
-        MathNode::Intertext(body) | MathNode::Tag { body, .. } => visit(body, MathStyle::Text),
-        MathNode::Accent(body, kind) => {
-            use latex_rust::AccentKind::*;
-            let cramped = matches!(
-                kind,
-                Hat | Check
-                    | Breve
-                    | Acute
-                    | Grave
-                    | Tilde
-                    | Bar
-                    | Vec
-                    | Dot
-                    | Ddot
-                    | Dddot
-                    | Ddddot
-                    | Ring
-                    | WideHat
-                    | WideTilde
-                    | Overleftarrow
-                    | Overrightarrow
-                    | Overleftrightarrow
-                    | Underleftarrow
-                    | Underrightarrow
-                    | Underleftrightarrow
-                    | Overbrace
-                    | Underbrace
-            );
-            visit(body, if cramped { style.cramp() } else { style });
-        }
-        MathNode::Delimited(_, body, _)
-        | MathNode::Color(_, body)
-        | MathNode::TextColor(_, body)
-        | MathNode::ColorBox(_, body)
-        | MathNode::FColorBox(_, _, body)
-        | MathNode::Phantom(_, body) => visit(body, style),
-        MathNode::Matrix(kind, _, rows) => {
-            let cell_style = match kind {
-                MatrixStyle::Aligned
-                    if rows.iter().all(|row| matches!(row, EnvRow::Cells { .. })) =>
-                {
-                    MathStyle::Display
-                }
-                MatrixStyle::Aligned => style,
-                kind if kind.is_display_env() => MathStyle::Display,
-                MatrixStyle::Array | MatrixStyle::Split => style,
-                _ => MathStyle::Text,
-            };
-            for row in rows {
-                match row {
-                    EnvRow::Cells { cells, number, .. } => {
-                        for cell in cells {
-                            visit(cell, cell_style);
-                        }
-                        if let EqNumber::Tag { body, .. } = number {
-                            visit(body, MathStyle::Text);
-                        }
-                    }
-                    EnvRow::Intertext(body) => visit(body, MathStyle::Text),
-                    EnvRow::Hline => {}
-                }
-            }
-        }
-        _ => {}
-    }
+    Ok(())
 }
 
 fn layout_source(source: &str, display: bool, size: f32) -> Result<MathBox, String> {
@@ -735,31 +333,17 @@ fn layout_source(source: &str, display: bool, size: f32) -> Result<MathBox, Stri
     let (ast, _) =
         latex_rust::parse_with_options(source, &ParseOptions::new().with_max_depth(MAX_DEPTH))
             .map_err(|e| e.to_string())?;
-    // Reject user-provided marker values and bound traversal before rewriting.
-    let restore_relation_glue = validate_ast(&ast)?;
-    let (normalized, spaces) = normalize_absolute_hspace(source, size)?;
-    let mut ast = if normalized == source {
-        ast
-    } else {
-        latex_rust::parse_with_options(&normalized, &ParseOptions::new().with_max_depth(MAX_DEPTH))
-            .map_err(|e| e.to_string())?
-            .0
-    };
     let style = if display {
         MathStyle::Display
     } else {
         MathStyle::Text
     };
-    if restore_relation_glue || !spaces.is_empty() {
-        let params = MathParams::from_font(font()?).map_err(|e| e.to_string())?;
-        resolve_layout_spacing(&mut ast, style, &spaces, &params);
-    }
-    validate_ast(&ast)?;
-    // Layout's own recursion guard is 32. The AST is restricted further above.
     // 1 logical CSS pixel = 3/4 point; this matters for AMS absolute spacing.
     let em_pt = Dim::from_ieee32_bits((size * 0.75).to_bits());
+    validate_ast(&ast, &em_pt)?;
     let tree = latex_rust::layout_with_em_size_pt(&ast, font()?, style, &em_pt)
         .map_err(|e| e.to_string())?;
+
     let mut pending = vec![(&tree, 0usize)];
     let mut count = 0;
     while let Some((node, depth)) = pending.pop() {
@@ -883,6 +467,160 @@ mod tests {
 
     fn value(dim: &Dim) -> f32 {
         scalar(dim).unwrap()
+    }
+
+    #[test]
+    fn math_coverage_boxed_spacing_keeps_the_requested_skip() {
+        let width = |s| value(&layout_source(s, false, 20.).unwrap().width);
+        let thin = width(r"u\,g") - width("ug");
+        for (base, spaced) in [
+            (r"\boxed{u}g", r"\boxed{u}\,g"),
+            (r"\boxed{=}g", r"\boxed{=}\,g"),
+        ] {
+            assert!(
+                (width(spaced) - width(base) - thin).abs() < 0.0005,
+                "{spaced}"
+            );
+        }
+    }
+
+    #[test]
+    fn math_coverage_binary_spacing_supplements_automatic_glue() {
+        let width = |s: &str| value(&layout_source(s, false, 20.).unwrap().width);
+        for (base, spaced, control, control_spaced) in [
+            ("a+b", r"a\,+\,b", "ab", r"a\,\,b"),
+            ("a+b", r"a\,+b", "ab", r"a\,b"),
+            ("a+b", r"a+\,b", "ab", r"a\,b"),
+            ("a+b", r"a+\hspace{-1pt}b", "ab", r"a\hspace{-1pt}b"),
+            (r"a\times b", r"a\,\times\,b", "ab", r"a\,\,b"),
+            ("a+b", r"a\displaystyle +b", "ab", "ab"),
+            ("-a", r"-\,a", "ab", r"a\,b"),
+            ("a+-b", r"a+\,-b", "ab", r"a\,b"),
+            ("(a+)", r"(a\,+)", "ab", r"a\,b"),
+            ("x^{a+b}", r"x^{a+\,b}", "x^{ab}", r"x^{a\,b}"),
+        ] {
+            assert!(
+                (width(spaced) - width(base) - (width(control_spaced) - width(control))).abs()
+                    < 0.0005,
+                "incorrect glue for {spaced}"
+            );
+        }
+        let glyph_positions = |s| {
+            let row = layout_source(s, false, 20.).unwrap();
+            let BoxContent::HList(items) = row.content else {
+                panic!("expected row")
+            };
+            let mut x = Dim::zero();
+            items
+                .into_iter()
+                .filter_map(|item| {
+                    let position = value(&x);
+                    x = &x + &item.width;
+                    matches!(item.content, BoxContent::Glyph { .. }).then_some(position)
+                })
+                .collect::<Vec<_>>()
+        };
+        let base = glyph_positions("a+b");
+        assert_eq!(base.len(), 3);
+        let thin = width(r"a\,b") - width("ab");
+        for (s, offsets) in [(r"a\,+b", [0., thin, thin]), (r"a+\,b", [0., 0., thin])] {
+            for ((actual, base), offset) in glyph_positions(s).into_iter().zip(&base).zip(offsets) {
+                assert!((actual - base - offset).abs() < 0.0005, "{s}");
+            }
+        }
+    }
+
+    #[test]
+    fn math_coverage_nested_styles_preserve_scope_and_size() {
+        for (plain, styled) in [
+            (
+                r"\frac{\frac{u}{v}}{w}",
+                r"\frac{\displaystyle\frac{u}{v}}{w}",
+            ),
+            (r"z^{\frac{u}{v}}", r"z^{\displaystyle\frac{u}{v}}"),
+            (r"z_{\frac{u}{v}}", r"z_{\displaystyle\frac{u}{v}}"),
+            (
+                r"\left(\frac{u}{v}\right)",
+                r"\left(\displaystyle\frac{u}{v}\right)",
+            ),
+        ] {
+            assert!(
+                vector(styled, false).height > vector(plain, false).height,
+                "{styled}"
+            );
+        }
+        let scoped = layout_source(
+            r"\begin{matrix}\displaystyle\frac{u}{v}&\frac{p}{q}\end{matrix}",
+            false,
+            20.,
+        )
+        .unwrap();
+        let unscoped = layout_source(
+            r"\begin{matrix}\displaystyle\frac{u}{v}&\displaystyle\frac{p}{q}\end{matrix}",
+            false,
+            20.,
+        )
+        .unwrap();
+        assert!(value(&scoped.width) < value(&unscoped.width));
+        let width = |s| value(&layout_source(s, false, 20.).unwrap().width);
+        assert!(
+            (20. * (width(r"z^{\displaystyle a\hspace{1pt}b}") - width(r"z^{\displaystyle ab}"))
+                - 4. / 3.)
+                .abs()
+                < 0.01
+        );
+        for (styled, plain) in [
+            (r"\frac{\textstyle u}{\textstyle v}", r"\frac{u}{v}"),
+            (r"z^{\scriptstyle 2}+q", "z^{2}+q"),
+            (
+                r"\begin{matrix}\textstyle u&v\end{matrix}",
+                r"\begin{matrix}u&v\end{matrix}",
+            ),
+        ] {
+            assert_eq!(
+                vector(styled, true).svg,
+                vector(plain, true).svg,
+                "{styled}"
+            );
+        }
+    }
+
+    #[test]
+    fn math_coverage_explicit_operator_limits_override_the_default() {
+        for (placed, plain) in [
+            (r"\sum\nolimits_{i}^{n}", r"\sum_{i}^{n}"),
+            (r"\prod\nolimits_{i}^{n}", r"\prod_{i}^{n}"),
+        ] {
+            assert!(
+                vector(placed, true).height < vector(plain, true).height,
+                "{placed}"
+            );
+            assert_eq!(
+                vector(placed, false).svg,
+                vector(plain, false).svg,
+                "{placed}"
+            );
+        }
+        for display in [false, true] {
+            assert!(
+                vector(r"\int\limits_{u}^{v}", display).height
+                    > vector(r"\int_{u}^{v}", display).height
+            );
+            assert!(vector(r"\lim\nolimits_i", display).depth < vector(r"\lim_i", display).depth);
+            assert_eq!(
+                vector(r"\int\nolimits_{u}^{v}", display).svg,
+                vector(r"\int_{u}^{v}", display).svg
+            );
+            assert_eq!(
+                vector(r"\sum_i^n\limits", display).svg,
+                vector(r"\sum\limits_i^n", display).svg
+            );
+        }
+        assert_eq!(
+            vector(r"\sum\limits_{i}^{n}", true).svg,
+            vector(r"\sum_{i}^{n}", true).svg
+        );
+        assert!(render_svg(r"x\limits^2", false, 20., [0; 4]).is_err());
     }
 
     #[test]
@@ -1025,11 +763,6 @@ mod tests {
                 (width(r"x^{a\;=\;b}") - script - 2. * script_thin).abs() < 0.0005,
                 "explicit script spacing must remain without text-style relation glue"
             );
-
-            assert!(
-                layout_source(r"a\;+\;b", display, 20.).is_err(),
-                "spacing that can reclassify a binary atom must remain unsupported"
-            );
         }
     }
 
@@ -1073,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_math_style_declarations_are_not_silently_ignored() {
+    fn explicit_math_style_declarations_apply_scoped_styles_and_reject_empty() {
         for command in [
             "displaystyle",
             "textstyle",
@@ -1087,28 +820,45 @@ mod tests {
                         format!(r"x+{{\{command} {body}}}"),
                     ] {
                         assert!(
-                            render_svg(&source, display, 20.0, [0; 4]).is_err(),
-                            "silently ignored: {source}"
+                            render_svg(&source, display, 20.0, [0; 4]).is_ok(),
+                            "failed valid style declaration: {source}"
                         );
                     }
                 }
             }
         }
-    }
 
-    #[test]
-    fn explicit_large_operator_limit_modifiers_are_not_silently_ignored() {
-        for display in [false, true] {
-            for source in [
-                r"\sum\nolimits_{i}^{n}",
-                r"\prod\nolimits_{i}^{n}",
-                r"\int\limits_{a}^{b}",
-            ] {
-                assert!(
-                    render_svg(source, display, 20.0, [0; 4]).is_err(),
-                    "silently ignored: {source}"
-                );
-            }
+        let disp_inline = render_svg(r"\displaystyle \frac{p+q}{r}", false, 20.0, [0; 4]).unwrap();
+        let disp_block = render_svg(r"\frac{p+q}{r}", true, 20.0, [0; 4]).unwrap();
+        assert!((disp_inline.height - disp_block.height).abs() < 0.01);
+        assert!((disp_inline.width - disp_block.width).abs() < 0.01);
+        assert_eq!(disp_inline.svg, disp_block.svg);
+
+        let text_in_block = render_svg(r"\textstyle \frac{a}{b}", true, 20.0, [0; 4]).unwrap();
+        let text_inline = render_svg(r"\frac{a}{b}", false, 20.0, [0; 4]).unwrap();
+        assert!((text_in_block.height - text_inline.height).abs() < 0.01);
+        assert!((text_in_block.width - text_inline.width).abs() < 0.01);
+
+        let script = render_svg(r"\scriptstyle \frac{a}{b}", false, 20.0, [0; 4]).unwrap();
+        let scriptscript =
+            render_svg(r"\scriptscriptstyle \frac{a}{b}", false, 20.0, [0; 4]).unwrap();
+        assert!(script.height < text_inline.height);
+        assert!(scriptscript.height < script.height);
+
+        let braced = render_svg(r"x+{\displaystyle \frac{a}{b}}", false, 20.0, [0; 4]).unwrap();
+        let plain = render_svg(r"x+\frac{a}{b}", false, 20.0, [0; 4]).unwrap();
+        assert!(braced.height > plain.height);
+
+        let spaced_eq =
+            render_svg(r"{\displaystyle \frac{a}{b}} = 1", false, 20.0, [0; 4]).unwrap();
+        let unspaced_eq = render_svg(r"{\displaystyle \frac{a}{b}}1", false, 20.0, [0; 4]).unwrap();
+        assert!(spaced_eq.width > unspaced_eq.width);
+
+        for unsupported in [r"{\displaystyle}", r"x+\displaystyle", r"z^\displaystyle 2"] {
+            assert!(
+                render_svg(unsupported, false, 20.0, [0; 4]).is_err(),
+                "unexpectedly accepted misplaced/empty style command: {unsupported}"
+            );
         }
     }
 
@@ -1540,7 +1290,7 @@ mod tests {
             let base = render_svg(baseline, display, 20.0, [0; 4]).unwrap();
             assert!((actual.width - base.width - 8.0 / 3.0).abs() < 0.001);
         }
-        // A user cannot inject or collide with internal marker dimensions.
+        // Relative skips still have a bounded range.
         for source in [
             r"x\hspace{65em}x",
             r"x^{\hspace{66em}}",
@@ -1551,26 +1301,25 @@ mod tests {
     }
 
     #[test]
-    fn absolute_hspace_normalization_preserves_literals_comments_and_escapes() {
+    fn absolute_hspace_parsing_preserves_literals_comments_and_escapes() {
         for source in [
             r"\text{x\hspace{1pt}y}",
             r"\mbox{x\hspace{1bp}y}",
             r"\operatorname{x\hspace{1pt}y}",
             r"\text{nested {x\hspace{1pt}} y}",
-            r"\\hspace{1pt}",
-            r"\hspaceother{1pt}",
+            r"\text{\\hspace{1pt}}",
             "x% \\hspace{1pt}\ny",
         ] {
-            assert_eq!(normalize_absolute_hspace(source, 20.0).unwrap().0, source);
+            let (ast, _) = latex_rust::parse_with_options(source, &ParseOptions::new()).unwrap();
+            assert!(!ast.gold().contains("(space hspace-pt"), "{source}");
         }
         let source = "x\\hspace % comment\n {1% inner\n pt}x";
         let base = vector("xx", false);
         let spaced = vector(source, false);
         assert!((spaced.width - base.width - 4.0 / 3.0).abs() < 0.01);
         let source = r"\text{\hspace{1pt}}x\hspace{1bp}x";
-        let (normalized, _) = normalize_absolute_hspace(source, 20.0).unwrap();
-        assert!(normalized.starts_with(r"\text{\hspace{1pt}}x"));
-        assert!(normalized.ends_with("em}x"));
+        let (ast, _) = latex_rust::parse_with_options(source, &ParseOptions::new()).unwrap();
+        assert_eq!(ast.gold().matches("(space hspace-pt").count(), 1);
         for source in [
             r"x\hspace{1pt",
             r"x\hspace{{1pt}}x",
@@ -1652,6 +1401,321 @@ mod tests {
                 }
                 usvg::Tree::from_str(&equation.svg, &usvg::Options::default()).unwrap();
             }
+        }
+    }
+
+    fn glyphs<'a>(tree: &'a MathBox, wanted: char) -> Vec<&'a MathBox> {
+        let mut pending = vec![tree];
+        let mut found = Vec::new();
+        while let Some(node) = pending.pop() {
+            match &node.content {
+                BoxContent::Glyph { ch, .. } if *ch == wanted => found.push(node),
+                BoxContent::HList(nodes)
+                | BoxContent::VList(nodes)
+                | BoxContent::Overlap(nodes) => pending.extend(nodes),
+                BoxContent::Color(_, inner)
+                | BoxContent::BackColor(_, inner)
+                | BoxContent::Frame { inner, .. } => pending.push(inner),
+                _ => {}
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn ams_starred_operators_stack_limits_in_display_style_only() {
+        let tree = layout_source(r"\operatorname*{argmax}_{x}^{n}", true, 20.).unwrap();
+        let BoxContent::Overlap(parts) = &tree.content else {
+            panic!("display starred operator must stack limits");
+        };
+        let [base, upper, lower] = parts.as_slice() else {
+            panic!("operator and two limits")
+        };
+        assert!(value(&upper.shift) - value(&upper.depth) > value(&base.height));
+        assert!(value(&lower.shift) + value(&lower.height) < -value(&base.depth));
+
+        // The star changes display placement only; the name keeps its shape,
+        // operator spacing and ordinary scripts in text style.
+        for (starred, plain) in [
+            (
+                r"\operatorname*{argmax}_{x} f(x)",
+                r"\operatorname{argmax}_{x} f(x)",
+            ),
+            (r"2\operatorname*{argmax} f", r"2\operatorname{argmax} f"),
+            (
+                r"\operatorname*{argmax}\nolimits_{x}",
+                r"\operatorname{argmax}_{x}",
+            ),
+        ] {
+            assert_eq!(
+                vector(starred, false).svg,
+                vector(plain, false).svg,
+                "{starred}"
+            );
+        }
+        for display in [false, true] {
+            let starred = vector(r"\operatorname*{argmax}\limits_{x}", display);
+            assert!(starred.depth > vector(r"\operatorname{argmax}_{x}", display).depth);
+            assert_eq!(
+                vector(r"\operatorname*{argmax}\nolimits_{x}", display).svg,
+                vector(r"\operatorname{argmax}_{x}", display).svg
+            );
+            // Unstarred names keep lateral scripts in both styles.
+            assert_eq!(
+                vector(r"\operatorname{argmax}_{x}", display).svg,
+                vector(r"\mathrm{argmax}_{x}", display).svg
+            );
+        }
+        assert_eq!(
+            vector(r"\displaystyle\operatorname*{argmax}_{x}", false).svg,
+            vector(r"\operatorname*{argmax}_{x}", true).svg
+        );
+    }
+
+    #[test]
+    fn ams_starred_operator_names_typeset_as_written() {
+        for (starred, expected) in [
+            // A skip inside the name is a skip, not a literal comma.
+            (r"\operatorname*{arg\,max}", r"\mathrm{arg}\,\mathrm{max}"),
+            // TeX ignores spaces and upright-sets letters in the name.
+            (r"\operatorname*{arg max}", r"\mathrm{argmax}"),
+            (r"\operatorname*{arg~max}", r"\mathrm{arg}\ \mathrm{max}"),
+            // Operator names use a text hyphen, not a binary minus.
+            (r"\operatorname*{ess-sup}", r"\text{ess-sup}"),
+            (r"\operatorname*{a*b}", r"\text{a*b}"),
+            (r"\operatorname*{a(b)}", r"\mathrm{a}(\mathrm{b})"),
+            // A name that is also a symbol's name is still a word.
+            (r"\operatorname*{alpha}", r"\mathrm{alpha}"),
+            (r"\operatorname*{\alpha}", r"\alpha"),
+        ] {
+            for display in [false, true] {
+                assert_eq!(
+                    vector(starred, display).svg,
+                    vector(expected, display).svg,
+                    "{starred}"
+                );
+            }
+        }
+        for source in [
+            r"\operatorname*",
+            r"\operatorname*{}",
+            r"\operatorname*{ }",
+            r"\operatorname*x",
+            r"\operatorname*{argmax",
+            r"\operatorname**{argmax}",
+            r"\operatorname*{argmax}_x_y",
+            r"\operatorname*{\unsupported}",
+            r"\operatorname*{x^2}",
+            r"{\operatorname*{x}_a}\limits_b",
+        ] {
+            assert!(render_svg(source, true, 20.0, [0; 4]).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn ams_middle_delimiters_match_their_enclosing_pair() {
+        for display in [false, true] {
+            for body in [
+                ["a", "b"],
+                [r"\frac{a}{b}", "c"],
+                ["a", r"\frac{b}{\frac{c}{d}}"],
+                ["", r"\sum_{i}^{n}"],
+            ] {
+                let [a, b] = body;
+                let split =
+                    layout_source(&format!(r"\left|{a}\middle|{b}\right|"), display, 20.).unwrap();
+                let whole =
+                    layout_source(&format!(r"\left|{a}{{}}{b}\right|"), display, 20.).unwrap();
+                let fences = glyphs(&split, '|');
+                assert_eq!(fences.len(), 3, "{body:?}");
+                for fence in &fences {
+                    assert_eq!(
+                        (&fence.height, &fence.depth, &fence.shift),
+                        (&fences[0].height, &fences[0].depth, &fences[0].shift),
+                        "{body:?}"
+                    );
+                }
+                // Sized from the content alone: the pair itself doesn't grow.
+                let outer = glyphs(&whole, '|');
+                assert_eq!(fences[0].height, outer[0].height, "{body:?}");
+                assert_eq!(fences[0].depth, outer[0].depth, "{body:?}");
+            }
+            assert_eq!(
+                vector(r"\left\langle a\middle\vert b\right\rangle", display).svg,
+                vector(r"\left\langle a\middle| b\right\rangle", display).svg
+            );
+            assert!(
+                vector(
+                    r"\left\langle\frac{a}{b}\middle\|\frac{c}{d}\right\rangle",
+                    display
+                )
+                .width
+                    > vector(r"\left\langle\frac{a}{b}\frac{c}{d}\right\rangle", display).width
+            );
+        }
+        let width = |s| value(&layout_source(s, false, 20.).unwrap().width);
+        // As in e-TeX a middle fence closes the list on its left and opens the
+        // one on its right: tight on both sides, and a unary minus after it.
+        let bar = value(
+            &glyphs(
+                &layout_source(r"\left(a\middle|b\right)", false, 20.).unwrap(),
+                '|',
+            )[0]
+            .width,
+        );
+        assert!(
+            (width(r"\left(a\middle|b\right)") - width(r"\left(ab\right)") - bar).abs() < 0.0005
+        );
+        assert!((width(r"\left(a\middle.b\right)") - width(r"\left(ab\right)")).abs() < 0.0005);
+        for (signed, plain) in [
+            (r"\left(a\middle|-b\right)", r"\left(a\middle|b\right)"),
+            (r"\left(a-\middle|b\right)", r"\left(a\middle|b\right)"),
+        ] {
+            assert!(
+                (width(signed) - width(plain) - width("-")).abs() < 0.0005,
+                "{signed}"
+            );
+        }
+        // It also ends a style declaration, which still applies on its own side.
+        for (declared, plain) in [
+            (
+                r"\left(\displaystyle a\middle|\frac{b}{c}\right)",
+                r"\left(a\middle|\frac{b}{c}\right)",
+            ),
+            (
+                r"\left(a\middle|\displaystyle\frac{b}{c}\right)",
+                r"\left(a\middle|\displaystyle{\frac{b}{c}}\right)",
+            ),
+        ] {
+            assert_eq!(vector(declared, false).svg, vector(plain, false).svg);
+        }
+        assert!(
+            vector(r"\left(a\middle|\displaystyle\frac{b}{c}\right)", false).height
+                > vector(r"\left(a\middle|\frac{b}{c}\right)", false).height
+        );
+        // Several fences, nesting, and color each stay within their own pair.
+        for source in [
+            r"\left(a\middle|b\middle|c\right)",
+            r"\left(\left[\frac{a}{b}\middle/c\right]\middle\vert d\right)",
+            r"\left(\color{red} a\middle|b\right)",
+            r"\mathrm{\left(a\middle|b\right)}",
+            r"\left(\middle|\right)",
+        ] {
+            assert!(render_svg(source, true, 20.0, [0; 4]).is_ok(), "{source}");
+        }
+        let nested = layout_source(
+            r"\left(\left[\frac{a}{b}\middle|c\right]\middle|d\right)",
+            true,
+            20.,
+        )
+        .unwrap();
+        assert_eq!(glyphs(&nested, '|').len(), 2);
+    }
+
+    #[test]
+    fn ams_middle_outside_a_delimited_list_stays_literal() {
+        for source in [
+            r"\middle",
+            r"a\middle|b",
+            r"\left(a\middle|b",
+            r"\left(a\middle b\right)",
+            r"\left(a\middle\right)",
+            r"\left({a\middle|b}\right)",
+            r"\left(\frac{a\middle|b}{c}\right)",
+            r"\left(\begin{matrix}a\middle|b\end{matrix}\right)",
+            r"\left(a\right)\middle|b",
+            r"\left(a\middle|\displaystyle\right)",
+        ] {
+            assert!(render_svg(source, true, 20.0, [0; 4]).is_err(), "{source}");
+        }
+        assert_eq!(
+            layout_source(r"a\middle|b", false, 20.).unwrap_err(),
+            "unmatched delimiter"
+        );
+    }
+
+    #[test]
+    fn ams_gathered_rows_are_centered_and_spaced_like_aligned_rows() {
+        let ink_rows = |source| {
+            let equation = vector(source, true);
+            let svg = usvg::Tree::from_str(&equation.svg, &usvg::Options::default()).unwrap();
+            let mut boxes = Vec::new();
+            let mut groups = vec![svg.root()];
+            while let Some(group) = groups.pop() {
+                for node in group.children() {
+                    match node {
+                        usvg::Node::Group(inner) => groups.push(inner),
+                        other => boxes.push(other.abs_bounding_box()),
+                    }
+                }
+            }
+            let split = equation.height / 2.;
+            [true, false].map(|upper| {
+                let row = || boxes.iter().filter(|b| (b.bottom() < split) == upper);
+                assert!(row().count() > 0, "{source}");
+                let left = row().map(|b| b.left()).fold(f32::MAX, f32::min);
+                let right = row().map(|b| b.right()).fold(f32::MIN, f32::max);
+                (left + right) / 2.
+            })
+        };
+        for source in [
+            r"\begin{gathered}0\\00000\end{gathered}",
+            r"\begin{gathered}00000\\0\end{gathered}",
+            r"\begin{gathered}0=0\\00=00\\\end{gathered}",
+        ] {
+            let [upper, lower] = ink_rows(source);
+            assert!((upper - lower).abs() < 0.05, "{source}: {upper} vs {lower}");
+        }
+        let [upper, lower] = ink_rows(r"\begin{aligned}0\\00000\end{aligned}");
+        assert!(upper > lower + 5., "control: aligned rows end at the tab");
+
+        for display in [false, true] {
+            let gathered = vector(r"\begin{gathered}a=b\\c=d\end{gathered}", display);
+            let aligned = vector(r"\begin{aligned}a=b\\c=d\end{aligned}", display);
+            assert!((gathered.height - aligned.height).abs() < 0.01);
+            assert!((gathered.ascent - aligned.ascent).abs() < 0.01);
+            assert!(gathered.height > vector("a=b", display).height * 1.5);
+            // Every row is set in display style, wherever it appears.
+            assert_eq!(
+                vector(r"\begin{gathered}\frac{a}{b}\end{gathered}", display).svg,
+                vector(
+                    r"\begin{gathered}\displaystyle\frac{a}{b}\end{gathered}",
+                    display
+                )
+                .svg
+            );
+        }
+        let braced = vector(r"\left\{\begin{gathered}a\\b\end{gathered}\right.", false);
+        assert!(braced.width > vector(r"\begin{gathered}a\\b\end{gathered}", false).width);
+    }
+
+    #[test]
+    fn ams_gathered_declines_what_it_would_misrender() {
+        for source in [
+            r"\begin{gathered}\end{gathered}",
+            r"\begin{gathered}a",
+            r"\begin{gathered}a\end{aligned}",
+            r"\begin{gathered*}a\end{gathered*}",
+            // No alignment tabs in a single centered column.
+            r"\begin{gathered}a&b\end{gathered}",
+            r"\begin{gathered}a\\c&d\end{gathered}",
+            // Position, row-skip and starred-break options aren't content.
+            r"\begin{gathered}[t]a\\b\end{gathered}",
+            r"\begin{gathered}a\\[4pt]b\end{gathered}",
+            r"\begin{gathered}a\\*b\end{gathered}",
+            r"\begin{gathered}a\\*^2b\end{gathered}",
+            r"\begin{gathered}a\\[^2b\end{gathered}",
+            r"\begin{gathered}a\\ \tag{1}b\end{gathered}",
+            r"\begin{gathered}\hline a\end{gathered}",
+            r"\begin{gathered}\intertext{and}a\end{gathered}",
+        ] {
+            assert!(render_svg(source, true, 20.0, [0; 4]).is_err(), "{source}");
+        }
+        for source in [
+            r"\begin{gathered}\left[a\right]\\(b)\end{gathered}",
+            r"\begin{gathered}a[b]\\c\nonumber\end{gathered}",
+        ] {
+            assert!(render_svg(source, true, 20.0, [0; 4]).is_ok(), "{source}");
         }
     }
 }

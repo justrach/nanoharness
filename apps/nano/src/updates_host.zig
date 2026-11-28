@@ -10,14 +10,16 @@
 //! and app installs run a background release check: 20 s after start, then
 //! hourly on the wall clock (1, 5, 15, 30 min after failures).
 //!
-//! Network, commands and the restart go through seams (`Http`,
-//! `proc_seam.Runner`, `Restarter`) so tests answer from made-up releases
-//! and never install or restart anything.
+//! Network, commands, the restart and the process list go through seams
+//! (`Http`, `proc_seam.Runner`, `Restarter`, `Processes`) so tests answer from
+//! made-up releases and never install or restart anything.
 const std = @import("std");
+const Io = std.Io;
 const builtin = @import("builtin");
 const json = std.json;
 const Allocator = std.mem.Allocator;
 const proc = @import("proc_seam.zig");
+const io_deadline = @import("io_deadline.zig");
 
 pub const check_interval_ms: i64 = 60 * 60 * 1000;
 pub const check_backoff_ms = [_]i64{ 60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000 };
@@ -88,6 +90,56 @@ pub fn macAppArtifactAlloc(gpa: Allocator, version: []const u8) ![]u8 {
     return std.fmt.allocPrint(gpa, "harness-{s}-macos-{s}-app.tar.gz", .{ version, platformKey().arch });
 }
 
+/// Ed25519 public key baked into the app (`scripts/gen-release-key.py`, see
+/// docs/adr/0009); pairs with the CI `RELEASE_MANIFEST_SIGNING_KEY` secret.
+pub const release_verify_key: [32]u8 = .{
+    0x81, 0x1b, 0x3c, 0x04, 0x21, 0x34, 0x1b, 0x27,
+    0xdf, 0xbd, 0x46, 0xd0, 0x90, 0xc2, 0x99, 0x5d,
+    0x7a, 0xe5, 0x70, 0x76, 0x16, 0x2c, 0xe7, 0x77,
+    0x39, 0x0d, 0x12, 0xb2, 0xa5, 0xe5, 0xa8, 0xe1,
+};
+
+/// `version` plus each `file=sha256` line, sorted. The private key signs this.
+pub fn manifestMessage(arena: Allocator, version: []const u8, files: ?json.ObjectMap) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(arena);
+    try buf.appendSlice(arena, version);
+    try buf.append(arena, '\n');
+    if (files) |map| {
+        var names: std.ArrayList([]const u8) = .empty;
+        defer names.deinit(arena);
+        var it = map.iterator();
+        while (it.next()) |e| try names.append(arena, e.key_ptr.*);
+        std.mem.sort([]const u8, names.items, {}, struct {
+            fn less(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.less);
+        for (names.items) |name| {
+            const meta = map.get(name) orelse continue;
+            if (meta != .object) continue;
+            const sha_v = meta.object.get("sha256") orelse continue;
+            if (sha_v != .string) continue;
+            try buf.appendSlice(arena, name);
+            try buf.append(arena, '=');
+            try buf.appendSlice(arena, sha_v.string);
+            try buf.append(arena, '\n');
+        }
+    }
+    return buf.toOwnedSlice(arena);
+}
+
+pub fn verifyManifestSig(message: []const u8, sig: []const u8, pubkey: [32]u8) bool {
+    if (sig.len != 64) return false;
+    const Ed = std.crypto.sign.Ed25519;
+    const pk = Ed.PublicKey.fromBytes(pubkey) catch return false;
+    var sig_bytes: [64]u8 = undefined;
+    @memcpy(&sig_bytes, sig[0..64]);
+    const signature = Ed.Signature.fromBytes(sig_bytes);
+    signature.verify(message, pk) catch return false;
+    return true;
+}
+
 pub fn autoUpdateFrom(value: ?[]const u8) bool {
     const v = std.mem.trim(u8, value orelse return true, " \t\r\n");
     var buf: [8]u8 = undefined;
@@ -142,6 +194,33 @@ pub fn detectInstallFrom(exe: []const u8, home: ?[]const u8, os: std.Target.Os.T
         end = slash;
     }
     return .{ .kind = .unmanaged };
+}
+
+/// Whether `entry` is a bundle `applyMacApp` moved aside from `bundle_name`:
+/// `.{bundle_name}.old-` and the swap's 12 hex digits.
+pub fn isReplacedBundle(entry: []const u8, bundle_name: []const u8) bool {
+    var rest = entry;
+    for ([_][]const u8{ ".", bundle_name, ".old-" }) |part| {
+        if (!std.mem.startsWith(u8, rest, part)) return false;
+        rest = rest[part.len..];
+    }
+    if (rest.len != 12) return false;
+    for (rest) |c| switch (c) {
+        '0'...'9', 'a'...'f' => {},
+        else => return false,
+    };
+    return true;
+}
+
+/// Whether any of `executables` is inside a folder called `dir_name`. Replaced
+/// bundles have random names, so the name alone decides: how the path up to it
+/// is spelled (`/tmp` or `/private/tmp`) doesn't matter.
+pub fn runsInside(executables: []const []const u8, dir_name: []const u8) bool {
+    for (executables) |exe| {
+        var it = std.mem.splitScalar(u8, std.fs.path.dirname(exe) orelse continue, '/');
+        while (it.next()) |part| if (std.mem.eql(u8, part, dir_name)) return true;
+    }
+    return false;
 }
 
 /// The `CFBundleIdentifier` string of an XML Info.plist.
@@ -207,6 +286,20 @@ pub const Restarter = struct {
     restart_fn: *const fn (ctx: ?*anyopaque, app_root: []const u8) void,
 };
 
+/// The executables running on this device, so an app bundle that was replaced
+/// is never deleted under a process still running from it.
+pub const Processes = struct {
+    ctx: ?*anyopaque = null,
+    /// Every running process's executable where it is on disk *now* (a process
+    /// whose bundle was renamed is listed under the new name), in `arena`.
+    /// Null: couldn't tell.
+    executables_fn: *const fn (ctx: ?*anyopaque, arena: Allocator) Allocator.Error!?[]const []const u8,
+
+    pub fn executables(self: Processes, arena: Allocator) Allocator.Error!?[]const []const u8 {
+        return self.executables_fn(self.ctx, arena);
+    }
+};
+
 // ---------------------------------------------------------------- state
 
 pub const Phase = enum { idle, checking, downloading, waitingForIdle, restarting, failed };
@@ -221,9 +314,13 @@ pub const Updater = struct {
     current_version: []const u8,
     /// `HARNESS_RELEASES_URL`, when set.
     releases_override: ?[]const u8 = null,
+    /// Refuse ApplyUpdate unless the manifest carries a valid Ed25519 `sig`.
+    /// Tests that predate signing set this false; production stays true.
+    require_manifest_sig: bool = true,
     http: Http,
     runner: proc.Runner,
     restarter: Restarter,
+    processes: Processes = .{ .executables_fn = runningExecutables },
     /// Nothing would be interrupted by a restart now (no live run, no open terminal).
     quiescent_ctx: ?*anyopaque = null,
     quiescent_fn: ?*const fn (ctx: ?*anyopaque) bool = null,
@@ -318,15 +415,35 @@ pub const Updater = struct {
         version: []const u8,
         /// The artifact's `sha256`, when the manifest lists one.
         files: ?json.ObjectMap = null,
+        /// Raw 64-byte Ed25519 signature over [`manifestMessage`].
+        sig: ?[]const u8 = null,
 
         pub fn sha256For(self: Manifest, file: []const u8) ?[]const u8 {
-            const files = self.files orelse return null;
+            return sha256From(self.files orelse return null, file);
+        }
+
+        fn sha256From(files: json.ObjectMap, file: []const u8) ?[]const u8 {
             const meta = files.get(file) orelse return null;
             if (meta != .object) return null;
             const s = meta.object.get("sha256") orelse return null;
             return if (s == .string) s.string else null;
         }
     };
+
+    fn decodeSig(arena: Allocator, raw: []const u8) ?[]const u8 {
+        const t = std.mem.trim(u8, raw, " \t\r\n");
+        if (t.len == 128) {
+            const out = arena.alloc(u8, 64) catch return null;
+            _ = std.fmt.hexToBytes(out, t) catch return null;
+            return out;
+        }
+        const decoder = std.base64.url_safe_no_pad.Decoder;
+        const n = decoder.calcSizeForSlice(t) catch return null;
+        if (n != 64) return null;
+        const out = arena.alloc(u8, 64) catch return null;
+        decoder.decode(out, t) catch return null;
+        return out;
+    }
 
     /// `manifest.json`, falling back to `latest.txt`. Error → message (arena).
     pub fn fetchLatest(self: *Updater, arena: Allocator) !union(enum) { ok: Manifest, err: []const u8 } {
@@ -342,7 +459,13 @@ pub const Updater = struct {
                 if (version.len == 0) return .{ .err = "manifest.json has an empty version" };
                 if (!validVersion(version)) return .{ .err = try std.fmt.allocPrint(arena, "manifest.json names an invalid version: {f}", .{json.fmt(version, .{})}) };
                 const files = v.object.get("files");
-                return .{ .ok = .{ .version = version, .files = if (files) |f| (if (f == .object) f.object else null) else null } };
+                const sig_field = v.object.get("sig");
+                const sig = if (sig_field) |s| (if (s == .string) decodeSig(arena, s.string) else null) else null;
+                return .{ .ok = .{
+                    .version = version,
+                    .files = if (files) |f| (if (f == .object) f.object else null) else null,
+                    .sig = sig,
+                } };
             }
         } else |_| {}
         const lurl = try std.fmt.allocPrint(arena, "{s}/latest.txt", .{base});
@@ -356,8 +479,11 @@ pub const Updater = struct {
         return .{ .ok = .{ .version = ver } };
     }
 
-    /// One check; false on failure (retry sooner).
+    /// One check; false on failure (retry sooner). It first deletes the bundles
+    /// earlier app updates replaced: the background checks start 20 s after
+    /// launch and repeat, so one goes once the process it waited for quits.
     pub fn checkOnce(self: *Updater, now_ms: i64) !bool {
+        if (self.install.kind == .mac_app) self.removeReplacedBundles(self.install.path);
         self.setPhase(.checking);
         var arena_state = std.heap.ArenaAllocator.init(self.gpa);
         defer arena_state.deinit();
@@ -487,11 +613,17 @@ pub const Updater = struct {
     /// `apply_mac_app`: copy the staged bundle next to the installed one
     /// (`ditto`, metadata-preserving), then two renames; if the second fails
     /// the old bundle is put back. Null on success, else why.
+    ///
+    /// The replaced bundle stays beside it under its hidden `.old-` name: the
+    /// app (and its engine) still run from it until they relaunch, and macOS
+    /// can't look up the code of a process whose executable was deleted, so
+    /// its Open panel service fails (#173). `removeReplacedBundles` deletes it.
     pub fn applyMacApp(self: *Updater, arena: Allocator, staged: []const u8, bundle: []const u8) !?[]const u8 {
         if (builtin.os.tag != .macos) return "macOS app updates are not supported on this platform";
         const io = self.io orelse return "updates need file access";
         const parent = std.fs.path.dirname(bundle) orelse return "app bundle has no parent directory";
         const name = std.fs.path.basename(bundle);
+        self.removeReplacedBundles(bundle);
         var rnd: [6]u8 = undefined;
         io.random(&rnd);
         const fresh = try std.fmt.allocPrint(arena, "{s}/.{s}.new-{x}", .{ parent, name, rnd });
@@ -511,8 +643,35 @@ pub const Updater = struct {
             std.Io.Dir.cwd().deleteTree(io, fresh) catch {};
             return try std.fmt.allocPrint(arena, "installing the new app bundle: {s}", .{@errorName(e)});
         };
-        std.Io.Dir.cwd().deleteTree(io, old) catch {};
         return null;
+    }
+
+    /// Delete the bundles earlier updates moved aside from `bundle` that no
+    /// process runs from any more. Whatever can't be told or deleted stays
+    /// for the next time; so does everything while `bundle` itself is missing
+    /// (a swap cut short between its two renames).
+    pub fn removeReplacedBundles(self: *Updater, bundle: []const u8) void {
+        if (builtin.os.tag != .macos) return;
+        const io = self.io orelse return;
+        if (!exists(io, bundle)) return;
+        var arena_state = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const parent_path = std.fs.path.dirname(bundle) orelse return;
+        var parent = std.Io.Dir.cwd().openDir(io, parent_path, .{ .iterate = true }) catch return;
+        defer parent.close(io);
+        var replaced: std.ArrayList([]const u8) = .empty;
+        var it = parent.iterate();
+        while (it.next(io) catch return) |e| {
+            if (e.kind != .directory or !isReplacedBundle(e.name, std.fs.path.basename(bundle))) continue;
+            const name = arena.dupe(u8, e.name) catch return;
+            replaced.append(arena, name) catch return;
+        }
+        if (replaced.items.len == 0) return;
+        const executables = (self.processes.executables(arena) catch return) orelse return;
+        for (replaced.items) |name| {
+            if (!runsInside(executables, name)) parent.deleteTree(io, name) catch {};
+        }
     }
 
     /// Atomically repoint `app_root/current` at `app_root/<ver>`.
@@ -546,12 +705,22 @@ pub const Updater = struct {
             .ok => |m| m,
             .err => |e| return .{ .err = self.keepErr(e) },
         };
+        if (try self.refuseUnsigned(arena, m)) |e| return .{ .err = self.keepErr(e) };
         if (!versionNewer(m.version, self.current_version))
             return .{ .err = self.keepErr(try std.fmt.allocPrint(arena, "already up to date ({s})", .{self.current_version})) };
         if (try self.stageHeadless(arena, m, self.install.path)) |e| return .{ .err = self.keepErr(e) };
         if (try self.applyHeadless(arena, self.install.path, m.version)) |e| return .{ .err = self.keepErr(e) };
         self.restarter.restart_fn(self.restarter.ctx, self.install.path);
         return .{ .version = try reply_gpa.dupe(u8, m.version) };
+    }
+
+    fn refuseUnsigned(self: *Updater, arena: Allocator, m: Manifest) !?[]const u8 {
+        if (!self.require_manifest_sig) return null;
+        const sig = m.sig orelse return try std.fmt.allocPrint(arena, "unsigned manifest; refusing to install", .{});
+        const message = try manifestMessage(arena, m.version, m.files);
+        if (!verifyManifestSig(message, sig, release_verify_key))
+            return try std.fmt.allocPrint(arena, "manifest signature mismatch", .{});
+        return null;
     }
 
     fn keepErr(self: *Updater, msg: []const u8) []const u8 {
@@ -592,6 +761,7 @@ pub const Updater = struct {
             self.unlock();
             return null;
         }
+        if (try self.refuseUnsigned(arena, m)) |e| return try self.gpa.dupe(u8, e);
         if (try self.stageHeadless(arena, m, self.install.path)) |e| return try self.gpa.dupe(u8, e);
         while (true) {
             self.setPhase(.waitingForIdle);
@@ -610,6 +780,41 @@ pub const Updater = struct {
         return null;
     }
 };
+
+const libproc = if (builtin.os.tag == .macos) struct {
+    const all_pids: u32 = 1;
+    const path_max = 4096;
+    extern "c" fn proc_listpids(kind: u32, typeinfo: u32, buffer: ?*anyopaque, buffersize: c_int) c_int;
+    extern "c" fn proc_pidpath(pid: c_int, buffer: [*]u8, buffersize: u32) c_int;
+} else struct {};
+
+/// `Processes` from the kernel. `proc_pidpath` follows a running executable
+/// through renames (`ps` prints the path it was launched with). A process that
+/// ended meanwhile, or whose executable is already gone from disk, runs from
+/// no bundle that is still there; any other failure means "couldn't tell".
+fn runningExecutables(_: ?*anyopaque, arena: Allocator) Allocator.Error!?[]const []const u8 {
+    if (comptime builtin.os.tag != .macos) return null;
+    const need = libproc.proc_listpids(libproc.all_pids, 0, null, 0);
+    if (need <= 0) return null;
+    // Room for processes that start between the two calls; a list that fills it may be cut short.
+    const pids = try arena.alloc(c_int, @as(usize, @intCast(need)) / @sizeOf(c_int) + 256);
+    const size: c_int = @intCast(pids.len * @sizeOf(c_int));
+    const got = libproc.proc_listpids(libproc.all_pids, 0, pids.ptr, size);
+    if (got <= 0 or got >= size) return null;
+    var paths: std.ArrayList([]const u8) = .empty;
+    for (pids[0 .. @as(usize, @intCast(got)) / @sizeOf(c_int)]) |pid| {
+        if (pid <= 0) continue;
+        var buf: [libproc.path_max]u8 = undefined;
+        const n = libproc.proc_pidpath(pid, &buf, buf.len);
+        if (n > 0) {
+            try paths.append(arena, try arena.dupe(u8, buf[0..@intCast(n)]));
+        } else switch (std.c.errno(@as(c_int, -1))) {
+            .SRCH, .NOENT => {},
+            else => return null,
+        }
+    }
+    return paths.items;
+}
 
 fn exists(io: std.Io, path: []const u8) bool {
     _ = std.Io.Dir.cwd().statFile(io, path, .{}) catch return false;
@@ -701,7 +906,7 @@ fn downloadErrorText(e: anyerror) []const u8 {
 /// when it hasn't moved for `idle_ms`, shuts the socket down.
 const IdleWatchdog = struct {
     io: std.Io,
-    handle: std.Io.net.Socket.Handle,
+    stream: std.Io.net.Stream,
     idle_ms: u32,
     progress: std.atomic.Value(u64) = .init(0),
     done: std.atomic.Value(bool) = .init(false),
@@ -726,7 +931,7 @@ const IdleWatchdog = struct {
             still_ms += 20;
             if (still_ms >= self.idle_ms) {
                 self.fired.store(true, .release);
-                @import("auth_host.zig").shutdownSocket(self.handle);
+                @import("auth_host.zig").shutdownSocket(self.io, self.stream);
                 return;
             }
         }
@@ -744,6 +949,24 @@ const IdleWatchdog = struct {
         return self.fired.load(.acquire);
     }
 };
+
+const FetchProgress = struct {
+    io: Io,
+    idle_watchdog: ?*IdleWatchdog = null,
+    deadline: ?*io_deadline.Progress = null,
+
+    fn tick(self: *FetchProgress) void {
+        if (self.idle_watchdog) |watchdog| watchdog.tick();
+        if (self.deadline) |progress| progress.tick(self.io);
+    }
+};
+
+fn disposeLateStep(gpa: Allocator, result: anyerror!Step) void {
+    if (result) |step| switch (step) {
+        .done => {},
+        .redirect => |next| gpa.free(next),
+    } else |_| {}
+}
 
 pub const FetchLimits = struct { idle_ms: u32 = read_idle_ms, max_bytes: u64 };
 
@@ -765,11 +988,33 @@ pub fn fetchInto(gpa: Allocator, io: std.Io, url: []const u8, limits: FetchLimit
             .headers = .{ .user_agent = .{ .override = "harness-engine-zig" } },
         });
         defer req.deinit();
-        var dog: IdleWatchdog = .{ .io = io, .handle = req.connection.?.stream_reader.stream.socket.handle, .idle_ms = limits.idle_ms };
-        dog.arm();
-        const step = fetchStep(gpa, &req, limits, sink, hash, &dog);
-        const fired = dog.disarm();
-        if (fired) return error.Timeout;
+        const step = if (comptime builtin.os.tag == .windows) blk: {
+            var deadline = io_deadline.Progress.init(io);
+            var progress: FetchProgress = .{ .io = io, .deadline = &deadline };
+            const outcome = try io_deadline.run(io, limits.idle_ms, &deadline, fetchStep, .{ gpa, &req, limits, sink, hash, &progress });
+            switch (outcome) {
+                .finished => |result| break :blk result,
+                .timed_out => |result| {
+                    disposeLateStep(gpa, result);
+                    return error.Timeout;
+                },
+                .canceled => |result| {
+                    disposeLateStep(gpa, result);
+                    return error.Canceled;
+                },
+            }
+        } else blk: {
+            var dog: IdleWatchdog = .{ .io = io, .stream = req.connection.?.stream_reader.stream, .idle_ms = limits.idle_ms };
+            dog.arm();
+            var progress: FetchProgress = .{ .io = io, .idle_watchdog = &dog };
+            const result = fetchStep(gpa, &req, limits, sink, hash, &progress);
+            const fired = dog.disarm();
+            if (fired) {
+                disposeLateStep(gpa, result);
+                return error.Timeout;
+            }
+            break :blk result;
+        };
         switch (try step) {
             .done => |d| return d,
             .redirect => |next| {
@@ -789,11 +1034,11 @@ pub fn fetchInto(gpa: Allocator, io: std.Io, url: []const u8, limits: FetchLimit
 
 const Step = union(enum) { done: Download, redirect: []u8 };
 
-fn fetchStep(gpa: Allocator, req: *std.http.Client.Request, limits: FetchLimits, sink: *std.Io.Writer, hash: *std.crypto.hash.sha2.Sha256, dog: *IdleWatchdog) !Step {
+fn fetchStep(gpa: Allocator, req: *std.http.Client.Request, limits: FetchLimits, sink: *std.Io.Writer, hash: *std.crypto.hash.sha2.Sha256, progress: *FetchProgress) !Step {
     try req.sendBodiless();
     var redirect_buf: [8 * 1024]u8 = undefined;
     var response = try req.receiveHead(&redirect_buf);
-    dog.tick();
+    progress.tick();
     const status: u16 = @backingInt(response.head.status);
     if (status >= 300 and status < 400) {
         if (response.head.location) |loc| return .{ .redirect = try absoluteLocation(gpa, req.uri, loc) };
@@ -819,7 +1064,7 @@ fn fetchStep(gpa: Allocator, req: *std.http.Client.Request, limits: FetchLimits,
             if (size > limits.max_bytes) return error.TooLarge;
             hash.update(buf[0..n]);
             try sink.writeAll(buf[0..n]);
-            dog.tick();
+            progress.tick();
         }
         if (n < buf.len) break;
     }
@@ -1638,7 +1883,13 @@ fn testUpdater(kind: InstallKind, path: []const u8, http: Http, runner: proc.Run
         .http = http,
         .runner = runner,
         .restarter = restart,
+        .require_manifest_sig = false,
+        .processes = .{ .executables_fn = nothingRuns },
     };
+}
+
+fn nothingRuns(_: ?*anyopaque, _: Allocator) Allocator.Error!?[]const []const u8 {
+    return &.{};
 }
 
 test "updates: UpdateStatus shapes for each install, and a check fills them in" {
@@ -2133,14 +2384,16 @@ test "updates: `harness-engine update` swaps a macOS app for the verified releas
     try testing.expectEqual(@as(u8, 0), try updateCommand(&u, a, data_dir, &out.writer, &err_out.writer));
     try testing.expect(std.mem.indexOf(u8, out.written(), "relaunch Harness to finish.") != null);
     try testing.expectEqualStrings("", err_out.written());
-    // The installed bundle is the new one, and nothing is left beside it.
+    // The installed bundle is the new one, and no second app shows beside it.
     const now = try tmp.dir.readFileAlloc(testing.io, "Applications/Harness.app/Contents/MacOS/" ++ app_bin, a, .limited(64));
     try testing.expectEqualStrings("new release\n", now);
     var apps = try tmp.dir.openDir(testing.io, "Applications", .{ .iterate = true });
     defer apps.close(testing.io);
     var it = apps.iterate();
     var entries: usize = 0;
-    while (try it.next(testing.io)) |_| entries += 1;
+    while (try it.next(testing.io)) |e| if (e.name[0] != '.') {
+        entries += 1;
+    };
     try testing.expectEqual(@as(usize, 1), entries);
     // The app's update view reads these lines (`classifyUpdateOutput`).
     try testing.expectEqual(@import("view_updates.zig").UpdateCommandOutcome.installed, @import("view_updates.zig").classifyUpdateOutput(true, out.written(), err_out.written()));
@@ -2151,4 +2404,298 @@ test "updates: `harness-engine update` swaps a macOS app for the verified releas
     try testing.expectEqual(@as(u8, 0), try updateCommand(&u, a, data_dir, &out.writer, &err_out.writer));
     try testing.expectEqualStrings("Harness 0.2.101 is up to date (latest: 0.2.101).\n", out.written());
     try testing.expectEqual(@import("view_updates.zig").UpdateCommandOutcome.up_to_date, @import("view_updates.zig").classifyUpdateOutput(true, out.written(), ""));
+}
+
+test "updates: a generated Ed25519 key signs and verifies a manifest message" {
+    const Ed = std.crypto.sign.Ed25519;
+    const kp = Ed.KeyPair.generate(testing.io);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var files: json.ObjectMap = .empty;
+    try files.put(arena.allocator(), "harness.bin", .{ .object = blk: {
+        var o: json.ObjectMap = .empty;
+        try o.put(arena.allocator(), "sha256", .{ .string = "abcd" });
+        break :blk o;
+    } });
+    const msg = try manifestMessage(arena.allocator(), "0.2.300", files);
+    const sig = try kp.sign(msg, null);
+    try testing.expect(verifyManifestSig(msg, &sig.toBytes(), kp.public_key.toBytes()));
+    var bad = sig.toBytes();
+    bad[0] ^= 1;
+    try testing.expect(!verifyManifestSig(msg, &bad, kp.public_key.toBytes()));
+}
+
+test "updates: ApplyUpdate refuses an unsigned manifest when signatures are required" {
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
+    var fh: FakeHttp = .{ .routes = &.{.{ .suffix = "/manifest.json", .status = 200, .body = "{\"version\":\"0.2.101\",\"files\":{}}" }} };
+    var fr: FakeRestart = .{};
+    var noop = proc.FakeRunner.init(testing.allocator, &.{});
+    defer noop.deinit();
+    var u = testUpdater(.managed, "/nowhere", fh.http(), noop.runner(), fr.restarter(), null);
+    defer u.deinit();
+    u.require_manifest_sig = true;
+    const msg = (try handle(&u, testing.allocator, .apply)).failed;
+    try testing.expect(std.mem.indexOf(u8, msg, "unsigned manifest") != null);
+    try testing.expectEqual(@as(usize, 0), fr.count);
+}
+
+test "updates: manifestMessage and verifyManifestSig match gen-release-key.py test vector" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var files: json.ObjectMap = .empty;
+    inline for (.{ .{ "b.zip", "2222" }, .{ "a.tar.gz", "1111" } }) |entry| {
+        var obj: json.ObjectMap = .empty;
+        try obj.put(a, "sha256", .{ .string = entry[1] });
+        try files.put(a, entry[0], .{ .object = obj });
+    }
+    const msg = try manifestMessage(a, "0.2.237", files);
+    try testing.expectEqualStrings("0.2.237\na.tar.gz=1111\nb.zip=2222\n", msg);
+
+    var pubkey: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&pubkey, "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8");
+    var sig: [64]u8 = undefined;
+    _ = try std.fmt.hexToBytes(
+        &sig,
+        "31682043ec7dc3bcf3db6e76618652e92d5b3120032be03d718e9e4f0554aeae" ++
+            "0d7012143d917424c4744bc3a570dd49acbb8194307ee7b34db3723755b1b30f",
+    );
+    try testing.expect(verifyManifestSig(msg, &sig, pubkey));
+
+    var bad_sig = sig;
+    bad_sig[0] ^= 1;
+    try testing.expect(!verifyManifestSig(msg, &bad_sig, pubkey));
+
+    const alt_msg = try manifestMessage(a, "0.2.238", files);
+    try testing.expect(!verifyManifestSig(alt_msg, &sig, pubkey));
+}
+
+/// A made-up `Applications/Harness.app` (an "old release") with made-up
+/// releases to update it to, and the processes that "run" meanwhile.
+const MacInstall = struct {
+    tmp: testing.TmpDir,
+    arena: std.heap.ArenaAllocator,
+    bundle: []const u8 = "",
+    data_dir: []const u8 = "",
+    routes: [2]FakeHttp.Route = undefined,
+    http: FakeHttp = undefined,
+    restart: FakeRestart = .{},
+    runner: proc.FakeRunner = undefined,
+    /// Executables of the running processes; null: they can't be listed.
+    running: ?[]const []const u8 = &.{},
+    u: Updater = undefined,
+
+    const main_exe = "Contents/MacOS/" ++ app_bin;
+
+    fn init(self: *MacInstall) !void {
+        const gpa = testing.allocator;
+        self.* = .{ .tmp = testing.tmpDir(.{}), .arena = .init(gpa) };
+        const a = self.arena.allocator();
+        const base = try self.tmp.dir.realPathFileAlloc(testing.io, ".", a);
+        try self.tmp.dir.createDirPath(testing.io, "Applications/Harness.app/Contents/MacOS");
+        try self.tmp.dir.writeFile(testing.io, .{ .sub_path = "Applications/Harness.app/" ++ main_exe, .data = "old release\n" });
+        try self.tmp.dir.createDirPath(testing.io, "data");
+        self.bundle = try std.fs.path.join(a, &.{ base, "Applications", "Harness.app" });
+        self.data_dir = try std.fs.path.join(a, &.{ base, "data" });
+        self.http = .{ .routes = &.{} };
+        self.runner = proc.FakeRunner.init(gpa, &.{
+            .{ .prefix = "tar -xzf", .effect = AppTarEffect.unpack },
+            .{ .prefix = "ditto", .effect = DittoEffect.copy },
+        });
+        self.u = testUpdater(.mac_app, self.bundle, self.http.http(), self.runner.runner(), self.restart.restarter(), testing.io);
+        self.u.processes = .{ .ctx = self, .executables_fn = executables };
+    }
+
+    fn deinit(self: *MacInstall) void {
+        self.u.deinit();
+        self.runner.deinit();
+        self.arena.deinit();
+        self.tmp.cleanup();
+    }
+
+    fn executables(ctx: ?*anyopaque, _: Allocator) Allocator.Error!?[]const []const u8 {
+        const self: *MacInstall = @ptrCast(@alignCast(ctx.?));
+        return self.running;
+    }
+
+    /// Put `version` on the release feed.
+    fn publish(self: *MacInstall, version: []const u8) !void {
+        const a = self.arena.allocator();
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash("app bytes", &digest, .{});
+        self.routes = .{
+            .{ .suffix = "/manifest.json", .status = 200, .body = try std.fmt.allocPrint(a, "{{\"version\":\"{s}\",\"files\":{{\"{s}\":{{\"sha256\":\"{s}\"}}}}}}", .{ version, try macAppArtifactAlloc(a, version), &std.fmt.bytesToHex(digest, .lower) }) },
+            .{ .suffix = "-app.tar.gz", .status = 200, .body = "app bytes" },
+        };
+        self.http.routes = &self.routes;
+    }
+
+    /// `harness update` to `version`.
+    fn update(self: *MacInstall, version: []const u8) !void {
+        try self.publish(version);
+        var out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        var err_out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer err_out.deinit();
+        try testing.expectEqual(@as(u8, 0), try updateCommand(&self.u, self.arena.allocator(), self.data_dir, &out.writer, &err_out.writer));
+        try testing.expect(std.mem.indexOf(u8, out.written(), "relaunch Harness to finish.") != null);
+        try testing.expectEqualStrings("", err_out.written());
+    }
+
+    /// The background release check every app install runs after it starts, then hourly.
+    fn check(self: *MacInstall) !void {
+        try testing.expect(try self.u.checkOnce(1_790_000_000_000));
+    }
+
+    /// The replaced bundles' folder names beside the installed app.
+    fn replaced(self: *MacInstall) ![]const []const u8 {
+        const a = self.arena.allocator();
+        var apps = try self.tmp.dir.openDir(testing.io, "Applications", .{ .iterate = true });
+        defer apps.close(testing.io);
+        var names: std.ArrayList([]const u8) = .empty;
+        var it = apps.iterate();
+        while (try it.next(testing.io)) |e| {
+            if (std.mem.startsWith(u8, e.name, ".Harness.app.old-")) try names.append(a, try a.dupe(u8, e.name));
+        }
+        return names.items;
+    }
+
+    /// A process launched from the bundle now called `name`, as the kernel lists it.
+    fn processIn(self: *MacInstall, name: []const u8) ![]const u8 {
+        return std.fmt.allocPrint(self.arena.allocator(), "/Applications/{s}/" ++ main_exe, .{name});
+    }
+
+    fn contents(self: *MacInstall, name: []const u8) ![]const u8 {
+        const a = self.arena.allocator();
+        return self.tmp.dir.readFileAlloc(testing.io, try std.fmt.allocPrint(a, "Applications/{s}/" ++ main_exe, .{name}), a, .limited(64));
+    }
+
+    fn has(self: *MacInstall, name: []const u8) !bool {
+        const path = try std.fmt.allocPrint(self.arena.allocator(), "Applications/{s}", .{name});
+        self.tmp.dir.access(testing.io, path, .{}) catch return false;
+        return true;
+    }
+};
+
+test "updates: #173 an applied macOS update keeps the bundle the running app was launched from" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var m: MacInstall = undefined;
+    try m.init();
+    defer m.deinit();
+    try m.update("0.2.101");
+    try testing.expectEqualStrings("new release\n", try m.contents("Harness.app"));
+    const kept = try m.replaced();
+    try testing.expectEqual(@as(usize, 1), kept.len);
+    try testing.expectEqualStrings("old release\n", try m.contents(kept[0]));
+}
+
+test "updates: #173 a replaced bundle goes at the next check once nothing runs from it, and nothing else does" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var m: MacInstall = undefined;
+    try m.init();
+    defer m.deinit();
+    const ours = ".Harness.app.old-0123456789ab";
+    const others = [_][]const u8{
+        ".Harness.app.old-mine",         ".Harness.app.old-0123456789abc", ".Harness.app.old-ABCDEF012345",
+        ".Harness.app.new-0123456789ab", ".Other.app.old-0123456789ab",    "Harness.app.old-0123456789ab",
+    };
+    try m.tmp.dir.createDirPath(testing.io, "Applications/" ++ ours ++ "/Contents/MacOS");
+    for (others) |name| try m.tmp.dir.createDirPath(testing.io, try std.fmt.allocPrint(m.arena.allocator(), "Applications/{s}", .{name}));
+    // Another app, and the installed one, run; nothing from the replaced bundle does.
+    m.running = &.{ "/Applications/Other.app/Contents/MacOS/other", "/Applications/Harness.app/" ++ MacInstall.main_exe };
+    try m.publish("0.2.100");
+    try m.check();
+    try testing.expect(!try m.has(ours));
+    for (others) |name| try testing.expect(try m.has(name));
+    try testing.expectEqualStrings("old release\n", try m.contents("Harness.app"));
+}
+
+test "updates: #173 a replaced bundle stays while a process runs from it, through checks and another update" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var m: MacInstall = undefined;
+    try m.init();
+    defer m.deinit();
+    try m.update("0.2.101");
+    const first = try m.replaced();
+    try testing.expectEqual(@as(usize, 1), first.len);
+    // The app (or its engine) still runs from the bundle that was moved aside.
+    m.running = &.{try m.processIn(first[0])};
+    try m.check();
+    try testing.expectEqualStrings("old release\n", try m.contents(first[0]));
+    try m.update("0.2.102");
+    try testing.expectEqualStrings("old release\n", try m.contents(first[0]));
+    try testing.expectEqual(@as(usize, 2), (try m.replaced()).len);
+    // It quit: the next check removes both.
+    m.running = &.{};
+    try m.check();
+    try testing.expectEqual(@as(usize, 0), (try m.replaced()).len);
+    try testing.expectEqualStrings("new release\n", try m.contents("Harness.app"));
+}
+
+test "updates: #173 the next update first removes replaced bundles nothing runs from" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var m: MacInstall = undefined;
+    try m.init();
+    defer m.deinit();
+    try m.update("0.2.101");
+    const first = try m.replaced();
+    try testing.expectEqual(@as(usize, 1), first.len);
+    try m.update("0.2.102");
+    const second = try m.replaced();
+    try testing.expectEqual(@as(usize, 1), second.len);
+    try testing.expect(!std.mem.eql(u8, first[0], second[0]));
+}
+
+test "updates: #173 replaced bundles stay when the processes can't be listed, or the app itself is missing" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var m: MacInstall = undefined;
+    try m.init();
+    defer m.deinit();
+    try m.update("0.2.101");
+    try testing.expectEqual(@as(usize, 1), (try m.replaced()).len);
+    m.running = null;
+    try m.check();
+    try testing.expectEqual(@as(usize, 1), (try m.replaced()).len);
+    // A swap cut short between its two renames: the aside copy is the only one.
+    m.running = &.{};
+    try m.tmp.dir.deleteTree(testing.io, "Applications/Harness.app");
+    try m.check();
+    try testing.expectEqual(@as(usize, 1), (try m.replaced()).len);
+}
+
+test "updates: #173 a failed swap still puts the installed bundle back" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var m: MacInstall = undefined;
+    try m.init();
+    defer m.deinit();
+    // `ditto` claims success but writes nothing, so the second rename fails.
+    m.runner.scripts = &.{.{ .prefix = "ditto" }};
+    const why = try m.u.applyMacApp(m.arena.allocator(), "/nowhere/Harness.app", m.bundle);
+    try testing.expectEqualStrings("installing the new app bundle: FileNotFound", why.?);
+    try testing.expectEqualStrings("old release\n", try m.contents("Harness.app"));
+    try testing.expectEqual(@as(usize, 0), (try m.replaced()).len);
+}
+
+test "updates: #173 the process list follows a running executable whose bundle was renamed" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
+    const name = try std.fmt.allocPrint(a, "Synthetic-{s}.app", .{tmp.sub_path});
+    const aside = try std.fmt.allocPrint(a, ".{s}.old-0123456789ab", .{name});
+    const dir = try std.fs.path.join(a, &.{ base, name, "Contents", "MacOS" });
+    try std.Io.Dir.cwd().createDirPath(testing.io, dir);
+    // A made-up app: a copy of this test program, waiting on its input.
+    const exe = try std.fs.path.join(a, &.{ dir, app_bin });
+    try std.Io.Dir.copyFileAbsolute(try std.process.executablePathAlloc(testing.io, a), exe, testing.io, .{});
+    var child = try std.process.spawn(testing.io, .{ .argv = &.{ exe, "--listen=-" }, .stdin = .pipe, .stdout = .ignore, .stderr = .ignore });
+    defer child.kill(testing.io);
+    try testing.expect(runsInside((try runningExecutables(null, a)).?, name));
+    try tmp.dir.rename(name, tmp.dir, aside, testing.io);
+    const running = (try runningExecutables(null, a)).?;
+    try testing.expect(runsInside(running, aside));
+    try testing.expect(!runsInside(running, name));
 }

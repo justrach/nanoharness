@@ -7,6 +7,7 @@ const Context = ctx_mod.Context;
 const EditState = ctx_mod.EditState;
 const tf = @import("textfield.zig");
 const keymap = @import("keymap.zig");
+const text_selection = @import("text_selection.zig");
 
 pub const Granularity = enum { char, word, line, prose_word, sentence, paragraph };
 /// Prompt editors share output's word/sentence/paragraph gestures; ordinary
@@ -44,7 +45,7 @@ pub fn lineEnd(s: []const u8, i: usize) usize {
     return j;
 }
 
-pub fn pointerSelect(c: *Context, e: *EditState, s: []const u8, at: usize, multiline: bool, mode: SelectionMode) void {
+pub fn pointerSelect(c: *Context, e: *EditState, s: []const u8, at: usize, multiline: bool, mode: SelectionMode, visual_line: ?[2]usize) void {
     e.undo.group = false;
     c.caret_moved_at = c.time;
     if (mode == .prompt and c.input.click_count >= 2) {
@@ -53,7 +54,10 @@ pub fn pointerSelect(c: *Context, e: *EditState, s: []const u8, at: usize, multi
             3 => .sentence,
             else => .paragraph,
         };
-        const range = @import("text_selection.zig").proseRange(s, at, c.input.click_count);
+        const range = if (c.input.click_count == 2)
+            text_selection.proseWordRange(s, at, visual_line)
+        else
+            text_selection.proseRange(s, at, c.input.click_count);
         e.anchor = range[0];
         e.caret = range[1];
         c.select_origin = range;
@@ -93,7 +97,7 @@ pub fn pointerDrag(c: *Context, e: *EditState, s: []const u8, at: usize, multili
                 .sentence => 3,
                 else => 4,
             };
-            const range = @import("text_selection.zig").proseRange(s, at, clicks);
+            const range = text_selection.proseRange(s, at, clicks);
             if (range[0] < orig0) {
                 e.anchor = orig1;
                 e.caret = range[0];
@@ -127,15 +131,18 @@ pub fn handleUndoShortcuts(c: *Context, b: *tf.TextBuffer, e: *EditState, r: *tf
     if (c.undo_op != .none) {
         const redo = c.undo_op == .redo;
         c.undo_op = .none;
+        if (b.cancelPreedit(e)) r.preedit_changed = true;
         keymap.undoStep(b, e, r, redo);
         c.changed = true;
         return true;
     }
     if (c.shortcut(.{ .key = 'z', .cmd = true, .shift = true }) or c.shortcut(.{ .key = 'y', .cmd = true })) {
+        if (b.cancelPreedit(e)) r.preedit_changed = true;
         keymap.undoStep(b, e, r, true);
         return true;
     }
     if (c.shortcut(.{ .key = 'z', .cmd = true })) {
+        if (b.cancelPreedit(e)) r.preedit_changed = true;
         keymap.undoStep(b, e, r, false);
         return true;
     }
@@ -181,6 +188,7 @@ pub fn editState(c: *Context, id: u64, buffer: *tf.TextBuffer) ?*EditState {
     if (!entry.found_existing) entry.value_ptr.* = .{ .caret = len, .anchor = len };
     const e = entry.value_ptr;
     if (c.focus != id or !c.input.window_active or !c.window_focused or e.caret != e.anchor) e.blink = .{};
+    if (buffer.want_caret != null or buffer.want_selection != null) _ = buffer.cancelPreedit(e);
     if (buffer.want_caret) |at| {
         e.caret = at;
         e.anchor = at;

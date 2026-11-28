@@ -66,6 +66,7 @@ pub fn selectLocalServers(
     var candidates: std.ArrayList(catalog.Listener) = .empty;
     for (listeners) |l| {
         if (l.pid == self_pid or (ignore_pid != 0 and l.pid == ignore_pid)) continue;
+        if (l.isTestRun()) continue;
         if (!isLoopbackOrUnspecified(l.address)) continue;
         const gop = try seen_ports.getOrPut(a, l.address.port);
         if (!gop.found_existing) try candidates.append(a, l);
@@ -114,6 +115,7 @@ pub fn runServersScan(gpa: Allocator, io: Io, ignore_pid: u32, out: *Io.Writer) 
     var candidates: std.ArrayList(catalog.Listener) = .empty;
     for (raw) |l| {
         if (l.pid == sys.self_pid or (ignore_pid != 0 and l.pid == ignore_pid)) continue;
+        if (l.isTestRun()) continue;
         if (!isLoopbackOrUnspecified(l.address)) continue;
         const gop = try seen_ports.getOrPut(a, l.address.port);
         if (!gop.found_existing) try candidates.append(a, l);
@@ -227,7 +229,7 @@ const DaemonState = struct {
         }
     }
 
-    fn scanOnce(d: *DaemonState) !void {
+    fn scanOnce(d: *DaemonState) !?i64 {
         var arena = std.heap.ArenaAllocator.init(d.gpa);
         defer arena.deinit();
         const a = arena.allocator();
@@ -267,7 +269,7 @@ const DaemonState = struct {
             }
         }
         const plans = try a.alloc(catalog.ProbeMemory.Plan, candidates.items.len);
-        d.memory.plan(candidates.items, discovery.nowMs(d.io), plans);
+        const settling_until = d.memory.plan(d.gpa, candidates.items, discovery.nowMs(d.io), plans);
         var servers: std.ArrayList(catalog.Observation) = .empty;
         var to_probe: std.ArrayList(usize) = .empty;
         for (plans, 0..) |p, i| switch (p) {
@@ -301,6 +303,7 @@ const DaemonState = struct {
             if (results[k]) try servers.append(a, candidates.items[ci]);
         }
         try d.cat.replaceLocal(servers.items);
+        return settling_until;
     }
 
     fn snapshotLine(d: *DaemonState) ![]u8 {
@@ -407,7 +410,7 @@ pub fn runDaemon(
 
     while (!state.stopping()) {
         state.dirty.store(false, .release);
-        state.scanOnce() catch {};
+        const settling_until = state.scanOnce() catch null;
         const line = state.snapshotLine() catch continue;
         if (!std.mem.eql(u8, line, last_line)) {
             if (last_line.len > 0) gpa.free(last_line);
@@ -417,7 +420,12 @@ pub fn runDaemon(
         } else {
             gpa.free(line);
         }
-        if (!state.pause(scan_interval_ms, true)) break;
+        var wait_ms = scan_interval_ms;
+        if (settling_until) |until| {
+            const rem = @max(@as(i64, 100), until - discovery.nowMs(io));
+            wait_ms = @min(wait_ms, rem);
+        }
+        if (!state.pause(wait_ms, true)) break;
     }
     state.stop_flag.store(true, .release);
     state.proxy.stop();

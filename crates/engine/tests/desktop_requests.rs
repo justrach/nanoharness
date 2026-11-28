@@ -7,6 +7,7 @@
 //! (a queued row that isn't there, an action that can't run) is the engine
 //! understanding the request and answering it.
 
+use std::ffi::OsString;
 use std::sync::Arc;
 
 use harness_adapters::mock::MockHarness;
@@ -14,6 +15,41 @@ use harness_engine::{EngineCore, HarnessRegistry};
 use harness_proto::HarnessId;
 use harness_rpc::{RpcError, RpcService};
 use serde_json::Value;
+
+struct IsolatedPaths(Vec<(&'static str, Option<OsString>)>);
+
+impl IsolatedPaths {
+    fn set(root: &std::path::Path) -> Self {
+        let names = ["HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "GEMINI_HOME"];
+        let previous = names
+            .into_iter()
+            .map(|name| (name, std::env::var_os(name)))
+            .collect();
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("CODEX_HOME", home.join("codex"));
+            std::env::set_var("CLAUDE_CONFIG_DIR", home.join("claude"));
+            std::env::set_var("GEMINI_HOME", home.join("gemini"));
+        }
+        Self(previous)
+    }
+}
+
+impl Drop for IsolatedPaths {
+    fn drop(&mut self) {
+        for (name, value) in self.0.drain(..) {
+            unsafe {
+                if let Some(value) = value {
+                    std::env::set_var(name, value);
+                } else {
+                    std::env::remove_var(name);
+                }
+            }
+        }
+    }
+}
 
 fn vectors() -> Value {
     let path = concat!(
@@ -69,6 +105,7 @@ fn request_placeholders_preserve_windows_paths_and_json_types() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_engine_understands_every_request_harness_nano_sends() {
     let dir = tempfile::tempdir().unwrap();
+    let _isolated_paths = IsolatedPaths::set(dir.path());
     let project = dir.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(project.join("README.md"), "# Parity\n").unwrap();

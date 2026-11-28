@@ -402,3 +402,81 @@ test "only picture names get a thumbnail, as GPUI's is_image_path" {
         try testing.expect(!attachments.isImageName(name));
     }
 }
+
+fn themedAttachmentView(a: *App, c: *ui.Context) void {
+    const k = @import("theme.zig").builtin(a.dark orelse false);
+    const root = ui.div(c).column().wFull().hFull().bg(k.shell).p(16);
+    defer root.end();
+    const pill = ui.div(c).column().wFull().bg(k.pill()).border(k.border).borderW(1).rounded(12).pb(12);
+    defer pill.end();
+    @import("view_composer_attachments.zig").strip(c, a, k, 280);
+}
+
+fn findRemoveButton(t: *const ui.Tester) ?usize {
+    for (t.ctx.nodes.items, 0..) |node, idx| {
+        if (node.interactive and @abs(node.rect.w - 20) < 0.5 and @abs(node.rect.h - 20) < 0.5) {
+            return idx;
+        }
+    }
+    return null;
+}
+
+test "composer attachment remove button stays opaque on hover in light and dark themes" {
+    const view_attachments = @import("view_composer_attachments.zig");
+    const theme_mod = @import("theme.zig");
+    theme_mod.registerFonts();
+
+    for ([_]bool{ false, true }) |dark| {
+        const hover_bg = view_attachments.removeHoverBg(theme_mod.builtin(dark));
+        try testing.expect(hover_bg.a >= 0.999);
+    }
+
+    const px = try testing.allocator.alloc(u8, 56 * 56 * 4);
+    defer testing.allocator.free(px);
+    var i: usize = 0;
+    while (i < px.len) : (i += 4) {
+        // Dark navy-slate BGRA so translucent hover fills wash out against it.
+        px[i] = 0x26;
+        px[i + 1] = 0x1a;
+        px[i + 2] = 0x12;
+        px[i + 3] = 0xff;
+    }
+    const dark_png = try ui.png.encode(testing.allocator, .{ .bytes = px, .width = 56, .height = 56 });
+    defer testing.allocator.free(dark_png);
+
+    for ([_]bool{ false, true }) |dark| {
+        var a: App = undefined;
+        try connected(&a,
+            \\{"UploadChunk":{},"UploadCommit":{"path":"/synthetic/uploads/dark-shot.png"}}
+        );
+        defer a.deinit();
+        a.dark = dark;
+        try attachments.stage(&a, "dark-shot.png", dark_png);
+        try pump(&a);
+        try testing.expectEqual(@as(usize, 1), attachments.count(&a));
+
+        var tester: ui.Tester = undefined;
+        try tester.init(a.gpa, .init(&a, themedAttachmentView), .{ .width = 320, .height = 180, .dark = dark });
+        defer tester.deinit();
+        tester.settle(0.5);
+
+        const before_idx = findRemoveButton(&tester) orelse return error.MissingRemoveButton;
+        const before_rect = tester.ctx.nodes.items[before_idx].rect;
+        const cx = before_rect.x + before_rect.w / 2;
+        const cy = before_rect.y + before_rect.h / 2;
+        tester.moveTo(cx, cy);
+        tester.settle(0.5);
+
+        if (!dark) if (std.c.getenv("NANO_ATTACHMENT_HOVER_SNAP")) |path| {
+            try tester.screenshot(std.mem.span(path));
+        };
+
+        const hovered_idx = findRemoveButton(&tester) orelse return error.MissingHoveredRemoveButton;
+        const fill = tester.ctx.nodes.items[hovered_idx].style.background orelse return error.MissingHoverBackground;
+        try testing.expect(fill.a >= 0.99);
+
+        tester.click(cx, cy);
+        tester.settle(0.1);
+        try testing.expectEqual(@as(usize, 0), attachments.count(&a));
+    }
+}

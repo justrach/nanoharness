@@ -377,6 +377,12 @@ fn author(value: &Value, key: &str, truncated: &mut bool) -> String {
 }
 
 #[derive(Deserialize)]
+struct RawLabel {
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Deserialize)]
 struct RawItem {
     number: u64,
     title: String,
@@ -405,6 +411,18 @@ struct RawItem {
     pull_request: Option<Value>,
     #[serde(default)]
     merged_at: Option<String>,
+    #[serde(default)]
+    labels: Vec<RawLabel>,
+}
+
+fn raw_labels(labels: &[RawLabel], truncated: &mut bool) -> Vec<String> {
+    labels
+        .iter()
+        .map(|label| label.name.trim())
+        .filter(|name| !name.is_empty())
+        .take(4)
+        .map(|name| clip(name, 48, truncated))
+        .collect()
 }
 fn item_url(repository: &GitHubRepositoryIdentity, kind: Kind, number: u64) -> String {
     let resource = if matches!(kind, Kind::Pull | Kind::Pulls) {
@@ -480,6 +498,7 @@ fn decode(
             additions: item.additions,
             deletions: item.deletions,
             changed_files: item.changed_files,
+            labels: raw_labels(&item.labels, truncated),
         });
     } else {
         let values = value.as_array().ok_or(ChangeRequestError::Decode)?;
@@ -501,6 +520,8 @@ fn decode(
                         is_draft: item.draft,
                         author: field(&item.user, "login", 256, truncated),
                         updated_at: clip(&item.updated_at, 128, truncated),
+                        created_at: clip(&item.created_at, 128, truncated),
+                        labels: raw_labels(&item.labels, truncated),
                     });
                 }
                 Kind::Files => {

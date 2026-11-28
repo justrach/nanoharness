@@ -27,18 +27,22 @@ pub fn shownIndex(s: []const u8, password: bool, index: usize) usize {
     return (std.unicode.utf8CountCodepoints(s[0..index]) catch index) * 3;
 }
 
-/// `s` in lines no wider than `width`, in the frame's memory.
-pub fn layout(c: *Context, s: []const u8, style: types.TextStyle, width: f32) []const Line {
+/// `s` split into physical lines, optionally wrapped to `width`.
+pub fn layout(c: *Context, s: []const u8, style: types.TextStyle, width: ?f32) []const Line {
     var out: std.ArrayList(Line) = .empty;
     var p: usize = 0;
     while (true) {
         const nl = std.mem.indexOfScalarPos(u8, s, p, '\n') orelse s.len;
-        const wrapped = c.text.wrap(s[p..nl], style, width);
-        for (wrapped, 0..) |l, k| {
-            const stop = if (k + 1 < wrapped.len) p + wrapped[k + 1].start else nl;
-            out.append(c.alloc(), .{ .start = p + l.start, .end = p + l.end, .stop = stop }) catch break;
+        if (width) |w| {
+            const wrapped = c.text.wrap(s[p..nl], style, w);
+            for (wrapped, 0..) |l, k| {
+                const stop = if (k + 1 < wrapped.len) p + wrapped[k + 1].start else nl;
+                out.append(c.alloc(), .{ .start = p + l.start, .end = p + l.end, .stop = stop }) catch break;
+            }
+            if (wrapped.len == 0) out.append(c.alloc(), .{ .start = p, .end = p, .stop = nl }) catch {};
+        } else {
+            out.append(c.alloc(), .{ .start = p, .end = nl, .stop = nl }) catch break;
         }
-        if (wrapped.len == 0) out.append(c.alloc(), .{ .start = p, .end = p, .stop = nl }) catch {};
         if (nl == s.len) break;
         p = nl + 1;
     }
@@ -83,11 +87,16 @@ pub fn indexAtPoint(c: *Context, s: []const u8, style: types.TextStyle, lines: [
 /// Multi-clicks own the glyph under the pointer, not the nearest caret.
 /// This keeps the right half of a word's last glyph (or an emoji) in that
 /// same word/cluster, matching selectable output text.
-pub fn clusterAtPoint(c: *Context, s: []const u8, style: types.TextStyle, lines: []const Line, x: f32, y: f32, lh: f32) usize {
-    const row: usize = @intFromFloat(@max(0, @min(@as(f32, @floatFromInt(lines.len - 1)), @floor(y / lh))));
+pub fn clusterAtPoint(c: *Context, s: []const u8, style: types.TextStyle, lines: []const Line, x: f32, y: f32, lh: f32) struct { at: usize, visual_line: ?[2]usize } {
+    const row_at = @floor(y / lh);
+    const row_count: f32 = @floatFromInt(lines.len);
+    const row: usize = @intFromFloat(@max(0, @min(row_count - 1, row_at)));
     const l = lines[row];
     const lay = c.text.layout(s[l.start..l.end], style);
-    return l.start + @import("text_selection.zig").glyphClusterAt(lay.glyphs, lay.width, x);
+    return .{
+        .at = l.start + @import("text_selection.zig").glyphClusterAt(lay.glyphs, lay.width, x),
+        .visual_line = if (row_at >= 0 and row_at < row_count and x >= 0 and x < lay.width) .{ l.start, l.end } else null,
+    };
 }
 
 /// The selection's ends, for a field whose lines start at (x, y): the text's
@@ -109,6 +118,28 @@ pub fn byteOfCodepoint(s: []const u8, n: usize) usize {
     return @min(i, s.len);
 }
 
+/// A background wash over a byte range of the field's UTF-8 text.
+pub const RangeWash = struct {
+    start: usize,
+    end: usize,
+    color: types.Color,
+
+    pub const side_padding: f32 = 6;
+};
+
+/// Use the field's gutters at line edges; inside a line, share the available
+/// separator so the chip doesn't paint behind adjacent prose or another chip.
+fn washEdges(c: *Context, s: []const u8, style: types.TextStyle, l: Line, start: usize, end: usize, x0: f32, x1: f32) [2]f32 {
+    const pad = RangeWash.side_padding;
+    var before = start;
+    while (before > l.start and (s[before - 1] == ' ' or s[before - 1] == '\t')) before -= 1;
+    var after = end;
+    while (after < l.end and (s[after] == ' ' or s[after] == '\t')) after += 1;
+    const left = if (before == l.start) pad else @min(pad, @max(0, (x0 - caretX(c, s, style, l, before)) / 2));
+    const right = if (after == l.end) pad else @min(pad, @max(0, (caretX(c, s, style, l, after) - x1) / 2));
+    return .{ x0 - left, x1 + right };
+}
+
 pub const Drawn = struct {
     /// The caret's place in the field's content, scrolled.
     caret: types.Point,
@@ -121,7 +152,7 @@ pub const Drawn = struct {
 /// over a spacer as tall as the lines): selection, text, composition and
 /// caret. When `follow` (the caret moved, the text changed), scrolled to
 /// keep the caret in view within `view_h`; else where the wheel left it.
-pub fn draw(c: *Context, s: []const u8, e: *EditState, style: types.TextStyle, lines: []const Line, view_h: f32, focused: bool, follow: bool, block: bool, caret_shown: bool, placeholder: []const u8, placeholder_color: types.Color, suggestion: []const u8, caret: Caret, caret_color: types.Color) Drawn {
+pub fn draw(c: *Context, s: []const u8, e: *EditState, style: types.TextStyle, lines: []const Line, view_h: f32, sideways_w: ?f32, focused: bool, follow: bool, block: bool, caret_shown: bool, placeholder: []const u8, placeholder_color: types.Color, suggestion: []const u8, caret: Caret, caret_color: types.Color, washes: []const RangeWash) Drawn {
     const th = c.theme;
     const lh = c.text.lineHeight(style);
     const k = lineOf(lines, e.caret);
@@ -133,12 +164,45 @@ pub fn draw(c: *Context, s: []const u8, e: *EditState, style: types.TextStyle, l
     }
     const total = @as(f32, @floatFromInt(lines.len)) * lh;
     e.scroll_y = @max(0, @min(e.scroll_y, total - view_h));
-    _ = c.leaf(.{ .width = .{ .px = 1 }, .height = .{ .px = total } }, .none, null);
+    var content_w: f32 = 1;
+    if (sideways_w) |view_w| {
+        // Size the horizontal range to the visible rows. Offscreen text is
+        // not shaped merely to find out how wide the document is.
+        for (lines, 0..) |l, row| {
+            const y = @as(f32, @floatFromInt(row)) * lh;
+            if (y + lh < e.scroll_y or y > e.scroll_y + view_h) continue;
+            content_w = @max(content_w, c.text.width(s[l.start..l.end], style) + 4);
+        }
+        if (focused and follow) {
+            if (cx < e.scroll_x) e.scroll_x = cx;
+            if (cx + 2 > e.scroll_x + view_w) e.scroll_x = cx + 2 - view_w;
+        }
+        e.scroll_x = std.math.clamp(e.scroll_x, 0, @max(0, content_w - view_w));
+    }
+    _ = c.leaf(.{ .width = .{ .px = content_w }, .height = .{ .px = total } }, .none, null);
     const lo = @min(e.caret, e.anchor);
     const hi = @max(e.caret, e.anchor);
     for (lines, 0..) |l, row| {
         const y = @as(f32, @floatFromInt(row)) * lh;
         if (y + lh < e.scroll_y or y > e.scroll_y + view_h) continue;
+        for (washes) |wash| {
+            const start = @max(wash.start, l.start);
+            const end = @min(wash.end, l.end);
+            if (start >= end) continue;
+            const x0 = caretX(c, s, style, l, start);
+            const x1 = caretX(c, s, style, l, end);
+            if (x1 <= x0) continue;
+            const left, const right = washEdges(c, s, style, l, start, end, x0, x1);
+            const inset = @min(0.5, lh / 2);
+            _ = c.leaf(.{
+                .absolute = true,
+                .width = .{ .px = right - left },
+                .height = .{ .px = @max(1, lh - 2 * inset) },
+                .radius = 6,
+                .background = wash.color,
+                .offset = .{ .x = left, .y = y + inset },
+            }, .none, null);
+        }
         if (focused and hi > lo and hi >= l.start and lo <= l.stop) {
             const x0 = caretX(c, s, style, l, @max(lo, l.start));
             // A selection across the line's end covers a space's width past it.
@@ -165,5 +229,5 @@ pub fn draw(c: *Context, s: []const u8, e: *EditState, style: types.TextStyle, l
         const inset: f32 = if (block) 0 else caret.inset;
         _ = c.leaf(.{ .absolute = true, .width = .{ .px = w }, .height = .{ .px = @max(1, lh - 2 * inset) }, .radius = if (block) 0 else caret.radius, .background = if (block) th.accent.alpha(0.45) else caret_color, .offset = .{ .x = cx, .y = cy + inset } }, .none, null);
     }
-    return .{ .caret = .{ .x = cx, .y = cy - e.scroll_y }, .line = k, .lines = lines.len };
+    return .{ .caret = .{ .x = cx - e.scroll_x, .y = cy - e.scroll_y }, .line = k, .lines = lines.len };
 }

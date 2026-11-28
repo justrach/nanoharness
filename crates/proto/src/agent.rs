@@ -632,6 +632,20 @@ pub struct UserInputQuestion {
     pub prefill: Option<String>,
     #[serde(default)]
     pub multiline: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requires_human_ui: bool,
+}
+
+/// True when a question is a tool/permission approval prompt that only a
+/// human clicking in a native UI may answer (never another agent via MCP).
+pub fn is_human_approval_question(q: &UserInputQuestion) -> bool {
+    q.requires_human_ui
+        || q.id.starts_with("permission:")
+        || q.header.eq_ignore_ascii_case("Approve tool")
+        || q.header.eq_ignore_ascii_case("Approve command")
+        || q.header.eq_ignore_ascii_case("Approve file change")
+        || q.header.eq_ignore_ascii_case("Permission")
+        || q.header.eq_ignore_ascii_case("Approve")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -752,6 +766,16 @@ pub enum AgentEvent {
         id: String,
         title: String,
         script: String,
+    },
+    /// Metadata for a CodeGraff hosted artifact (`artifact.codegraff.com`).
+    #[serde(rename_all = "camelCase")]
+    GeneratedArtifact {
+        id: String,
+        artifact_id: String,
+        title: String,
+        format: String,
+        visibility: String,
+        url: String,
     },
     ReasoningDelta {
         text: String,
@@ -1270,6 +1294,25 @@ mod generated_image_tests {
         let value = serde_json::to_value(&event).unwrap();
         assert_eq!(value["type"], "generatedVisual");
         assert_eq!(value["title"], "Overview");
+        assert_eq!(serde_json::from_value::<AgentEvent>(value).unwrap(), event);
+    }
+
+    #[test]
+    fn generated_artifact_event_round_trip() {
+        let id = "art-0123456789abcdef01234567";
+        let event = AgentEvent::GeneratedArtifact {
+            id: format!("show-artifact:{id}"),
+            artifact_id: id.into(),
+            title: "Architecture".into(),
+            format: "html".into(),
+            visibility: "private".into(),
+            url: format!("https://codegraff.com/a/{id}"),
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["type"], "generatedArtifact");
+        assert_eq!(value["artifactId"], id);
+        assert_eq!(value["format"], "html");
+        assert_eq!(value["visibility"], "private");
         assert_eq!(serde_json::from_value::<AgentEvent>(value).unwrap(), event);
     }
 

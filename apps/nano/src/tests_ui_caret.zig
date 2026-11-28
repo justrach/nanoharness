@@ -80,6 +80,22 @@ const Harness = struct {
     }
 };
 
+test "compact and expanded composer carets stay 1.5 points wide before punctuation" {
+    for ([_]composer.Shape{ .compact, .expanded }) |shape| {
+        var h: Harness = undefined;
+        try h.init(shape);
+        defer h.deinit();
+        const before_comma: usize = "Yes".len;
+        h.t.typeText("Yes, it works.");
+        h.t.textOps(&.{.{ .select = .{ .anchor = before_comma, .caret = before_comma } }});
+        h.snap("caret-before-comma");
+        const focused = h.t.ctx.focused_text orelse return error.NoComposerCaret;
+        try testing.expectEqual(before_comma, focused.caret);
+        try testing.expectEqual(@as(usize, 1), h.carets());
+        try testing.expectEqual(@as(f32, 1.5), focused.caret_rect.w);
+    }
+}
+
 test "compact and expanded composer carets blink at 500 ms and restart on typing" {
     for ([_]composer.Shape{ .compact, .expanded }) |shape| {
         var h: Harness = undefined;

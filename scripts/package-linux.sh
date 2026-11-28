@@ -6,13 +6,13 @@
 #
 # Usage: scripts/package-linux.sh
 # Env:   PROFILE=debug for a fast unoptimized package (CI smoke), release for an
-#        optimized one without fat LTO; default dist (what ships).
+#        optimized package without fat LTO; default headless (smaller shipped engine).
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
-PROFILE="${PROFILE:-dist}"
+PROFILE="${PROFILE:-headless}"
 ARCH="$(uname -m)"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 OUT_DIR="$ROOT/target/package"
@@ -31,7 +31,7 @@ fi
 rm -rf "$STAGE" "$TARBALL"
 mkdir -p "$STAGE"
 install -m 755 "$ENGINE_BIN" "$STAGE/harness-engine"
-(cd "$ROOT/apps/nano" && "$ROOT/scripts/heavy-build.sh" zig build -Doptimize=ReleaseSafe)
+(cd "$ROOT/apps/nano" && "$ROOT/scripts/heavy-build.sh" zig build -Doptimize=ReleaseSafe -Dcpu=baseline)
 install -m 755 "$ROOT/apps/nano/zig-out/bin/harness" "$STAGE/harness"
 install -m 755 "$ROOT/apps/nano/zig-out/bin/harness-nano" "$STAGE/harness-nano"
 install -m 644 "$ROOT/dist/harness.desktop" "$STAGE/harness.desktop"

@@ -4,7 +4,7 @@
 //! device before accepting a workspace-relative path.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -1262,12 +1262,12 @@ fn read_image_blocking(
             "Image exceeds 8 MiB preview limit".into(),
         ));
     }
-    let mut file = std::fs::File::open(root.join(relative.as_path()))
+    let (mut file, _pinned_dirs) = crate::uploads::open_pinned_file(root, relative.as_path())
         .map_err(|e| WorkspaceFilesError::Io(e.to_string()))?;
     let opened = file
         .metadata()
         .map_err(|e| WorkspaceFilesError::Io(e.to_string()))?;
-    if !same_file_revision(&before, &opened) {
+    if !opened.is_file() || !same_file_revision(&before, &opened) {
         return Err(WorkspaceFilesError::Io("Image changed before open".into()));
     }
     let mut bytes = Vec::new();
@@ -1367,10 +1367,47 @@ fn read_file_blocking(
             return Err(WorkspaceFilesError::Io("file read cancelled".into()));
         }
         let before = checked_file_metadata(root, relative)?;
-        let bytes =
-            std::fs::read(&path).map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+        if before.len() > MAX_PREVIEW_FILE_BYTES {
+            return Ok(WorkspaceFileText {
+                checkout_id: String::new(),
+                path: wire_path,
+                text: None,
+                content_hash: None,
+                size: before.len(),
+                modified_at: before.modified().ok().map(chrono::DateTime::from),
+                encoding: WorkspaceTextEncoding::Unsupported,
+                line_ending: None,
+                read_only_reason: Some(WorkspaceReadOnlyReason::TooLarge),
+                truncated: true,
+            });
+        }
+        let (mut file, _pinned_dirs) =
+            crate::uploads::open_pinned_file(root, relative.as_path())
+                .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+        let opened = file
+            .metadata()
+            .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+        if !opened.is_file() || !same_file_revision(&before, &opened) {
+            if attempt == 1 {
+                return Err(WorkspaceFilesError::Io(
+                    "file changed while it was being read; retry".into(),
+                ));
+            }
+            continue;
+        }
+        let mut bytes = Vec::new();
+        std::io::Read::take(&mut file, MAX_PREVIEW_FILE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+        let handle_after = file
+            .metadata()
+            .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
         let after = checked_file_metadata(root, relative)?;
-        if same_file_revision(&before, &after) && bytes.len() as u64 == after.len() {
+        if bytes.len() as u64 <= MAX_PREVIEW_FILE_BYTES
+            && same_file_revision(&before, &after)
+            && same_file_revision(&opened, &handle_after)
+            && bytes.len() as u64 == after.len()
+        {
             return Ok(classify_file_text(wire_path, bytes, &after));
         }
         if attempt == 1 {
@@ -1766,10 +1803,29 @@ fn current_write_revision(
             "file exceeds the editable limit".into(),
         ));
     }
-    let path = root.join(relative.as_path());
-    let bytes = std::fs::read(path).map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+    let (mut file, _pinned_dirs) = crate::uploads::open_pinned_file(root, relative.as_path())
+        .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+    let opened = file
+        .metadata()
+        .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+    if !opened.is_file() || !same_file_revision(&metadata, &opened) {
+        return Err(WorkspaceFilesError::Io(
+            "file changed while preparing write; retry".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    std::io::Read::take(&mut file, MAX_EDITABLE_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+    let handle_after = file
+        .metadata()
+        .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
     let after = checked_file_metadata(root, relative)?;
-    if !same_file_revision(&metadata, &after) || bytes.len() as u64 != after.len() {
+    if bytes.len() as u64 > MAX_EDITABLE_FILE_BYTES
+        || !same_file_revision(&metadata, &after)
+        || !same_file_revision(&opened, &handle_after)
+        || bytes.len() as u64 != after.len()
+    {
         return Err(WorkspaceFilesError::Io(
             "file changed while preparing write; retry".into(),
         ));
@@ -2862,6 +2918,28 @@ mod image_tests {
                     &request()
                 )
                 .is_err()
+            );
+            let fifo = root.join("pipe.png");
+            let c_fifo = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+            assert!(
+                read_image_blocking(
+                    &root,
+                    &WorkspaceRelativePath::file("pipe.png").unwrap(),
+                    &request()
+                )
+                .is_err()
+            );
+            let cancel = AtomicBool::new(false);
+            let file_res = read_file_blocking(
+                &root,
+                &WorkspaceRelativePath::file("pipe.png").unwrap(),
+                &cancel,
+            )
+            .unwrap();
+            assert_eq!(
+                file_res.read_only_reason,
+                Some(WorkspaceReadOnlyReason::NotRegularFile)
             );
         }
     }

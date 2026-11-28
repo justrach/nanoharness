@@ -63,7 +63,9 @@ pub const State = struct {
 pub fn toggle(a: *App, navigation: Navigation) void {
     const p = &a.view.palette;
     if (p.open and p.navigation == navigation) return close(a);
-    // The session search and the header's menus give way.
+    // The session search, overview grid and the header's menus give way.
+    a.view.tab_overview.open = false;
+    @import("view_fullscreen_chrome.zig").clearLeftPeek(a);
     @import("view_sidebar_search.zig").close(a);
     @import("view_sidebar_menus.zig").close(a);
     p.open = true;
@@ -101,7 +103,7 @@ fn paneLabel(a: *const App, ix: usize) struct { title: []const u8, project: []co
     return .{ .title = title, .project = if (a.findSpace(ch.space_id)) |sp| sp.name else "" };
 }
 
-fn firstLine(s: []const u8) []const u8 {
+pub fn firstLine(s: []const u8) []const u8 {
     return s[0 .. std.mem.indexOfScalar(u8, s, '\n') orelse s.len];
 }
 
@@ -120,7 +122,7 @@ pub fn entries(a: *const App, gpa: std.mem.Allocator, query: []const u8) ![]Entr
     var in_panes: std.ArrayList([]const u8) = .empty;
     defer in_panes.deinit(gpa);
     const history = a.view.palette.navigation == .chat_history;
-    if (!history and !a.view.settings_open) if (a.tabs.layout()) |s| for (s.panes.items, 0..) |pane, ix| {
+    if (a.view.palette.navigation == .preserve_tabs and !a.view.settings_open) if (a.tabs.layout()) |s| for (s.panes.items, 0..) |pane, ix| {
         if (ix == s.focus) continue;
         if (pane) |id| try in_panes.append(gpa, id);
         const l = paneLabel(a, ix);
@@ -128,9 +130,44 @@ pub fn entries(a: *const App, gpa: std.mem.Allocator, query: []const u8) ![]Entr
         const text = std.fmt.bufPrint(&buf, "{s} {s}", .{ l.title, l.project }) catch l.title;
         if (pal.matchesQuery(query, text)) try out.append(gpa, .{ .pane = ix });
     };
+    if (a.view.palette.navigation == .preserve_tabs and !a.view.settings_open) {
+        if (a.tabs.layout()) |s| {
+            const group = &s.groups[s.focus];
+            if (group.items.items.len > 1) {
+                for (group.items.items, 0..) |pt, pt_ix| {
+                    if (pt_ix == group.active) continue;
+                    const ch = if (pt.chat) |id| a.findChat(id) else null;
+                    const title = if (ch) |chat| firstLine(chat.title orelse "Untitled session") else "New tab";
+                    const proj: []const u8 = if (ch) |chat| (if (a.findSpace(chat.space_id)) |sp| sp.name else "") else "";
+                    var buf: [1024]u8 = undefined;
+                    const text = std.fmt.bufPrint(&buf, "{s} {s} tab", .{ title, proj }) catch title;
+                    if (pal.matchesQuery(query, text)) try out.append(gpa, .{ .open_tab = .{ .ws = a.tabs.active, .pane_tab = pt_ix } });
+                    if (pt.chat) |id| try appendUniqueId(gpa, &in_panes, id);
+                }
+            }
+        }
+        const render = @import("view_tab_strip_render.zig");
+        for (0..a.tabs.items.items.len) |ws| {
+            if (ws == a.tabs.active) continue;
+            const cid = render.workspaceChatId(a, ws);
+            const ch = if (cid) |id| a.findChat(id) else null;
+            const title = if (ch) |chat| firstLine(chat.title orelse "Untitled session") else "New tab";
+            const proj_id: ?[]const u8 = if (ch) |chat| chat.space_id else a.workspaceProject(ws);
+            const proj: []const u8 = if (a.findSpace(proj_id)) |sp| sp.name else "";
+            const panes_n: usize = if (ws < a.tabs.splits.items.len) (if (a.tabs.splits.items[ws]) |s| s.panes.items.len else 1) else 1;
+            var buf: [1024]u8 = undefined;
+            const text = std.fmt.bufPrint(&buf, "{s} {s} {s}", .{ title, proj, if (panes_n > 1) "split tab" else "open tab" }) catch title;
+            if (pal.matchesQuery(query, text)) try out.append(gpa, .{ .open_tab = .{ .ws = ws } });
+            if (cid) |id| try appendUniqueId(gpa, &in_panes, id);
+        }
+    }
     if (!history) {
-        const actions = pal.actionsFor(query, isDark(a));
-        try out.appendSlice(gpa, actions.slice());
+        const actions = pal.actionsForContext(query, isDark(a), a.view.full_screen);
+        const mode = a.settings.uiMode();
+        for (actions.slice()) |e| {
+            if (e == .toggle_part and !pal.partTogglesIn(e.toggle_part, mode)) continue;
+            try out.append(gpa, e);
+        }
     }
     const p = &a.view.palette;
     if (!history and p.external.items.len > 0 and pal.matchesQuery(query, "import conversations from other tools")) try out.append(gpa, .import_all);
@@ -168,7 +205,12 @@ pub fn entries(a: *const App, gpa: std.mem.Allocator, query: []const u8) ![]Entr
     return out.toOwnedSlice(gpa);
 }
 
-fn deviceOrEmpty(a: *const App, id: ?[]const u8) []const u8 {
+fn appendUniqueId(gpa: std.mem.Allocator, list: *std.ArrayList([]const u8), id: []const u8) !void {
+    for (list.items) |have| if (std.mem.eql(u8, have, id)) return;
+    try list.append(gpa, id);
+}
+
+pub fn deviceOrEmpty(a: *const App, id: ?[]const u8) []const u8 {
     const want = id orelse return "";
     for (a.devices.items) |d| if (std.mem.eql(u8, d.id, want)) return d.name;
     return "";
@@ -192,15 +234,36 @@ pub fn activate(a: *App, e: Entry) void {
     close(a);
     switch (e) {
         .new_chat => if (replace) a.replaceCurrent(null) else a.newTab(),
-        .new_project => @import("app_open_chooser.zig").open(a, .new_project),
+        // The real New project form, as the sidebar's New project opens it.
+        .new_project => a.addFolder(),
         .settings => @import("view_settings.zig").open(a),
         .theme => unreachable,
+        .full_screen => |is_fs| a.setFullScreen(!is_fs),
+        .toggle_sidebar => {
+            a.view.sidebar_open = !a.view.sidebar_open;
+            if (!a.view.sidebar_open) @import("view_sidebar_search.zig").close(a);
+            a.redraw();
+        },
+        .split_right => @import("view_tab_strip.zig").splitChoosingFolder(a, .horizontal),
+        .split_down => @import("view_tab_strip.zig").splitChoosingFolder(a, .vertical),
+        .close_tab => a.closeByShortcut(),
+        .tab_overview => @import("view_tab_overview.zig").open(a),
+        .toggle_side_panel => @import("app_panels.zig").toggleHost(a),
+        .toggle_files => @import("app_files.zig").toggle(a),
+        .toggle_terminal => @import("app_actions.zig").toggleDock(a),
+        .chat_history => toggle(a, .chat_history),
         .custom_theme_studio => @import("view_custom_theme_studio.zig").open(a),
         .custom_theme => |id| if (@import("custom_themes.zig").findPreset(id)) |preset| {
             @import("view_custom_theme_studio.zig").applyPreset(a, preset.*);
         },
         .ui_mode => |m| {
+            const was_design = a.settings.uiMode() == .design;
             a.settings.applyUiMode(m);
+            if (m == .design) {
+                @import("app_panels.zig").openDesignCanvas(a);
+            } else if (was_design) {
+                @import("app_panels.zig").closeDesignCanvas(a);
+            }
             a.redraw();
         },
         .toggle_part => |part| {
@@ -212,7 +275,11 @@ pub fn activate(a: *App, e: Entry) void {
             importExternal(a, &.{.{ .source = x.source, .id = x.id }});
         },
         .import_all => importExternal(a, null),
-        .pane => |ix| a.focusPane(ix),
+        .pane => |ix| @import("view_tab_strip.zig").focus(a, .{ .chat = ix }),
+        .open_tab => |t| {
+            a.view.settings_open = false;
+            if (t.pane_tab) |pt| a.showPaneTab(pt) else a.showTab(t.ws);
+        },
         .chat => |id| {
             // The id outlives the chat list's next update.
             var buf: [256]u8 = undefined;
@@ -223,16 +290,191 @@ pub fn activate(a: *App, e: Entry) void {
     }
 }
 
-/// The palette's keys, taken before anything else sees them: ↑↓ round
-/// the results, Return picks, Escape closes.
+const PreviewAction = enum { none, activate, split, rename, duplicate, close };
+
+fn entryChatId(a: *const App, e: Entry) ?[]const u8 {
+    return switch (e) {
+        .chat => |id| id,
+        .open_tab => |ot| openTabChatId(a, ot),
+        .pane => |ix| if (a.tabs.layout()) |s|
+            (if (ix == s.focus) a.tabs.current() else if (ix < s.panes.items.len) s.panes.items[ix] else null)
+        else
+            null,
+        else => null,
+    };
+}
+
+fn openTabChatId(a: *const App, ot: pal.OpenTab) ?[]const u8 {
+    const render = @import("view_tab_strip_render.zig");
+    if (ot.pane_tab) |pt| {
+        const s = a.tabs.layout() orelse return null;
+        return if (pt < s.groups[s.focus].items.items.len) s.groups[s.focus].items.items[pt].chat else null;
+    }
+    return render.workspaceChatId(a, ot.ws);
+}
+
+fn openViewCount(a: *const App) usize {
+    const tabs_n = a.tabs.items.items.len;
+    const extra_panes = if (a.tabs.layout()) |s| s.panes.items.len -| 1 else 0;
+    return tabs_n + extra_panes;
+}
+
+fn sectionTitle(e: Entry) []const u8 {
+    return switch (e) {
+        .pane => "Open Panes",
+        .open_tab => "Open Tabs",
+        .chat => "Recent Sessions",
+        .external, .import_all => "Other Tools",
+        else => "Commands",
+    };
+}
+
+/// Opens rename dialog pre-filled with the highlighted session (`⌘R`).
+pub fn renameEntry(a: *App, e: Entry) void {
+    const cid = entryChatId(a, e) orelse return;
+    const ch = a.findChat(cid) orelse return;
+    close(a);
+    @import("view_chat_menu.zig").renameChat(a, ch);
+    a.redraw();
+}
+
+/// Opens a fresh sibling tab targeted to the same project & computer (`⇧⌘D`).
+pub fn duplicateEntry(a: *App, e: Entry) void {
+    if (e != .chat and e != .open_tab and e != .pane) return;
+    const cid = entryChatId(a, e);
+    const ch = if (cid) |id| a.findChat(id) else null;
+    const ws_proj: ?[]const u8 = if (e == .open_tab and e.open_tab.pane_tab == null) a.workspaceProject(e.open_tab.ws) else null;
+    const space_id: ?[]const u8 = if (ch) |chat| chat.space_id else ws_proj;
+    const device_id: ?[]const u8 = if (ch) |chat| chat.device_id else null;
+    const no_project = (ch != null and ch.?.space_id == null);
+
+    var space_buf: [256]u8 = undefined;
+    const space_copy: ?[]const u8 = if (space_id) |sp| blk: {
+        const s = space_buf[0..@min(sp.len, space_buf.len)];
+        @memcpy(s, sp[0..s.len]);
+        break :blk s;
+    } else null;
+    var device_buf: [256]u8 = undefined;
+    const device_copy: ?[]const u8 = if (device_id) |dv| blk: {
+        const s = device_buf[0..@min(dv.len, device_buf.len)];
+        @memcpy(s, dv[0..s.len]);
+        break :blk s;
+    } else null;
+
+    close(a);
+    a.view.settings_open = false;
+    a.newTab();
+    if (space_copy) |sp| {
+        if (a.space) |old| a.retireSlice(old);
+        a.space = a.gpa.dupe(u8, sp) catch null;
+        a.new_no_project = false;
+    } else if (no_project) {
+        if (a.space) |old| a.retireSlice(old);
+        a.space = null;
+        a.new_no_project = true;
+    }
+    if (device_copy) |dv| {
+        if (a.new_device) |old| a.retireSlice(old);
+        a.new_device = a.gpa.dupe(u8, dv) catch null;
+    }
+    a.ensureModels(a.target().harness);
+    a.redraw();
+}
+
+/// Opens `e` in a horizontal split beside the current pane (`⌘D`).
+pub fn splitEntry(a: *App, e: Entry) void {
+    switch (e) {
+        .chat => |id| {
+            var buf: [256]u8 = undefined;
+            const own = buf[0..@min(id.len, buf.len)];
+            @memcpy(own, id[0..own.len]);
+            close(a);
+            a.splitOpening(.horizontal, own);
+        },
+        .open_tab => |ot| {
+            if (openTabChatId(a, ot)) |cid| {
+                var buf: [256]u8 = undefined;
+                const own = buf[0..@min(cid.len, buf.len)];
+                @memcpy(own, cid[0..own.len]);
+                close(a);
+                a.splitOpening(.horizontal, own);
+            } else {
+                close(a);
+                a.splitPane(.horizontal);
+            }
+        },
+        .pane => |ix| {
+            close(a);
+            a.focusPane(ix);
+        },
+        .new_chat => {
+            close(a);
+            a.splitPane(.horizontal);
+        },
+        else => activate(a, e),
+    }
+}
+
+/// Closes an open tab/pane or archives a recent session (`⌘⌫` or preview button) while keeping the switcher open.
+pub fn closeEntry(a: *App, e: Entry) void {
+    switch (e) {
+        .open_tab => |ot| {
+            if (ot.pane_tab) |pt| {
+                if (a.tabs.layout()) |s| {
+                    var buf: [256]u8 = undefined;
+                    const own: ?[]const u8 = if (openTabChatId(a, ot)) |id| blk: {
+                        const copy = buf[0..@min(id.len, buf.len)];
+                        @memcpy(copy, id[0..copy.len]);
+                        break :blk copy;
+                    } else null;
+                    if (a.tabs.closeBackgroundPaneTab(s.focus, pt)) {
+                        if (own) |id| a.archiveClosed(id, a.settings.get(.archive_sessions_on_close));
+                    }
+                }
+            } else {
+                a.closeTabArchiving(ot.ws);
+            }
+            a.redraw();
+        },
+        .pane => |ix| {
+            a.focusPane(ix);
+            a.closePanel();
+            a.redraw();
+        },
+        .chat => |id| {
+            const ch = a.findChat(id) orelse return;
+            if (ch.archived) return;
+            var buf: [256]u8 = undefined;
+            const own = buf[0..@min(id.len, buf.len)];
+            @memcpy(own, id[0..own.len]);
+            a.setArchived(own, true);
+            a.setNotice("Session archived");
+            a.redraw();
+        },
+        else => {},
+    }
+}
+
+/// The palette's keys, taken before anything else sees them: ↑↓ / Ctrl+N/P /
+/// Tab round the results, Return picks, ⌘D splits, ⌘R renames, ⇧⌘D duplicates,
+/// ⌘⌫ closes/archives, Escape closes.
 pub fn keys(c: *ui.Context, a: *App) void {
     const p = &a.view.palette;
     if (!p.open) return;
     if (c.shortcut(.{ .key = S.escape })) return close(a);
-    const down = c.shortcut(.{ .key = S.down });
-    const up = !down and c.shortcut(.{ .key = S.up });
+    const history = p.navigation == .chat_history;
+    const down = c.shortcut(.{ .key = S.down }) or
+        c.shortcut(.{ .ctrl = true, .key = 'n' }) or
+        (!history and c.shortcut(.{ .key = S.tab }));
+    const up = !down and (c.shortcut(.{ .key = S.up }) or
+        c.shortcut(.{ .ctrl = true, .key = 'p' }) or
+        (!history and c.shortcut(.{ .shift = true, .key = S.tab })));
     const enter = c.shortcut(.{ .key = S.enter });
-    if (!down and !up and !enter) return;
+    const dup_key = !history and c.shortcut(S.native(.{ .cmd = true, .shift = true, .key = 'd' }));
+    const split_key = !history and !dup_key and c.shortcut(S.native(.{ .cmd = true, .key = 'd' }));
+    const rename_key = !history and c.shortcut(S.native(.{ .cmd = true, .key = 'r' }));
+    const close_key = !history and c.shortcut(S.native(.{ .cmd = true, .key = S.backspace }));
+    if (!down and !up and !enter and !dup_key and !split_key and !rename_key and !close_key) return;
     const list = entries(a, c.alloc(), queryOf(c, a)) catch return;
     if (down or up) {
         if (list.len == 0) return;
@@ -240,15 +482,27 @@ pub fn keys(c: *ui.Context, a: *App) void {
         p.reveal = true;
         return a.redraw();
     }
+    if (list.len == 0) return;
+    const active = list[@min(p.active, list.len - 1)];
+    if (dup_key) return duplicateEntry(a, active);
+    if (rename_key) return renameEntry(a, active);
+    if (split_key) return splitEntry(a, active);
+    if (close_key) {
+        closeEntry(a, active);
+        const after = entries(a, c.alloc(), queryOf(c, a)) catch &.{};
+        p.active = @min(p.active, after.len -| 1);
+        return;
+    }
     // nanoui hands over presses, not releases or repeats: each one is a
     // fresh press, let go at once.
     defer p.enter.release();
     if (!p.enter.press(false)) return;
     // The results for the query as typed now, not as last drawn.
-    if (list.len > 0) activate(a, list[@min(p.active, list.len - 1)]);
+    activate(a, active);
 }
 
-fn scrimColor(k: theme.Colors) ui.Color {
+fn scrimColor(a: *const App, k: theme.Colors) ui.Color {
+    if (a.view.full_screen) return .{ .a = 0.50 };
     return .{ .a = if (k.dark) 0.35 else 0.32 * (0.35 / 0.6) };
 }
 
@@ -265,20 +519,24 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
     const list = entries(a, c.alloc(), query) catch return;
     p.active = @min(p.active, list.len -| 1);
     const history = p.navigation == .chat_history;
+    const two_pane = !history and c.size.w >= 680;
     const footer = history and a.view.sidebar_open and !a.view.settings_open;
-    const w = @min(if (history) @as(f32, 420) else 560, c.size.w - 32);
+    const w = @min(if (history) @as(f32, 420) else if (two_pane) @as(f32, 780) else 560, c.size.w - 32);
+    const list_w: f32 = if (two_pane) @min(336, @floor(w * 0.44)) else w;
+    const preview_w: f32 = if (two_pane) @max(0, w - list_w - 1) else 0;
     ui.key(c, "command-palette-scrim");
     var scrim = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(8);
     if (history) {
         const left = std.math.clamp(if (footer) a.settings.sidebarWidth() - 44 else 16, 16, @max(16, c.size.w - w - 16));
         scrim = scrim.column().itemsStart().pl(left);
         scrim = if (footer) scrim.justifyEnd().pb(52) else scrim.pt(50);
-    } else scrim = scrim.bg(scrimColor(k)).center();
+    } else scrim = scrim.bg(scrimColor(a, k)).center();
     defer scrim.end();
     if (scrim.clicked()) return close(a);
     // Its children inside its 1-point border, as GPUI lays them out.
+    const card_border = if (a.view.full_screen and k.dark) ui.Color.white.alpha(0.14) else k.border;
     var card = @import("view_sidebar_menus.zig").held(ui.div(c).w(w).column().p(1).rounded(16)
-        .bg(if (k.frosted) .transparent else k.composer).border(k.border).borderW(1).clip());
+        .bg(if (k.frosted) .transparent else k.composer).border(card_border).borderW(1).clip());
     if (!k.frosted) card = kit.shadowLg(card);
     defer card.end();
     if (k.frosted) frostedBackdrop(c, k);
@@ -296,56 +554,112 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
         icons.icon(c, .close, 12, k.muted, 0);
         if (dismiss.clicked()) close(a);
     }
-    header(c, a, k, w);
+    header(c, a, k, w, list.len);
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = hairline(k) }, .none, null);
     var picked: ?Entry = null;
+    var closed_entry: ?Entry = null;
+    var preview_action: PreviewAction = .none;
+    const active_entry: ?Entry = if (list.len > 0) list[@min(p.active, list.len - 1)] else null;
     {
-        const max_h = std.math.clamp(c.size.h - 180, 100, 360);
-        var style: ui.Style = .{ .width = .fill, .max_height = max_h, .direction = .column, .gap = 2 };
-        if (@hasField(ui.Style, "scrollbar")) style.scrollbar = .{ .overlay = k.faint.alpha(0.5) };
-        const at = c.nodes.items.len;
-        ui.scroll(c, style);
-        defer ui.end(c);
-        const id = c.node(@intCast(at)).id;
-        p.scroll_id = id;
-        for (list, 0..) |e, ix| {
-            ui.key(c, c.print("command-result-{d}", .{ix}));
-            var wrap = ui.div(c).column().wFull();
-            if (ix == 0) wrap = wrap.pt(8);
-            if (ix + 1 == list.len) wrap = wrap.pb(8);
-            defer wrap.end();
-            if (history and ix == 0) {
-                const section = ui.div(c).row().wFull().px(16).pt(6).pb(5);
-                defer section.end();
-                ui.text(c, "All chats", .{ .size = 11, .line_height = 11 * phi, .color = k.muted });
+        const max_h = if (two_pane) std.math.clamp(c.size.h - 172, 220, 394) else std.math.clamp(c.size.h - 180, 100, 360);
+        const body = if (two_pane) ui.div(c).row().wFull().h(max_h) else ui.div(c).column().wFull();
+        defer body.end();
+        {
+            const list_col = if (two_pane) ui.div(c).column().w(list_w).hFull() else ui.div(c).column().wFull();
+            defer list_col.end();
+            var style: ui.Style = .{
+                .width = .fill,
+                .height = if (two_pane) .fill else .auto,
+                .max_height = max_h,
+                .direction = .column,
+                .gap = 2,
+            };
+            if (@hasField(ui.Style, "scrollbar")) style.scrollbar = .{ .overlay = k.faint.alpha(0.5) };
+            const at = c.nodes.items.len;
+            ui.scroll(c, style);
+            defer ui.end(c);
+            const id = c.node(@intCast(at)).id;
+            p.scroll_id = id;
+            for (list, 0..) |e, ix| {
+                ui.key(c, c.print("command-result-{d}", .{ix}));
+                var wrap = ui.div(c).column().wFull();
+                if (ix == 0) wrap = wrap.pt(8);
+                if (ix + 1 == list.len) wrap = wrap.pb(8);
+                defer wrap.end();
+                if (history and ix == 0) {
+                    const section = ui.div(c).row().wFull().px(16).pt(6).pb(5);
+                    defer section.end();
+                    ui.text(c, "All chats", .{ .size = 11, .line_height = 11 * phi, .color = k.muted });
+                }
+                if (ix > 0 and list[ix - 1].section() != e.section()) {
+                    const sep = ui.div(c).column().wFull().py(6);
+                    defer sep.end();
+                    _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border.alpha(0.6) }, .none, null);
+                }
+                if (!history and (ix == 0 or !std.mem.eql(u8, sectionTitle(list[ix - 1]), sectionTitle(e)))) {
+                    const sec = ui.div(c).row().wFull().px(16).pt(4).pb(2);
+                    defer sec.end();
+                    ui.text(c, sectionTitle(e), .{ .size = 11, .line_height = 11 * phi, .weight = theme.ui_medium_weight, .color = k.muted.alpha(0.8) });
+                }
+                const content = ui.div(c).column().wFull().px(8);
+                defer content.end();
+                var row_hovered = content.hovered();
+                if (history) {
+                    if (historyRow(c, a, k, e, ix == p.active, query_text, list_w - 18)) picked = e;
+                } else if (row(c, a, k, e, ix == p.active, query_text, list_w - 18, &closed_entry, &row_hovered)) {
+                    picked = e;
+                }
+                if (two_pane and row_hovered and !c.keyboard_hides_hover and p.active != ix) {
+                    p.active = ix;
+                    c.changed = true;
+                }
+                if (ix == p.active and p.reveal) reveal(c, id, wrap);
             }
-            if (ix > 0 and list[ix - 1].section() != e.section()) {
-                const sep = ui.div(c).column().wFull().py(8);
-                defer sep.end();
-                _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border.alpha(0.6) }, .none, null);
+            p.reveal = false;
+            if (list.len == 0) {
+                const empty = ui.div(c).column().wFull().py(24).px(16).gap(6).itemsCenter();
+                defer empty.end();
+                ui.text(c, "No results", .{ .size = 13, .line_height = 13 * phi, .color = k.text });
+                ui.text(c, if (p.navigation == .chat_history) "Try a chat title, project, or device." else "Try a pane, command, chat title, project, or device.", .{ .size = 13, .line_height = 13 * phi, .color = k.muted });
             }
-            const content = ui.div(c).column().wFull().px(8);
-            defer content.end();
-            if (history) {
-                if (historyRow(c, a, k, e, ix == p.active, query_text, w - 18)) picked = e;
-            } else if (row(c, a, k, e, ix == p.active, query_text, w - 18)) picked = e;
-            if (ix == p.active and p.reveal) reveal(c, id, wrap);
         }
-        p.reveal = false;
-        if (list.len == 0) {
-            const empty = ui.div(c).column().wFull().py(24).px(16).gap(6).itemsCenter();
-            defer empty.end();
-            ui.text(c, "No results", .{ .size = 13, .line_height = 13 * phi, .color = k.text });
-            ui.text(c, if (p.navigation == .chat_history) "Try a chat title, project, or device." else "Try a pane, command, chat title, project, or device.", .{ .size = 13, .line_height = 13 * phi, .color = k.muted });
+        if (two_pane) {
+            _ = c.leaf(.{ .width = .{ .px = 1 }, .height = .fill, .background = k.border.alpha(0.6) }, .none, null);
+            previewPane(c, a, k, active_entry, preview_w, &preview_action);
         }
     }
     if (!history) {
         _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = hairline(k) }, .none, null);
-        const f = ui.div(c).row().wFull().h(32).px(16).gap(12).itemsCenter();
+        const f = ui.div(c).row().wFull().h(32).px(16).gap(10).itemsCenter();
         defer f.end();
         keyHint(c, k, "↑ ↓", "Navigate");
         keyHint(c, k, "↵", "Select");
+        if (two_pane) {
+            keyHint(c, k, "⌘D", "Split");
+            keyHint(c, k, "⌘R", "Rename");
+            keyHint(c, k, "⇧⌘D", "New tab");
+            keyHint(c, k, "⌘Del", "Close");
+        }
         keyHint(c, k, "Esc", "Close");
+    }
+    if (closed_entry) |ce| {
+        closeEntry(a, ce);
+        const after = entries(a, c.alloc(), queryOf(c, a)) catch &.{};
+        p.active = @min(p.active, after.len -| 1);
+        return;
+    }
+    switch (preview_action) {
+        .none => {},
+        .activate => if (active_entry) |ae| activate(a, ae),
+        .split => if (active_entry) |ae| splitEntry(a, ae),
+        .rename => if (active_entry) |ae| renameEntry(a, ae),
+        .duplicate => if (active_entry) |ae| duplicateEntry(a, ae),
+        .close => if (active_entry) |ae| {
+            closeEntry(a, ae);
+            const after = entries(a, c.alloc(), queryOf(c, a)) catch &.{};
+            p.active = @min(p.active, after.len -| 1);
+            return;
+        },
     }
     if (picked) |e| activate(a, e);
 }
@@ -441,7 +755,7 @@ fn reveal(c: *ui.Context, scroll_id: u64, d: ui.Div) void {
 
 /// The search: its glyph, the field at 14 points on the composer input's
 /// 22.75-point line, and ⌘K's cap; 44 tall with its rule.
-fn header(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
+fn header(c: *ui.Context, a: *App, k: theme.Colors, w: f32, result_count: usize) void {
     const p = &a.view.palette;
     const h = ui.div(c).row().wFull().h(43).px(16).gap(10).itemsCenter();
     defer h.end();
@@ -450,7 +764,14 @@ fn header(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         const f = ui.div(c).row().grow().w(0).itemsCenter();
         defer f.end();
         const splits = if (a.tabs.layout()) |s| s.panes.items.len > 1 else false;
-        const placeholder = if (p.navigation == .chat_history) "Search chats across projects…" else if (splits) "Search open panes, commands and chats…" else "Search commands and chats…";
+        const placeholder = if (p.navigation == .chat_history)
+            "Search chats across projects…"
+        else if (splits)
+            "Search open panes, commands and chats…"
+        else if (a.view.full_screen)
+            "Search open tabs, commands and chats…"
+        else
+            "Search commands and chats…";
         ui.key(c, "command-palette-search");
         const at = c.nodes.items.len;
         const res = ui.textField(c, &p.query, .{ .placeholder = placeholder, .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 14, .line_height = 22.75 });
@@ -479,6 +800,41 @@ fn header(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     }
     _ = w;
     if (p.navigation != .chat_history) {
+        if (p.query.text().len > 0) {
+            ui.key(c, "command-palette-clear");
+            const clear = ui.div(c).size(20, 20).center().rounded(10).bg(k.ink(0.06)).hover(k.hover);
+            defer clear.end();
+            icons.icon(c, .close, 11, k.muted, 0);
+            if (clear.clicked()) {
+                p.query.clear();
+                p.active = 0;
+                p.focus = true;
+                a.redraw();
+            }
+        }
+        const badge_text = if (p.query.text().len > 0)
+            c.print("{d} results", .{result_count})
+        else
+            c.print("{d} open", .{openViewCount(a)});
+        {
+            const badge = ui.div(c).h(20).px(8).center().rounded(10).bg(k.ink(if (k.dark) 0.06 else 0.045));
+            defer badge.end();
+            ui.text(c, badge_text, .{ .size = 11, .line_height = 11 * phi, .weight = theme.ui_medium_weight, .color = k.muted });
+        }
+        {
+            ui.key(c, "command-palette-overview");
+            const ob = @import("view_tooltip.zig").on(
+                ui.div(c).size(22, 22).center().rounded(6).hover(k.hover).control(),
+                k,
+                .{ .text = "Visual tab overview (⇧⌘\\)" },
+            );
+            defer ob.end();
+            icons.icon(c, .widget, 13, k.muted, 0);
+            if (ob.clicked()) {
+                close(a);
+                @import("view_tab_overview.zig").open(a);
+            }
+        }
         var buf: [32]u8 = undefined;
         kit.kbdHint(c, k, shortcuts.badge(&buf, "mod-k"));
     }
@@ -493,7 +849,7 @@ fn keyHint(c: *ui.Context, k: theme.Colors, keys_: []const u8, label: []const u8
 }
 
 /// One result, `inner` wide less its own sides; true when clicked.
-fn row(c: *ui.Context, a: *App, k: theme.Colors, e: Entry, lit: bool, query: []const u8, inner: f32) bool {
+fn row(c: *ui.Context, a: *App, k: theme.Colors, e: Entry, lit: bool, query: []const u8, inner: f32, closed: *?Entry, hovered_out: *bool) bool {
     switch (e) {
         .chat => |id| {
             const ch = a.findChat(id) orelse return false;
@@ -507,28 +863,60 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, e: Entry, lit: bool, query: []c
         },
         else => {},
     }
-    var r = ui.div(c).row().wFull().h(30).px(8).gap(10).itemsCenter().rounded(10);
+    var r = ui.div(c).row().wFull().h(30).px(8).gap(8).itemsCenter().rounded(10);
     r = if (lit) r.bg(if (k.is_harp) k.active else k.selected) else r.hover(k.hover);
     defer r.end();
-    const hot = lit or r.hovered();
+    const is_hot = r.hovered();
+    hovered_out.* = is_hot;
+    const hot = lit or is_hot;
     const tc = if (hot) k.text else k.text.alpha(0.9);
     const st: ui.TextStyle = .{ .size = 13, .line_height = 13 * phi, .color = tc };
-    const room = inner - 16 - 16 - 10;
+    const closable = e == .pane or e == .open_tab;
+    const close_btn_w: f32 = if (closable and hot) 22 else 0;
+    const room = @max(40, inner - 16 - 16 - 10 - close_btn_w);
+    var close_clicked = false;
     switch (e) {
         .pane => |ix| {
             const l = paneLabel(a, ix);
             const s = a.tabs.layout();
             const glyph = if (s) |x| pal.paneGlyph(x.axis == .horizontal, ix, x.panes.items.len) else "▣";
             slot(c, k, glyph);
-            const tail = c.text.width("Go to pane", .{ .size = 11 }) + 10;
-            const proj_w = if (l.project.len > 0) @min(160, c.text.width(l.project, .{ .size = 12 })) + 10 else 0;
+            const tail_label = "Go to pane";
+            const tail = c.text.width(tail_label, .{ .size = 11 }) + 8;
+            const proj_w = if (l.project.len > 0 and room >= 240) @min(80, c.text.width(l.project, .{ .size = 12 })) + 8 else 0;
             {
                 const t = ui.div(c).row().grow().w(0).clip();
                 defer t.end();
-                kit.highlightText(c, k, l.title, st, room - tail - proj_w, query);
+                kit.highlightText(c, k, l.title, st, @max(32, room - tail - proj_w), query);
             }
-            if (l.project.len > 0) kit.ellipsisText(c, l.project, .{ .size = 12, .line_height = 12 * phi, .color = k.muted }, 160);
-            ui.text(c, "Go to pane", .{ .size = 11, .line_height = 11 * phi, .color = k.muted.alpha(0.7) });
+            if (l.project.len > 0 and room >= 240) kit.ellipsisText(c, l.project, .{ .size = 12, .line_height = 12 * phi, .color = k.muted }, 80);
+            ui.text(c, tail_label, .{ .size = 11, .line_height = 11 * phi, .color = k.muted.alpha(0.7) });
+        },
+        .open_tab => |ot| {
+            const render = @import("view_tab_strip_render.zig");
+            const chat_id: ?[]const u8 = if (ot.pane_tab) |pt|
+                (if (a.tabs.layout()) |s| (if (pt < s.groups[s.focus].items.items.len) s.groups[s.focus].items.items[pt].chat else null) else null)
+            else
+                render.workspaceChatId(a, ot.ws);
+            const ch = if (chat_id) |cid| a.findChat(cid) else null;
+            const title = if (ch) |chat| firstLine(chat.title orelse "Untitled session") else "New tab";
+            const panes_n: usize = if (ot.pane_tab == null and ot.ws < a.tabs.splits.items.len)
+                (if (a.tabs.splits.items[ot.ws]) |s| s.panes.items.len else 1)
+            else
+                1;
+            const proj_id: ?[]const u8 = if (ch) |chat| chat.space_id else if (ot.pane_tab == null) a.workspaceProject(ot.ws) else null;
+            const proj: []const u8 = if (a.findSpace(proj_id)) |sp| sp.name else "";
+            icons.icon(c, if (panes_n > 1) .widget else .@"chat-round-line", 16, k.muted, 0);
+            const badge = if (panes_n > 1) c.print("Split · {d} panes", .{panes_n}) else "Open tab";
+            const tail = c.text.width(badge, .{ .size = 11 }) + 8;
+            const proj_w = if (proj.len > 0 and room >= 240) @min(80, c.text.width(proj, .{ .size = 12 })) + 8 else 0;
+            {
+                const t = ui.div(c).row().grow().w(0).clip();
+                defer t.end();
+                kit.highlightText(c, k, title, st, @max(32, room - tail - proj_w), query);
+            }
+            if (proj.len > 0 and room >= 240) kit.ellipsisText(c, proj, .{ .size = 12, .line_height = 12 * phi, .color = k.muted }, 80);
+            ui.text(c, badge, .{ .size = 11, .line_height = 11 * phi, .color = k.muted.alpha(0.75) });
         },
         .import_all => {
             slot(c, k, "↓");
@@ -543,44 +931,21 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, e: Entry, lit: bool, query: []c
             const folder = x.folder();
             const trailing = if (folder.len == 0) c.print("{s} · {s}", .{ x.sourceLabel(), when }) else c.print("{s} · {s} · {s}", .{ x.sourceLabel(), folder, when });
             const tst: ui.TextStyle = .{ .size = 11, .line_height = 11 * phi, .color = k.muted.alpha(0.7) };
-            const tw = @min(260, c.text.width(trailing, tst));
+            const tw = @min(140, c.text.width(trailing, tst));
             {
                 const t = ui.div(c).row().grow().w(0).clip();
                 defer t.end();
-                kit.highlightText(c, k, firstLine(x.title), st, room - tw - 10, query);
+                kit.highlightText(c, k, firstLine(x.title), st, @max(32, room - tw - 10), query);
             }
-            kit.ellipsisText(c, trailing, tst, 260);
+            kit.ellipsisText(c, trailing, tst, 140);
         },
         else => {
-            const glyph: icons.Name = switch (e) {
-                .new_chat => .@"pen-new-square",
-                .new_project => .folder,
-                .settings => .@"settings-minimalistic",
-                .theme => |m| switch (m) {
-                    .toggle => if (k.dark) .sun else .moon,
-                    .system => .monitor,
-                    .light => .sun,
-                    .dark => .moon,
-                },
-                .custom_theme_studio, .custom_theme => .@"magic-stick-3",
-                .ui_mode => |m| switch (m) {
-                    .zen => .@"magic-stick-3",
-                    .developer => .terminal,
-                },
-                .toggle_part => .tuning,
-                else => unreachable,
-            };
+            const glyph = entryIcon(k, e);
             icons.icon(c, glyph, 16, k.muted, 0);
             var buf: [32]u8 = undefined;
-            const hint: ?[]const u8 = switch (e) {
-                .new_chat => shortcuts.badge(&buf, comboFor(a, "newSession")),
-                .new_project => shortcuts.badge(&buf, comboFor(a, "newProject")),
-                .settings => shortcuts.badge(&buf, "mod-,"),
-                .ui_mode => shortcuts.badge(&buf, "mod-shift-m"),
-                else => null,
-            };
+            const hint = commandHint(a, e, &buf);
             {
-                const t = ui.div(c).row().grow().w(0);
+                const t = ui.div(c).row().grow().w(0).clip();
                 defer t.end();
                 kit.highlightText(c, k, e.label().?, st, room, query);
             }
@@ -596,12 +961,334 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, e: Entry, lit: bool, query: []c
             }
         },
     }
+    if (closable and hot) {
+        ui.key(c, "palette-row-close");
+        const cb = ui.div(c).size(18, 18).center().rounded(9).bg(k.ink(0.06)).hover(k.hover);
+        defer cb.end();
+        icons.icon(c, .close, 10, k.muted, 0);
+        if (cb.clicked()) close_clicked = true;
+    }
     if (r.hovered()) c.cursor_hand = true;
+    if (close_clicked) {
+        closed.* = e;
+        return false;
+    }
     return r.clicked();
 }
 
+fn entryIcon(k: theme.Colors, e: Entry) icons.Name {
+    return switch (e) {
+        .new_chat => .@"pen-new-square",
+        .new_project => .folder,
+        .settings => .@"settings-minimalistic",
+        .theme => |m| switch (m) {
+            .toggle => if (k.dark) .sun else .moon,
+            .system => .monitor,
+            .light => .sun,
+            .dark => .moon,
+        },
+        .full_screen => .@"expand-arrows",
+        .toggle_sidebar => .@"sidebar-minimalistic-left",
+        .split_right => .@"split-columns",
+        .split_down => .@"fold-vertical",
+        .close_tab => .close,
+        .tab_overview => .widget,
+        .toggle_side_panel => .@"sidebar-minimalistic",
+        .toggle_files => .folder,
+        .toggle_terminal => .terminal,
+        .chat_history => .@"clock-circle",
+        .custom_theme_studio, .custom_theme => .@"magic-stick-3",
+        .ui_mode => |m| switch (m) {
+            .zen => .@"magic-stick-3",
+            .developer => .terminal,
+            .design => .@"palette-search",
+        },
+        .toggle_part => .tuning,
+        else => .terminal,
+    };
+}
+
+fn commandHint(a: *const App, e: Entry, buf: []u8) ?[]const u8 {
+    return switch (e) {
+        .new_chat => shortcuts.badge(buf, comboFor(a, "newSession")),
+        .new_project => shortcuts.badge(buf, comboFor(a, "newProject")),
+        .settings => shortcuts.badge(buf, "mod-,"),
+        .full_screen => if (comptime @import("builtin").os.tag == .macos) "⌃⌘F" else "F11",
+        .toggle_sidebar => shortcuts.badge(buf, comboFor(a, "toggleSidebar")),
+        .split_right => shortcuts.badge(buf, comboFor(a, "splitTerminal")),
+        .split_down => blk: {
+            const c_down = comboFor(a, "splitTerminalDown");
+            break :blk if (c_down.len > 0) shortcuts.badge(buf, c_down) else null;
+        },
+        .close_tab => shortcuts.badge(buf, "mod-w"),
+        .tab_overview => shortcuts.badge(buf, "mod-shift-\\"),
+        .toggle_side_panel => shortcuts.badge(buf, comboFor(a, "toggleChanges")),
+        .toggle_files => shortcuts.badge(buf, comboFor(a, "toggleFiles")),
+        .toggle_terminal => shortcuts.badge(buf, comboFor(a, "toggleTerminal")),
+        .ui_mode => |m| shortcuts.badge(buf, if (m == .design) "mod-alt-d" else "mod-shift-m"),
+        else => null,
+    };
+}
+
+pub fn transcriptForChat(a: *const App, chat_id: []const u8) ?*const @import("transcript.zig").Transcript {
+    if (a.selected) |sel| if (std.mem.eql(u8, sel, chat_id)) return &a.transcript;
+    for (a.peers.items) |*peer_item| {
+        if (std.mem.eql(u8, peer_item.id, chat_id)) return &peer_item.transcript;
+    }
+    return null;
+}
+
+pub fn firstTextPart(entry: *const @import("transcript.zig").Entry) ?[]const u8 {
+    for (entry.parts.items) |*part| {
+        if (part.kind == .text) {
+            const trimmed = std.mem.trim(u8, part.text.items, " \t\n\r");
+            if (trimmed.len > 0) return trimmed;
+        }
+    }
+    for (entry.parts.items) |*part| {
+        const trimmed = std.mem.trim(u8, part.text.items, " \t\n\r");
+        if (trimmed.len > 0) return trimmed;
+    }
+    return null;
+}
+
+fn previewPane(c: *ui.Context, a: *const App, k: theme.Colors, maybe_entry: ?Entry, w: f32, action: *PreviewAction) void {
+    const col = ui.div(c).column().w(w).hFull().p(16).gap(12);
+    defer col.end();
+    const inner_w = @max(80, w - 32);
+    const e = maybe_entry orelse {
+        const empty = ui.div(c).column().wFull().grow().h(0).center().gap(6);
+        defer empty.end();
+        icons.icon(c, .@"palette-search", 20, k.muted.alpha(0.55), 0);
+        ui.text(c, "No matching item", .{ .size = 13, .line_height = 13 * phi, .color = k.muted });
+        return;
+    };
+
+    switch (e) {
+        .pane, .open_tab, .chat => {
+            const workspace = @import("workspace.zig");
+            const render = @import("view_tab_strip_render.zig");
+            var chat_id: ?[]const u8 = null;
+            var kind_label: []const u8 = "Saved Session";
+            var action_label: []const u8 = "Open Session ↩";
+            var panes_n: usize = 1;
+            var ws_ix: ?usize = null;
+            var closable = false;
+
+            switch (e) {
+                .pane => |ix| {
+                    kind_label = "Split Pane";
+                    action_label = "Focus Pane ↩";
+                    closable = true;
+                    if (a.tabs.layout()) |s| {
+                        chat_id = if (ix == s.focus) a.tabs.current() else if (ix < s.panes.items.len) s.panes.items[ix] else null;
+                    }
+                },
+                .open_tab => |ot| {
+                    kind_label = "Open Tab";
+                    action_label = "Switch to Tab ↩";
+                    closable = true;
+                    ws_ix = if (ot.pane_tab == null) ot.ws else null;
+                    chat_id = openTabChatId(a, ot);
+                    if (ot.pane_tab == null and ot.ws < a.tabs.splits.items.len) {
+                        if (a.tabs.splits.items[ot.ws]) |s| panes_n = s.panes.items.len;
+                    }
+                },
+                .chat => |id| chat_id = id,
+                else => unreachable,
+            }
+
+            const ch = if (chat_id) |cid| a.findChat(cid) else null;
+            const title = if (ch) |chat| firstLine(chat.title orelse "Untitled session") else "Draft session";
+            const proj_id: ?[]const u8 = if (ch) |chat| chat.space_id else if (ws_ix) |wi| a.workspaceProject(wi) else null;
+            const project: []const u8 = if (a.findSpace(proj_id)) |sp| sp.name else if (proj_id == null and ch != null) "No project" else "";
+            const device: []const u8 = if (ch) |chat| deviceOrEmpty(a, chat.device_id) else "";
+            const branch: ?[]const u8 = if (ch) |chat| if (chat.branch) |b| blk: {
+                const tr_b = std.mem.trim(u8, b, " ");
+                break :blk if (tr_b.len > 0) tr_b else null;
+            } else null else null;
+            const st_val = if (chat_id) |cid| workspace.statusOf(a.sessions.items, cid) else .idle;
+            const running = st_val == .working or st_val == .awaiting_input;
+
+            {
+                const card = ui.div(c).column().wFull().grow().h(0).p(14).gap(10).rounded(12).bg(k.ink(if (k.dark) 0.04 else 0.025)).border(k.border.alpha(0.7)).borderW(1).clip();
+                defer card.end();
+                {
+                    const top = ui.div(c).row().wFull().gap(8).itemsCenter();
+                    defer top.end();
+                    {
+                        const pill = ui.div(c).row().h(20).px(8).gap(6).itemsCenter().rounded(10).bg(k.ink(if (k.dark) 0.07 else 0.05));
+                        defer pill.end();
+                        const dot_c = if (running) k.accent else if (e == .open_tab or e == .pane) k.text.alpha(0.75) else k.muted.alpha(0.6);
+                        _ = c.leaf(.{ .width = .{ .px = 6 }, .height = .{ .px = 6 }, .radius = 3, .background = dot_c }, .none, null);
+                        ui.text(c, if (running) c.print("{s} · Running", .{kind_label}) else kind_label, .{ .size = 11, .line_height = 11 * phi, .weight = theme.ui_medium_weight, .color = k.text.alpha(0.85) });
+                    }
+                    ui.spacer(c);
+                    if (ch) |chat| {
+                        var tb: [32]u8 = undefined;
+                        ui.text(c, rules.relativeTime(&tb, a.nowMs(), chat.timeMs()), .{ .size = 11, .line_height = 11 * phi, .color = k.muted });
+                    }
+                    _ = render;
+                }
+                kit.ellipsisText(c, title, .{ .size = 15, .line_height = 15 * 1.4, .weight = .semibold, .color = k.text }, inner_w - 28);
+                {
+                    const meta = ui.div(c).row().wFull().gap(8).itemsCenter().clip();
+                    defer meta.end();
+                    if (project.len > 0) previewChip(c, k, .folder, project);
+                    if (branch) |br| previewChip(c, k, .@"git-branch", br);
+                    if (device.len > 0) previewChip(c, k, .monitor, device);
+                    if (panes_n > 1) previewChip(c, k, .widget, c.print("{d} panes", .{panes_n}));
+                }
+                _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border.alpha(0.55) }, .none, null);
+                {
+                    const body = ui.div(c).column().wFull().grow().h(0).gap(8).clip();
+                    defer body.end();
+                    if (chat_id) |cid| {
+                        if (transcriptForChat(a, cid)) |tr_ptr| {
+                            const n_entries = tr_ptr.entries.items.len;
+                            const start = n_entries -| 4;
+                            var shown_any = false;
+                            for (tr_ptr.entries.items[start..]) |*te| {
+                                if (te.role == .system) continue;
+                                const snippet = firstTextPart(te) orelse continue;
+                                shown_any = true;
+                                const line_row = ui.div(c).row().wFull().gap(6).itemsStart();
+                                defer line_row.end();
+                                const who = if (te.role == .user) "You" else "Graff";
+                                ui.text(c, who, .{ .size = 11, .line_height = 11 * phi, .weight = theme.ui_medium_weight, .color = if (te.role == .user) k.accent else k.muted });
+                                kit.ellipsisText(c, firstLine(snippet), .{ .size = 12, .line_height = 12 * phi, .color = k.text.alpha(0.88) }, @max(40, inner_w - 72));
+                            }
+                            if (!shown_any) {
+                                ui.text(c, if (ch != null and ch.?.preview != null) ch.?.preview.? else "Session active in background.", .{ .size = 12, .line_height = 12 * phi, .color = k.muted });
+                            }
+                        } else if (ch) |chat| {
+                            if (chat.preview) |prev| {
+                                const trimmed = std.mem.trim(u8, prev, " \t\n\r");
+                                if (trimmed.len > 0) {
+                                    ui.text(c, "Latest message", .{ .size = 11, .line_height = 11 * phi, .weight = theme.ui_medium_weight, .color = k.muted });
+                                    kit.ellipsisText(c, firstLine(trimmed), .{ .size = 12.5, .line_height = 12.5 * phi, .color = k.text.alpha(0.88) }, inner_w - 28);
+                                }
+                            } else {
+                                ui.text(c, "Open to load the live conversation transcript.", .{ .size = 12, .line_height = 12 * phi, .color = k.muted });
+                            }
+                        } else {
+                            ui.text(c, "Empty draft pane waiting for your first message.", .{ .size = 12, .line_height = 12 * phi, .color = k.muted });
+                        }
+                    } else {
+                        ui.text(c, "Draft view ready to pick a project, computer, and prompt.", .{ .size = 12, .line_height = 12 * phi, .color = k.muted });
+                    }
+                }
+            }
+            const can_rename = ch != null;
+            const close_tip: ?[]const u8 = if (closable) "Close (\u{2318}Del)" else if (ch != null and !ch.?.archived) "Archive session (\u{2318}Del)" else null;
+            previewActionsBar(c, k, action_label, e == .chat or e == .open_tab, can_rename, true, close_tip, !closable, action);
+        },
+        .external => |i| {
+            const x = a.view.palette.external.items[i];
+            const when = rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, a.nowMs(), x.updated_ms);
+            {
+                const card = ui.div(c).column().wFull().grow().h(0).p(14).gap(10).rounded(12).bg(k.ink(if (k.dark) 0.04 else 0.025)).border(k.border.alpha(0.7)).borderW(1);
+                defer card.end();
+                previewChip(c, k, .@"clock-circle", x.sourceLabel());
+                kit.ellipsisText(c, firstLine(x.title), .{ .size = 15, .line_height = 15 * 1.4, .weight = .semibold, .color = k.text }, inner_w - 28);
+                if (x.folder().len > 0) previewChip(c, k, .folder, x.folder());
+                ui.text(c, c.print("Updated {s} · Imports into Graff", .{when}), .{ .size = 12, .line_height = 12 * phi, .color = k.muted });
+            }
+            previewActionsBar(c, k, "Import & Open ↩", false, false, false, null, false, action);
+        },
+        else => {
+            var hint_buf: [32]u8 = undefined;
+            const hint = commandHint(a, e, &hint_buf);
+            const title = if (e == .import_all)
+                c.print("Import {d} conversations", .{a.view.palette.external.items.len})
+            else
+                e.label() orelse "Command";
+            {
+                const card = ui.div(c).column().wFull().grow().h(0).p(16).gap(12).rounded(12).bg(k.ink(if (k.dark) 0.04 else 0.025)).border(k.border.alpha(0.7)).borderW(1);
+                defer card.end();
+                {
+                    const head = ui.div(c).row().wFull().gap(10).itemsCenter();
+                    defer head.end();
+                    {
+                        const tile = ui.div(c).size(36, 36).center().rounded(10).bg(k.ink(if (k.dark) 0.08 else 0.05)).border(k.border.alpha(0.6)).borderW(1);
+                        defer tile.end();
+                        icons.icon(c, if (e == .import_all) .restart else entryIcon(k, e), 18, k.text.alpha(0.88), 0);
+                    }
+                    const lbls = ui.div(c).column().grow().w(0).gap(2);
+                    defer lbls.end();
+                    kit.ellipsisText(c, title, .{ .size = 14, .line_height = 14 * phi, .weight = .semibold, .color = k.text }, inner_w - 86);
+                    ui.text(c, "Workspace Action", .{ .size = 11, .line_height = 11 * phi, .color = k.muted });
+                    if (hint) |h| kit.kbdHint(c, k, h);
+                }
+                _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border.alpha(0.5) }, .none, null);
+                ui.text(c, if (e == .new_chat) "Opens a fresh session draft in a new tab." else "Runs immediately on the active workspace view.", .{ .size = 12, .line_height = 12 * phi, .color = k.muted });
+            }
+            previewActionsBar(c, k, "Run Command ↩", e == .new_chat, false, false, null, false, action);
+        },
+    }
+}
+
+fn previewChip(c: *ui.Context, k: theme.Colors, glyph: icons.Name, label: []const u8) void {
+    const ch = ui.div(c).row().h(20).px(7).gap(5).itemsCenter().rounded(6).bg(k.ink(if (k.dark) 0.06 else 0.04));
+    defer ch.end();
+    icons.icon(c, glyph, 11, k.muted, 0);
+    kit.ellipsisText(c, label, .{ .size = 11, .line_height = 11 * phi, .color = k.muted }, 140);
+}
+
+fn previewActionsBar(
+    c: *ui.Context,
+    k: theme.Colors,
+    primary_label: []const u8,
+    can_split: bool,
+    can_rename: bool,
+    can_duplicate: bool,
+    close_tip: ?[]const u8,
+    close_is_archive: bool,
+    action: *PreviewAction,
+) void {
+    const row_ = ui.div(c).row().wFull().gap(8).itemsCenter();
+    defer row_.end();
+    {
+        ui.key(c, "palette-preview-open");
+        const b = ui.div(c).row().h(28).px(12).gap(6).itemsCenter().rounded(8).bg(k.accent).hover(k.accent.alpha(0.9));
+        defer b.end();
+        ui.text(c, primary_label, .{ .size = 12, .line_height = 12 * phi, .weight = theme.ui_medium_weight, .color = k.onAccent() });
+        if (b.clicked()) action.* = .activate;
+    }
+    if (can_split) {
+        ui.key(c, "palette-preview-split");
+        const b = ui.div(c).row().h(28).px(10).gap(6).itemsCenter().rounded(8).bg(k.ink(if (k.dark) 0.07 else 0.05)).border(k.border.alpha(0.7)).borderW(1).hover(k.hover);
+        defer b.end();
+        icons.icon(c, .@"split-columns", 12, k.text.alpha(0.85), 0);
+        ui.text(c, "Split ⌘D", .{ .size = 12, .line_height = 12 * phi, .weight = theme.ui_medium_weight, .color = k.text.alpha(0.88) });
+        if (b.clicked()) action.* = .split;
+    }
+    ui.spacer(c);
+    if (can_rename) {
+        ui.key(c, "palette-preview-rename");
+        const b = @import("view_tooltip.zig").on(ui.div(c).size(28, 28).center().rounded(14).bg(k.ink(if (k.dark) 0.07 else 0.05)).border(k.border.alpha(0.7)).borderW(1).hover(k.hover).control(), k, .{ .text = "Rename session (\u{2318}R)" });
+        defer b.end();
+        icons.icon(c, .pen, 13, k.muted, 0);
+        if (b.clicked()) action.* = .rename;
+    }
+    if (can_duplicate) {
+        ui.key(c, "palette-preview-duplicate");
+        const b = @import("view_tooltip.zig").on(ui.div(c).size(28, 28).center().rounded(14).bg(k.ink(if (k.dark) 0.07 else 0.05)).border(k.border.alpha(0.7)).borderW(1).hover(k.hover).control(), k, .{ .text = "New tab in same project (\u{21e7}\u{2318}D)" });
+        defer b.end();
+        icons.icon(c, .copy, 13, k.muted, 0);
+        if (b.clicked()) action.* = .duplicate;
+    }
+    if (close_tip) |tip_text| {
+        ui.key(c, "palette-preview-close");
+        const b = @import("view_tooltip.zig").on(ui.div(c).size(28, 28).center().rounded(14).bg(k.ink(if (k.dark) 0.07 else 0.05)).border(k.border.alpha(0.7)).borderW(1).hover(k.hover).control(), k, .{ .text = tip_text });
+        defer b.end();
+        icons.icon(c, if (close_is_archive) .@"archive-minimalistic" else .@"trash-bin-minimalistic", 13, k.muted, 0);
+        if (b.clicked()) action.* = .close;
+    }
+}
+
 /// A shortcut's combination as the keymap has it, its default when unset.
-fn comboFor(a: *const App, key: []const u8) []const u8 {
+pub fn comboFor(a: *const App, key: []const u8) []const u8 {
     for (shortcuts.all) |sc| if (std.mem.eql(u8, sc.key, key)) {
         const combo = a.settings.combo(sc);
         return if (combo.len > 0) combo else sc.default;

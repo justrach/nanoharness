@@ -161,3 +161,85 @@ test "the footer follow-up chip defaults to Steer on GPT-6.0+ and toggles betwee
         try testing.expect(h.t.hasText("Queue"));
     }
 }
+
+test "Steer preference preserves the draft when live steering is unavailable (#95)" {
+    var h: Harness = undefined;
+    try h.init("graff");
+    defer h.deinit();
+
+    const sessions = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[ {"chatId":"graff","status":"working","updatedAt":1000} ]
+    , .{});
+    defer sessions.deinit();
+    try h.a.sessions.replace(sessions.value);
+    h.a.offscreen = true;
+    h.a.engine.state = .connected;
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"QueueMessage":{"id":"queued-synthetic"}}
+    , .{});
+    h.a.settings.setText("followUpBehavior", "steer");
+    h.a.caps.queue = true;
+    h.a.caps.actions = false;
+    h.a.composer.set("A follow-up that must not be silently queued");
+
+    h.a.send();
+    h.t.settle(1);
+    h.snap("steer-unavailable");
+
+    try testing.expectEqualStrings("A follow-up that must not be silently queued", h.a.composer.text());
+    try testing.expect(h.a.notice_len > 0);
+    try testing.expect(h.t.hasText("Update Harness on this device and the chat host to use this action"));
+    var queued_requests: usize = 0;
+    for (h.a.engine.sent.items) |frame| {
+        var sent = try std.json.parseFromSlice(std.json.Value, testing.allocator, frame, .{});
+        defer sent.deinit();
+        if (std.mem.eql(u8, sent.value.object.get("method").?.string, "QueueMessage")) queued_requests += 1;
+    }
+    try testing.expectEqual(@as(usize, 0), queued_requests);
+
+    // Explicit Queue remains available even when live Steer is blocked.
+    h.a.composer.set("Queue this follow-up explicitly");
+    h.a.sendFollowUp(.queue);
+    queued_requests = 0;
+    for (h.a.engine.sent.items) |frame| {
+        var sent = try std.json.parseFromSlice(std.json.Value, testing.allocator, frame, .{});
+        defer sent.deinit();
+        if (std.mem.eql(u8, sent.value.object.get("method").?.string, "QueueMessage")) queued_requests += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), queued_requests);
+    try testing.expectEqualStrings("", h.a.composer.text());
+}
+
+test "Steer preference promotes a follow-up in an existing local graff chat (#95)" {
+    var h: Harness = undefined;
+    try h.init("graff");
+    defer h.deinit();
+
+    const sessions = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[ {"chatId":"graff","status":"working","updatedAt":1000} ]
+    , .{});
+    defer sessions.deinit();
+    try h.a.sessions.replace(sessions.value);
+    h.a.device_id = try testing.allocator.dupe(u8, "d");
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"QueueMessage":{"id":"queued-synthetic"},"SteerQueuedMessageNow":{"sent":true}}
+    , .{});
+    h.a.engine.state = .connected;
+    h.a.settings.setText("followUpBehavior", "steer");
+    h.a.caps.queue = true;
+    h.a.caps.actions = true;
+    h.a.composer.set("Steer this active conversation");
+
+    h.a.send();
+    _ = h.a.engine.pump();
+    _ = h.a.engine.pump();
+
+    try testing.expectEqual(@as(usize, 2), h.a.engine.sent.items.len);
+    const queued = try std.json.parseFromSlice(std.json.Value, testing.allocator, h.a.engine.sent.items[0], .{});
+    defer queued.deinit();
+    try testing.expectEqualStrings("QueueMessage", queued.value.object.get("method").?.string);
+    const promoted = try std.json.parseFromSlice(std.json.Value, testing.allocator, h.a.engine.sent.items[1], .{});
+    defer promoted.deinit();
+    try testing.expectEqualStrings("SteerQueuedMessageNow", promoted.value.object.get("method").?.string);
+    try testing.expectEqualStrings("", h.a.composer.text());
+}

@@ -217,10 +217,16 @@ pub const Button = enum { left, right, middle };
 /// Where a scroll gesture is: a trackpad's fingers, then its momentum.
 pub const ScrollPhase = enum { none, began, changed, ended, momentum };
 
+pub const DropFile = struct {
+    name: []const u8,
+    bytes: []const u8,
+};
+
 /// What a drag and drop delivered, valid during the frame it arrives in.
 pub const Drop = struct {
     point: types.Point,
     urls: []const []const u8 = &.{},
+    files: []const DropFile = &.{},
     text: []const u8 = "",
 };
 

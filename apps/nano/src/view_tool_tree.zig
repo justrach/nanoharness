@@ -59,7 +59,7 @@ pub fn group(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts
         const max_title_w = if (c.rects.get(c.node(h.index).id)) |hr| @import("motion_rules.zig").toolGroupTitleCap(hr.w, 28, 8) else @import("motion_rules.zig").toolGroupTitleCap(col_est, 28, 8);
         const title_slot = ui.div(c).row().grow().w(0).clip();
         defer title_slot.end();
-        chrome.title(c, k, tools.label(buf, parts), active, h.hovered(), max_title_w);
+        chrome.title(c, k, tools.label(buf, parts), parts, active, h.hovered(), max_title_w);
     }
     const fold_id = state.key(parent, key, "group-fold");
     const initial_height = 2 + @as(f32, @floatFromInt(parts.len)) * rules.row_height + rules.footer_gap + rules.footer_height;
@@ -72,12 +72,12 @@ pub fn group(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts
     const children = ui.div(c).column().wFull().pt(2);
     defer children.end();
     rememberHeight(c, a, fold_id, children.index);
-    if (is_animating) c.frameIn(1.0 / 30.0);
+    if (is_animating) c.animationFrame();
     for (arrivals, 0..) |arrival, i| {
         const p = &parts[parts.len - 1 - i];
         ui.key(c, c.print("tool-{s}", .{p.id}));
         rowImpl(c, a, k, e, p, parent, arrival);
-        if ((arrival.progress < 1 or arrival.connector < 1) and !c.reduced_motion) c.frameIn(1.0 / 30.0);
+        if ((arrival.progress < 1 or arrival.connector < 1) and !c.reduced_motion) c.animationFrame();
     }
     const footer = ui.div(c).row().wFull().h(rules.footer_height + rules.footer_gap).pt(rules.footer_gap).pl(56).gap(12).itemsCenter().control();
     defer footer.end();
@@ -135,7 +135,15 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
     }
     _ = c.leaf(.{ .width = .{ .px = rules.gutter }, .height = .{ .px = rules.row_height } }, .none, null);
     const content = ui.div(c).column().grow().w(0).py(2).motion(.{ .opacity = rules.connectorParts(arrival.connector, arrival.predecessor).branch, .y = -2 * (1 - arrival.progress) });
+    c.node(content.index).layout_dependent = true;
     defer content.end();
+    const col_est = @import("view_composer.zig").dockedWidth(transcript_view.paneWidth(c, a), transcript_view.column_w);
+    const content_rect = c.rects.get(c.node(content.index).id);
+    if (content_rect == null) c.animationFrame();
+    const content_w = if (content_rect) |cr| cr.w else @max(0, col_est - rules.gutter - 2);
+    const raw = if (p.agent) (if (p.subagent_title.len > 0) p.subagent_title else "subagent") else firstLine(p.text.items);
+    const has_target = p.path.len > 0 or raw.len > 0;
+    const stacked = ordinary and has_target and content_w < 190;
     // Use the actual text slot, after chip/result/disclosure columns have
     // taken their room. A clipped command still needs its expandable body.
     const header_text_id = std.hash.Wyhash.hash(c.node(content.index).id, "header-text");
@@ -143,7 +151,46 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
     const header_fits = c.text.width(p.text.items, kit.style(c, 12, 18, .{ .mono = true })) <= header_room;
     const has_detail = !linked and (is_todo_list or rules.hasVisibleBody(c.alloc(), p, header_fits));
     const open = has_detail and a.view.groupOpen(detail_key, p.kind == .reasoning);
-    {
+    const has_trail = (is_todo_list and p.todo_step.len > 0) or (ordinary and result != .settled and result != .failed) or p.agent;
+    const has_chevron = linked or has_detail;
+    if (stacked) {
+        const full_target = if (p.path.len > 0) p.path else raw;
+        var head = ui.div(c).column().wFull().px(4).py(3).gap(1).rounded(if (running) 8 else 4).control();
+        if (running) head = head.bg(k.ink(0.06));
+        if (has_detail) head = kit.pressFeedback(head.hover(k.ink(0.04)));
+        head = @import("view_tooltip.zig").on(head, k, .{ .text = c.print("{s} · {s}", .{ p.chip, full_target }) });
+        defer head.end();
+        if (has_detail and head.clicked()) a.view.toggleGroup(a.gpa, detail_key, p.kind == .reasoning);
+        const color = if (p.is_error) k.danger else if (has_detail and head.hovered()) k.text else k.muted;
+        {
+            const top = ui.div(c).row().wFull().h(18).gap(4).itemsCenter().clip();
+            defer top.end();
+            ui.text(c, p.chip, kit.style(c, 12.5, 18, .{ .weight = .medium, .color = color }));
+            ui.spacer(c);
+            if (has_trail) chrome.trailCompact(c, k, result, if (result.washed()) arrival.row.wash(c.time, c.reduced_motion) else 1, true);
+            if (has_chevron) {
+                const slot = ui.div(c).row().size(14, 14).center();
+                defer slot.end();
+                chrome.chevron(c, k, open, 11);
+            }
+        }
+        {
+            const detail = ui.div(c).row().wFull().h(20).clip().itemsCenter();
+            c.node(detail.index).id = header_text_id;
+            c.node(detail.index).layout_dependent = true;
+            defer detail.end();
+            const rect = c.rects.get(c.node(detail.index).id);
+            if (rect == null) c.animationFrame();
+            const room = @max(0, if (rect) |b| b.w else content_w - 8);
+            if (p.path.len > 0) {
+                const name = file_icons.basename(p.path);
+                fileBadge(c, a, k, p.path, name, room, parent);
+            } else {
+                kit.ellipsisText(c, raw, kit.style(c, 12, 18, .{ .mono = true, .color = k.text.alpha(0.84) }), room);
+            }
+            if (running and !c.reduced_motion) kit.loaderFrame(c, 0.080);
+        }
+    } else {
         var head = ui.div(c).row().wFull().h(rules.row_height - 4).px(6).gap(8).itemsCenter().rounded(if (running or ag_running) 8 else 4).control();
         if (running or ag_running) head = head.bg(k.ink(0.06));
         if (has_detail) head = kit.pressFeedback(head.hover(k.ink(0.04)));
@@ -162,7 +209,6 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
             // frame even for settled rows, or a wide pane keeps a 160pt title.
             if (rect == null) c.animationFrame();
             const room = if (rect) |b| b.w else 160;
-            const raw = if (p.agent) (if (p.subagent_title.len > 0) p.subagent_title else "subagent") else firstLine(p.text.items);
             if (p.path.len > 0) {
                 const name = file_icons.basename(p.path);
                 fileBadge(c, a, k, p.path, name, room, parent);
@@ -173,14 +219,18 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
         }
         // Reserving a real end column prevents a long command/path from
         // painting under either a result wash or the disclosure chevron.
-        if (is_todo_list) {
-            if (p.todo_step.len > 0) kit.fadeText(c, p.todo_step, kit.style(c, 11.5, 18, .{ .color = k.muted }), 180);
-        } else if (ordinary) {
-            chrome.trail(c, k, result, if (result.washed()) arrival.row.wash(c.time, c.reduced_motion) else 1);
-        } else if (p.agent) agentRowTrail(c, k, p, live_prog, ag_state, vaw);
-        const slot = ui.div(c).row().size(18, 18).center();
-        defer slot.end();
-        if (linked) icons.icon(c, .@"arrow-up-right", 11, k.muted.alpha(0.8), 0) else if (has_detail) chrome.chevron(c, k, open, 12);
+        if (has_trail) {
+            if (is_todo_list) {
+                kit.fadeText(c, p.todo_step, kit.style(c, 11.5, 18, .{ .color = k.muted }), 180);
+            } else if (ordinary) {
+                chrome.trail(c, k, result, if (result.washed()) arrival.row.wash(c.time, c.reduced_motion) else 1);
+            } else if (p.agent) agentRowTrail(c, k, p, live_prog, ag_state, vaw);
+        }
+        if (has_chevron) {
+            const slot = ui.div(c).row().size(18, 18).center();
+            defer slot.end();
+            if (linked) icons.icon(c, .@"arrow-up-right", 11, k.muted.alpha(0.8), 0) else chrome.chevron(c, k, open, 12);
+        }
     }
     if (!has_detail) return;
     const fold_id = state.key(parent, detail_key, "detail-fold");
@@ -194,7 +244,7 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
     const body = ui.div(c).column().wFull().pl(6).gap(4).pb(4);
     defer body.end();
     rememberHeight(c, a, fold_id, body.index);
-    if (is_animating) c.frameIn(1.0 / 30.0);
+    if (is_animating) c.animationFrame();
     if (p.kind == .reasoning) return transcript_view.streamMarkdown(c, a, k, e, p, parent);
     if (is_todo_list) {
         const checklist_w = if (c.rects.get(c.node(content.index).id)) |cr| @max(180, cr.w - 32) else 520;
@@ -241,6 +291,8 @@ fn agentRowTrail(
         ui.text(c, "Failed", kit.style(c, 11.5, 16, .{ .weight = .medium, .color = k.danger }));
     } else if (ag_state == .cancelled) {
         ui.text(c, "Stopped", kit.style(c, 11.5, 16, .{ .color = k.muted }));
+    } else if (ag_state == .ended) {
+        ui.text(c, "Ended", kit.style(c, 11.5, 16, .{ .color = k.muted }));
     } else {
         if (model.len > 0) kit.fadeText(c, model, kit.style(c, 11, 16, .{ .color = k.faint }), 110);
         ui.text(c, "Done", kit.style(c, 11.5, 16, .{ .color = k.muted }));
@@ -316,7 +368,15 @@ pub fn rememberHeight(c: *ui.Context, a: *App, id: u64, index: u32) void {
     if (c.rects.get(c.node(index).id)) |rect| {
         if (@abs(rect.h - f.natural) > 0.5) {
             f.natural = rect.h;
-            if (is_animating) c.changed = true;
+            if (is_animating) {
+                c.changed = true;
+            } else if (f.open) {
+                // Already open and settled: track reflowed height (resize,
+                // narrow stacked rows, inner detail) without triggering a
+                // spurious fold animation on the next pointer event.
+                f.from = rect.h;
+                f.target = rect.h;
+            }
         }
     } else if (is_animating) {
         c.changed = true;
@@ -424,17 +484,23 @@ fn fileBadge(c: *ui.Context, a: *App, k: theme.Colors, path: []const u8, name: [
         const chat = a.findChat(chat_id) orelse break :blk null;
         break :blk rules.workspacePath(c.alloc(), chat.cwd orelse break :blk null, path);
     };
-    var badge = ui.div(c).row().h(22).pl(1).pr(6).gap(6).itemsCenter().rounded(5).bg(k.ink(0.06));
+    const compact = width < 105;
+    var badge = if (compact)
+        ui.div(c).row().h(20).px(3).itemsCenter().rounded(4).bg(k.ink(0.06))
+    else
+        ui.div(c).row().h(22).pl(1).pr(6).gap(6).itemsCenter().rounded(5).bg(k.ink(0.06));
     if (relative != null) badge = badge.control().hover(k.ink(0.10));
     defer badge.end();
     // A display-only badge must not claim the parent disclosure's hit.
     if (relative) |file| if (badge.clicked()) @import("app_files.zig").openFile(a, file);
-    {
+    if (!compact) {
         const well = ui.div(c).row().size(20, 20).center().rounded(4).bg(ui.Color.hex(if (k.dark) 0x000000 else 0xffffff).alpha(0.16));
-        defer well.end();
         file_icons.icon(c, path, false, k.dark, 14);
+        well.end();
+        kit.ellipsisText(c, name, kit.style(c, 12, 18, .{ .mono = true, .color = k.muted }), @max(width - 33, 0));
+    } else {
+        kit.ellipsisText(c, name, kit.style(c, 11.5, 18, .{ .mono = true, .color = k.text.alpha(0.84) }), @max(width - 6, 0));
     }
-    kit.fadeText(c, name, kit.style(c, 12, 18, .{ .mono = true, .color = k.muted }), @max(width - 33, 0));
 }
 
 fn firstLine(text: []const u8) []const u8 {

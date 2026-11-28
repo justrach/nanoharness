@@ -308,17 +308,17 @@ impl Uploads {
         extra_roots: &[PathBuf],
     ) -> Result<AttachmentChunk, EngineError> {
         use std::io::{Read, Seek};
-        let file = self.inspect(path, extra_roots)?;
+        let mut file = self.inspect_open(path, extra_roots)?;
         let size = file.size;
         let start = offset.min(size);
         let next_offset = (start + READ_CHUNK_BYTES).min(size);
-        // Read ONLY this chunk's byte range — never the whole file per chunk.
+        // Read ONLY this chunk's byte range from the pinned descriptor — never
+        // re-open by path after validation.
         let mut buf = vec![0u8; (next_offset - start) as usize];
-        let mut handle = std::fs::File::open(&file.resolved)?;
-        handle.seek(std::io::SeekFrom::Start(start))?;
+        file.handle.seek(std::io::SeekFrom::Start(start))?;
         let mut read = 0usize;
         while read < buf.len() {
-            let n = handle.read(&mut buf[read..])?;
+            let n = file.handle.read(&mut buf[read..])?;
             if n == 0 {
                 break;
             }
@@ -379,7 +379,11 @@ impl Uploads {
         }
     }
 
-    fn inspect(&self, path: &str, extra_roots: &[PathBuf]) -> Result<InspectedFile, EngineError> {
+    fn inspect_open(
+        &self,
+        path: &str,
+        extra_roots: &[PathBuf],
+    ) -> Result<InspectedFile, EngineError> {
         let outside = || EngineError::Other("Attachment is outside the upload cache".into());
         // Queued-attachment refs resolve against this device's uploads dir
         // (present only once the transfer landed) — then jail as usual.
@@ -390,7 +394,9 @@ impl Uploads {
         } else {
             path
         };
-        // Canonicalize BOTH sides so `..` segments and symlinks can't escape.
+        // Canonicalize BOTH sides so `..` segments and symlinks can't escape,
+        // then open relative to the canonical allowed root with O_NOFOLLOW +
+        // O_NONBLOCK so a swap or FIFO cannot escape the jail or block a worker.
         let resolved = std::fs::canonicalize(path).map_err(|_| outside())?;
         let read_roots = self
             .inner
@@ -398,38 +404,46 @@ impl Uploads {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let allowed = std::iter::once(&self.inner.dir)
+        let matched = std::iter::once(&self.inner.dir)
             .chain(read_roots.iter())
             .chain(extra_roots.iter())
             .filter_map(|root| std::fs::canonicalize(root).ok())
-            .any(|root| resolved.starts_with(&root) && resolved != root);
-        if !allowed {
-            return Err(outside());
-        }
-        let meta = std::fs::metadata(&resolved)?;
+            .find_map(|root| {
+                (resolved.starts_with(&root) && resolved != root).then(|| {
+                    resolved
+                        .strip_prefix(&root)
+                        .ok()
+                        .map(|rel| (root, rel.to_path_buf()))
+                })?
+            });
+        let (matched_root, relative) = matched.ok_or_else(outside)?;
+        let mime_type = mime_by_ext(&resolved).ok_or_else(|| {
+            EngineError::Other("Attachment is not a supported image, video or PDF".into())
+        })?;
+        let (handle, pinned_directories) = open_pinned_file(&matched_root, &relative)?;
+        let meta = handle.metadata()?;
         if !meta.is_file() {
             return Err(EngineError::Other("Attachment is not a file".into()));
         }
         if meta.len() > MAX_BYTES {
             return Err(EngineError::Other("Attachment is too large".into()));
         }
-        let mime_type = mime_by_ext(&resolved).ok_or_else(|| {
-            EngineError::Other("Attachment is not a supported image, video or PDF".into())
-        })?;
         Ok(InspectedFile {
+            handle,
+            _pinned_directories: pinned_directories,
             name: resolved
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "attachment".into()),
             mime_type: mime_type.to_string(),
             size: meta.len(),
-            resolved,
         })
     }
 }
 
 struct InspectedFile {
-    resolved: PathBuf,
+    handle: std::fs::File,
+    _pinned_directories: Vec<std::fs::File>,
     name: String,
     mime_type: String,
     size: u64,
@@ -746,9 +760,10 @@ fn same_generated_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
 }
 
 /// Walk canonical descendants relative to a pinned directory descriptor. A
-/// concurrent directory/symlink replacement cannot redirect the source open.
+/// concurrent directory/symlink replacement cannot redirect the source open,
+/// and `O_NONBLOCK` ensures special files (FIFOs) never stall a worker thread.
 #[cfg(unix)]
-fn open_generated_file(
+pub(crate) fn open_pinned_file(
     root: &Path,
     relative: &Path,
 ) -> std::io::Result<(std::fs::File, Vec<std::fs::File>)> {
@@ -761,9 +776,12 @@ fn open_generated_file(
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(root)?;
     let components: Vec<_> = relative.components().collect();
+    if components.is_empty() {
+        return Err(std::io::Error::other("Invalid pinned file path"));
+    }
     for (i, component) in components.iter().enumerate() {
         let std::path::Component::Normal(name) = component else {
-            return Err(std::io::Error::other("Invalid generated image path"));
+            return Err(std::io::Error::other("Invalid pinned file path"));
         };
         let name = std::ffi::CString::new(name.as_bytes())?;
         let flags = libc::O_RDONLY
@@ -787,7 +805,7 @@ fn open_generated_file(
 }
 
 #[cfg(not(any(unix, windows)))]
-fn open_generated_file(
+pub(crate) fn open_pinned_file(
     root: &Path,
     relative: &Path,
 ) -> std::io::Result<(std::fs::File, Vec<std::fs::File>)> {
@@ -799,7 +817,7 @@ fn open_generated_file(
 // on the source until publication. This prevents path replacement and writes
 // even when NTFS timestamps and file lengths would compare equal.
 #[cfg(windows)]
-fn open_generated_file(
+pub(crate) fn open_pinned_file(
     root: &Path,
     relative: &Path,
 ) -> std::io::Result<(std::fs::File, Vec<std::fs::File>)> {
@@ -879,7 +897,7 @@ impl Uploads {
         if relative.as_os_str().is_empty() {
             return Err(invalid());
         }
-        let (mut input, _pinned_directories) = open_generated_file(&root, relative)?;
+        let (mut input, _pinned_directories) = open_pinned_file(&root, relative)?;
         let before = input.metadata()?;
         if !before.is_file() || before.len() > MAX_GENERATED_IMAGE_BYTES {
             return Err(invalid());
@@ -1046,5 +1064,33 @@ mod generated_image_tests {
         // All locks must be released after the operation.
         std::fs::write(&source, b"changed").unwrap();
         std::fs::rename(&parent, root.path().join("moved")).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_chunk_rejects_fifo_without_blocking_and_open_pinned_refuses_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let fifo = root.path().join("pipe.png");
+        let c_fifo = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+
+        let uploads = Uploads::from_root(store.path());
+        let err = uploads
+            .read_chunk(&fifo.to_string_lossy(), 0, &[root.path().to_path_buf()])
+            .expect_err("FIFO must be rejected without blocking");
+        assert!(err.to_string().contains("not a file"), "{err}");
+
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.png"), PNG).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.png"),
+            root.path().join("link.png"),
+        )
+        .unwrap();
+        assert!(
+            open_pinned_file(&root.path().canonicalize().unwrap(), Path::new("link.png")).is_err(),
+            "open_pinned_file must refuse symlinks via O_NOFOLLOW"
+        );
     }
 }

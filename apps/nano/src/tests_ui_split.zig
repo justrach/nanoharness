@@ -327,3 +327,17 @@ test "a question's transcript chip ends inside a narrow pane" {
         if (window_w == 1200) h.snap("question-chip-narrow-pane");
     }
 }
+
+test "resolved question leaves the transcript without removing a live question" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try applyFrame(&h.a.transcript,
+        \\{"reset":[{"id":"ask","role":"assistant","status":"streaming","parts":[
+        \\ {"kind":"input","id":"r1","resolved":true,"questions":[{"id":"q1","question":"Synthetic answered question","options":["Yes","No"]}]},
+        \\ {"kind":"input","id":"r2","resolved":false,"questions":[{"id":"q2","question":"Synthetic live question","options":["Yes","No"]}]}]}]}
+    );
+    h.t.settle(1);
+    try testing.expect(!h.t.containsText("Synthetic answered question"));
+    try testing.expect(h.t.containsText("Synthetic live question"));
+}

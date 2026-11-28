@@ -60,6 +60,41 @@ test "independent workspaces in the same project keep their panel tabs" {
     try testing.expectEqualStrings("chat-b", layout.panes.items[0].?);
 }
 
+test "#1313 session navigation opens or focuses each conversation tab exactly once" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.a.openChatInTab("chat-a");
+    h.a.openChatInTab("chat-b");
+    const workspace = h.a.tabs.active;
+    const panels = h.a.tabs.layout() orelse return error.MissingConversationTabs;
+    const pane = panels.focus;
+    const group = &panels.groups[pane];
+
+    for ([_][]const u8{ "chat-b", "chat-a", "chat-b", "chat-a" }, [_]usize{ 1, 0, 1, 0 }) |chat, slot| {
+        h.a.openChatInTab(chat);
+        try testing.expectEqualStrings(chat, h.a.selected.?);
+        try testing.expectEqual(workspace, h.a.tabs.active);
+        try testing.expectEqual(pane, panels.focus);
+        try testing.expectEqual(@as(usize, 2), group.count());
+        try testing.expectEqual(slot, group.active);
+        try testing.expectEqualStrings(if (slot == 0) "chat-b" else "chat-a", group.items.items[1 - slot].chat.?);
+    }
+
+    // Archived history opens in its own workspace and can be focused again.
+    h.a.openChatInTab("chat-archived");
+    try testing.expectEqualStrings("chat-archived", h.a.selected.?);
+    const history = h.a.tabs.active;
+    try testing.expect(history != workspace);
+    const before = h.a.tabs.items.items.len;
+    h.a.openChatInTab("chat-a");
+    try testing.expectEqual(workspace, h.a.tabs.active);
+    h.a.openChatInTab("chat-archived");
+    try testing.expectEqual(history, h.a.tabs.active);
+    try testing.expectEqual(before, h.a.tabs.items.items.len);
+}
+
 test "project header creates an independent session in that project" {
     var h: Harness = undefined;
     try h.init();

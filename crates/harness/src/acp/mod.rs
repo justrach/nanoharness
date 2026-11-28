@@ -191,7 +191,7 @@ fn default_effort_values(
         ReasoningLevel::Low => vec!["low", "minimal"],
         ReasoningLevel::Medium => vec!["medium"],
         ReasoningLevel::High => vec!["high"],
-        ReasoningLevel::XHigh => vec!["xhigh", "x-high", "high"],
+        ReasoningLevel::XHigh => vec!["xhigh", "extra_high", "x-high", "high"],
         ReasoningLevel::Max => vec!["max", "xhigh", "high"],
         ReasoningLevel::Ultra | ReasoningLevel::Ultracode | ReasoningLevel::Ultrathink => {
             vec!["ultra", "max", "high"]
@@ -620,6 +620,9 @@ fn harness_mcp_servers(harness: HarnessId, origin: Option<&crate::RunOrigin>) ->
     if let Ok(port) = std::env::var("HARNESS_IPC_PORT") {
         env.push(json!({ "name": "HARNESS_IPC_PORT", "value": port }));
     }
+    if let Some(token) = origin.ipc_token.as_deref() {
+        env.push(json!({ "name": "HARNESS_IPC_TOKEN", "value": token }));
+    }
     json!([{
         "name": "harness",
         "command": program.to_string_lossy(),
@@ -803,6 +806,47 @@ struct AntigravityAuthSettings {
     method: Option<String>,
 }
 
+/// agy 1.5.17 reads `antigravity-cli/settings.json`; older ACP servers used
+/// `antigravity-acp/settings.json`. Prefer the CLI path when both exist.
+fn antigravity_settings_files(home: &Path) -> [PathBuf; 2] {
+    [
+        home.join("antigravity-cli").join("settings.json"),
+        home.join("antigravity-acp").join("settings.json"),
+    ]
+}
+
+fn configured_auth_method(home: &Path) -> Result<Option<ConfiguredAuthMethod>, HarnessError> {
+    let mut last_err = None;
+    for path in antigravity_settings_files(home) {
+        match configured_auth_method_in(&path) {
+            Ok(Some(method)) => return Ok(Some(method)),
+            Ok(None) => {}
+            Err(err) => last_err = Some(err),
+        }
+    }
+    match last_err {
+        Some(err) => Err(err),
+        None => Ok(None),
+    }
+}
+
+fn antigravity_auth_files(home: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for dir in ["antigravity-cli", "antigravity-acp"] {
+        let root = home.join(dir);
+        for name in [
+            "settings.json",
+            "oauth_creds.json",
+            "google_accounts.json",
+            "credentials.json",
+            "auth.json",
+        ] {
+            files.push(root.join(name));
+        }
+    }
+    files
+}
+
 fn configured_auth_method_in(path: &Path) -> Result<Option<ConfiguredAuthMethod>, HarnessError> {
     let settings = match std::fs::read_to_string(path) {
         Ok(settings) => settings,
@@ -930,6 +974,46 @@ fn first_sentence(text: &str) -> String {
 /// root-started server running as the invoking user.
 const ANTIGRAVITY_LINUX_ARGS: &[&str] = &["--uid="];
 
+/// Native `agy` / `antigravity` CLIs. Headless Linux systemd units often have
+/// a minimal PATH, so we look in the same well-known bins as the other agents
+/// instead of PATH alone.
+fn antigravity_cli_paths() -> Vec<PathBuf> {
+    antigravity_named_paths(&["agy", "antigravity"])
+}
+
+/// Legacy ACP server names used when the native CLI is absent.
+fn antigravity_server_paths() -> Vec<PathBuf> {
+    antigravity_named_paths(&["agy_acp_server", "agy_acp_server.par", "agy_acp_server.exe"])
+}
+
+/// Native CLI plus legacy server, so `extra_paths` / `cli_extra_paths` find
+/// `~/.local/bin/agy` on a systemd unit whose PATH is `/usr/bin`.
+fn antigravity_all_extra_paths() -> Vec<PathBuf> {
+    let mut paths = antigravity_cli_paths();
+    paths.extend(antigravity_server_paths());
+    paths
+}
+
+fn antigravity_named_paths(names: &[&str]) -> Vec<PathBuf> {
+    antigravity_named_paths_in(crate::executable::home_dir().as_deref(), names)
+}
+
+fn antigravity_named_paths_in(home: Option<&Path>, names: &[&str]) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = home {
+        for name in names {
+            dirs.push(home.join(".local").join("bin").join(name));
+            dirs.push(home.join(".antigravity").join("bin").join(name));
+        }
+    }
+    for name in names {
+        dirs.push(PathBuf::from("/opt/homebrew/bin").join(name));
+        dirs.push(PathBuf::from("/usr/local/bin").join(name));
+        dirs.push(PathBuf::from("/opt/Antigravity/bin").join(name));
+    }
+    dirs
+}
+
 fn antigravity_spec() -> AcpAgentSpec {
     AcpAgentSpec {
         id: HarnessId::Antigravity,
@@ -943,10 +1027,10 @@ fn antigravity_spec() -> AcpAgentSpec {
         },
         npm_package: None,
         archive: antigravity_archive(),
-        extra_paths: Vec::new,
+        extra_paths: antigravity_all_extra_paths,
         cli_executable: "agy_acp_server",
-        cli_extra_paths: Vec::new,
-        install_hint: "Antigravity is not installed: install the agy CLI with ACP support, install the legacy ACP server from Settings, or set ANTIGRAVITY_ACP_EXECUTABLE to either executable",
+        cli_extra_paths: antigravity_all_extra_paths,
+        install_hint: "Antigravity is not installed: install the agy CLI with ACP support (searched PATH, the login shell's PATH, ~/.local/bin, ~/.antigravity/bin, /opt/homebrew/bin, /usr/local/bin, /opt/Antigravity/bin), install the legacy ACP server from Settings, or set ANTIGRAVITY_ACP_EXECUTABLE to either executable",
         models: || {
             use ReasoningLevel::{High, Low, Medium};
             vec![
@@ -978,8 +1062,10 @@ fn antigravity_spec() -> AcpAgentSpec {
         effort_values: default_effort_values,
         ladder_extras: &[],
         prompt_complete_extension: false,
-        prompt_stall: None,
-        stall_hint: "The agent process is likely wedged.",
+        // Generous bound (30s past CCPA's own 300s HTTP timeout) so silent
+        // xhigh thinking never false-positives while wedged turns still settle.
+        prompt_stall: Some(Duration::from_secs(330)),
+        stall_hint: "Antigravity stopped responding. Send your message again to resume.",
         effort_in_model_id: true,
         // the personal oauth method is only the first-run default; sign-in
         // preserves any method already selected in antigravity's settings.
@@ -1002,6 +1088,13 @@ pub enum SignInProgress {
     /// the server is being downloaded before sign-in can start.
     /// the agent is waiting on the user at this sign-in url.
     OpenBrowser(String),
+}
+
+/// File a recording `$BROWSER` shim writes the authorize URL into (`$0.url`).
+pub fn browser_recorded_url_path(browser: &Path) -> PathBuf {
+    let mut path = browser.as_os_str().to_os_string();
+    path.push(".url");
+    PathBuf::from(path)
 }
 
 fn sign_in_url(line: &str) -> Option<String> {
@@ -1276,9 +1369,7 @@ impl AcpHarness {
             .transpose()?;
         let configured_method = gemini_home
             .as_ref()
-            .map(|home| {
-                configured_auth_method_in(&home.join("antigravity-acp").join("settings.json"))
-            })
+            .map(|home| configured_auth_method(home))
             .transpose()?
             .flatten();
         let mut cmd = Command::new(&exe);
@@ -1292,7 +1383,7 @@ impl AcpHarness {
         if let Some(home) = gemini_home {
             cmd.env("GEMINI_HOME", home);
         }
-        if let Some(browser) = browser {
+        if let Some(browser) = &browser {
             cmd.env("BROWSER", browser);
         }
         let scratch = self.adapter_scratch()?;
@@ -1312,6 +1403,24 @@ impl AcpHarness {
         })?;
         let on_progress = std::sync::Arc::new(on_progress);
         let announced = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if let Some(browser) = &browser {
+            let url_path = browser_recorded_url_path(browser);
+            let on_progress = on_progress.clone();
+            let announced = announced.clone();
+            tokio::spawn(async move {
+                let deadline = std::time::Instant::now() + SIGN_IN_TIMEOUT;
+                while std::time::Instant::now() < deadline {
+                    if let Ok(text) = tokio::fs::read_to_string(&url_path).await
+                        && let Some(url) = sign_in_url(text.trim())
+                        && !announced.swap(true, std::sync::atomic::Ordering::AcqRel)
+                    {
+                        on_progress(SignInProgress::OpenBrowser(url));
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            });
+        }
         if let Some(stderr) = child.stderr.take() {
             let on_progress = on_progress.clone();
             let announced = announced.clone();
@@ -1370,6 +1479,40 @@ impl AcpHarness {
                 SIGN_IN_TIMEOUT.as_secs() / 60
             ))),
         }
+    }
+
+    /// `agy acp --login`: paste-code sign-in for hosts that cannot reach the
+    /// ACP server's 127.0.0.1 OAuth callback (headless / remote).
+    pub async fn login_command(&self) -> Result<crate::process::Command, HarnessError> {
+        let (exe, _) = self.resolve_program(false).await?;
+        let args = self.login_args(&exe);
+        if self.spec.id == HarnessId::Antigravity && args.first().map(String::as_str) != Some("acp")
+        {
+            return Err(HarnessError::Protocol(
+                "Antigravity paste-code login needs the native agy CLI (`agy acp --login`)".into(),
+            ));
+        }
+        let mut cmd = crate::process::Command::new(&exe);
+        crate::apply_run_environment(&mut cmd, None);
+        cmd.args(args);
+        crate::compose_child_path(&mut cmd, &exe);
+        self.configure_adapter_environment(&mut cmd, &exe);
+        if let Some(home) = std::env::var_os("HOME") {
+            cmd.current_dir(home);
+        }
+        if self.spec.id == HarnessId::Antigravity {
+            cmd.env("GEMINI_HOME", antigravity_paths::home()?);
+        }
+        Ok(cmd)
+    }
+
+    fn login_args(&self, program: &Path) -> Vec<String> {
+        let mut args = self.launch_args(program);
+        if self.spec.id == HarnessId::Antigravity && args.first().map(String::as_str) == Some("acp")
+        {
+            args.push("--login".into());
+        }
+        args
     }
 
     /// Use a fixed agent binary instead of PATH/known-location resolution.
@@ -1431,7 +1574,9 @@ impl AcpHarness {
     /// when neither the binary nor the machinery to install it (npm) exists.
     fn find_server(&self) -> Option<PathBuf> {
         if self.spec.id == HarnessId::Antigravity
-            && let Some(cli) = find_on_paths("agy", Vec::new())
+            && let Some(cli) = ["agy", "antigravity"]
+                .into_iter()
+                .find_map(|name| find_on_paths(name, antigravity_cli_paths()))
         {
             return Some(cli);
         }
@@ -1452,7 +1597,10 @@ impl AcpHarness {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| {
-                    name.eq_ignore_ascii_case("agy") || name.eq_ignore_ascii_case("agy.exe")
+                    name.eq_ignore_ascii_case("agy")
+                        || name.eq_ignore_ascii_case("agy.exe")
+                        || name.eq_ignore_ascii_case("antigravity")
+                        || name.eq_ignore_ascii_case("antigravity.exe")
                 })
         {
             return vec!["acp".into()];
@@ -1848,7 +1996,7 @@ fn reasoning_from_value(value: &str) -> Option<ReasoningLevel> {
         "low" => Some(ReasoningLevel::Low),
         "medium" => Some(ReasoningLevel::Medium),
         "high" => Some(ReasoningLevel::High),
-        "xhigh" => Some(ReasoningLevel::XHigh),
+        "xhigh" | "extrahigh" => Some(ReasoningLevel::XHigh),
         "max" => Some(ReasoningLevel::Max),
         "ultra" => Some(ReasoningLevel::Ultra),
         "ultracode" => Some(ReasoningLevel::Ultracode),
@@ -1894,6 +2042,36 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
         .iter()
         .filter_map(trait_from_config_option)
         .collect();
+    // agy_acp_server 1.5+ exposes grouped model families in `configOptions[model]`
+    // alongside only the *current* model's `thought_level` options (e.g. flash's
+    // low/medium/high), while `models.availableModels` still lists every concrete
+    // `<family>-<level>` variant. Recover each family's exact ladder from those
+    // variants so models with extra levels (Neon/Hydrogen XHigh) keep them in the
+    // picker instead of inheriting the default model's narrower ladder.
+    let wire_variant_levels: std::collections::HashMap<String, Vec<ReasoningLevel>> =
+        session_response
+            .get("models")
+            .and_then(|m| m.get("availableModels"))
+            .and_then(Value::as_array)
+            .map(|available| {
+                let choices = available.iter().filter_map(|m| {
+                    let id = m.get("modelId").and_then(Value::as_str)?;
+                    let name = m.get("name").and_then(Value::as_str).unwrap_or(id);
+                    Some((id, name))
+                });
+                effort_groups(choices)
+                    .into_iter()
+                    .filter(|group| !group.variants.is_empty())
+                    .map(|group| {
+                        let mut levels: Vec<ReasoningLevel> =
+                            group.variants.into_iter().map(|(level, _)| level).collect();
+                        levels.sort_unstable();
+                        levels.dedup();
+                        (group.id, levels)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
     let exact = |id: &str| catalog.iter().find(|m| norm_id(&m.id) == norm_id(id));
     // Family-alias catalog row: the claude adapter advertises bare aliases
@@ -1929,10 +2107,15 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
                 .and_then(|m| m.description.clone())
                 .or_else(|| description.map(str::to_owned))
                 .or_else(|| known.and_then(|m| m.description.clone())),
-            reasoning_levels: match known.filter(|m| !m.reasoning_levels.is_empty()) {
-                Some(m) => m.reasoning_levels.clone(),
-                None => ladder.clone(),
-            },
+            reasoning_levels: wire_variant_levels
+                .get(id)
+                .cloned()
+                .or_else(|| {
+                    known
+                        .filter(|m| !m.reasoning_levels.is_empty())
+                        .map(|m| m.reasoning_levels.clone())
+                })
+                .unwrap_or_else(|| ladder.clone()),
             options,
             maker: None,
             billing: None,
@@ -2171,14 +2354,7 @@ impl Harness for AcpHarness {
                 .unwrap_or_else(|| PathBuf::from(format!("{}@{}", pin.name, pin.version))),
         };
         let extra = if self.id() == HarnessId::Antigravity {
-            let root = antigravity_paths::home()?.join("antigravity-acp");
-            vec![
-                root.join("settings.json"),
-                root.join("oauth_creds.json"),
-                root.join("google_accounts.json"),
-                root.join("credentials.json"),
-                root.join("auth.json"),
-            ]
+            antigravity_auth_files(&antigravity_paths::home()?)
         } else {
             vec![]
         };
@@ -2444,6 +2620,10 @@ fn initialize_params_with_subagents(harness: HarnessId, graff_subagents: bool) -
             capabilities["subagents"] = json!({});
             capabilities["_meta"] = json!({ "graff/backgroundSubagents": true });
         }
+    } else if harness == HarnessId::Antigravity {
+        // agy (verified 1.5.14) sends ask_question as a form elicitation, and
+        // writes the questions into its reply as text for clients that don't.
+        capabilities["elicitation"] = elicitation::capability();
     }
     json!({
         "protocolVersion": 1,
@@ -2670,15 +2850,32 @@ fn validate_config_model_selection(
 }
 
 fn is_model_config_option(session_response: &Value, config_id: &str) -> bool {
+    config_option_category(session_response, config_id) == Some("model")
+}
+
+fn config_option_category<'a>(session_response: &'a Value, config_id: &str) -> Option<&'a str> {
     session_response
         .get("configOptions")
         .and_then(Value::as_array)
-        .is_some_and(|options| {
-            options.iter().any(|option| {
-                option.get("id").and_then(Value::as_str) == Some(config_id)
-                    && option.get("category").and_then(Value::as_str) == Some("model")
-            })
+        .and_then(|options| {
+            options
+                .iter()
+                .find(|option| option.get("id").and_then(Value::as_str) == Some(config_id))
         })
+        .and_then(|option| option.get("category").and_then(Value::as_str))
+}
+
+/// `agy_acp_server` catches cancellation on `session/cancel` and emits its
+/// exception message as an `agent_message_chunk` right before settling.
+/// Suppress that synthetic chunk when interrupted so it never pollutes the
+/// assistant's transcript.
+fn is_synthetic_cancel_chunk(harness: HarnessId, event: &AgentEvent) -> bool {
+    harness == HarnessId::Antigravity
+        && matches!(
+            event,
+            AgentEvent::TextDelta { text }
+                if text.trim() == "The request was cancelled by the client."
+        )
 }
 
 /// The `session/set_config_option` calls a session response's `configOptions`
@@ -3344,6 +3541,7 @@ fn handle_server_request_live(
         prefill: None,
         multiline: false,
         multi_select: false,
+        requires_human_ui: false,
     };
     let client = client.clone();
     let request_input = std::sync::Arc::clone(request_input);
@@ -3400,6 +3598,7 @@ fn ask_permission_yes_no(
         prefill: None,
         multiline: false,
         multi_select: false,
+        requires_human_ui: true,
     };
     let client = client.clone();
     let request_input = std::sync::Arc::clone(request_input);
@@ -3494,10 +3693,12 @@ fn is_auth_required(error: &HarnessError) -> bool {
     matches!(error, HarnessError::Protocol(message) if message.contains("(code -32000)"))
 }
 
-const EFFORT_SUFFIXES: [(&str, &str, ReasoningLevel); 3] = [
+const EFFORT_SUFFIXES: [(&str, &str, ReasoningLevel); 5] = [
     ("-low", " (Low)", ReasoningLevel::Low),
     ("-medium", " (Medium)", ReasoningLevel::Medium),
     ("-high", " (High)", ReasoningLevel::High),
+    ("-xhigh", " (Extra High)", ReasoningLevel::XHigh),
+    ("-xhigh", " (XHigh)", ReasoningLevel::XHigh),
 ];
 
 /// one picker row: either a single advertised model, or the effort variants
@@ -3585,14 +3786,14 @@ fn group_effort_variants(models: Vec<Model>) -> Vec<Model> {
         .collect()
 }
 
-/// the advertised variant id for a grouped model: the picked level when the
-/// model offers it, else its strongest level. Ids the agent already
-/// advertises (chats saved with a full variant id) pass through untouched.
-fn effort_variant_id(
+/// Resolve a saved model pick + reasoning against the advertised choices:
+/// handles per-effort variant ids, Antigravity 1.5+ grouped `configOptions[model]`,
+/// and legacy variant ids mapped back to their 1.5+ base model + inferred effort.
+fn resolve_effort_model(
     session_response: &Value,
     model: &str,
     reasoning: Option<ReasoningLevel>,
-) -> String {
+) -> (String, Option<ReasoningLevel>) {
     let choices: Vec<(&str, &str)> = session_response
         .get("configOptions")
         .and_then(Value::as_array)
@@ -3613,31 +3814,70 @@ fn effort_variant_id(
         })
         .unwrap_or_default();
     if choices.iter().any(|(id, _)| *id == model) {
-        return model.to_owned();
+        return (model.to_owned(), reasoning);
     }
-    let groups = effort_groups(choices);
-    let Some(group) = groups.iter().find(|group| group.id == model) else {
-        return model.to_owned();
-    };
-    let offered = |level: ReasoningLevel| {
-        group
-            .variants
-            .iter()
-            .find(|(variant_level, _)| *variant_level == level)
-            .map(|(_, id)| (*id).to_owned())
-    };
-    reasoning
-        .and_then(offered)
-        .or_else(|| {
-            [
-                ReasoningLevel::High,
-                ReasoningLevel::Medium,
-                ReasoningLevel::Low,
-            ]
-            .into_iter()
-            .find_map(offered)
-        })
-        .unwrap_or_else(|| model.to_owned())
+    let groups = effort_groups(choices.iter().copied());
+    if let Some(group) = groups.iter().find(|group| group.id == model) {
+        let offered = |level: ReasoningLevel| {
+            group
+                .variants
+                .iter()
+                .find(|(variant_level, _)| *variant_level == level)
+                .map(|(_, id)| (*id).to_owned())
+        };
+        let resolved = reasoning
+            .and_then(offered)
+            .or_else(|| {
+                [
+                    ReasoningLevel::High,
+                    ReasoningLevel::Medium,
+                    ReasoningLevel::Low,
+                ]
+                .into_iter()
+                .find_map(offered)
+            })
+            .unwrap_or_else(|| model.to_owned());
+        return (resolved, reasoning);
+    }
+    if let Some((base, level)) = EFFORT_SUFFIXES.iter().find_map(|(id_suffix, _, level)| {
+        model
+            .strip_suffix(id_suffix)
+            .filter(|base| choices.iter().any(|(id, _)| id == base))
+            .map(|base| (base, *level))
+    }) {
+        return (base.to_owned(), reasoning.or(Some(level)));
+    }
+    if let Some(available) = session_response
+        .get("models")
+        .and_then(|m| m.get("availableModels"))
+        .and_then(Value::as_array)
+    {
+        let wire_choices = available.iter().filter_map(|m| {
+            let id = m.get("modelId").and_then(Value::as_str)?;
+            let name = m.get("name").and_then(Value::as_str).unwrap_or(id);
+            Some((id, name))
+        });
+        for group in effort_groups(wire_choices) {
+            if choices.iter().any(|(id, _)| *id == group.id)
+                && let Some((level, _)) = group.variants.iter().find(|(_, id)| *id == model)
+            {
+                return (group.id, reasoning.or(Some(*level)));
+            }
+        }
+    }
+    (model.to_owned(), reasoning)
+}
+
+/// the advertised variant id for a grouped model: the picked level when the
+/// model offers it, else its strongest level. Ids the agent already
+/// advertises (chats saved with a full variant id) pass through untouched.
+#[cfg(test)]
+fn effort_variant_id(
+    session_response: &Value,
+    model: &str,
+    reasoning: Option<ReasoningLevel>,
+) -> String {
+    resolve_effort_model(session_response, model, reasoning).0
 }
 
 /// Await a setup request while draining incoming messages, so a `session/load`
@@ -3762,16 +4002,78 @@ fn prompt_like_request(
     Box::pin(async move { client.request(method, params).await })
 }
 
-/// Track tools to avoid prompting into an unowned self-continued turn.
-fn track_open_tools(ev: &AgentEvent, open_tools: &mut std::collections::HashSet<String>) {
-    match ev {
-        AgentEvent::ToolCall { id, .. } => {
-            open_tools.insert(id.clone());
+/// Track open tools and background tools that outlive a turn (for example
+/// Antigravity's `run_command` background tasks, which stay `in_progress`
+/// across `end_turn` and settle later via `tool_call_update`).
+#[derive(Default)]
+struct ToolLifecycleTracker {
+    open: std::collections::HashSet<String>,
+    background: std::collections::HashSet<String>,
+}
+
+impl ToolLifecycleTracker {
+    /// Update open/background tool sets for one `session/update` batch and
+    /// return any `BackgroundTask` lifecycle transitions to forward.
+    fn observe_batch(&mut self, events: &[AgentEvent], turn_active: bool) -> Vec<AgentEvent> {
+        let resolved_in_batch: std::collections::HashSet<&str> = events
+            .iter()
+            .filter_map(|ev| match ev {
+                AgentEvent::ToolResult { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let mut bg_events = Vec::new();
+        for ev in events {
+            match ev {
+                AgentEvent::ToolCall { id, .. } if id != harness_proto::LIVE_PLAN_TOOL_ID => {
+                    self.open.insert(id.clone());
+                    if !turn_active
+                        && !resolved_in_batch.contains(id.as_str())
+                        && self.background.insert(id.clone())
+                    {
+                        bg_events.push(AgentEvent::BackgroundTask {
+                            id: id.clone(),
+                            running: true,
+                        });
+                    }
+                }
+                AgentEvent::ToolResult { id, .. } => {
+                    self.open.remove(id);
+                    if self.background.remove(id) {
+                        bg_events.push(AgentEvent::BackgroundTask {
+                            id: id.clone(),
+                            running: false,
+                        });
+                    }
+                }
+                _ => {}
+            }
         }
-        AgentEvent::ToolResult { id, .. } => {
-            open_tools.remove(id);
+        bg_events
+    }
+
+    /// Any tool still open when a turn completes cleanly outlived the turn as
+    /// background work: promote it out of `open` (so follow-up steers are not
+    /// deferred forever) and announce it to the engine's idle reaper / wake
+    /// tracker.
+    fn promote_open_on_turn_end(&mut self) -> Vec<AgentEvent> {
+        let mut ids: Vec<String> = self.open.drain().collect();
+        ids.sort();
+        let mut bg_events = Vec::new();
+        for id in ids {
+            if id != harness_proto::LIVE_PLAN_TOOL_ID && self.background.insert(id.clone()) {
+                bg_events.push(AgentEvent::BackgroundTask { id, running: true });
+            }
         }
-        _ => {}
+        bg_events
+    }
+
+    fn clear_open(&mut self) {
+        self.open.clear();
+    }
+
+    fn has_open(&self) -> bool {
+        !self.open.is_empty()
     }
 }
 
@@ -3877,7 +4179,7 @@ async fn run_session(session: Session) {
                         "{agent_name} isn't signed in. Use Settings → Agents → Sign in."
                     )));
                 }
-                Err(e) if harness == HarnessId::Graff => {
+                Err(e) if matches!(harness, HarnessId::Graff | HarnessId::Antigravity) => {
                     // Never send a retry without its native conversation context
                     // or replace the stored reference with an empty session.
                     return Err(HarnessError::Protocol(format!(
@@ -3995,15 +4297,17 @@ async fn run_session(session: Session) {
         } else {
             false
         };
+        let mut requested_reasoning = request.reasoning;
         let requested_model: Option<String> = if devin_configured {
             None
         } else {
             match request.model.as_deref() {
-                Some(model) if effort_in_model_id => Some(effort_variant_id(
-                    &session_response,
-                    model,
-                    request.reasoning,
-                )),
+                Some(model) if effort_in_model_id => {
+                    let (resolved, inferred) =
+                        resolve_effort_model(&session_response, model, requested_reasoning);
+                    requested_reasoning = inferred;
+                    Some(resolved)
+                }
                 model => model.map(str::to_owned),
             }
         };
@@ -4034,9 +4338,11 @@ async fn run_session(session: Session) {
         // Apply the run's model + effort + model options through the
         // session's advertised config options. Best-effort for effort and
         // traits: a rejected auxiliary set is logged and the agent default
-        // runs.
+        // runs. For Devin and Antigravity 1.5+, apply model first so updated
+        // model-dependent `thought_level` / `speed` options (e.g. xhigh on
+        // Neon/Hydrogen) are visible on the second pass.
         if harness == HarnessId::Graff {
-            graff_models::validate_effort(&session_response, request.reasoning)?;
+            graff_models::validate_effort(&session_response, requested_reasoning)?;
         }
         let efforts = if devin_configured
             && devin_selection
@@ -4045,7 +4351,7 @@ async fn run_session(session: Session) {
         {
             Vec::new()
         } else {
-            effort_values(request.reasoning, request.model.as_deref())
+            effort_values(requested_reasoning, request.model.as_deref())
         };
         let session_commands = scan_available_commands(&session_response);
         let init_commands = if session_commands.is_empty() {
@@ -4053,73 +4359,125 @@ async fn run_session(session: Session) {
         } else {
             session_commands
         };
-        let options_snapshot = session_response;
+        let mut options_snapshot = session_response;
         let mut initial_effort =
             thought_level_value(&options_snapshot["configOptions"]).map(str::to_owned);
-        for (config_id, payload) in config_option_sets_with_modes(
+        let mut sets = config_option_sets_with_modes(
             &options_snapshot,
             requested_model.as_deref(),
             &efforts,
             &request.model_options,
             autonomy_modes(&request),
-        ) {
-            if devin_configured
-                && config_id == "speed"
-                && devin_selection
-                    .as_ref()
-                    .is_some_and(|selection| selection.speed.is_some())
-            {
-                continue;
-            }
-            let mut params = serde_json::Map::new();
-            params.insert("sessionId".into(), session_id.clone().into());
-            params.insert("configId".into(), config_id.clone().into());
-            if let Some(payload) = payload.as_object() {
-                for (k, v) in payload {
-                    params.insert(k.clone(), v.clone());
-                }
-            }
-            let set_result = request_draining(
-                &client,
-                &mut incoming,
-                "session/set_config_option",
-                Value::Object(params),
-            )
-            .await;
-            if harness == HarnessId::Graff
-                && request.reasoning.is_some()
-                && graff_models::is_thought_option(&options_snapshot, &config_id)
-            {
-                let response = set_result.map_err(|error| {
-                    HarnessError::Protocol(format!(
-                        "graff rejected requested thought level: {error}"
-                    ))
-                })?;
-                graff_models::verify_effort_set(
-                    &response,
-                    graff_models::effort_name(request.reasoning.unwrap()),
-                )?;
-                continue;
-            }
-            if let Err(e) = set_result {
-                if matches!(harness, HarnessId::Antigravity | HarnessId::Devin)
-                    && requested_model.is_some()
-                    && is_model_config_option(&options_snapshot, &config_id)
+        );
+        let deferred = matches!(harness, HarnessId::Devin | HarnessId::Antigravity)
+            && sets
+                .iter()
+                .any(|(id, _)| is_model_config_option(&options_snapshot, id));
+        let mut initial_mode_sets = Vec::new();
+        if deferred {
+            initial_mode_sets = sets
+                .iter()
+                .filter(|(id, _)| config_option_category(&options_snapshot, id) == Some("mode"))
+                .cloned()
+                .collect();
+            sets.retain(|(id, _)| is_model_config_option(&options_snapshot, id));
+        }
+        let mut pass = 0;
+        while !sets.is_empty() {
+            pass += 1;
+            for (config_id, payload) in sets {
+                if devin_configured
+                    && config_id == "speed"
+                    && devin_selection
+                        .as_ref()
+                        .is_some_and(|selection| selection.speed.is_some())
                 {
-                    return Err(HarnessError::Protocol(format!(
-                        "agent rejected requested model {}: {e}",
-                        requested_model.as_deref().unwrap_or_default()
-                    )));
+                    continue;
                 }
-                tracing::debug!(
-                    target: "harness_adapters::acp",
-                    "session/set_config_option {config_id}={payload} rejected (agent default runs): {e}"
-                );
-            } else if is_thought_level_config_option(&options_snapshot, &config_id) {
-                initial_effort = payload
-                    .get("value")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
+                let mut params = serde_json::Map::new();
+                params.insert("sessionId".into(), session_id.clone().into());
+                params.insert("configId".into(), config_id.clone().into());
+                if let Some(payload) = payload.as_object() {
+                    for (k, v) in payload {
+                        params.insert(k.clone(), v.clone());
+                    }
+                }
+                let set_result = request_draining(
+                    &client,
+                    &mut incoming,
+                    "session/set_config_option",
+                    Value::Object(params),
+                )
+                .await;
+                if harness == HarnessId::Graff
+                    && requested_reasoning.is_some()
+                    && graff_models::is_thought_option(&options_snapshot, &config_id)
+                {
+                    let response = set_result.map_err(|error| {
+                        HarnessError::Protocol(format!(
+                            "graff rejected requested thought level: {error}"
+                        ))
+                    })?;
+                    graff_models::verify_effort_set(
+                        &response,
+                        graff_models::effort_name(requested_reasoning.unwrap()),
+                    )?;
+                    if let Some(updated) = response.get("configOptions").filter(|v| v.is_array()) {
+                        options_snapshot["configOptions"] = updated.clone();
+                    }
+                    continue;
+                }
+                match set_result {
+                    Ok(response) => {
+                        let was_thought =
+                            is_thought_level_config_option(&options_snapshot, &config_id);
+                        if let Some(updated) = response.get("configOptions").filter(|v| v.is_array())
+                        {
+                            options_snapshot["configOptions"] = updated.clone();
+                        }
+                        if was_thought {
+                            initial_effort = payload
+                                .get("value")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned);
+                        } else if let Some(current_thought) =
+                            thought_level_value(&options_snapshot["configOptions"])
+                        {
+                            initial_effort = Some(current_thought.to_owned());
+                        }
+                    }
+                    Err(e) => {
+                        if matches!(harness, HarnessId::Antigravity | HarnessId::Devin)
+                            && requested_model.is_some()
+                            && is_model_config_option(&options_snapshot, &config_id)
+                        {
+                            return Err(HarnessError::Protocol(format!(
+                                "agent rejected requested model {}: {e}",
+                                requested_model.as_deref().unwrap_or_default()
+                            )));
+                        }
+                        tracing::debug!(
+                            target: "harness_adapters::acp",
+                            "session/set_config_option {config_id}={payload} rejected (agent default runs): {e}"
+                        );
+                    }
+                }
+            }
+            if !deferred || pass > 1 {
+                break;
+            }
+            sets = config_option_sets_with_modes(
+                &options_snapshot,
+                requested_model.as_deref(),
+                &efforts,
+                &request.model_options,
+                autonomy_modes(&request),
+            );
+            sets.retain(|(id, _)| !is_model_config_option(&options_snapshot, id));
+            for mode_set in std::mem::take(&mut initial_mode_sets) {
+                if !sets.iter().any(|(id, _)| id == &mode_set.0) {
+                    sets.push(mode_set);
+                }
             }
         }
         // Graff reports the checkout it runs the session in; the engine
@@ -4341,7 +4699,7 @@ async fn run_session(session: Session) {
     // its response (or an authoritative completion extension) arrives.
     // HARNESS_ACP_QUIET_SETTLE_MS is intentionally no longer honored (#296).
     let mut last_update_at = tokio::time::Instant::now();
-    let mut open_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut open_tools = ToolLifecycleTracker::default();
     // PREVENTION, ahead of all the recovery above: never send a
     // `session/prompt` into a session that is visibly mid SELF-CONTINUED
     // turn — that prompt's reply is what the adapter drops (the verified
@@ -4457,8 +4815,14 @@ async fn run_session(session: Session) {
                         Incoming::Notification { method, params } => {
                             let events =
                                 session_update_events(&method, &params, &session_id, &mut subagents, &mut trackers);
-                            for ev in events {
+                            let bg_events = open_tools.observe_batch(&events, true);
+                            for ev in events.into_iter().chain(bg_events) {
                                 clarification.observe(&ev);
+                                if (interrupted || interrupt.is_cancelled())
+                                    && is_synthetic_cancel_chunk(harness, &ev)
+                                {
+                                    continue;
+                                }
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
                                     break;
@@ -4503,7 +4867,7 @@ async fn run_session(session: Session) {
                     }).await {
                         break 'main;
                     }
-                    open_tools.clear();
+                    open_tools.clear_open();
                     last_update_at = tokio::time::Instant::now();
                     prompt_seq += 1;
                     current_prompt_id = prompt_complete_extension.then(|| format!("harness-p{prompt_seq}"));
@@ -4546,6 +4910,15 @@ async fn run_session(session: Session) {
                 autonomous_turn = false;
                 if interrupted {
                     done_after_interrupt = true;
+                    open_tools.clear_open();
+                } else if res.is_ok() {
+                    for bg in open_tools.promote_open_on_turn_end() {
+                        if !send(&event_tx, bg).await {
+                            break 'main;
+                        }
+                    }
+                } else {
+                    open_tools.clear_open();
                 }
                 if !send(
                     &event_tx,
@@ -4580,7 +4953,7 @@ async fn run_session(session: Session) {
                         break 'main;
                     }
                     done_current = false;
-                    open_tools.clear();
+                    open_tools.clear_open();
                     last_update_at = tokio::time::Instant::now();
                     prompt_seq += 1;
                     current_prompt_id =
@@ -4705,7 +5078,7 @@ async fn run_session(session: Session) {
                                 break 'main;
                             }
                             trackers.effort.finish_turn();
-                            open_tools.clear();
+                            open_tools.clear_open();
                             done_current = true;
                             autonomous_turn = false;
                             if !send(
@@ -4738,9 +5111,14 @@ async fn run_session(session: Session) {
                     // tolerated by design.
                     let events =
                         session_update_events(&method, &params, &session_id, &mut subagents, &mut trackers);
-                    for ev in events {
+                    let bg_events = open_tools.observe_batch(&events, turn.is_some());
+                    for ev in events.into_iter().chain(bg_events) {
                         clarification.observe(&ev);
-                        track_open_tools(&ev, &mut open_tools);
+                        if (interrupted || interrupt.is_cancelled())
+                            && is_synthetic_cancel_chunk(harness, &ev)
+                        {
+                            continue;
+                        }
                         if !send(&event_tx, ev).await {
                             break 'main;
                         }
@@ -4858,8 +5236,14 @@ async fn run_session(session: Session) {
                                 Incoming::Notification { method, params } => {
                                     let events =
                                         session_update_events(&method, &params, &session_id, &mut subagents, &mut trackers);
-                                    for ev in events {
+                                    let bg_events = open_tools.observe_batch(&events, true);
+                                    for ev in events.into_iter().chain(bg_events) {
                                         clarification.observe(&ev);
+                                        if (interrupted || interrupt.is_cancelled())
+                                            && is_synthetic_cancel_chunk(harness, &ev)
+                                        {
+                                            continue;
+                                        }
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
                                             break;
@@ -4946,7 +5330,7 @@ async fn run_session(session: Session) {
                         break 'main;
                     }
                     done_current = false;
-                    open_tools.clear();
+                    open_tools.clear_open();
                     last_update_at = tokio::time::Instant::now();
                     prompt_seq += 1;
                     current_prompt_id =
@@ -4985,7 +5369,8 @@ async fn run_session(session: Session) {
                 busy_defer_deadline = None;
                 if turn.is_none()
                     && !queued_steers.is_empty()
-                    && (!open_tools.is_empty() || last_update_at.elapsed() < BUSY_RECENT)
+                    && ((harness != HarnessId::Antigravity && open_tools.has_open())
+                        || last_update_at.elapsed() < BUSY_RECENT)
                 {
                     busy_defer_deadline = Some(tokio::time::Instant::now() + BUSY_RECHECK);
                 } else if turn.is_none()
@@ -5004,7 +5389,7 @@ async fn run_session(session: Session) {
                         break 'main;
                     }
                     done_current = false;
-                    open_tools.clear();
+                    open_tools.clear_open();
                     last_update_at = tokio::time::Instant::now();
                     prompt_seq += 1;
                     current_prompt_id =
@@ -5082,7 +5467,7 @@ async fn run_session(session: Session) {
                         break 'main;
                     }
                     done_current = false;
-                    open_tools.clear();
+                    open_tools.clear_open();
                     last_update_at = tokio::time::Instant::now();
                     prompt_seq += 1;
                     current_prompt_id =
@@ -5119,7 +5504,7 @@ async fn run_session(session: Session) {
                         queued_steers.push_back(text);
                     } else if turn.is_none()
                         && defer_into_busy
-                        && (!open_tools.is_empty()
+                        && ((harness != HarnessId::Antigravity && open_tools.has_open())
                             || last_update_at.elapsed() < BUSY_RECENT)
                     {
                         // Mid self-continued turn (see BUSY_RECENT above):
@@ -5148,7 +5533,7 @@ async fn run_session(session: Session) {
                             break 'main;
                         }
                         done_current = false;
-                        open_tools.clear();
+                        open_tools.clear_open();
                         last_update_at = tokio::time::Instant::now();
                         prompt_seq += 1;
                     current_prompt_id =
@@ -5696,6 +6081,77 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_search_paths_include_linux_local_bin_without_a_desktop() {
+        let home = Path::new("/home/carsten");
+        let cli = antigravity_named_paths_in(Some(home), &["agy", "antigravity"]);
+        assert!(cli.contains(&home.join(".local").join("bin").join("agy")));
+        assert!(cli.contains(&home.join(".local").join("bin").join("antigravity")));
+        assert!(cli.contains(&home.join(".antigravity").join("bin").join("agy")));
+        assert!(cli.contains(&PathBuf::from("/usr/local/bin/agy")));
+        assert!(cli.contains(&PathBuf::from("/opt/Antigravity/bin/agy")));
+        let server = antigravity_named_paths_in(Some(home), &["agy_acp_server"]);
+        assert!(server.contains(&home.join(".local").join("bin").join("agy_acp_server")));
+        let extra = antigravity_named_paths_in(Some(home), &["agy"]);
+        // extra_paths on the spec must include the native CLI, not only the
+        // legacy ACP server — otherwise enabled_set() stays empty on systemd.
+        assert!(extra.contains(&home.join(".local").join("bin").join("agy")));
+        assert_eq!(
+            AcpHarness::antigravity().login_args(Path::new("/home/u/.local/bin/agy")),
+            vec!["acp".to_string(), "--login".to_string()]
+        );
+        assert!(
+            AcpHarness::antigravity()
+                .login_args(Path::new("/usr/bin/agy_acp_server"))
+                .first()
+                .map(String::as_str)
+                != Some("acp")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_detects_agy_in_local_bin_when_path_is_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join(".local").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let cli = bin.join("agy");
+        std::fs::write(&cli, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "acp::tests::antigravity_local_bin_detection_subprocess",
+                "--nocapture",
+            ])
+            .env("HOME", home.path())
+            .env("PATH", "/usr/bin")
+            .env_remove("ANTIGRAVITY_ACP_EXECUTABLE")
+            .env("HARNESS_NO_LOGIN_SHELL", "1")
+            .env("HARNESS_TEST_AGY_LOCAL_BIN", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_local_bin_detection_subprocess() {
+        if std::env::var_os("HARNESS_TEST_AGY_LOCAL_BIN").is_none() {
+            return;
+        }
+        let harness = AcpHarness::antigravity();
+        assert!(
+            harness.installed(),
+            "agy in ~/.local/bin must count as installed on a headless host"
+        );
+    }
+
+    #[test]
     fn antigravity_home_expands_a_home_relative_gemini_home() {
         let home = tempfile::tempdir().unwrap();
         let expanded =
@@ -5731,12 +6187,42 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(method.canonical, "oauth-business");
+        assert_eq!(
+            configured_auth_method(&gemini_home)
+                .unwrap()
+                .unwrap()
+                .canonical,
+            "oauth-business"
+        );
+    }
+
+    #[test]
+    fn antigravity_cli_settings_win_over_legacy_acp_settings() {
+        let home = tempfile::tempdir().unwrap();
+        let gemini = home.path();
+        std::fs::create_dir_all(gemini.join("antigravity-acp")).unwrap();
+        std::fs::create_dir_all(gemini.join("antigravity-cli")).unwrap();
+        std::fs::write(
+            gemini.join("antigravity-acp").join("settings.json"),
+            r#"{"auth":{"type":"oauth-personal"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            gemini.join("antigravity-cli").join("settings.json"),
+            r#"{"auth":{"type":"oauth-business"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            configured_auth_method(gemini).unwrap().unwrap().canonical,
+            "oauth-business"
+        );
+        let files = antigravity_auth_files(gemini);
+        assert!(files.contains(&gemini.join("antigravity-cli").join("settings.json")));
+        assert!(files.contains(&gemini.join("antigravity-acp").join("oauth_creds.json")));
     }
 
     fn selected_auth_in_home(gemini_home: &Path) -> String {
-        let configured =
-            configured_auth_method_in(&gemini_home.join("antigravity-acp").join("settings.json"))
-                .unwrap();
+        let configured = configured_auth_method(gemini_home).unwrap();
         sign_in_auth_method(
             &all_antigravity_auth_methods(),
             "oauth-personal",
@@ -5889,6 +6375,21 @@ mod tests {
             session_mcp_servers(json!([harness.clone()]), &stdio_only, &servers),
             json!([harness])
         );
+        // The run's scoped IPC token passes only into harness MCP server env.
+        let origin = crate::RunOrigin {
+            chat_id: "c1".into(),
+            build_wait_dir: None,
+            ipc_token: Some("mcp-secret-tok".into()),
+        };
+        let mcp = harness_mcp_servers(HarnessId::Graff, Some(&origin));
+        if let Some(arr) = mcp.as_array()
+            && !arr.is_empty()
+        {
+            let env = arr[0]["env"].as_array().unwrap();
+            assert!(env.iter().any(|item| {
+                item["name"] == "HARNESS_IPC_TOKEN" && item["value"] == "mcp-secret-tok"
+            }));
+        }
         // The run's token never reaches a log line.
         let logged = format!("{:?}", servers[0]);
         assert!(
@@ -5898,7 +6399,7 @@ mod tests {
     }
 
     #[test]
-    fn only_graff_is_offered_form_elicitation() {
+    fn graff_and_antigravity_are_offered_form_elicitation() {
         for subagents in [false, true] {
             let graff = initialize_params_with_subagents(HarnessId::Graff, subagents);
             assert_eq!(
@@ -5906,6 +6407,12 @@ mod tests {
                 json!({ "form": {} })
             );
         }
+        // agy asks ask_question in chat text unless a form is offered.
+        let antigravity = initialize_params(HarnessId::Antigravity);
+        assert_eq!(
+            antigravity["clientCapabilities"]["elicitation"],
+            json!({ "form": {} })
+        );
         for other in [HarnessId::Devin, HarnessId::Grok] {
             let params = initialize_params(other);
             assert!(params["clientCapabilities"].get("elicitation").is_none());
@@ -6593,6 +7100,7 @@ mod tests {
             prefill: None,
             multiline: false,
             multi_select: false,
+            requires_human_ui: true,
         };
         let answer = |label: &str| UserInputAnswer {
             question_id: "q".into(),
@@ -6806,6 +7314,116 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_1_5_models_preserve_per_family_effort_ladders() {
+        let session = json!({
+            "configOptions": [
+                {
+                    "id": "model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "gemini-3.8-flash",
+                    "options": [
+                        { "value": "gemini-3.8-flash", "name": "Gemini 3.8 Flash" },
+                        { "value": "gemini-4-neon", "name": "Gemini 4 Neon" },
+                        { "value": "gemini-4-hydrogen", "name": "Gemini 4 Hydrogen" },
+                        { "value": "gemini-3.1-pro", "name": "Gemini 3.1 Pro" }
+                    ]
+                },
+                {
+                    "id": "thought_level",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "medium",
+                    "options": [
+                        { "value": "low", "name": "Low" },
+                        { "value": "medium", "name": "Medium" },
+                        { "value": "high", "name": "High" }
+                    ]
+                }
+            ],
+            "models": {
+                "availableModels": [
+                    { "modelId": "gemini-3.8-flash-low", "name": "Gemini 3.8 Flash (Low)" },
+                    { "modelId": "gemini-3.8-flash-medium", "name": "Gemini 3.8 Flash (Medium)" },
+                    { "modelId": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash (High)" },
+                    { "modelId": "gemini-4-neon-low", "name": "Gemini 4 Neon (Low)" },
+                    { "modelId": "gemini-4-neon-medium", "name": "Gemini 4 Neon (Medium)" },
+                    { "modelId": "gemini-4-neon-high", "name": "Gemini 4 Neon (High)" },
+                    { "modelId": "gemini-4-neon-xhigh", "name": "Gemini 4 Neon (Extra High)" },
+                    { "modelId": "gemini-4-hydrogen-low", "name": "Gemini 4 Hydrogen (Low)" },
+                    { "modelId": "gemini-4-hydrogen-xhigh", "name": "Gemini 4 Hydrogen (Extra High)" },
+                    { "modelId": "gemini-3.1-pro-low", "name": "Gemini 3.1 Pro (Low)" },
+                    { "modelId": "gemini-pro-agent", "name": "Gemini 3.1 Pro (High)" }
+                ]
+            }
+        });
+        assert_eq!(
+            reasoning_from_value("extra_high"),
+            Some(ReasoningLevel::XHigh)
+        );
+        let models = models_from_session(&session, &[]);
+        let levels = |id: &str| {
+            models
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap_or_else(|| panic!("missing model {id}: {models:?}"))
+                .reasoning_levels
+                .clone()
+        };
+        assert_eq!(
+            levels("gemini-4-neon"),
+            vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+            ]
+        );
+        assert_eq!(
+            levels("gemini-4-hydrogen"),
+            vec![ReasoningLevel::Low, ReasoningLevel::XHigh]
+        );
+        assert_eq!(
+            levels("gemini-3.8-flash"),
+            vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+            ]
+        );
+        assert_eq!(
+            levels("gemini-3.1-pro"),
+            vec![ReasoningLevel::Low, ReasoningLevel::High]
+        );
+        assert_eq!(
+            resolve_effort_model(&session, "gemini-4-neon-xhigh", None),
+            ("gemini-4-neon".into(), Some(ReasoningLevel::XHigh))
+        );
+        assert_eq!(
+            resolve_effort_model(&session, "gemini-pro-agent", None),
+            ("gemini-3.1-pro".into(), Some(ReasoningLevel::High))
+        );
+        assert_eq!(
+            resolve_effort_model(&session, "gemini-4-neon-xhigh", Some(ReasoningLevel::Low)),
+            ("gemini-4-neon".into(), Some(ReasoningLevel::Low))
+        );
+    }
+
+    #[test]
+    fn antigravity_synthetic_cancel_chunk_detection() {
+        let cancel = AgentEvent::TextDelta {
+            text: "The request was cancelled by the client.\n".into(),
+        };
+        let real = AgentEvent::TextDelta {
+            text: "Here is the answer.".into(),
+        };
+        assert!(is_synthetic_cancel_chunk(HarnessId::Antigravity, &cancel));
+        assert!(!is_synthetic_cancel_chunk(HarnessId::Antigravity, &real));
+        assert!(!is_synthetic_cancel_chunk(HarnessId::Grok, &cancel));
+        assert!(!is_synthetic_cancel_chunk(HarnessId::Devin, &cancel));
+    }
+
+    #[test]
     fn skills_list_from_their_frontmatter_first_folder_winning() {
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
@@ -6911,6 +7529,67 @@ fn explicit_program_launches_do_not_get_archive_scratch_roots() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-antigravity-acp.sh"),
     );
     assert!(harness.adapter_scratch().unwrap().is_none());
+}
+
+#[cfg(test)]
+#[test]
+fn tool_lifecycle_tracker_promotes_open_tools_at_turn_end_and_settles_later() {
+    let mut tracker = ToolLifecycleTracker::default();
+    let call = |id: &str| AgentEvent::ToolCall {
+        id: id.into(),
+        call: harness_proto::ToolCall::Exec {
+            command: "gh pr checks --watch".into(),
+        },
+    };
+    let result = |id: &str| AgentEvent::ToolResult {
+        id: id.into(),
+        is_error: false,
+        output: None,
+        diff: None,
+    };
+
+    // Synchronous tool during an active turn produces no BackgroundTask events.
+    assert!(tracker.observe_batch(&[call("sync-1")], true).is_empty());
+    assert!(tracker.observe_batch(&[result("sync-1")], true).is_empty());
+
+    // Tool still open when the turn completes is promoted and cleared from open.
+    assert!(tracker.observe_batch(&[call("bg-1")], true).is_empty());
+    assert!(tracker.has_open());
+    assert_eq!(
+        tracker.promote_open_on_turn_end(),
+        vec![AgentEvent::BackgroundTask {
+            id: "bg-1".into(),
+            running: true,
+        }]
+    );
+    assert!(!tracker.has_open());
+
+    // Post-turn tool_call_update carrying both ToolCall refresh and ToolResult
+    // settles bg-1 without re-emitting running: true.
+    assert_eq!(
+        tracker.observe_batch(&[call("bg-1"), result("bg-1")], false),
+        vec![AgentEvent::BackgroundTask {
+            id: "bg-1".into(),
+            running: false,
+        }]
+    );
+
+    // An async tool opened during an unowned (self-continued) turn announces
+    // running: true immediately and settles when its ToolResult arrives.
+    assert_eq!(
+        tracker.observe_batch(&[call("bg-2")], false),
+        vec![AgentEvent::BackgroundTask {
+            id: "bg-2".into(),
+            running: true,
+        }]
+    );
+    assert_eq!(
+        tracker.observe_batch(&[result("bg-2")], false),
+        vec![AgentEvent::BackgroundTask {
+            id: "bg-2".into(),
+            running: false,
+        }]
+    );
 }
 
 #[cfg(test)]

@@ -50,7 +50,7 @@ test "Settings › Devices: Rename sends the new name, Remove asks once more, th
     a.view.settings_open = true;
     a.settings.section = .devices;
     var t: ui.Tester = undefined;
-    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1200, .height = 780, .dark = true });
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1200, .height = 1100, .dark = true });
     defer t.deinit();
     t.settle(1);
 
@@ -110,7 +110,7 @@ test "Settings › Devices: only a remote computer has Updates, and only the ope
     a.view.settings_open = true;
     a.settings.section = .devices;
     var t: ui.Tester = undefined;
-    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1200, .height = 780, .dark = true });
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1200, .height = 1100, .dark = true });
     defer t.deinit();
     t.settle(1);
 
@@ -149,7 +149,7 @@ test "a press on nothing focusable hands the keys back to the composer; Escape's
     a.dark = true;
     a.engine.state = .connected;
     var t: ui.Tester = undefined;
-    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1200, .height = 780, .dark = true });
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1200, .height = 1100, .dark = true });
     defer t.deinit();
     t.settle(1);
     try testing.expectEqual(a.view.composer_id, t.ctx.focus);

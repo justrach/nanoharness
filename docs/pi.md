@@ -62,7 +62,6 @@ Validation:
 cargo test -p harness-adapters --features native-fixture
 cargo test -p harness-engine --lib --test pi_resume --test acp_lifecycle --test message_queue --test e2e
 cargo test -p harness-adapters --test pi_live -- --ignored --nocapture
-cargo check -p harness-ui --tests
 ```
 
 The ignored Pi test requires an installed CLI and uses isolated settings and a

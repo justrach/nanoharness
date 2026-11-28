@@ -7,7 +7,7 @@
 #
 # Usage: scripts/package-arch.sh
 # Env:   PROFILE=debug to package target/debug/harness, release for
-#        target/release; default dist (what ships).
+#        target/release; default headless (smaller shipped engine).
 #        BIN=<path> override the binary (dry-run/testing).
 #        NFPM_ARCH=amd64|arm64 override the package arch (default: uname -m).
 
@@ -15,7 +15,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
-PROFILE="${PROFILE:-dist}"
+PROFILE="${PROFILE:-headless}"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 OUT_DIR="$ROOT/target/package"
 PKG="$OUT_DIR/harness-$VERSION-linux-$(uname -m).pkg.tar.zst"

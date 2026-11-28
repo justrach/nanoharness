@@ -2,7 +2,7 @@
 
 Agents running inside a Harness chat can publish an existing raster image from
 their workspace inline into the conversation, where it renders with the same
-attachment cache and lightbox as generated images.
+attachment cache and image preview as generated images.
 
 ## Tool contract (MCP)
 

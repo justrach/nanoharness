@@ -10,6 +10,7 @@
 //! that must not diverge per surface live in one place).
 
 use serde::{Deserialize, Serialize};
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -346,6 +347,139 @@ pub fn diff_transcript_shared(
         remove,
         count: next.len(),
     }
+}
+
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn fnv1a_update(mut hash: u64, bytes: &[u8]) -> u64 {
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+/// Deterministic content checksum for one transcript entry, stable across
+/// processes so a client holding cached rows can ask for a `since` delta.
+pub fn entry_sum_of(entry: &SessionMessageEntry) -> u64 {
+    let bytes = serde_json::to_vec(entry).unwrap_or_default();
+    fnv1a_update(FNV_OFFSET, &bytes)
+}
+
+/// Order-sensitive checksum across entry ids, used as the `since` frame's
+/// ordering tripwire.
+pub fn order_sum<'a>(ids: impl IntoIterator<Item = &'a str>) -> u64 {
+    let mut hash = FNV_OFFSET;
+    for id in ids {
+        hash = fnv1a_update(hash, id.as_bytes());
+        hash = fnv1a_update(hash, &[0]);
+    }
+    hash
+}
+
+/// Diff a transcript against a reader's cached `(entry_id, entry_sum)` list.
+/// Returns a `Reset` when most rows differ, else a minimal `Delta`.
+pub fn delta_from_known<E: Borrow<SessionMessageEntry>>(
+    known: &[(String, u64)],
+    next: &[E],
+) -> TranscriptFrame {
+    let next_refs: Vec<&SessionMessageEntry> = next.iter().map(Borrow::borrow).collect();
+    let known_by_id: HashMap<&str, (usize, u64)> = known
+        .iter()
+        .enumerate()
+        .map(|(i, (id, sum))| (id.as_str(), (i, *sum)))
+        .collect();
+    let next_ids: std::collections::HashSet<&str> =
+        next_refs.iter().map(|e| e.id.as_str()).collect();
+
+    let remove: Vec<String> = known
+        .iter()
+        .filter(|(id, _)| !next_ids.contains(id.as_str()))
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    let mut upsert = Vec::new();
+    for (i, entry) in next_refs.iter().copied().enumerate() {
+        let after = i.checked_sub(1).map(|p| next_refs[p].id.as_str());
+        match known_by_id.get(entry.id.as_str()) {
+            Some(&(prev_ix, prev_sum)) => {
+                let prev_after = prev_ix.checked_sub(1).map(|p| known[p].0.as_str());
+                if prev_after == after && entry_sum_of(entry) == prev_sum {
+                    continue;
+                }
+                upsert.push(TranscriptUpsert {
+                    after: after.map(str::to_string),
+                    entry: entry.clone(),
+                });
+            }
+            None => upsert.push(TranscriptUpsert {
+                after: after.map(str::to_string),
+                entry: entry.clone(),
+            }),
+        }
+    }
+
+    if upsert.len() * 2 >= next_refs.len().max(1) && next_refs.len() > 4 {
+        return TranscriptFrame::Reset {
+            reset: next_refs.into_iter().cloned().collect(),
+        };
+    }
+    TranscriptFrame::Delta {
+        upsert,
+        append: Vec::new(),
+        remove,
+        count: next_refs.len(),
+    }
+}
+
+/// For a reader holding `known` rows, compute what can be sent immediately from
+/// the transcript's newest entries (`tail`: whole suffix entries) before reading
+/// older history: entries the reader holds whose checksum changed, plus new
+/// entries after the last held entry in `tail`.
+///
+/// Returns `(changed_or_new_entries, updated_known)` where `updated_known`
+/// reflects the reader's state after applying those entries in place / at the
+/// end — the exact baseline the subsequent [`delta_from_known`] diffs from.
+pub fn tail_since_known<E: Borrow<SessionMessageEntry>>(
+    known: &[(String, u64)],
+    tail: &[E],
+) -> (Vec<SessionMessageEntry>, Vec<(String, u64)>) {
+    let tail: Vec<&SessionMessageEntry> = tail.iter().map(Borrow::borrow).collect();
+    let mut known_at: HashMap<&str, usize> = HashMap::with_capacity(known.len());
+    for (i, (id, _)) in known.iter().enumerate() {
+        known_at.entry(id.as_str()).or_insert(i);
+    }
+    let last_held = tail
+        .iter()
+        .rposition(|e| known_at.contains_key(e.id.as_str()));
+    let mut sent = Vec::new();
+    let mut changed: Vec<(usize, u64)> = Vec::new();
+    let mut added: Vec<(String, u64)> = Vec::new();
+    for (i, entry) in tail.iter().copied().enumerate() {
+        match known_at.get(entry.id.as_str()) {
+            Some(&at) => {
+                let sum = entry_sum_of(entry);
+                if sum != known[at].1 {
+                    changed.push((at, sum));
+                    sent.push(entry.clone());
+                }
+            }
+            None if last_held.is_none_or(|held| i > held)
+                && !added.iter().any(|(id, _)| *id == entry.id) =>
+            {
+                added.push((entry.id.clone(), entry_sum_of(entry)));
+                sent.push(entry.clone());
+            }
+            None => {}
+        }
+    }
+    let mut holds = known.to_vec();
+    for (at, sum) in changed {
+        holds[at].1 = sum;
+    }
+    holds.extend(added);
+    (sent, holds)
 }
 
 /// A frame that could not be applied cleanly — the consumer's copy has
@@ -768,6 +902,69 @@ mod context_update_tests {
         assert_eq!(
             TranscriptBaseline::capture_shared(&next_shared),
             TranscriptBaseline::capture(&next_owned)
+        );
+    }
+
+    #[test]
+    fn tail_since_known_then_delta_from_known_lands_on_full_transcript() {
+        let entry = |id: &str, text: &str| SessionMessageEntry {
+            id: id.into(),
+            role: crate::schema::MessageRole::Assistant,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: text.into(),
+            }],
+            created_at: 0,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let mut held: Vec<SessionMessageEntry> =
+            (0..10).map(|i| entry(&format!("a{i}"), "done")).collect();
+        let known: Vec<(String, u64)> = held
+            .iter()
+            .map(|e| (e.id.clone(), entry_sum_of(e)))
+            .collect();
+
+        // While away: a3 removed, a8 edited, a10 and a11 appended, mid-insert a8b between a8 and a9.
+        let mut full: Vec<SessionMessageEntry> = (0..12)
+            .filter(|&i| i != 3)
+            .map(|i| {
+                let text = if i == 8 {
+                    "edited"
+                } else if i >= 10 {
+                    "new"
+                } else {
+                    "done"
+                };
+                entry(&format!("a{i}"), text)
+            })
+            .collect();
+        let pos_a9 = full.iter().position(|e| e.id == "a9").unwrap();
+        full.insert(pos_a9, entry("a8b", "mid"));
+
+        let tail = &full[full.len() - 5..];
+        let (sent, holds) = tail_since_known(&known, tail);
+        let sent_ids: Vec<&str> = sent.iter().map(|e| e.id.as_str()).collect();
+        // a8 changed, a10 and a11 are after last held a9; a8b is before a9 so deferred to full delta.
+        assert_eq!(sent_ids, vec!["a8", "a10", "a11"]);
+
+        // Reader applies opening tail in place / at the end.
+        for e in sent {
+            if let Some(slot) = held.iter_mut().find(|row| row.id == e.id) {
+                *slot = e;
+            } else {
+                held.push(e);
+            }
+        }
+        // Subsequent full delta measured from `holds` lands exactly on `full`.
+        let frame = delta_from_known(&holds, &full);
+        apply_transcript_frame(&mut held, frame).unwrap();
+        assert_eq!(held, full);
+        assert_eq!(
+            order_sum(held.iter().map(|e| e.id.as_str())),
+            order_sum(full.iter().map(|e| e.id.as_str()))
         );
     }
 }

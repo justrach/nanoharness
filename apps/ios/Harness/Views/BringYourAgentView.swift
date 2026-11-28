@@ -8,17 +8,29 @@ import SwiftUI
 struct BringYourAgentView: View {
     @Environment(AppModel.self) private var model
     @State private var readiness: AgentReadiness?
+    @State private var phoneCloudSandboxId: String?
+    @State private var phoneCloudRate: String?
+    @State private var phoneCloudStatus: String?
+    @State private var phoneCloudFailure: String?
+    @State private var phoneCloudBusy = false
+    @State private var confirmPhoneCloudStart = false
+    @State private var openedChat = false
 
+    let onPhoneCloudReady: (String) -> Void
     private let downloadURL = URL(string: AgentReadiness.downloadURL)!
 
     var body: some View {
         Group {
-            // Until the first answer, and once an agent is ready, Home keeps its plain empty line.
-            if let readiness, readiness.state != .ready {
+            let noComputer = readiness?.state == .noComputer
+            if (readiness.map { $0.state != .ready } ?? true)
+                || phoneCloudSandboxId != nil || phoneCloudBusy || phoneCloudFailure != nil {
                 VStack(alignment: .leading, spacing: 18) {
                     header
-                    if readiness.state == .noComputer { getHarness }
-                    agentCards(readiness)
+                    if noComputer { getHarness }
+                    if noComputer || phoneCloudSandboxId != nil || phoneCloudBusy || phoneCloudFailure != nil {
+                        phoneCloudCard
+                    }
+                    if let readiness, readiness.state != .ready { agentCards(readiness) }
                 }
                 .padding(.vertical, 8)
                 .accessibilityElement(children: .contain)
@@ -30,13 +42,150 @@ struct BringYourAgentView: View {
                     .accessibilityIdentifier("home-empty")
             }
         }
-        // Look again while it is on screen: an agent installed or switched on at the computer shows up here.
+        .alert("Start a cloud sandbox?", isPresented: $confirmPhoneCloudStart) {
+            Button("Start a cloud sandbox") { Task { await startPhoneCloud() } }
+                .accessibilityIdentifier("onboarding-cloud-confirm")
+            Button("Cancel", role: .cancel) {}
+                .accessibilityIdentifier("onboarding-cloud-cancel")
+        } message: {
+            Text("\(phoneCloudRate ?? "Rate unavailable") · billed per second until you turn it off in Settings → Cloud sandboxes.")
+        }
         .task {
+            await refreshPhoneCloudRate()
             while !Task.isCancelled {
                 readiness = await model.agentReadiness()
                 try? await Task.sleep(for: .seconds(readiness?.state == .ready ? 30 : 4))
             }
         }
+    }
+
+    private var phoneCloudCard: some View {
+        SheetCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Or start one in the cloud")
+                    .font(Theme.sans(16, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                Text("Harness will prepare a private cloud machine and open a Graff chat when it is actually ready.")
+                    .font(Theme.sans(13))
+                    .foregroundStyle(Theme.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let phoneCloudStatus {
+                    Label(phoneCloudStatus, systemImage: phoneCloudBusy ? "arrow.triangle.2.circlepath" : "cloud.fill")
+                        .font(Theme.sans(13, weight: .medium))
+                        .foregroundStyle(Theme.textMuted)
+                        .accessibilityIdentifier("onboarding-cloud-status")
+                }
+                if let phoneCloudFailure {
+                    Text(phoneCloudFailure)
+                        .font(Theme.sans(12))
+                        .foregroundStyle(Theme.danger)
+                        .accessibilityIdentifier("onboarding-cloud-error")
+                }
+                HStack {
+                    if phoneCloudBusy { ProgressView().controlSize(.small) }
+                    Button {
+                        if !model.hasPhoneGatewayKey {
+                            model.startSignIn()
+                        } else if let phoneCloudSandboxId {
+                            Task { await waitForPhoneCloud(id: phoneCloudSandboxId) }
+                        } else {
+                            Task {
+                                if await refreshPhoneCloudRate() {
+                                    confirmPhoneCloudStart = true
+                                } else {
+                                    phoneCloudFailure = "CodeGraff has not returned a price yet. No sandbox was started."
+                                }
+                            }
+                        }
+                    } label: {
+                        Text(cloudButtonTitle)
+                            .font(Theme.sans(14, weight: .semibold))
+                            .foregroundStyle(Theme.bg)
+                            .padding(.horizontal, 14)
+                            .frame(minHeight: 44)
+                            .background(Theme.text, in: Capsule())
+                    }
+                    .disabled(phoneCloudBusy || model.signInBusy)
+                    .accessibilityIdentifier("onboarding-cloud-start")
+                    if model.signInBusy { ProgressView().controlSize(.small) }
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var cloudButtonTitle: String {
+        if !model.hasPhoneGatewayKey { return model.signInBusy ? "Signing in…" : "Sign in again to get a cloud key" }
+        if phoneCloudBusy { return "Preparing cloud sandbox…" }
+        if phoneCloudSandboxId != nil { return "Check readiness again" }
+        return "Start a cloud sandbox · \(phoneCloudRate ?? "checking rate…")"
+    }
+
+    @discardableResult
+    private func refreshPhoneCloudRate() async -> Bool {
+        guard model.hasPhoneGatewayKey else { return false }
+        do {
+            let list = try await model.cloudSandboxes(deviceId: model.deviceId)
+            guard let price = list?.sizes.first(where: \.isDefault)?.pricePerHourMicroUsd
+                ?? list?.sizes.first?.pricePerHourMicroUsd
+                ?? list?.sandboxes.first(where: { $0.provider == "fleet" })?.pricePerHourMicroUsd else {
+                return false
+            }
+            phoneCloudRate = CloudSandboxRules.formatRate(price)
+            phoneCloudFailure = nil
+            return true
+        } catch {
+            phoneCloudFailure = error.localizedDescription
+            return false
+        }
+    }
+
+    private func startPhoneCloud() async {
+        guard !phoneCloudBusy, model.hasPhoneGatewayKey else { return }
+        phoneCloudBusy = true
+        phoneCloudFailure = nil
+        phoneCloudStatus = "Creating or reusing your cloud sandbox…"
+        do {
+            let id = try await model.startPhoneCloudSandbox(size: nil)
+            phoneCloudSandboxId = id
+            phoneCloudStatus = "Waiting for Harness and Graff to come online…"
+            phoneCloudBusy = false
+            await waitForPhoneCloud(id: id)
+        } catch {
+            phoneCloudFailure = error.localizedDescription
+            phoneCloudStatus = nil
+        }
+        phoneCloudBusy = false
+    }
+
+    private func waitForPhoneCloud(id: String) async {
+        guard !phoneCloudBusy else { return }
+        phoneCloudBusy = true
+        phoneCloudFailure = nil
+        for _ in 0..<90 {
+            switch await model.phoneCloudChatReadiness(sandboxId: id) {
+            case .ready(let deviceId):
+                phoneCloudStatus = "Graff is ready. Opening your chat…"
+                if !openedChat {
+                    openedChat = true
+                    onPhoneCloudReady(deviceId)
+                }
+                phoneCloudBusy = false
+                return
+            case .waitingForDevice:
+                phoneCloudStatus = "Waiting for the cloud machine to connect…"
+            case .waitingForAgent:
+                phoneCloudStatus = "Waiting for Graff to start on the cloud machine…"
+            case .waitingForModel:
+                phoneCloudStatus = "Checking Graff’s hosted Auto models…"
+            }
+            try? await Task.sleep(for: .seconds(4))
+        }
+        phoneCloudBusy = false
+        phoneCloudStatus = "The sandbox is running, but its chat setup is not ready yet."
+        phoneCloudFailure = "It is safe to check again; this phone will not create another sandbox."
     }
 
     private var header: some View {

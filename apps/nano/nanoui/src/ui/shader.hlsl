@@ -37,8 +37,11 @@ cbuffer Params : register(b0) {
     float4 text_gamma;   // 80  DirectWrite's coverage correction
     float  text_contrast; // 96
     float  gray_contrast; // 100
-    float2 pad2;         // 104
-};                       // 112 bytes
+    float  classic_contrast;      // 104 the same for GDI Classic glyphs
+    float  classic_gray_contrast; // 108
+    float4 classic_gamma;         // 112
+    float4 classic_gray_gamma;    // 128
+};                       // 144 bytes
 
 // One quad, byte-identical to shader.metal's `Instance` and to gpu.zig's.
 struct Instance {
@@ -74,6 +77,7 @@ Texture2D<float4> native_atlas : register(t4);
 // bound by d3d11.zig for that instance's draw alone, as shader.metal's
 // `frame` is. Sampled as pictures are (linear, clamped).
 Texture2D<float4> frame_tex : register(t5);
+StructuredBuffer<float4> grads : register(t6);
 SamplerState sampler_atlas : register(s1);
 SamplerState sampler_images : register(s2);
 
@@ -225,18 +229,21 @@ float2 rounded_box_aa(float2 p, float2 half_size, float r) {
     return float2(d, max(grad / scale, 0.0001) * 0.5);
 }
 
+float2 corner_sdf_aa(float2 p, float2 half_size, float r_in);
+
 // How much of the fragment the instance's clip lets through: discarded
 // outside it, cut in its rounded corners.
 float clip_coverage(Varyings v) {
     if (v.v_screen.x < v.i_clip.x || v.v_screen.y < v.i_clip.y || v.v_screen.x > v.i_clip.z || v.v_screen.y > v.i_clip.w) discard;
     float clip_cover = 1.0;
     float clip_round = v.i_misc.w;
-    if (clip_round > 0.0) {
-        float corners = floor(clip_round / 4096.0);
-        float rad = clip_round - corners * 4096.0;
+    if (clip_round != 0.0) {
+        float corners = floor(abs(clip_round) / 4096.0);
+        float rad = abs(clip_round) - corners * 4096.0;
+        if (clip_round < 0.0) rad = -rad;
         float2 ch = (v.i_clip.zw - v.i_clip.xy) * 0.5;
         float2 q = v.v_screen - v.i_clip.xy - ch;
-        float2 cd = rounded_box_aa(q, ch, min(rad, min(ch.x, ch.y)));
+        float2 cd = corner_sdf_aa(q, ch, min(rad, min(ch.x, ch.y)));
         uint bit = q.y < 0.0 ? (q.x < 0.0 ? 1u : 2u) : (q.x < 0.0 ? 8u : 4u);
         if ((uint(corners) & bit) != 0u) clip_cover = 1.0 - smoothstep(-cd.y, cd.y, cd.x);
         if (clip_cover <= 0.0) discard;
@@ -265,20 +272,10 @@ float blur_along_x(float x, float y, float sigma, float corner, float2 half_size
     return integral.y - integral.x;
 }
 
-float shadow_alpha(float2 p, float2 half_size, float corner, float sigma) {
-    float low = p.y - half_size.y;
-    float high = p.y + half_size.y;
-    float start = clamp(-3.0 * sigma, low, high);
-    float end = clamp(3.0 * sigma, low, high);
-    float step = (end - start) / 4.0;
-    float y = start + step * 0.5;
-    float alpha = 0.0;
-    for (int k = 0; k < 4; k++) {
-        alpha += blur_along_x(p.x, p.y - y, sigma, corner, half_size) * gaussian(y, sigma) * step;
-        y += step;
-    }
-    return alpha;
-}
+// Shadows, dithering, and multi-stop gradient helpers live in corner_sdf.hlsl.
+float shadow_alpha(float2 p, float2 half_size, float corner, float sigma);
+float shadow_dither(float2 pos);
+float4 gradient_stops(float4 uv, float y);
 
 // A line, as shader.metal's line_color, smoothed by its exact gradient.
 float4 line_color(Varyings v) {
@@ -327,10 +324,12 @@ float4 triangle_color(Varyings v) {
     return float4(v.i_color.rgb * alpha, alpha);
 }
 
-float text_coverage(float a, float intensity, float lightness, bool subpixel) {
-    float k = (subpixel ? text_contrast : gray_contrast) * clamp(3.0 - 4.0 * lightness, 0.0, 1.0);
+float text_coverage(float a, float intensity, float lightness, bool subpixel, bool classic) {
+    float4 gamma = classic ? (subpixel ? classic_gamma : classic_gray_gamma) : text_gamma;
+    float contrast = classic ? (subpixel ? classic_contrast : classic_gray_contrast) : (subpixel ? text_contrast : gray_contrast);
+    float k = contrast * clamp(3.0 - 4.0 * lightness, 0.0, 1.0);
     float v = a * (k + 1.0) / (a * k + 1.0);
-    float correction = (text_gamma[0] * intensity + text_gamma[1]) * v + text_gamma[2] * intensity + text_gamma[3];
+    float correction = (gamma[0] * intensity + gamma[1]) * v + gamma[2] * intensity + gamma[3];
     return clamp(v + v * (1.0 - v) * correction, 0.0, 1.0);
 }
 
@@ -350,15 +349,18 @@ Pixel glyph_pixel(Varyings v, float clip_cover) {
     bool one_to_one = all(abs(screen_pixels - atlas_texels) < float2(0.001, 0.001));
     if (rgb_text != 0.0 && one_to_one) {
         // Native glyphs are nearest-sampled, as raster.zig does. The RGB
-        // texel's alpha is a tag: 1 ClearType, 128/255 native grayscale.
+        // texel's alpha is a tag: 255/254 Natural/Classic ClearType,
+        // 128/127 Natural/Classic native grayscale.
         int2 at = clamp(int2(v.v_uv * float2(side)), int2(0, 0), int2(side) - 1);
         float4 native = native_atlas.Load(int3(at, 0));
+        uint tag = (uint)round(native.a * 255.0);
+        bool classic = tag == 254 || tag == 127;
         float lightness = 0.30 * v.i_color.r + 0.59 * v.i_color.g + 0.11 * v.i_color.b;
         if (native.a > 0.75 && rgb_text > 0.5) {
             float3 coverage = float3(
-                text_coverage(native.r, v.i_color.r, lightness, true),
-                text_coverage(native.g, v.i_color.g, lightness, true),
-                text_coverage(native.b, v.i_color.b, lightness, true)) * opacity;
+                text_coverage(native.r, v.i_color.r, lightness, true, classic),
+                text_coverage(native.g, v.i_color.g, lightness, true, classic),
+                text_coverage(native.b, v.i_color.b, lightness, true, classic)) * opacity;
             Pixel o;
             o.color = float4(v.i_color.rgb * coverage, dot(coverage, float3(1.0, 1.0, 1.0)) / 3.0);
             o.coverage = float4(coverage, o.color.a);
@@ -366,7 +368,7 @@ Pixel glyph_pixel(Varyings v, float clip_cover) {
         }
         if (native.a > 0.0) {
             float intensity = 0.25 * v.i_color.r + 0.5 * v.i_color.g + 0.25 * v.i_color.b;
-            float a = text_coverage(gray, intensity, lightness, false) * opacity;
+            float a = text_coverage(gray, intensity, lightness, false, classic) * opacity;
             return scalar_pixel(float4(v.i_color.rgb * a, a));
         }
     }
@@ -386,8 +388,9 @@ float4 shade(Varyings v) {
     if (kind == 6.0 || kind == 7.0) return shape;
     float2 half_size = v.i_rect.zw * 0.5;
     float2 p = v.v_local - half_size;
-    float r = min(v.i_misc.x, min(half_size.x, half_size.y));
-    float2 da = rounded_box_aa(p, half_size, r);
+    float r_abs = min(abs(v.i_misc.x), min(half_size.x, half_size.y));
+    float r = v.i_misc.x < 0.0 ? -r_abs : r_abs;
+    float2 da = corner_sdf_aa(p, half_size, r);
     float d = da.x;
     float aa = da.y;
     float coverage = 1.0 - smoothstep(-aa, aa, d);
@@ -410,12 +413,18 @@ float4 shade(Varyings v) {
         float sigma = max(v.i_misc.y, 0.25);
         float a = shadow_alpha(p, half_size, r, sigma) * v.i_color.a;
         // Knocked out inside the box itself (see shader.metal).
-        if (kind == 5.0) a *= clamp(rounded_box_aa(p - v.i_uv.xy, max(half_size - v.i_uv.z, float2(0.0, 0.0)), max(abs(r) - v.i_uv.z, 0.0)).x + 0.5, 0.0, 1.0);
+        if (kind == 5.0) {
+            float rb = max(r_abs - v.i_uv.z, 0.0);
+            if (r < 0.0) rb = -rb;
+            a *= clamp(corner_sdf_aa(p - v.i_uv.xy, max(half_size - v.i_uv.z, float2(0.0, 0.0)), rb).x + 0.5, 0.0, 1.0);
+        }
+        if (a > 0.0) a = clamp(a + shadow_dither(v.pos.xy), 0.0, 1.0);
         return float4(v.i_color.rgb * a, a);
     }
     // Premultiplied: the border is laid over the fill (see shader.metal).
     float4 fill = v.i_color;
-    if (v.i_uv.y > 0.5 && v.i_uv.y < 1.5) {
+    if (v.i_uv.y > 1.5) fill = gradient_stops(v.i_uv, v.v_local.y);
+    else if (v.i_uv.y > 0.5) {
         float gr = floor(v.i_uv.z / 256.0), gb = floor(v.i_uv.w / 256.0);
         float4 bottom = float4(gr, v.i_uv.z - gr * 256.0, gb, v.i_uv.w - gb * 256.0) / 255.0;
         fill = lerp(fill, bottom, saturate(v.v_local.y / max(v.i_rect.w, 1e-4)));
@@ -425,7 +434,7 @@ float4 shade(Varyings v) {
     if (bw > 0.0 && v.i_border_color.a > 0.0) {
         float inner = smoothstep(-bw - aa, -bw + aa, d);
         float4 b = float4(v.i_border_color.rgb * v.i_border_color.a, v.i_border_color.a);
-        if (v.i_uv.x > 0.5) b *= dash_cover(p, half_size, r, bw);
+        if (v.i_uv.x > 0.5) b *= dash_cover(p, half_size, r_abs, bw);
         c = lerp(c, b + c * (1.0 - b.a), inner);
     }
     return c * coverage;
@@ -497,9 +506,10 @@ float3 glass_tone(float3 c, float4 tone) {
 
 Pixel glass_ps(Varyings v) {
     float clip_cover = clip_coverage(v);
-    // The pane's edge, antialiased as a quad's.
+    // The pane's edge, antialiased as a quad's (continuous squircle by default).
     float2 hp = v.i_rect.zw * 0.5;
-    float2 da = rounded_box_aa(v.v_local - hp, hp, min(v.i_misc.x, min(hp.x, hp.y)));
+    float gr_abs = min(abs(v.i_misc.x), min(hp.x, hp.y));
+    float2 da = corner_sdf_aa(v.v_local - hp, hp, v.i_misc.x < 0.0 ? -gr_abs : gr_abs);
     float coverage = (1.0 - smoothstep(-da.y, da.y, da.x)) * clip_cover * v.i_uv.z;
 
     // The optics, in the frame's pixels.
@@ -507,7 +517,7 @@ Pixel glass_ps(Varyings v) {
     float2 p = v.v_world * s;
     float2 h = hp * s;
     float2 q = p - v.i_rect.xy * s - h;
-    float rr = min(v.i_misc.x * s, min(h.x, h.y));
+    float rr = min(abs(v.i_misc.x) * s, min(h.x, h.y));
     float t = max(-rounded_box(q, h, rr), 0.0);
     float bezel = v.i_uv.x * s;
     float rim_width = v.i_uv.w * s;

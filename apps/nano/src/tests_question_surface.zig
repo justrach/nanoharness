@@ -157,6 +157,50 @@ test "question focus sidebar search owns digits and pending chat stays highlight
     try h.snap("inactive-owner-highlight");
 }
 
+test "question focus Needs you reopens the answer in its split pane" {
+    for ([_]bool{ true, false }) |other_workspace| {
+        var h: Harness = undefined;
+        try h.init(1200, 700, 6);
+        defer h.deinit();
+        const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\[ {"id":"synthetic-owner","title":"Question owner","archived":false} ]
+        , .{});
+        defer chats.deinit();
+        try h.a.chats.replace(chats.value);
+        const sessions = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\[ {"chatId":"synthetic-owner","status":"awaitingInput"} ]
+        , .{});
+        defer sessions.deinit();
+        try h.a.sessions.replace(sessions.value);
+        h.a.sessions.items[0].updated_ms = h.a.nowMs();
+        h.a.settings.setText("sidebarOrganization", "byStatus");
+        h.a.view.sidebar_open = true;
+        h.a.focusPane(6);
+        h.a.view.strip.focused = .{ .chat = 6 };
+        if (other_workspace) h.a.newWorkspaceSession();
+        h.draw();
+        try testing.expectEqual(@as(usize, 0), textCount(&h.t, "Cancel question"));
+        const section = textRect(&h.t, "Needs you") orelse return error.MissingNeedsYou;
+        const row = for (h.t.ctx.nodes.items) |n| {
+            if (n.rect.x >= h.a.view.sidebar_width or n.rect.y <= section.y) continue;
+            switch (n.content) {
+                .text => |v| if (std.mem.eql(u8, v.str, "Question owner")) break n.rect,
+                else => {},
+            }
+        } else return error.MissingOwnerRow;
+        h.t.click(row.x + row.w / 2, row.y + row.h / 2);
+        h.draw();
+
+        try testing.expectEqual(@as(usize, 0), h.a.tabs.active);
+        try testing.expectEqualStrings("synthetic-owner", h.a.selected.?);
+        try testing.expectEqual(@as(usize, 7), h.a.tabs.layout().?.panes.items.len);
+        try testing.expectEqual(@as(usize, 0), h.a.tabs.layout().?.focus);
+        if (other_workspace) try h.snap("needs-you-after-click");
+        try testing.expect(question.ownsActivePane(&h.a));
+        try testing.expectEqual(@as(usize, 1), textCount(&h.t, "Cancel question"));
+    }
+}
+
 test "question surface narrow split keeps options readable and controls window bounded" {
     var h: Harness = undefined;
     try h.init(1000, 700, 7);
@@ -380,4 +424,40 @@ test "question surface long content scrolls while controls stay pinned and next 
     try testing.expectEqual(@as(usize, 1), h.a.wizard.?.page);
     try bounded(&h.t, "Submit", 1000, 360);
     try h.snap("long-content-next-page");
+}
+
+test "question surface Escape cancels auto-advance, clears page-0 picks, and dismisses untouched questions" {
+    const single_payload =
+        \\{"reset":[{"id":"ask","role":"assistant","parts":[{"kind":"input","requestId":"synthetic-single","resolved":false,"questions":[
+        \\{"id":"q0","header":"Mode","question":"Pick one option.","options":["Alpha","Beta"]}]}]}]}
+    ;
+    var h: Harness = undefined;
+    try h.initWithInput(1100, 700, 0, single_payload);
+    defer h.deinit();
+
+    // Picking a single-choice option schedules auto-advance; Escape cancels the timer & pick cleanly.
+    _ = h.t.shortcut(.{ .key = '1' });
+    h.draw();
+    try testing.expect(h.a.wizard.?.advance_at != null);
+    try testing.expect(h.a.wizard.?.picked(0));
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.escape });
+    h.draw();
+    try testing.expect(h.a.wizard != null);
+    try testing.expect(h.a.wizard.?.advance_at == null);
+    try testing.expect(!h.a.wizard.?.picked(0));
+
+    // Clicking option manually without active timer -> Escape clears page-0 pick; next Escape dismisses.
+    try h.t.clickText("Beta");
+    h.draw();
+    h.a.wizard.?.advance_at = null;
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.escape });
+    h.draw();
+    try testing.expect(h.a.wizard != null);
+    try testing.expect(!h.a.wizard.?.picked(1));
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.escape });
+    h.draw();
+    try testing.expect(h.a.wizard == null);
+    var sent = try command(&h, "dismissInput");
+    defer sent.deinit();
+    try testing.expectEqualStrings("synthetic-owner", sent.value.object.get("params").?.object.get("chatId").?.string);
 }

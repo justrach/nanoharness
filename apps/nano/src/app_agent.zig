@@ -35,9 +35,10 @@ pub fn target(a: *const App) Target {
     }
     // The model's ladder, else its agent's (`trait_ladder`), at its default.
     // Drop any sticky reasoning level the target model does not offer.
-    if (modelOfFor(a, t.harness, t.model) != null) {
+    if (modelOfFor(a, t.harness, t.model)) |model| {
         const levels = ladder(a, t.harness, t.model);
         t.reasoning = supportedReasoning(levels, t.reasoning) orelse rules.defaultReasoning(levels);
+        t.service_tier = model.compatibleServiceTier(t.service_tier);
     }
     return t;
 }
@@ -210,10 +211,13 @@ fn keptServiceTier(a: *const App, ch: workspace.Chat, next_model: ?[]const u8) ?
     if (sameModel(ch.model, next_model)) return ch.service_tier;
     const id = next_model orelse return null;
     const m = modelOf(a, id) orelse return null;
-    if (!m.service_tier_supported) return null;
-    const tier = ch.service_tier orelse return null;
-    if (std.mem.eql(u8, tier, "ultrafast") and !m.service_tier_ultrafast) return "fast";
-    return tier;
+    return m.compatibleServiceTier(ch.service_tier);
+}
+
+/// A saved choice survives until the target model's catalog is known.
+pub fn sendServiceTier(a: *const App, harness: []const u8, model: ?[]const u8, tier: ?[]const u8) ?[]const u8 {
+    const known = modelOfFor(a, harness, model) orelse return tier;
+    return known.compatibleServiceTier(tier);
 }
 
 fn setNew(a: *App, field: *?[]u8, value: ?[]const u8) void {

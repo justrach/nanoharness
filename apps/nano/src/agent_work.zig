@@ -26,6 +26,10 @@ pub const AgentState = enum {
     completed,
     failed,
     cancelled,
+    /// Stopped without a recorded outcome: its parent tool resolved, or its
+    /// turn ended, while its own status still said running (or was one this
+    /// build doesn't know). Never shown as success.
+    ended,
 
     pub fn isRunning(s: AgentState) bool {
         return s == .running;
@@ -107,8 +111,14 @@ pub const AgentWork = struct {
 
 /// Exact mirror of `Nano.SubagentTasks.resolveAgentState`:
 /// 1. Live `WatchToolProgress` state (`running`/`completed`/`failed`/`cancelled`) is authoritative.
-/// 2. Persisted `subagentStatus` is used next, never leaving a settled turn ghost-running.
-/// 3. Falls back to tool `resolved` / `is_error` gated by `turn_live`.
+/// 2. Persisted `subagentStatus` is used next, never leaving a settled turn
+///    ghost-running. Only the child's own status says it completed: one still
+///    `running` (or unknown) after its turn ends is `.ended`, and a failed
+///    parent tool still reads `.failed`. A spawn call can resolve while its
+///    child keeps working (a background child), so a live turn keeps a
+///    `running` child running.
+/// 3. With no lifecycle recorded (ADR 0205's progress rows), the parent
+///    tool's result is the outcome, gated by `turn_live`.
 pub fn resolveAgentState(
     live_state: ?[]const u8,
     doc_status: ?agent_link.Status,
@@ -127,12 +137,13 @@ pub fn resolveAgentState(
             .done => .completed,
             .failed => .failed,
             .cancelled, .disconnected => .cancelled,
-            .running => if (!resolved and turn_live) .running else if (is_error) .failed else .completed,
+            .running => if (is_error) .failed else if (turn_live) .running else .ended,
+            .unknown => if (is_error) .failed else if (!resolved and turn_live) .running else .ended,
         };
     }
     if (is_error) return .failed;
-    if (!resolved and turn_live) return .running;
-    return .completed;
+    if (resolved) return .completed;
+    return if (turn_live) .running else .ended;
 }
 
 /// Exact mirror of `Nano.SubagentTasks.placeCard`: places the popover above
@@ -292,8 +303,12 @@ pub fn derive(
                     "Ready to review"
                 else
                     (lastProgressLine(p.output) orelse "Done"),
-                .failed => lastProgressLine(p.output) orelse "Failed",
+                // A spawn call that succeeded (a detached child's) says
+                // nothing about the failure; the chip's tail holds its reason.
+                .failed => (if (p.is_error) null else lastProgressLine(p.subagent_tail)) orelse
+                    lastProgressLine(p.output) orelse "Failed",
                 .cancelled => "Stopped",
+                .ended => "Ended without reporting an outcome",
             };
 
             const row: AgentRow = .{
@@ -470,14 +485,100 @@ fn familyChip(p: *const tr.Part) ?ToolChip {
 
 test "809 resolveAgentState matches Lean SubagentTasks invariants" {
     const testing = std.testing;
-    // Settled turn never leaves a stale running doc status ghost-running.
-    try testing.expectEqual(AgentState.completed, resolveAgentState(null, .running, false, false, false));
+    // Settled turn never leaves a stale running doc status ghost-running,
+    // and never calls it completed either: it ended without an outcome.
+    try testing.expectEqual(AgentState.ended, resolveAgentState(null, .running, false, false, false));
     try testing.expectEqual(AgentState.failed, resolveAgentState(null, .running, false, true, false));
     try testing.expectEqual(AgentState.cancelled, resolveAgentState("disconnected", .running, false, false, true));
     // Live WatchToolProgress overrides stale doc state even across turns.
     try testing.expectEqual(AgentState.running, resolveAgentState("running", null, false, false, false));
     try testing.expectEqual(AgentState.completed, resolveAgentState("completed", .running, false, false, true));
     try testing.expectEqual(AgentState.cancelled, resolveAgentState("cancelled", .running, false, false, true));
+}
+
+test "a child is completed only when its own status says so" {
+    const testing = std.testing;
+    const S = agent_link.Status;
+    const Row = struct { doc: ?S, resolved: bool, is_error: bool, turn_live: bool, want: AgentState };
+    const rows = [_]Row{
+        // The child's own terminal status decides, whatever the tool did.
+        .{ .doc = .done, .resolved = true, .is_error = false, .turn_live = false, .want = .completed },
+        .{ .doc = .done, .resolved = false, .is_error = false, .turn_live = true, .want = .completed },
+        .{ .doc = .failed, .resolved = true, .is_error = false, .turn_live = false, .want = .failed },
+        .{ .doc = .failed, .resolved = false, .is_error = false, .turn_live = true, .want = .failed },
+        .{ .doc = .cancelled, .resolved = true, .is_error = false, .turn_live = false, .want = .cancelled },
+        .{ .doc = .disconnected, .resolved = true, .is_error = false, .turn_live = false, .want = .cancelled },
+        // Still `running`: live while its turn is, never "completed" after.
+        .{ .doc = .running, .resolved = false, .is_error = false, .turn_live = true, .want = .running },
+        .{ .doc = .running, .resolved = true, .is_error = false, .turn_live = true, .want = .running },
+        .{ .doc = .running, .resolved = true, .is_error = false, .turn_live = false, .want = .ended },
+        .{ .doc = .running, .resolved = false, .is_error = false, .turn_live = false, .want = .ended },
+        .{ .doc = .running, .resolved = true, .is_error = true, .turn_live = false, .want = .failed },
+        .{ .doc = .running, .resolved = true, .is_error = true, .turn_live = true, .want = .failed },
+        // A status this build doesn't know is never success.
+        .{ .doc = .unknown, .resolved = false, .is_error = false, .turn_live = true, .want = .running },
+        .{ .doc = .unknown, .resolved = true, .is_error = false, .turn_live = true, .want = .ended },
+        .{ .doc = .unknown, .resolved = true, .is_error = false, .turn_live = false, .want = .ended },
+        .{ .doc = .unknown, .resolved = false, .is_error = false, .turn_live = false, .want = .ended },
+        .{ .doc = .unknown, .resolved = true, .is_error = true, .turn_live = false, .want = .failed },
+        // No lifecycle recorded (graff's default progress rows): the parent
+        // tool's own result is the child's outcome.
+        .{ .doc = null, .resolved = true, .is_error = false, .turn_live = false, .want = .completed },
+        .{ .doc = null, .resolved = true, .is_error = true, .turn_live = false, .want = .failed },
+        .{ .doc = null, .resolved = false, .is_error = false, .turn_live = true, .want = .running },
+        // A call that never resolved before its turn ended has no outcome.
+        .{ .doc = null, .resolved = false, .is_error = false, .turn_live = false, .want = .ended },
+    };
+    for (rows) |r| {
+        const got = resolveAgentState(null, r.doc, r.resolved, r.is_error, r.turn_live);
+        if (got != r.want) {
+            std.debug.print("doc={s} resolved={} is_error={} turn_live={}: got {s}, want {s}\n", .{ if (r.doc) |d| @tagName(d) else "none", r.resolved, r.is_error, r.turn_live, @tagName(got), @tagName(r.want) });
+            return error.TestUnexpectedResult;
+        }
+    }
+    // An unknown status string, parsed as the doc delivers it, stays unknown.
+    var t: tr.Transcript = .{ .gpa = testing.allocator };
+    defer t.deinit();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"a1","role":"assistant","status":"complete","parts":[
+        \\  {"id":"ag","kind":"tool","resolved":true,"subagentRef":"doc-sub","subagentStatus":"paused","call":{"kind":"unknown","name":"Agent: Synthetic"}},
+        \\  {"id":"ok","kind":"tool","resolved":true,"subagentRef":"doc-ok","subagentStatus":"completed","call":{"kind":"unknown","name":"Agent: Synthetic"}},
+        \\  {"id":"none","kind":"tool","resolved":true,"call":{"kind":"unknown","name":"Agent: Synthetic"}}]}]}
+    , .{});
+    defer parsed.deinit();
+    try t.apply(parsed.value);
+    const parts = t.entries.items[0].parts.items;
+    try testing.expectEqual(@as(?S, .unknown), parts[0].subagent_status);
+    try testing.expectEqual(@as(?S, .done), parts[1].subagent_status);
+    try testing.expectEqual(@as(?S, null), parts[2].subagent_status);
+    try testing.expectEqual(AgentState.ended, resolveAgentState(null, parts[0].subagent_status, true, false, false));
+}
+
+test "a detached child's failure reason, not its spawn result, details its row" {
+    const testing = std.testing;
+    var t: tr.Transcript = .{ .gpa = testing.allocator };
+    defer t.deinit();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[
+        \\  {"id":"u1","role":"user","parts":[{"id":"up","kind":"text","text":"Inspect the example in the background"}]},
+        \\  {"id":"a1","role":"assistant","status":"complete","parts":[
+        \\    {"id":"bg","kind":"tool","resolved":true,"output":"Started background agent sa-001.","subagentStatus":"failed",
+        \\     "subagentTail":"synthetic bad argument [invalid-arguments failure, 1 attempt]","call":{"kind":"unknown","name":"Agent: Inspect example"}},
+        \\    {"id":"fg","kind":"tool","resolved":true,"isError":true,"output":"subagent sa-002 failed before producing a report: synthetic 503","subagentStatus":"failed",
+        \\     "subagentTail":"synthetic 503","call":{"kind":"unknown","name":"Agent: Check fixtures"}}]}]}
+    , .{});
+    defer parsed.deinit();
+    try t.apply(parsed.value);
+    var prog: progress_mod.State = .init(testing.allocator);
+    defer prog.deinit();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const w = derive(arena.allocator(), t.entries.items, &prog, false);
+    try testing.expectEqual(@as(usize, 2), w.agents.len);
+    try testing.expectEqual(AgentState.failed, w.agents[0].state);
+    try testing.expectEqualStrings("synthetic bad argument [invalid-arguments failure, 1 attempt]", w.agents[0].detail);
+    // A failed spawn call's own result stays its detail.
+    try testing.expectEqualStrings("subagent sa-002 failed before producing a report: synthetic 503", w.agents[1].detail);
 }
 
 test "809 placeCard clamps within window margins and flips below when top-clipped" {

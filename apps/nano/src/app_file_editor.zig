@@ -6,6 +6,7 @@ const App = @import("app.zig").App;
 const rpc = @import("rpc.zig");
 const Allocator = std.mem.Allocator;
 pub const limit = 1024 * 1024;
+const autosave_delay = 0.75;
 test {
     _ = @import("tests_file_editor.zig");
 }
@@ -37,6 +38,8 @@ pub const Editor = struct {
     read_id: ?u64 = null,
     save_id: ?u64 = null,
     pending: ?Snapshot = null,
+    autosave_at: ?f64 = null,
+    composing: bool = false,
     field: u64 = 0,
     focus: bool = false,
     focused: bool = false,
@@ -102,7 +105,14 @@ pub const Editor = struct {
     }
     pub fn changed(e: *Editor) void {
         e.revision +%= 1;
+        e.armAutosave();
         e.app.redraw();
+    }
+    pub fn armAutosave(e: *Editor) void {
+        e.autosave_at = if (e.app.settings.get(.files_autosave_enabled) and e.editable and !e.composing and !e.conflict)
+            e.app.now + autosave_delay
+        else
+            null;
     }
     fn errorMessage(e: *Editor, message: ?[]const u8) void {
         if (e.error_text) |old| e.app.retireSlice(old);
@@ -165,12 +175,18 @@ pub const Editor = struct {
         e.errorMessage(if (e.editable) null else str(value, "readOnlyReason") orelse "Read-only file: missing writable snapshot authority");
     }
     pub fn save(e: *Editor) bool {
-        if (!e.editable or e.loading or e.pending != null or e.conflict or !e.dirty()) return false;
+        if (!e.editable or e.loading or e.pending != null or e.conflict or e.composing or !e.dirty()) return false;
+        e.autosave_at = null;
         if (!validText(e.buffer.text(), e.encoding, e.ending)) {
             e.errorMessage("File exceeds the editable limit or contains unsupported text");
+            e.app.redraw();
             return false;
         }
-        const text = e.app.gpa.dupe(u8, e.buffer.text()) catch return false;
+        const text = e.app.gpa.dupe(u8, e.buffer.text()) catch {
+            e.errorMessage("Could not prepare the save; unsaved text retained");
+            e.app.redraw();
+            return false;
+        };
         e.pending = .{ .text = text, .revision = e.revision };
         e.errorMessage(null);
         e.save_id = e.app.engine.mux.next_id;
@@ -186,6 +202,8 @@ pub const Editor = struct {
             .encoding = e.encoding,
             .lineEnding = e.ending,
         }), .of(Editor, e, onSave));
+        // Request construction can fail without calling the reply handler.
+        if (e.save_id == null and e.pending != null) onSave(e, 0, .{ .err = "Could not send the save; unsaved text retained" });
         e.app.redraw();
         return true;
     }
@@ -194,8 +212,8 @@ pub const Editor = struct {
         const pending = e.pending orelse return;
         e.pending = null;
         e.save_id = null;
-        defer e.app.gpa.free(pending.text);
         var written = false;
+        defer if (!written) e.app.gpa.free(pending.text);
         switch (reply) {
             .ok => |value| {
                 if (std.mem.eql(u8, str(value, "status") orelse "", "written")) {
@@ -204,17 +222,14 @@ pub const Editor = struct {
                         const path = str(f, "path") orelse "";
                         const hash = str(f, "contentHash") orelse "";
                         if (std.mem.eql(u8, path, e.path) and hash.len > 0) {
-                            const baseline = e.app.gpa.dupe(u8, pending.text) catch return;
-                            const owned_hash = e.app.gpa.dupe(u8, hash) catch {
-                                e.app.gpa.free(baseline);
-                                return;
-                            };
-                            e.app.gpa.free(e.baseline);
-                            e.baseline = baseline;
-                            e.app.gpa.free(e.hash);
-                            e.hash = owned_hash;
-                            e.saved_revision = pending.revision;
-                            written = true;
+                            if (e.app.gpa.dupe(u8, hash)) |owned_hash| {
+                                e.app.gpa.free(e.baseline);
+                                e.baseline = pending.text;
+                                e.app.gpa.free(e.hash);
+                                e.hash = owned_hash;
+                                e.saved_revision = pending.revision;
+                                written = true;
+                            } else |_| {}
                         }
                     }
                     if (!written) e.errorMessage("Invalid save acknowledgement; unsaved text retained");
@@ -228,17 +243,52 @@ pub const Editor = struct {
         }
         // baseline is the acknowledged snapshot, never whatever is typed now.
         // A later edit or failed/conflicting write must continue to block exit.
-        if (written) continueExit(e.app);
+        if (written) {
+            continueExit(e.app);
+        } else {
+            // Surface the error and keep the edits. Do not retry a failed or
+            // conflicting write until another explicit edit or manual save.
+            e.autosave_at = null;
+        }
         e.app.redraw();
     }
     pub fn discard(e: *Editor) void {
         if (e.pending != null) return;
+        e.autosave_at = null;
+        e.composing = false;
         e.buffer.set(e.baseline);
         e.revision +%= 1;
         e.saved_revision = e.revision;
         e.errorMessage(null);
     }
 };
+
+/// Only live workspace editors can schedule writes. Navigation may park an
+/// editor, but never changes its capture of the file, checkout, or device.
+pub fn tick(a: *App, now: f64) ?f64 {
+    const enabled = a.settings.get(.files_autosave_enabled);
+    var next: ?f64 = null;
+    for (a.panels.tabs.items) |tab| if (tab.editor) |e| {
+        if (!enabled) {
+            e.autosave_at = null;
+            continue;
+        }
+        // Opt-in affects edits made while it is enabled, not older dirty
+        // buffers that a person may have deliberately left unsaved.
+        const deadline = e.autosave_at orelse continue;
+        if (e.composing) continue;
+        // An in-flight write must acknowledge its hash first. A close or
+        // reload dialog must keep its explicit Save/Discard/Cancel choice.
+        if (e.pending != null or a.panels.file_close.intent != null) continue;
+        if (deadline > now) {
+            next = if (next) |n| @min(n, deadline) else deadline;
+        } else {
+            e.autosave_at = null;
+            _ = e.save();
+        }
+    };
+    return next;
+}
 
 fn str(v: std.json.Value, key: []const u8) ?[]const u8 {
     if (v != .object) return null;
@@ -434,7 +484,7 @@ pub fn dialog(c: *ui.Context, a: *App, k: @import("theme.zig").Colors) void {
     const actions = ui.div(c).row().wFull().justifyEnd().gap(8);
     defer actions.end();
     for ([_]struct { label: []const u8, decision: Decision }{ .{ .label = "Cancel", .decision = .cancel }, .{ .label = "Discard changes", .decision = .discard }, .{ .label = "Save changes", .decision = .save } }) |action| {
-        const enabled = action.decision == .cancel or (e.pending == null and (action.decision != .save or !e.conflict));
+        const enabled = action.decision == .cancel or (e.pending == null and (action.decision != .save or (!e.conflict and !e.composing)));
         var button = ui.div(c).row().px(10).py(7).rounded(7);
         if (enabled) button = button.hover(k.selected).control() else button = button.opacity(0.4);
         defer button.end();

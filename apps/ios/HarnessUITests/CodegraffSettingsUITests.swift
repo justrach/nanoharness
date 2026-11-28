@@ -36,7 +36,9 @@ final class CodegraffSettingsUITests: XCTestCase {
     func testCloudSandboxesShowSizesAndRates() {
         openSettings()
         keep("settings")
-        app.buttons["settings-cloud-sandboxes"].tap()
+        let cloudSettings = app.buttons["settings-cloud-sandboxes"]
+        cloudSettings.swipeUpUntilHittable(in: app)
+        cloudSettings.tap()
         XCTAssertTrue(app.navigationBars["Cloud sandboxes"].waitForExistence(timeout: 5))
         XCTAssertTrue(label("Cloud sandbox running · $0.10/h"))
         XCTAssertTrue(label("Running · 2 vCPU · 4 GB · $0.10/h · keeps running until you turn it off"))
@@ -59,9 +61,24 @@ final class CodegraffSettingsUITests: XCTestCase {
     }
 
     /// Budgets, concurrency and a repository's switch and size, then recent jobs.
+    func testThisPhoneCanTurnOffACloudSandboxWithoutAComputer() {
+        openSettings(["-onboarding-nocomputer", "-demo-phone-cloud"])
+        let cloudSettings = app.buttons["settings-cloud-sandboxes"]
+        cloudSettings.swipeUpUntilHittable(in: app)
+        cloudSettings.tap()
+        XCTAssertTrue(app.navigationBars["Cloud sandboxes"].waitForExistence(timeout: 5))
+        // With no computers there is a single target, so no picker is shown.
+        let stop = app.buttons["cloud-sandbox-stop"].firstMatch
+        XCTAssertTrue(stop.waitForExistence(timeout: 5))
+        stop.tap()
+        XCTAssertTrue(app.staticTexts["Paused — memory and files kept"].waitForExistence(timeout: 10))
+    }
+
     func testGithubCIConnectedAccount() {
         openSettings()
-        app.buttons["settings-github-ci"].tap()
+        let githubSettings = app.buttons["settings-github-ci"]
+        githubSettings.swipeUpUntilHittable(in: app)
+        githubSettings.tap()
         XCTAssertTrue(app.navigationBars["GitHub CI"].waitForExistence(timeout: 5))
         XCTAssertTrue(label("Organization · 2 of 3 repositories on"))
         XCTAssertTrue(label("$12.50 of $50 used this month"))
@@ -85,13 +102,17 @@ final class CodegraffSettingsUITests: XCTestCase {
 
     func testGithubCIOffersConnectWhenNothingIsConnected() {
         openSettings(["-github-ci-new"])
-        app.buttons["settings-github-ci"].tap()
+        let githubSettings = app.buttons["settings-github-ci"]
+        githubSettings.swipeUpUntilHittable(in: app)
+        githubSettings.tap()
         XCTAssertTrue(label("Run GitHub Actions on Codegraff"))
         let connect = app.buttons["github-ci-connect"]
         XCTAssertTrue(connect.exists)
         XCTAssertTrue(connect.isEnabled)
         XCTAssertEqual(connect.label, "Connect GitHub")
-        XCTAssertTrue(app.buttons["github-ci-copy-snippet"].exists)
+        let snippet = app.buttons["github-ci-copy-snippet"]
+        snippet.swipeUpUntilHittable(in: app)
+        XCTAssertTrue(snippet.exists)
         keep("github-ci-connect")
     }
 }

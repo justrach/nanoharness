@@ -11,14 +11,14 @@ pub const State = struct {
 };
 
 pub fn sync(a: *App, requested: bool, dark: bool) bool {
-    if (a.offscreen or a.window == null) return requested and !a.glass.reduced_transparency;
+    if (a.offscreen or a.window == null) return requested and !a.glass.reduced_transparency and !a.view.full_screen;
     if (comptime builtin.os.tag == .macos) {
         if (a.glass.native == null) {
             const w = a.window.?;
             const surface = w.surface orelse return false;
             a.glass.native = Native.create(a.gpa, w.nswindow, surface.renderer.layer, .{ .ctx = a, .changed = changed }, .{}) catch return false;
         }
-        return a.glass.native.?.sync(requested, dark);
+        return a.glass.native.?.syncSurface(requested, dark, a.view.full_screen);
     }
     // No transparent black canvas on platforms without native window blur.
     return false;

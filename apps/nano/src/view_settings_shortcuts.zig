@@ -36,11 +36,21 @@ pub fn capture(c: *ui.Context, a: *App) void {
     _ = c.shortcut(s);
     var shown: [64]u8 = undefined;
     if (shortcuts.reserved(combo)) return refuse(a, c.print("{s} is reserved for the composer.", .{shortcuts.display(&shown, combo)}));
-    // One past the page's shortcuts: the Appshots page's.
-    for (shortcuts.all ++ [_]shortcuts.Shortcut{shortcuts.appshot}, 0..) |other, j| if (j != ix and std.mem.eql(u8, a.settings.combo(other), combo)) {
+    const kp = @import("ux_rules.zig").KeymapPartition;
+    const cand: kp.Chord = .{
+        .code = s.key,
+        .cmd = s.cmd,
+        .ctrl = s.ctrl,
+        .alt = s.alt,
+        .shift = s.shift,
+    };
+    if (kp.memChord(cand, &kp.fixed_window_chords) or shortcuts.isWorkspaceModeBinding(combo)) {
+        return refuse(a, c.print("{s} is a fixed window shortcut.", .{shortcuts.display(&shown, combo)}));
+    }
+    for (shortcuts.all, 0..) |other, j| if (j != ix and std.mem.eql(u8, a.settings.combo(other), combo)) {
         return refuse(a, c.print("{s} is already assigned to {s}.", .{ shortcuts.display(&shown, combo), other.title }));
     };
-    a.settings.setCombo(if (ix == shortcuts.all.len) shortcuts.appshot else shortcuts.all[ix], combo);
+    a.settings.setCombo(shortcuts.all[ix], combo);
     a.view.recording = null;
     a.view.shortcut_notice.clearRetainingCapacity();
 }
@@ -270,7 +280,9 @@ fn fixedGroup(c: *ui.Context, k: theme.Colors) void {
         defer r.end();
         ui.text(c, f.title, set.st(c, 13, .{ .color = k.text }));
         ui.spacer(c);
-        ui.text(c, f.keys, .{ .size = 12, .line_height = 12 * 1.618, .mono = true, .color = k.muted });
+        var buf: [64]u8 = undefined;
+        const keys = if (f.chord) |chord| c.print("{s}", .{shortcuts.chordBadge(&buf, chord)}) else f.keys;
+        ui.text(c, keys, .{ .size = 12, .line_height = 12 * 1.618, .mono = true, .color = k.muted });
     }
 }
 

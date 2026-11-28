@@ -76,10 +76,10 @@ pub fn name_for_chat(chat_id: &str) -> String {
     }
 }
 
-/// A new tree is named for the task, with a stable digest of the full chat id
-/// to distinguish independent conversations doing the same work. Existing trees
-/// keep their name.
-pub fn name_for_task(chat_id: &str, task: &str) -> String {
+/// A new tree gets a stable, opaque digest of the full chat id with no prompt
+/// text, so auto-generated Git branch names (`worktree-<name>`) never leak
+/// first-message content. Existing trees and explicit user names stay unchanged.
+pub fn default_name(chat_id: &str) -> String {
     // FNV-1a has an explicitly stable algorithm, unlike DefaultHasher. Hash all
     // bytes: UUIDv7 ids share prefixes, and filtering punctuation/case loses ids.
     let digest = chat_id
@@ -88,10 +88,13 @@ pub fn name_for_task(chat_id: &str, task: &str) -> String {
         .fold(0xcbf29ce484222325_u64, |hash, byte| {
             (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
         });
-    let slug = crate::worktree_name::task_slug(task);
-    // Reserve one separator and 16 hex digits within Graff's 64-byte limit.
-    let slug = slug[..slug.len().min(47)].trim_end_matches('-');
-    format!("{slug}-{digest:016x}")
+    format!("{digest:016x}")
+}
+
+/// Returns [`default_name`]`(chat_id)` regardless of `_task` so callers passing
+/// prompt text cannot embed message content into the worktree or branch name.
+pub fn name_for_task(chat_id: &str, _task: &str) -> String {
+    default_name(chat_id)
 }
 
 #[cfg(test)]
@@ -128,10 +131,22 @@ mod tests {
     }
 
     #[test]
-    fn new_chat_names_describe_the_task_without_product_branding() {
-        let name = name_for_task("chat-graff-tree", "Fix login redirect after sign-in");
-        assert_eq!(name, "fix-login-redirect-after-sign-in-1a7188e911beeb31");
+    fn default_name_never_leaks_prompt_text_and_ignores_prompt_changes() {
+        let name = name_for_task(
+            "chat-graff-tree",
+            "The blue button still does nothing after I click it twice.",
+        );
+        assert_eq!(name, "1a7188e911beeb31");
+        assert_eq!(name, default_name("chat-graff-tree"));
+        assert_eq!(
+            name,
+            name_for_task("chat-graff-tree", "Unrelated prompt text")
+        );
+        for token in ["blue", "button", "click", "unrelated"] {
+            assert!(!name.contains(token), "{name} leaked {token}");
+        }
         assert!(valid_name(&name));
+        assert!(!name.starts_with("harness-"));
         assert!(valid_name(&name_for_task("---", "***")));
         assert!(valid_name(&name_for_task("chat", &"x".repeat(100))));
         assert_ne!(
@@ -143,15 +158,9 @@ mod tests {
     #[test]
     fn task_name_digests_are_stable_across_processes() {
         // Published FNV-1a 64-bit vectors pin the algorithm, not Rust's hasher.
-        assert_eq!(name_for_task("", "Fix login"), "fix-login-cbf29ce484222325");
-        assert_eq!(
-            name_for_task("a", "Fix login"),
-            "fix-login-af63dc4c8601ec8c"
-        );
-        assert_eq!(
-            name_for_task("foobar", "Fix login"),
-            "fix-login-85944171f73967e8"
-        );
+        assert_eq!(name_for_task("", "Fix login"), "cbf29ce484222325");
+        assert_eq!(name_for_task("a", "Fix login"), "af63dc4c8601ec8c");
+        assert_eq!(name_for_task("foobar", "Fix login"), "85944171f73967e8");
     }
 
     #[test]
@@ -180,7 +189,11 @@ mod tests {
         assert_eq!(names.len(), ids.len());
         for name in names {
             assert!(valid_name(&name), "{name}");
-            assert!(name.starts_with("fix-login-"), "{name}");
+            assert_eq!(name.len(), 16, "{name}");
+            assert!(
+                name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+                "{name}"
+            );
         }
     }
 
@@ -200,7 +213,7 @@ mod tests {
                 assert!(name.len() <= 64);
                 assert!(!name.starts_with("harness-"));
                 assert!(!name.contains("--"), "{name}");
-                assert_eq!(name_for_task(id, &task), name);
+                assert_eq!(name, default_name(id));
             }
         }
     }
