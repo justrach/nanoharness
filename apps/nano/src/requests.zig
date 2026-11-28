@@ -55,6 +55,7 @@ pub fn runBot(bot: []const u8, message: ?[]const u8, routine: ?[]const u8) Reque
 pub const ModelOptions = struct {
     orchestrator: ?[]const u8 = null,
     serviceTier: ?[]const u8 = null,
+    harnessAcpV2Preview: ?bool = null,
 };
 
 pub const Config = struct {

@@ -1532,6 +1532,7 @@ async fn run_session(session: Session) {
                     );
                 }
 
+                Some(Incoming::OrderedResponse { .. }) => {},
                 // stdout EOF or reader gone: the app server exited.
                 Some(Incoming::Eof) | None => break 'main,
             },

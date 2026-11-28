@@ -347,6 +347,7 @@ async fn session(
                     Some(Incoming::Request { id, .. }) => {
                         client.respond_error(&id, -32601, "not supported during dictation")
                     }
+                    Some(Incoming::OrderedResponse { .. }) => {},
                     Some(Incoming::Eof) | None => return Err("Codex stopped.".to_string()),
                 }
             }
@@ -435,6 +436,7 @@ async fn session(
                 Some(Incoming::Request { id, .. }) => {
                     client.respond_error(&id, -32601, "not supported during dictation");
                 }
+                Some(Incoming::OrderedResponse { .. }) => {},
                 Some(Incoming::Eof) | None => break Err("Codex stopped.".into()),
             },
         }

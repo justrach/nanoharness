@@ -48,6 +48,8 @@ pub mod graff_mcp;
 pub mod graff_extensions;
 pub mod graff_worktree;
 mod normalize;
+mod preview;
+pub use preview::cancel::PreviewCancelTarget;
 mod prompt_images;
 mod subagent;
 mod subagent_devin;
@@ -1184,6 +1186,8 @@ pub struct NativeFlintEnv {
 /// fake agent with [`AcpHarness::with_executable`].
 pub struct AcpHarness {
     spec: AcpAgentSpec,
+    preview_stdio: bool,
+    preview_targets: preview::cancel::Controls,
     graff_draft_subagents: Option<Arc<AtomicBool>>,
     /// Settings → graff's compaction point (percent; 0 = graff's default).
     graff_compact_at: Option<Arc<AtomicU8>>,
@@ -1213,9 +1217,22 @@ pub struct AcpHarness {
 }
 
 impl AcpHarness {
+    /// Request ACP Preview for run connections only. Discovery remains v1.
+    pub fn with_preview_stdio(mut self, enabled: bool) -> Self {
+        self.preview_stdio = enabled;
+        self
+    }
+
+    /// Cancel a capability-advertised target in this chat's active Preview connection.
+    pub async fn cancel_preview_target(&self, chat: &str, target: PreviewCancelTarget) -> bool {
+        self.preview_targets.cancel(chat, target).await
+    }
+
     fn with_spec(spec: AcpAgentSpec) -> Self {
         Self {
             spec,
+            preview_stdio: false,
+            preview_targets: Default::default(),
             graff_draft_subagents: None,
             graff_compact_at: None,
             graff_native_flint: None,
@@ -2290,7 +2307,12 @@ impl Harness for AcpHarness {
     }
 
     fn supports_steering(&self) -> bool {
-        true
+        !self.preview_stdio
+    }
+    fn supports_steering_for(&self, request: &RunRequest) -> bool {
+        !self.preview_stdio
+            && !(self.spec.id == HarnessId::Graff
+                && request.model_options.get(preview::PROTOCOL_OPTION) == Some(&Value::Bool(true)))
     }
     fn steering_mode(&self) -> SteeringMode {
         self.spec.steering_mode
@@ -2502,9 +2524,10 @@ impl Harness for AcpHarness {
             graff_worktree::ensure_worktree(&program, &request.cwd, name, &spec.base).await?;
             launch_args.extend(["-w".to_owned(), name.clone()]);
         }
+        let launch_cwd = request.cwd.clone();
         let (scratch, mut child, stderr_tail) = self
             .spawn_agent(
-                Some(&request.cwd),
+                Some(&launch_cwd),
                 true,
                 &launch_args,
                 controls.origin.as_ref(),
@@ -2514,17 +2537,48 @@ impl Harness for AcpHarness {
             // session/load only accepts the checkout Graff runs in: the tree.
             request.cwd = harness_proto::graff_worktree::GraffWorktree::path_in(&request.cwd, name);
         }
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| HarnessError::Protocol("agent child has no stdin".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| HarnessError::Protocol("agent child has no stdout".into()))?;
-        let (client, incoming) = RpcClient::new(stdin, stdout);
+        let (mut client, mut incoming) = preview::connect(&mut child)?;
+        let mut scratch = scratch;
+        let mut stderr_tail = stderr_tail;
+        let mut preview_init = None;
+        let preview_enabled = !self.supports_steering_for(&request);
+        if self.spec.id == HarnessId::Graff {
+            request.model_options.remove(preview::PROTOCOL_OPTION);
+        }
+        if preview_enabled {
+            let negotiation = preview::negotiate(&client, &mut incoming);
+            match tokio::select! {
+                result = tokio::time::timeout(self.handshake_timeout, negotiation) => {
+                    result.map_err(|_| HarnessError::Protocol("ACP Preview initialize timed out".into()))??
+                }
+                _ = controls.interrupt.cancelled() => {
+                    return Ok(futures::stream::once(async { Ok(AgentEvent::Done {
+                        status: DoneStatus::Interrupted, result: None, error: None, session_id: None,
+                    }) }).boxed());
+                }
+            } {
+                Some(init) => preview_init = Some(init),
+                None => {
+                    // Legacy agents ignored our v2 capability fields. Never reuse
+                    // that child; send a clean v1 initialize on fresh stdio.
+                    child.shutdown(self.kill_grace).await;
+                    drop(client);
+                    drop(incoming);
+                    drop(scratch);
+                    (scratch, child, stderr_tail) = self
+                        .spawn_agent(
+                            Some(&launch_cwd),
+                            true,
+                            &launch_args,
+                            controls.origin.as_ref(),
+                        )
+                        .await?;
+                    (client, incoming) = preview::connect(&mut child)?;
+                }
+            }
+        }
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
-        tokio::spawn(run_session(Session {
+        let session = Session {
             child,
             scratch,
             client,
@@ -2547,7 +2601,12 @@ impl Harness for AcpHarness {
             kill_grace: self.kill_grace,
             handshake_timeout: self.handshake_timeout,
             stderr_tail,
-        }));
+        };
+        if let Some(init) = preview_init {
+            tokio::spawn(preview::run(session, init, self.preview_targets.clone()));
+        } else {
+            tokio::spawn(run_session(session));
+        }
 
         let events = futures::stream::unfold(event_rx, |mut rx| async move {
             rx.recv().await.map(|ev| (ev, rx))
@@ -5187,6 +5246,7 @@ async fn run_session(session: Session) {
                     }
                     break 'main;
                 }
+                Some(Incoming::OrderedResponse { .. }) => {},
             },
 
             res = async { steering_call.as_mut().expect("guarded by if").1.as_mut().await },
@@ -6378,6 +6438,7 @@ mod tests {
         // The run's scoped IPC token passes only into harness MCP server env.
         let origin = crate::RunOrigin {
             chat_id: "c1".into(),
+            submission_id: None,
             build_wait_dir: None,
             ipc_token: Some("mcp-secret-tok".into()),
         };

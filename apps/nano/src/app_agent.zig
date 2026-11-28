@@ -319,18 +319,35 @@ fn storeChatConfig(a: *App, model: ?[]const u8, reasoning: ?[]const u8, orchestr
 fn storeChatConfigLive(a: *App, model: ?[]const u8, reasoning: ?[]const u8, orchestrator: ?[]const u8, service_tier: ?[]const u8, focus_composer: bool) void {
     const id = a.selected orelse return;
     const ch = a.findChat(id) orelse return;
-    const sent = a.send_(requests.setChatConfig(id, .{
+    if (!sendChatConfig(a, ch, model, reasoning, orchestrator, service_tier, ch.acp_v2_preview)) return;
+    _ = workspace.setChatConfig(&a.chats, id, model, reasoning, orchestrator, service_tier);
+    if (focus_composer) a.view.focus_composer = true;
+    a.redraw();
+}
+
+pub fn toggleChatAcpPreview(a: *App, ch: workspace.Chat) void {
+    if (!std.mem.eql(u8, ch.harness orelse "", "graff")) return;
+    const enabled = !ch.acp_v2_preview;
+    if (!sendChatConfig(a, ch, ch.model, ch.reasoning, ch.orchestrator, ch.service_tier, enabled)) return;
+    workspace.setChatAcpPreview(&a.chats, ch.id, enabled);
+    a.redraw();
+}
+
+fn sendChatConfig(a: *App, ch: workspace.Chat, model: ?[]const u8, reasoning: ?[]const u8, orchestrator: ?[]const u8, service_tier: ?[]const u8, preview: bool) bool {
+    const sent = a.send_(requests.setChatConfig(ch.id, .{
         .harness = ch.harness orelse "graff",
         .model = model,
         .reasoning = reasoning,
-        .modelOptions = .{ .orchestrator = orchestrator, .serviceTier = service_tier },
+        .modelOptions = .{ .orchestrator = orchestrator, .serviceTier = service_tier, .harnessAcpV2Preview = if (preview) true else null },
+        .sandbox = ch.sandbox orelse "workspace-write",
         // The config is replaced whole: a plain chat stays one.
         .chatMode = if (ch.chat_mode) true else null,
     }), .of(App, a, App.onNotice));
-    if (sent == null) return a.setNotice("The config change couldn't be sent. Reconnect and try again.");
-    _ = @import("workspace.zig").setChatConfig(&a.chats, id, model, reasoning, orchestrator, service_tier);
-    if (focus_composer) a.view.focus_composer = true;
-    a.redraw();
+    if (sent == null) {
+        a.setNotice("The config change couldn't be sent. Reconnect and try again.");
+        return false;
+    }
+    return true;
 }
 
 /// The project a new chat starts in: the one picked, else the first;

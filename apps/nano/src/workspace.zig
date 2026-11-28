@@ -50,6 +50,8 @@ pub const Chat = struct {
     reasoning: ?[]const u8 = null,
     orchestrator: ?[]const u8 = null,
     service_tier: ?[]const u8 = null,
+    acp_v2_preview: bool = false,
+    sandbox: ?[]const u8 = null,
     /// A plain chat, not a coding session (`ChatConfig::chat_mode`).
     chat_mode: bool = false,
     cwd: ?[]const u8,
@@ -214,6 +216,13 @@ pub fn setChatConfig(l: *Chats, id: []const u8, model: ?[]const u8, reasoning: ?
     };
     return false;
 }
+pub fn setChatAcpPreview(l: *Chats, id: []const u8, enabled: bool) void {
+    for (l.items) |*chat| if (std.mem.eql(u8, chat.id, id)) {
+        chat.acp_v2_preview = enabled;
+        return;
+    };
+}
+
 pub const Devices = List(Device, parseDevice);
 
 fn ms(a: Allocator, o: json.ObjectMap, k: []const u8) i64 {
@@ -255,6 +264,8 @@ fn parseSpace(a: Allocator, o: json.ObjectMap) ?Space {
 
 fn parseChat(a: Allocator, o: json.ObjectMap) ?Chat {
     const config = if (o.get("config")) |c| (if (c == .object) c.object else null) else null;
+    const options = if (config) |c| c.get("modelOptions") else null;
+    const preview = if (options) |mo| if (mo == .object) mo.object.get("harnessAcpV2Preview") else null else null;
     return .{
         .id = str(a, o, "id") orelse return null,
         .title = str(a, o, "title"),
@@ -272,6 +283,8 @@ fn parseChat(a: Allocator, o: json.ObjectMap) ?Chat {
         .reasoning = if (config) |c| str(a, c, "reasoning") else null,
         .orchestrator = if (config) |c| (if (c.get("modelOptions")) |mo| (if (mo == .object) str(a, mo.object, "orchestrator") else null) else null) else null,
         .service_tier = if (config) |c| (if (c.get("modelOptions")) |mo| (if (mo == .object) str(a, mo.object, "serviceTier") else null) else null) else null,
+        .acp_v2_preview = if (preview) |v| v == .bool and v.bool else false,
+        .sandbox = if (config) |c| str(a, c, "sandbox") else null,
         .chat_mode = if (config) |c| (if (c.get("chatMode")) |v| v == .bool and v.bool else false) else false,
         .cwd = str(a, o, "cwd"),
         .harness_session_id = str(a, o, "harnessSessionId"),

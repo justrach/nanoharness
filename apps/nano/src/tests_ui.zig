@@ -970,6 +970,55 @@ fn openRowMenu(h: *Harness, title: []const u8) !void {
     h.t.settle(1);
 }
 
+test "ACP Preview is opt-in for one Graff chat and survives config edits and send" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[ {"id":"a","deviceId":"d","title":"Alpha","config":{"harness":"codex"}},
+        \\  {"id":"b","deviceId":"d","title":"Beta","config":{"harness":"graff","model":"fixture","reasoning":"medium","sandbox":"read-only","modelOptions":{"orchestrator":"off","serviceTier":"fast"}}} ]
+    , .{});
+    defer parsed.deinit();
+    try h.a.chats.replace(parsed.value);
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"Mutate\":{},\"Command\":{}}", .{});
+    h.a.engine.state = .connected;
+    try openRowMenu(&h, "Alpha");
+    try testing.expect(!h.t.hasText("Try ACP v2 Preview"));
+    h.press(.{ .key = ui.Shortcut.escape });
+    try openRowMenu(&h, "Beta");
+    try testing.expect(h.t.hasText("Try ACP v2 Preview"));
+    h.snap("acp-preview-available");
+    try h.t.clickText("Try ACP v2 Preview");
+    h.t.settle(1);
+    try testing.expect(h.a.findChat("b").?.acp_v2_preview);
+    try testing.expect(!h.a.findChat("a").?.acp_v2_preview);
+    try openRowMenu(&h, "Beta");
+    try testing.expect(h.t.hasText("Use ACP v1"));
+    h.snap("acp-preview-after");
+    try h.t.clickText("Use ACP v1");
+    h.t.settle(1);
+    try testing.expect(!h.a.findChat("b").?.acp_v2_preview);
+    try openRowMenu(&h, "Beta");
+    try h.t.clickText("Try ACP v2 Preview");
+    h.t.settle(1);
+
+    h.a.openChatInTab("b");
+    @import("app_agent.zig").pickReasoning(&h.a, "high");
+    h.a.composer.set("Synthetic submission");
+    h.a.send();
+    var config_edit = false;
+    var submission = false;
+    for (h.a.engine.sent.items) |frame| {
+        if (std.mem.indexOf(u8, frame, "\"harnessAcpV2Preview\":true") == null) continue;
+        try testing.expect(std.mem.indexOf(u8, frame, "\"sandbox\":\"read-only\"") != null);
+        try testing.expect(std.mem.indexOf(u8, frame, "\"serviceTier\":\"fast\"") != null);
+        if (std.mem.indexOf(u8, frame, "\"setChatConfig\"") != null and std.mem.indexOf(u8, frame, "\"reasoning\":\"high\"") != null) config_edit = true;
+        if (std.mem.indexOf(u8, frame, "\"prompt\":\"Synthetic submission\"") != null) submission = true;
+    }
+    try testing.expect(config_edit);
+    try testing.expect(submission);
+}
+
 test "a session's ⋯ menu pins it after the last pin, and unpins it" {
     var h: Harness = undefined;
     try h.init();

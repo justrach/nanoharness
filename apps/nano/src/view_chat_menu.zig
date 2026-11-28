@@ -135,6 +135,13 @@ fn menu(c: *ui.Context, a: *App, k: theme.Colors) void {
                 close(a);
                 return a.setArchived(ch.id, true);
             }
+            if (std.mem.eql(u8, ch.harness orelse "", "graff")) {
+                const label = if (ch.acp_v2_preview) "Use ACP v1" else "Try ACP v2 Preview";
+                if (row(c, k, .pen, label, k.muted, k.text.alpha(0.9), false)) {
+                    close(a);
+                    return @import("app_agent.zig").toggleChatAcpPreview(a, ch);
+                }
+            }
             if (row(c, k, .copy, "Copy", k.muted, k.text.alpha(0.9), true)) m.page = .copy;
             separator(c, k, w);
             if (row(c, k, .@"trash-bin-minimalistic", "Delete…", k.danger, k.danger, false)) {

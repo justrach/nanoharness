@@ -885,6 +885,7 @@ impl SessionsEngine {
         let controls = RunControls {
             origin: Some(harness_adapters::RunOrigin {
                 chat_id: chat_id.to_string(),
+                submission_id: Some(user_id.clone()),
                 ipc_token: self.inner.ipc_mcp_token.get().cloned(),
                 ..Default::default()
             }),
@@ -898,7 +899,7 @@ impl SessionsEngine {
             chat_id.to_string(),
             RunHandle {
                 run_id: run_id.clone(),
-                steerable: harness.supports_steering(),
+                steerable: harness.supports_steering_for(&request),
                 steers_attachments: harness.steers_attachments(),
                 runtime_config: RuntimeConfig::from_request(harness_id, &request),
                 steer_tx,

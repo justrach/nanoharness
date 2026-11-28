@@ -36,13 +36,23 @@ pub(crate) enum Incoming {
         method: String,
         params: Value,
     },
+    /// A response deliberately delivered in stdout order with notifications.
+    OrderedResponse {
+        id: i64,
+        outcome: Result<Value, HarnessError>,
+    },
     /// stdout EOF: the app server exited. All pending requests fail.
     Eof,
 }
 
 type StdoutObserver = Box<dyn Fn(&str) + Send>;
 
-type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, HarnessError>>>>>;
+type Pending = Arc<Mutex<HashMap<i64, PendingResponse>>>;
+
+enum PendingResponse {
+    Direct(oneshot::Sender<Result<Value, HarnessError>>),
+    Ordered,
+}
 
 #[derive(Clone)]
 pub(crate) struct RpcClient {
@@ -104,7 +114,7 @@ impl RpcClient {
                     "{method}: app-server exited before responding"
                 )));
             }
-            pending.insert(id, tx);
+            pending.insert(id, PendingResponse::Direct(tx));
         }
         let line = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         if self.writer.send(line.to_string()).is_err() {
@@ -124,6 +134,26 @@ impl RpcClient {
                 "{method}: app-server exited before responding"
             ))),
         }
+    }
+
+    /// Issue a request whose response is a barrier in the incoming stream.
+    pub fn request_ordered(&self, method: &str, params: Value) -> Result<i64, HarnessError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut pending = self.pending.lock().expect("pending lock");
+        if self.is_closed() {
+            return Err(HarnessError::Protocol(format!(
+                "{method}: app-server exited"
+            )));
+        }
+        pending.insert(id, PendingResponse::Ordered);
+        let line = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        if self.writer.send(line.to_string()).is_err() {
+            pending.remove(&id);
+            return Err(HarnessError::Protocol(format!(
+                "{method}: app-server stdin closed"
+            )));
+        }
+        Ok(id)
     }
 
     /// Fire a notification (no id, no response).
@@ -293,7 +323,20 @@ async fn read_loop(
                         .map(Value::take)
                         .unwrap_or(Value::Null)),
                 };
-                let _ = sender.send(outcome);
+                match sender {
+                    PendingResponse::Direct(sender) => {
+                        let _ = sender.send(outcome);
+                    }
+                    PendingResponse::Ordered => {
+                        if tx
+                            .send(Incoming::OrderedResponse { id, outcome })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
             }
             // Server→client request (approvals).
             (Some(method), Some(id)) => {
@@ -368,8 +411,7 @@ mod tests {
             "provider authentication failed: sign in again or check the API key",
             "unauthorized",
         ] {
-            let failure =
-                response_failure(&json!({"code":-32603,"message":message,"data":data}));
+            let failure = response_failure(&json!({"code":-32603,"message":message,"data":data}));
             let HarnessError::KeyRejected { provider, .. } = &failure else {
                 panic!("{message}: {failure:?}");
             };
@@ -388,7 +430,9 @@ mod tests {
         );
         // The untyped generic text stays a protocol error (read as signed out).
         assert!(matches!(
-            response_failure(&json!({"code":-32603,"message":"provider authentication failed: sign in again or check the API key"})),
+            response_failure(
+                &json!({"code":-32603,"message":"provider authentication failed: sign in again or check the API key"})
+            ),
             HarnessError::Protocol(_)
         ));
     }
