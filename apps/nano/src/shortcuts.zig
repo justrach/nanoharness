@@ -92,10 +92,10 @@ pub const fixed = [_]Fixed{
     .{ .title = "Move to the pane on the right", .keys = "Opt+Cmd+→" },
     .{ .title = "Move to the pane above", .keys = "Opt+Cmd+↑" },
     .{ .title = "Move to the pane below", .keys = "Opt+Cmd+↓" },
-    .{ .title = "Grow the pane to the left", .keys = "Ctrl+Cmd+←" },
-    .{ .title = "Grow the pane to the right", .keys = "Ctrl+Cmd+→" },
-    .{ .title = "Grow the pane up", .keys = "Ctrl+Cmd+↑" },
-    .{ .title = "Grow the pane down", .keys = "Ctrl+Cmd+↓" },
+    .{ .title = "Grow the pane to the left", .chord = resizePane(ui.Shortcut.left) },
+    .{ .title = "Grow the pane to the right", .chord = resizePane(ui.Shortcut.right) },
+    .{ .title = "Grow the pane up", .chord = resizePane(ui.Shortcut.up) },
+    .{ .title = "Grow the pane down", .chord = resizePane(ui.Shortcut.down) },
     .{ .title = "Make all panes the same size", .keys = "Ctrl+Cmd+=" },
     .{ .title = "Zoom the pane (and back)", .keys = "Cmd+Shift+Enter" },
     .{ .title = "Next chat tab", .keys = "Cmd+Shift+]" },
@@ -300,6 +300,15 @@ test "key-caps as the GPUI app's badges on the Mac (`badge_combos_use_mac_glyphs
 /// The command palette's key: fixed, as the GPUI app binds it
 /// (`KeyBinding::new(&platform_combo("mod-k"), ToggleCommandPalette)`).
 pub const command_palette: ui.Shortcut = .{ .key = 'k', .cmd = true };
+
+/// Command maps to Control off macOS. Use a distinct chord there so Ctrl+Arrow
+/// is available to editors and Ctrl+Alt+Arrow can still switch panes.
+pub fn resizePane(key: u21) ui.Shortcut {
+    return if (@import("builtin").os.tag == .macos)
+        .{ .key = key, .cmd = true, .ctrl = true }
+    else
+        .{ .key = key, .ctrl = true, .alt = true, .shift = true };
+}
 
 const keymap_partition = @import("ux_rules.zig").KeymapPartition;
 pub const cycle_ui_mode = windowShortcut(keymap_partition.cycle_ui_mode);

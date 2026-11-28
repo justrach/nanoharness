@@ -973,7 +973,7 @@ fn keys(c: *ui.Context, a: *App) void {
     }
     const arrows = [_]struct { u21, tabs.Direction }{ .{ S.left, .left }, .{ S.right, .right }, .{ S.up, .up }, .{ S.down, .down } };
     for (arrows) |x| {
-        if (c.shortcut(.{ .key = x[0], .cmd = true, .ctrl = true })) {
+        if (c.shortcut(@import("shortcuts.zig").resizePane(x[0]))) {
             a.tabs.resize(x[1]);
             a.rememberTabs();
         }

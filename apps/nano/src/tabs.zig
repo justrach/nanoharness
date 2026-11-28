@@ -197,8 +197,9 @@ pub const Split = struct {
     }
 
     /// Moves the focused pane's far divider (its near one for the last
-    /// pane) toward `d`; nothing when the split runs the other way.
+    /// pane) toward `d`; nothing with no divider or on the other axis.
     fn resize(s: *Split, d: Direction) void {
+        if (s.panes.items.len < 2) return;
         const grow = switch (s.axis) {
             .horizontal => switch (d) {
                 .right => true,
@@ -936,6 +937,19 @@ test "closing keeps a tab, and the active one stays in range" {
     t.show("c");
     t.forget("c");
     try testing.expect(t.current() == null);
+}
+
+test "resizing a one-pane workspace leaves its share and zoom unchanged" {
+    var t: Tabs = .init(testing.allocator);
+    defer t.deinit();
+    t.show("synthetic");
+    try t.isolateWorkspace();
+    const s = t.layout().?;
+    s.zoomed = true;
+    t.resize(.right);
+    t.resize(.left);
+    try testing.expectEqualSlices(f32, &.{1}, s.shares.items);
+    try testing.expect(s.zoomed);
 }
 
 test "⌘D makes even panes and focuses the new chat; focus swaps; ⌘W closes a pane" {

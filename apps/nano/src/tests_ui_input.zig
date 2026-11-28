@@ -451,6 +451,24 @@ test "composer native Return still sends by default while Shift Return inserts a
     try testing.expectEqual(@as(usize, 2), h.a.pending_sends.items.len);
 }
 
+test "Ctrl arrow stays with the composer instead of resizing a pane" {
+    if (@import("builtin").os.tag == .macos) return error.SkipZigTest;
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try h.a.tabs.isolateWorkspace();
+    h.t.textOps(&.{ .{ .insert = "one two three" }, .{ .command = .move_line_start } });
+
+    // Windows offers the shortcut to the view before delivering the key.
+    try testing.expect(!h.t.shortcut(.{ .key = ui.Shortcut.right, .ctrl = true }));
+    h.t.ctx.input.ctrl = true;
+    h.t.key(.right);
+    h.t.ctx.input.ctrl = false;
+    try testing.expectEqualStrings("one two three", h.a.composer.text());
+    h.t.textOps(&.{.{ .insert = "|" }});
+    try testing.expectEqualStrings("one| two three", h.a.composer.text());
+}
+
 test "native composer spaces advance the caret before the next word is typed" {
     var h: Harness = undefined;
     try h.init();
