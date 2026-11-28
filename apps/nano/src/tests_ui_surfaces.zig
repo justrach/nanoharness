@@ -218,6 +218,44 @@ test "generated-page chips open only their local host's validated page and lock 
     try testing.expect(b.native == null);
 }
 
+test "only a saved MCP App shows the offline browser notice" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const notice = "Saved result. Live tool calls are unavailable.";
+    const browser = @import("app_browser.zig");
+    browser.openInternalLink(&h.a, "synthetic-parent", "https://example.com/");
+    h.t.settle(0.1);
+    try testing.expect(h.t.hasText("https://example.com/"));
+    try testing.expect(!h.t.hasText(notice));
+
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[ {"id":"synthetic-parent","deviceId":"synthetic-local","title":"Synthetic browser fixture","archived":false} ]
+    , .{});
+    defer chats.deinit();
+    try h.a.chats.replace(chats.value);
+    h.a.device_id = try testing.allocator.dupe(u8, "synthetic-local");
+    try h.transcript(
+        \\{"reset":[{"id":"answer","role":"assistant","parts":[
+        \\ {"id":"page","kind":"tool","resolved":true,"call":{"kind":"unknown","name":"render_html"},"view":{"kind":"html","id":"0123456789abcdef0123456789abcdef"}},
+        \\ {"id":"app","kind":"tool","resolved":true,"call":{"kind":"unknown","name":"synthetic_app"},"view":{"kind":"mcpApp","id":"0123456789abcdef0123456789abcdef"}}]}]}
+    );
+    try h.t.clickText("render_html");
+    h.t.settle(0.1);
+    try testing.expect(h.t.hasText("graff-view://html/0123456789abcdef0123456789abcdef"));
+    try testing.expect(!h.t.hasText(notice));
+
+    try h.t.clickText("synthetic_app");
+    h.t.settle(0.1);
+    const b = h.a.panels.tabs.items[2].browser.?;
+    try testing.expectEqualStrings("graff-view://mcp-app/0123456789abcdef0123456789abcdef", b.url);
+    try testing.expect(b.native == null);
+    const label = h.t.findText(notice) orelse return error.MissingSavedResultNotice;
+    const body = h.t.ctx.rects.get(b.body_node) orelse return error.MissingBrowserBody;
+    try testing.expect(label.y + label.h <= body.y);
+}
+
 test "a link opens beside the chat at the side pane's width" {
     var h: Harness = undefined;
     try h.init();

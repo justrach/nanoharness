@@ -93,7 +93,8 @@ fn hitTest(obj: objc.Object, _: objc.SEL, point: objc.CGPoint) callconv(.c) ?obj
         s.cursor_dirty = true;
         return null;
     }
-    return obj;
+    // Let AppKit hit-test native children such as the Browser's WebKit view.
+    return objc.msgSuper(?objc.Object, obj, objc.class("NSView"), "hitTest:", .{point});
 }
 
 /// The view gives up the keyboard (a page took it): no box has the focus.
