@@ -52,7 +52,8 @@ test "the native Browser renders a generated page without injecting an app bridg
 }
 
 const App = @import("app.zig").App;
-const Browser = @import("app_browser.zig").Browser;
+const app_browser = @import("app_browser.zig");
+const Browser = app_browser.Browser;
 
 fn zoomKey(menu: *nanoui.Menu, key: []const u8, code: u16) bool {
     const objc = nanoui.objc;
@@ -147,50 +148,239 @@ test "browser zoom shortcuts route native menu and UI keys to the focused visibl
     }
 }
 
-const Http = struct {
-    server: std.Io.net.Server,
-    served: std.atomic.Value(bool) = .init(false),
+fn waitForTitle(native: *const app_browser.Native, expected: []const u8) !void {
+    const deadline = std.Io.Clock.awake.now(testing.io).addDuration(.fromSeconds(5));
+    while (!std.mem.eql(u8, expected, native.title())) {
+        if (std.Io.Clock.awake.now(testing.io).compare(.gte, deadline)) break;
+        const pool = nanoui.objc.Pool.push();
+        defer pool.pop();
+        nanoui.runFor(0.01);
+    }
+    try testing.expectEqualStrings(expected, native.title());
+}
 
-    fn run(h: *Http) void {
-        var fds = [_]std.posix.pollfd{.{ .fd = h.server.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
-        if ((std.posix.poll(&fds, 5000) catch return) <= 0) return;
-        const stream = h.server.accept(testing.io) catch return;
-        defer stream.close(testing.io);
-        var bytes: [4096]u8 = undefined;
-        var buffers = [_][]u8{&bytes};
-        _ = stream.readWithControl(testing.io, &buffers, &.{}) catch return;
-        const page = "<!doctype html><title>Synthetic localhost preview</title><p>A local fixture, not a user project.</p>";
-        var buf: [1024]u8 = undefined;
-        var writer = stream.writer(testing.io, &buf);
-        writer.interface.print("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ page.len, page }) catch return;
-        writer.interface.flush() catch return;
-        h.served.store(true, .release);
+const HiddenPreview = struct {
+    const objc = nanoui.objc;
+    const button: objc.CGPoint = .{ .x = 50, .y = 32 };
+    const input: objc.CGPoint = .{ .x = 50, .y = 80 };
+
+    fn windowPoint(native: *const app_browser.Native, point: objc.CGPoint) objc.CGPoint {
+        const bounds = objc.msg(objc.CGRect, native.view, "bounds", .{});
+        const flipped = objc.msg(objc.BOOL, native.view, "isFlipped", .{});
+        return objc.msg(objc.CGPoint, native.view, "convertPoint:toView:", .{
+            objc.CGPoint{ .x = point.x, .y = if (flipped) point.y else bounds.size.height - point.y },
+            @as(?objc.Object, null),
+        });
+    }
+
+    fn settleLayout(surface: *nanoui.Surface, browser: *const Browser) !nanoui.ui.Rect {
+        // Native sync during the build consumes the preceding layout's rects.
+        surface.frame();
+        surface.frame();
+        const body = surface.ctx.rects.get(browser.body_node) orelse return error.NoBrowserBody;
+        const native = browser.native orelse return error.NoNativePreview;
+        try testing.expectEqual(body, native.rect orelse return error.NoNativeRect);
+        return body;
+    }
+
+    fn themeFrame(window: objc.Object) !objc.Object {
+        const content = objc.msg(objc.Object, window, "contentView", .{});
+        return objc.msg(?objc.Object, content, "superview", .{}) orelse error.NoThemeFrame;
+    }
+
+    fn hit(window: objc.Object, location: objc.CGPoint) !objc.Object {
+        const frame = try themeFrame(window);
+        const parent = objc.msg(?objc.Object, frame, "superview", .{});
+        // hitTest: takes a point in the receiver's superview (window base
+        // coordinates if the theme frame has no superview).
+        const p = if (parent) |v| objc.msg(objc.CGPoint, v, "convertPoint:fromView:", .{ location, @as(?objc.Object, null) }) else location;
+        return objc.msg(?objc.Object, frame, "hitTest:", .{p}) orelse error.NoWindowHit;
+    }
+
+    fn inPreview(view: objc.Object, native: *const app_browser.Native) bool {
+        return view == native.view or objc.msg(objc.BOOL, view, "isDescendantOf:", .{native.view});
+    }
+
+    fn expectChrome(window: objc.Object, native: *const app_browser.Native, body: nanoui.ui.Rect) !void {
+        // Halfway up the address bar, immediately above the body.
+        try testing.expect(body.y > 19);
+        const content = objc.msg(objc.Object, window, "contentView", .{});
+        const location = objc.msg(objc.CGPoint, content, "convertPoint:toView:", .{
+            objc.CGPoint{ .x = body.x + body.w / 2, .y = body.y - 19 }, @as(?objc.Object, null),
+        });
+        const target = try hit(window, location);
+        try testing.expect(!inPreview(target, native));
+        try testing.expectEqual(content, target);
+    }
+
+    fn click(surface: *nanoui.Surface, native: *const app_browser.Native, body: nanoui.ui.Rect, point: objc.CGPoint) !void {
+        const window = surface.window.nswindow;
+        const location = windowPoint(native, point);
+        const p = surface.toView(location);
+        try testing.expect(p.x >= body.x and p.x < body.x + body.w and p.y >= body.y and p.y < body.y + body.h);
+        const target = try hit(window, location);
+        if (!inPreview(target, native)) {
+            const name = objc.msg(objc.Object, target, "className", .{});
+            std.debug.print("Browser body hit {s} instead of WebKit\n", .{objc.fromNSString(name)});
+            return error.BrowserBodyDidNotHitWebKit;
+        }
+        // Deliver only to the window hierarchy's hit target, not the global
+        // event queue or NSWindow's window-ordering path.
+        const number = objc.msg(objc.NSInteger, window, "windowNumber", .{});
+        for ([_]objc.NSUInteger{ 1, 2 }) |kind| { // leftMouseDown, leftMouseUp
+            const event = objc.msg(objc.Object, objc.class("NSEvent"), "mouseEventWithType:location:modifierFlags:timestamp:windowNumber:context:eventNumber:clickCount:pressure:", .{
+                kind, location, @as(objc.NSUInteger, 0), @as(f64, 0), number, @as(?objc.Object, null), @as(objc.NSInteger, 0), @as(objc.NSInteger, 1), @as(f32, if (kind == 1) 1 else 0),
+            });
+            objc.msg(void, target, if (kind == 1) "mouseDown:" else "mouseUp:", .{event});
+        }
+    }
+
+    fn typeX(window: objc.Object, native: *const app_browser.Native) !void {
+        const event = objc.msg(objc.Object, objc.class("NSEvent"), "keyEventWithType:location:modifierFlags:timestamp:windowNumber:context:characters:charactersIgnoringModifiers:isARepeat:keyCode:", .{
+            @as(objc.NSUInteger, 10),                              objc.CGPoint{},          @as(objc.NSUInteger, 0), @as(f64, 0),
+            objc.msg(objc.NSInteger, window, "windowNumber", .{}), @as(?objc.Object, null), objc.nsString("x"),      objc.nsString("x"),
+            objc.NO,                                               @as(u16, 7),
+        });
+        // The preceding click must have moved the responder into WebKit;
+        // do not repair focus just to get a successful DOM input event.
+        const target = objc.msg(objc.Object, window, "firstResponder", .{});
+        try testing.expect(target == native.view or objc.msg(objc.BOOL, target, "isKindOfClass:", .{objc.class("NSView")}) and
+            objc.msg(objc.BOOL, target, "isDescendantOf:", .{native.view}));
+        objc.msg(void, target, "keyDown:", .{event});
     }
 };
 
-test "the native Browser loads a real localhost HTTP preview without an engine" {
+test "the native Browser delivers input to a saved generated page without an engine" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const objc = nanoui.objc;
     const pool = objc.Pool.push();
     defer pool.pop();
     prepareAppKit();
-    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var http: Http = .{ .server = try addr.listen(testing.io, .{}) };
-    defer http.server.deinit(testing.io);
-    const thread = try std.Thread.spawn(.{}, Http.run, .{&http});
-    defer thread.join();
-    var probe: Probe = .{};
-    const native = try @import("browser_native.zig").Native.create(testing.allocator, testing.io, "", .{ .ctx = &probe, .changed = Probe.changed });
-    defer native.destroy();
-    const address = try std.fmt.allocPrint(testing.allocator, "http://127.0.0.1:{d}/", .{http.server.socket.address.getPort()});
-    defer testing.allocator.free(address);
-    native.navigate(address);
-    try testing.expect(native.allowsBackForwardGestures());
-    nanoui.runFor(3);
-    try testing.expect(http.served.load(.acquire));
-    try testing.expectEqualStrings("Synthetic localhost preview", native.title());
+    // HTTP(S), including localhost, routes to browse Connected Apps. A saved
+    // generated page exercises the production embedded WebKit path offline.
+    const id = "0123456789abcdef0123456789abcdef";
+    const address = "graff-view://html/" ++ id;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, ".graff/views");
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = ".graff/views/" ++ id ++ ".html",
+        .data =
+        \\<!doctype html><title></title>
+        \\<style>body { margin: 16px; } button, input { box-sizing: border-box; display: block; width: 180px; height: 36px; margin: 0 0 12px; }</style>
+        \\<button type="button">Count</button><input aria-label="Fixture text"><output>count=0; text=</output>
+        \\<script>
+        \\const button = document.querySelector('button'), field = document.querySelector('input');
+        \\const output = document.querySelector('output');
+        \\let count = 0;
+        \\function show() { document.title = output.textContent = `count=${count}; text=${field.value}`; }
+        \\button.addEventListener('click', event => { if (event.isTrusted) { ++count; show(); } });
+        \\field.addEventListener('focus', () => { document.title = 'Fixture input focused'; });
+        \\field.addEventListener('input', event => { if (event.isTrusted) show(); });
+        \\document.title = 'Synthetic generated preview ready';
+        \\</script>
+        ,
+    });
+    const home = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(home);
+    var env = std.process.Environ.Map.init(testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", home);
+    @import("theme.zig").registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.env = &env;
+    a.offscreen = true;
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"preview-fixture","deviceId":"synthetic-local","title":"Synthetic preview","archived":false}]
+    , .{});
+    defer chats.deinit();
+    try a.chats.replace(chats.value);
+    a.device_id = try testing.allocator.dupe(u8, "synthetic-local");
+    a.openChat("preview-fixture", null);
+    app_browser.openSaved(&a, "preview-fixture", @import("saved_view.zig").View.init(.html, id).?);
+    app_browser.settleFrame(&a);
+    const preview_tab = a.panels.active;
+    const browser = (a.panels.activeTab() orelse return error.NoBrowserTab).browser orelse return error.NoBrowserTab;
+    try testing.expect(browser.native == null);
+
+    // Same native hierarchy as the app, but never ordered or made key. The
+    // synthetic runtime installs no application delegate and starts no engine.
+    const nsapp = objc.msg(objc.Object, objc.class("NSApplication"), "sharedApplication", .{});
+    var runtime: nanoui.App = .{
+        .gpa = testing.allocator,
+        .io = testing.io,
+        .options = .{ .quit_on_last_window_closed = false },
+        .nsapp = nsapp,
+        .delegate = nsapp,
+        .flags = .{ .hidden = true },
+    };
+    const window = try runtime.newWindow(.{
+        .width = 1400,
+        .height = 900,
+        .visible = false,
+        .title_bar = .hidden,
+        .theme = @import("theme.zig").ui(false),
+        .content = .{ .view = .init(&a, @import("view.zig").view) },
+    });
+    defer {
+        a.window = null;
+        runtime.running = true;
+        window.close();
+        nanoui.runFor(0.1);
+        runtime.windows.deinit(testing.allocator);
+    }
+    a.window = window;
+    const surface = window.surface.?;
+    try testing.expect(!objc.msg(objc.BOOL, window.nswindow, "isVisible", .{}));
+    try testing.expect(!objc.msg(objc.BOOL, window.nswindow, "isKeyWindow", .{}));
+    const body = try HiddenPreview.settleLayout(surface, browser);
+    const native = browser.native orelse return error.NoNativePreview;
+    try testing.expect(native.visible);
+    // This route locks navigation to the saved page and uses no app bridge or
+    // persistent website data. The native view is created by the real layout.
+    try testing.expect(!native.allowsBackForwardGestures());
+    const config = objc.msg(objc.Object, native.view, "configuration", .{});
+    const store = objc.msg(objc.Object, config, "websiteDataStore", .{});
+    try testing.expect(!objc.msg(objc.BOOL, store, "isPersistent", .{}));
+    const controller = objc.msg(objc.Object, config, "userContentController", .{});
+    const scripts = objc.msg(objc.Object, controller, "userScripts", .{});
+    try testing.expectEqual(@as(objc.NSUInteger, 0), objc.msg(objc.NSUInteger, scripts, "count", .{}));
+    try waitForTitle(native, "Synthetic generated preview ready");
     try testing.expectEqualStrings(address, native.url());
-    const Native = @import("browser_native.zig").Native;
+
+    objc.msg(void, try HiddenPreview.themeFrame(window.nswindow), "layoutSubtreeIfNeeded", .{});
+    try HiddenPreview.expectChrome(window.nswindow, native, body);
+    try HiddenPreview.click(surface, native, body, HiddenPreview.button);
+    try waitForTitle(native, "count=1; text=");
+    try HiddenPreview.click(surface, native, body, HiddenPreview.input);
+    try waitForTitle(native, "Fixture input focused");
+    try HiddenPreview.typeX(window.nswindow, native);
+    try waitForTitle(native, "count=1; text=x");
+
+    app_browser.openBlank(&a);
+    app_browser.settleFrame(&a);
+    try testing.expect(a.panels.active != preview_tab);
+    surface.frame();
+    try testing.expect(!native.visible);
+    try testing.expect(objc.msg(objc.BOOL, native.view, "isHidden", .{}));
+    try testing.expect(a.panels.activeTab().?.browser.?.native == null);
+    @import("app_panels.zig").showTab(&a, preview_tab);
+    const restored_body = try HiddenPreview.settleLayout(surface, browser);
+    try testing.expectEqual(native, browser.native.?);
+    try testing.expect(native.visible);
+    objc.msg(void, try HiddenPreview.themeFrame(window.nswindow), "layoutSubtreeIfNeeded", .{});
+    try HiddenPreview.expectChrome(window.nswindow, native, restored_body);
+    try HiddenPreview.click(surface, native, restored_body, HiddenPreview.button);
+    try waitForTitle(native, "count=2; text=x");
+    try HiddenPreview.click(surface, native, restored_body, HiddenPreview.input);
+    try waitForTitle(native, "Fixture input focused");
+    try HiddenPreview.typeX(window.nswindow, native);
+    try waitForTitle(native, "count=2; text=xx");
+    try testing.expect(!objc.msg(objc.BOOL, window.nswindow, "isVisible", .{}));
+    try testing.expect(!objc.msg(objc.BOOL, window.nswindow, "isKeyWindow", .{}));
+
+    const Native = app_browser.Native;
     native.setZoom(Native.nextZoom(native.pageZoom(), .out));
     try testing.expectApproxEqAbs(@as(f64, 0.9090909090909091), native.pageZoom(), 1e-12);
     native.setZoom(Native.nextZoom(native.pageZoom(), .in));

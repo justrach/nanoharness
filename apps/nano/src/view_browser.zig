@@ -88,6 +88,13 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, b: *Browser) void {
         defer notice.end();
         ui.text(c, b.notice.text(), .{ .size = 12, .wrap = true, .color = k.danger });
     }
+    if (comptime builtin.os.tag == .macos) {
+        if (b.saved_view) |saved| if (saved.kind == .mcpApp) {
+            const notice = ui.div(c).column().wFull().px(12).py(8);
+            defer notice.end();
+            ui.text(c, "Saved result. Live tool calls are unavailable.", .{ .size = 12, .wrap = true, .color = k.muted });
+        };
+    }
     const body = ui.div(c).column().wFull().grow().h(0).center().gap(8);
     defer body.end();
     b.body_node = c.node(body.index).id;

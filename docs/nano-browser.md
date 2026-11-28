@@ -21,15 +21,27 @@ Markdown file preview keep the containing chat as their owner. Privileged
 schemes, malformed URLs and embedded credentials are rejected; they never fall
 through to a system-browser launch.
 
-A tool's generated-page chip opens its saved HTML or MCP App in the pane.
-These are host-local: an unknown or different host is not guessed. Only a
-validated kind and 32-character lowercase hexadecimal ID can locate a page,
+A tool's generated-page chip opens saved HTML or a saved MCP App snapshot in
+the pane. On macOS, Nano shows “Saved result. Live tool calls are unavailable.”
+above the snapshot in native browser chrome, outside the saved page. Saved
+HTML and ordinary websites do not show that notice. A snapshot is not a live
+MCP App session and cannot call tools.
+
+These saved pages are host-local: an unknown or different host is not guessed.
+Only a validated kind and 32-character lowercase hexadecimal ID can locate a page,
 under `.graff/views` or `.graff/mcp-apps` in the host's home directory. The
 reader refuses symlinks and non-regular files and bounds the body to 16 MiB.
 The `graff-view` scheme supplies Harness's existing Content Security Policy:
 inline scripts/styles, no network or forms, sandboxed origin, and only the
 MCP App kind's inline data frames. These tabs cannot navigate to websites or
 arbitrary files.
+
+Live support would require an upstream, non-replayable resource-capture
+capability issued during the original tool run and bound to that same run,
+MCP server connection, and tool. Live access would require fresh user consent.
+A host must reject replay or attempts to use the capability after a reconnect,
+even to the same server. A saved snapshot does not carry that capability or
+restore live access.
 
 Ordinary websites have no nanoui IPC bridge, injected app scripts, or engine
 handles. WebKit is allocated only when a nonempty Browser tab is actually
